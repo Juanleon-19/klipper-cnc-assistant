@@ -52,6 +52,27 @@ Moonraker can be used to initiate controlled Klipper motion while a WebSocket te
 
 The measured command-to-observed-motion latency must not be interpreted as direct motor or machine latency. It includes command transmission, Klipper scheduling, motion reporting, WebSocket notification, and client observation delays.
 
-## Next experiment
 
-Experiment 004 will characterize continuous jog strategies and evaluate command horizon, motion queue behavior, velocity continuity, and observed stopping response.
+## Why continuous jog requires further research
+
+The final CNC application is intended to provide analog joystick control.
+
+A joystick naturally represents a desired movement direction and velocity. Klipper, however, executes planned motion commands.
+
+A naive implementation could continuously send many small G-code movements while the joystick is active. This may cause motion commands to accumulate in the Klipper motion queue.
+
+If the user releases the joystick while several movements remain queued, the machine may continue moving after the input has returned to zero.
+
+This behavior is undesirable for manual CNC positioning, especially when approaching a PCB reference point or positioning a cutting tool close to the workpiece.
+
+The next stage of the project therefore investigates a short motion-horizon strategy.
+
+Instead of planning a long movement, the jog controller will only provide Klipper with a limited amount of future motion. The controller will periodically evaluate the desired joystick velocity and extend the planned movement only while motion is still requested.
+
+The objective is to find a practical balance between:
+
+- Smooth continuous motion.
+- Low command frequency.
+- Limited queued motion.
+- Fast stopping response.
+- Predictable manual positioning.
