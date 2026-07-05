@@ -43,3 +43,108 @@ Initial position:
 
 ```text
 X = 0.000 mm
+---
+
+### `manual_control_test.py`
+
+Validates the manual positioning abstraction implemented by the `ManualJogController`.
+
+The test provides an interactive command interface for requesting machine movement on the X, Y, and Z axes.
+
+Supported motion commands:
+
+```text
+x+
+x-
+y+
+y-
+z+
+z----
+
+### `manual_control_test.py`
+
+Validates the manual positioning abstraction implemented by the `ManualJogController`.
+
+The test provides an interactive command interface for requesting machine movement on the X, Y, and Z axes.
+
+Supported motion commands:
+
+```text
+x+
+x-
+y+
+y-
+z+
+z-
+
+The test also validates the three manual jog modes:
+
+COARSE
+NORMAL
+FINE
+
+Each mode selects a different jog profile.
+
+Mode	Distance	Speed
+COARSE	10.0 mm	40.0 mm/s
+NORMAL	1.0 mm	10.0 mm/s
+FINE	0.1 mm	2.0 mm/s
+
+The manual controller translates operator intent into a relative motion request.
+
+Conceptually:
+
+Operator command
+       |
+       v
+ManualJogController
+       |
+       v
+Jog profile selection
+       |
+       v
+JogController
+       |
+       v
+Moonraker
+       |
+       v
+Klipper
+
+For example:
+
+Mode    : FINE
+Command : x+
+
+is translated into:
+
+Axis     : X
+Distance : +0.100 mm
+Speed    : 2.000 mm/s
+
+The ManualJogController does not generate G-code directly.
+
+Motion generation and machine limit validation remain the responsibility of the JogController.
+
+Physical validation
+
+Manual movement was successfully validated on all configured machine axes:
+
+X+  PASSED
+X-  PASSED
+
+Y+  PASSED
+Y-  PASSED
+
+Z+  PASSED
+Z-  PASSED
+
+All jog profiles were also physically validated:
+
+COARSE  PASSED
+NORMAL  PASSED
+FINE    PASSED
+
+Result:
+
+PASSED
