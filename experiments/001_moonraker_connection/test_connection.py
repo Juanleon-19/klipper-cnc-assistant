@@ -1,6 +1,11 @@
+import os
 import requests
 
-MOONRAKER_URL = "http://192.168.0.21:7126"
+
+MOONRAKER_URL = os.getenv(
+    "MOONRAKER_URL",
+    "http://localhost:7125"
+)
 
 print("=" * 45)
 print("KLIPPER CNC ASSISTANT")
