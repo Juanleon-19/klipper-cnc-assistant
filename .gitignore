@@ -1,0 +1,42 @@
+# Python virtual environments
+.venv/
+venv/
+env/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Python tooling
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Operating system files
+.DS_Store
+Thumbs.db
+
+# Application runtime files
+*.log
+
+# CNC generated files
+*.nc
+*.tap
+*.gcode
+
+# Height map generated data
+*.heightmap
+*.mesh
+
+# Local configuration
+config.local.json
+.env
