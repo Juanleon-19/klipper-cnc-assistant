@@ -1,3 +1,4 @@
+import asyncio
 import os
 
 from klipper_cnc_assistant.machine.discovery import (
@@ -8,6 +9,13 @@ from klipper_cnc_assistant.moonraker.client import (
     MoonrakerClient,
     MoonrakerError,
 )
+
+from klipper_cnc_assistant.moonraker.telemetry import (
+    MoonrakerTelemetry,
+)
+
+
+DISPLAY_PERIOD = 0.05
 
 
 def print_axis(
@@ -22,10 +30,38 @@ def print_axis(
     )
 
 
-def main():
+async def display_live_state(
+    machine,
+):
+    while True:
+        state = (
+            machine.get_motion_snapshot()
+        )
+
+        print(
+            "\r"
+            f"X={state['x']:8.3f} mm  "
+            f"Y={state['y']:8.3f} mm  "
+            f"Z={state['z']:8.3f} mm  "
+            f"V={state['velocity']:8.3f} mm/s",
+            end="",
+            flush=True,
+        )
+
+        await asyncio.sleep(
+            DISPLAY_PERIOD
+        )
+
+
+async def run():
     moonraker_url = os.getenv(
         "MOONRAKER_URL",
         "http://localhost:7125",
+    )
+
+    moonraker_ws = os.getenv(
+        "MOONRAKER_WS",
+        "ws://localhost:7125/websocket",
     )
 
     print("=" * 60)
@@ -80,20 +116,6 @@ def main():
 
         return
 
-    print("\n[MACHINE POSITION]")
-
-    print(
-        f"X = {machine.position.x:8.3f} mm"
-    )
-
-    print(
-        f"Y = {machine.position.y:8.3f} mm"
-    )
-
-    print(
-        f"Z = {machine.position.z:8.3f} mm"
-    )
-
     print("\n[MACHINE AXES]")
 
     print_axis(
@@ -133,11 +155,58 @@ def main():
         f"{machine.max_accel:.3f} mm/s^2"
     )
 
-    print(
-        "\n[OK] Machine discovery completed"
+    telemetry = MoonrakerTelemetry(
+        websocket_url=moonraker_ws,
+        machine_state=machine,
     )
+
+    print(
+        "\n[LIVE MACHINE STATE]"
+    )
+
+    print(
+        "Press CTRL+C to stop.\n"
+    )
+
+    telemetry_task = asyncio.create_task(
+        telemetry.run()
+    )
+
+    display_task = asyncio.create_task(
+        display_live_state(
+            machine
+        )
+    )
+
+    try:
+        await asyncio.gather(
+            telemetry_task,
+            display_task,
+        )
+
+    finally:
+        telemetry.stop()
+
+        telemetry_task.cancel()
+        display_task.cancel()
+
+        await asyncio.gather(
+            telemetry_task,
+            display_task,
+            return_exceptions=True,
+        )
+
+
+def main():
+    try:
+        asyncio.run(run())
+
+    except KeyboardInterrupt:
+        print(
+            "\n\n[INFO] "
+            "Klipper CNC Assistant stopped"
+        )
 
 
 if __name__ == "__main__":
     main()
-
