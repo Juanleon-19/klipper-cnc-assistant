@@ -14,7 +14,7 @@ Some tests in this directory require a physical Klipper-controlled machine and m
 
 ---
 
-## Manual machine tests
+## Manual Machine Tests
 
 ### `manual_jog_test.py`
 
@@ -31,7 +31,7 @@ The test verifies that the application can:
 - Send the generated G-code through Moonraker.
 - Query the machine after motion and verify the resulting position.
 
-### Validated configuration
+#### Validated configuration
 
 The initial physical validation used:
 
@@ -43,6 +43,26 @@ Initial position:
 
 ```text
 X = 0.000 mm
+```
+
+Requested target:
+
+```text
+X = 5.000 mm
+```
+
+Final reported position:
+
+```text
+X = 5.000 mm
+```
+
+The requested movement was completed successfully.
+
+No software limit correction was required during this test.
+
+**Result: PASSED**
+
 ---
 
 ### `manual_control_test.py`
@@ -51,23 +71,7 @@ Validates the manual positioning abstraction implemented by the `ManualJogContro
 
 The test provides an interactive command interface for requesting machine movement on the X, Y, and Z axes.
 
-Supported motion commands:
-
-```text
-x+
-x-
-y+
-y-
-z+
-z----
-
-### `manual_control_test.py`
-
-Validates the manual positioning abstraction implemented by the `ManualJogController`.
-
-The test provides an interactive command interface for requesting machine movement on the X, Y, and Z axes.
-
-Supported motion commands:
+#### Supported motion commands
 
 ```text
 x+
@@ -76,24 +80,25 @@ y+
 y-
 z+
 z-
+```
 
-The test also validates the three manual jog modes:
+#### Jog modes
 
-COARSE
-NORMAL
-FINE
+The test validates three manual jog modes:
+
+| Mode | Distance | Speed |
+|---|---:|---:|
+| `COARSE` | 10.0 mm | 40.0 mm/s |
+| `NORMAL` | 1.0 mm | 10.0 mm/s |
+| `FINE` | 0.1 mm | 2.0 mm/s |
 
 Each mode selects a different jog profile.
-
-Mode	Distance	Speed
-COARSE	10.0 mm	40.0 mm/s
-NORMAL	1.0 mm	10.0 mm/s
-FINE	0.1 mm	2.0 mm/s
 
 The manual controller translates operator intent into a relative motion request.
 
 Conceptually:
 
+```text
 Operator command
        |
        v
@@ -110,41 +115,135 @@ Moonraker
        |
        v
 Klipper
+```
 
 For example:
 
+```text
 Mode    : FINE
 Command : x+
+```
 
 is translated into:
 
+```text
 Axis     : X
 Distance : +0.100 mm
 Speed    : 2.000 mm/s
+```
 
-The ManualJogController does not generate G-code directly.
+The `ManualJogController` does not generate G-code directly.
 
-Motion generation and machine limit validation remain the responsibility of the JogController.
+Motion generation and machine limit validation remain the responsibility of the `JogController`.
 
-Physical validation
+#### Physical validation
 
 Manual movement was successfully validated on all configured machine axes:
 
-X+  PASSED
-X-  PASSED
-
-Y+  PASSED
-Y-  PASSED
-
-Z+  PASSED
-Z-  PASSED
+| Command | Status |
+|---|---|
+| `X+` | PASSED |
+| `X-` | PASSED |
+| `Y+` | PASSED |
+| `Y-` | PASSED |
+| `Z+` | PASSED |
+| `Z-` | PASSED |
 
 All jog profiles were also physically validated:
 
-COARSE  PASSED
-NORMAL  PASSED
-FINE    PASSED
+| Jog mode | Status |
+|---|---|
+| `COARSE` | PASSED |
+| `NORMAL` | PASSED |
+| `FINE` | PASSED |
 
-Result:
+**Result: PASSED**
 
-PASSED
+---
+
+## Jog Target Limiting
+
+The `JogController` calculates the requested target before sending motion to Klipper.
+
+Conceptually:
+
+```text
+Current position
+       |
+       v
+Requested distance
+       |
+       v
+Requested target
+       |
+       v
+Machine coordinate limits
+       |
+       v
+Applied target
+```
+
+For example:
+
+```text
+Current X = 150 mm
+Maximum X = 160 mm
+Requested = +20 mm
+```
+
+The nominal requested target is:
+
+```text
+150 + 20 = 170 mm
+```
+
+Because the configured maximum X coordinate is 160 mm, the controller limits the applied target to:
+
+```text
+X = 160 mm
+```
+
+The effective movement becomes:
+
+```text
++10 mm
+```
+
+This software validation does not replace Klipper homing, endstops, machine configuration, or physical safety mechanisms.
+
+---
+
+## Running the Manual Tests
+
+Activate the project virtual environment before executing the tests.
+
+### Relative jog test
+
+```bash
+PYTHONPATH=src \
+MOONRAKER_URL=http://192.168.x.x:7125 \
+python tests/manual_jog_test.py
+```
+
+### Interactive manual control test
+
+```bash
+PYTHONPATH=src \
+MOONRAKER_URL=http://192.168.x.x:7125 \
+python tests/manual_control_test.py
+```
+
+Replace the example Moonraker host and port with the configuration of the target Klipper instance.
+
+Manual motion tests require operator supervision.
+
+Before requesting physical movement, verify that the selected axis has sufficient free travel.
+
+---
+
+## Current Validation Status
+
+| Test | Feature | Status |
+|---|---|---|
+| `manual_jog_test.py` | Relative machine jog | PASSED |
+| `manual_control_test.py` | Manual multi-axis jog control | PASSED |
