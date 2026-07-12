@@ -1,0 +1,64 @@
+/*
+ * TEST 004 - JOYSTICK DIRECTION CHECK
+ *
+ * X -> A2
+ * Y -> A1
+ */
+
+const byte PIN_X = A2;
+const byte PIN_Y = A1;
+
+void setup()
+{
+    Serial.begin(115200);
+
+    while (!Serial);
+
+    Serial.println();
+    Serial.println("========================================");
+    Serial.println("TEST 004 - JOYSTICK DIRECTIONS");
+    Serial.println("========================================");
+    Serial.println();
+}
+
+void loop()
+{
+    int x = analogRead(PIN_X);
+    int y = analogRead(PIN_Y);
+
+    String dir = "CENTER";
+
+    bool left  = x < 300;
+    bool right = x > 700;
+    bool up    = y < 300;
+    bool down  = y > 700;
+
+    if(left && up)
+        dir = "UP_LEFT";
+    else if(right && up)
+        dir = "UP_RIGHT";
+    else if(left && down)
+        dir = "DOWN_LEFT";
+    else if(right && down)
+        dir = "DOWN_RIGHT";
+    else if(left)
+        dir = "LEFT";
+    else if(right)
+        dir = "RIGHT";
+    else if(up)
+        dir = "UP";
+    else if(down)
+        dir = "DOWN";
+
+    Serial.print("X=");
+    Serial.print(x);
+
+    Serial.print("   Y=");
+    Serial.print(y);
+
+    Serial.print("   ->   ");
+
+    Serial.println(dir);
+
+    delay(100);
+}
