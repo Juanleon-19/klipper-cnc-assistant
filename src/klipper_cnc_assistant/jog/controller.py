@@ -1,3 +1,8 @@
+from __future__ import annotations
+
+import time
+
+
 class JogError(Exception):
     pass
 
@@ -16,6 +21,12 @@ class JogController:
     ):
         self.client = moonraker_client
         self.machine = machine_state
+
+        self._continuous_x = 0
+        self._continuous_y = 0
+        self._continuous_speed = 0.0
+        self._continuous_step = 0.2
+        self._last_continuous_update = 0.0
 
     def _get_axis_limits(
         self,
@@ -162,3 +173,64 @@ class JogController:
                 ) > 1e-9
             ),
         }
+
+    def set_continuous_state(
+        self,
+        x_dir,
+        y_dir,
+        speed,
+        step=0.2,
+    ):
+        self._continuous_x = int(x_dir)
+        self._continuous_y = int(y_dir)
+        self._continuous_speed = float(speed)
+        self._continuous_step = float(step)
+
+    def stop_continuous(
+        self,
+    ):
+        self._continuous_x = 0
+        self._continuous_y = 0
+        self._continuous_speed = 0.0
+        self._continuous_step = 0.2
+
+    def has_continuous_motion(
+        self,
+    ):
+        return (
+            self._continuous_x != 0
+            or self._continuous_y != 0
+        )
+
+    def update_continuous(
+        self,
+    ):
+        if not self.has_continuous_motion():
+            return False
+
+        now = time.time()
+
+        if now - self._last_continuous_update < 0.05:
+            return False
+
+        self._last_continuous_update = now
+
+        moved = False
+
+        if self._continuous_x != 0:
+            self.move_relative(
+                axis="x",
+                distance=self._continuous_x * self._continuous_step,
+                speed=self._continuous_speed,
+            )
+            moved = True
+
+        if self._continuous_y != 0:
+            self.move_relative(
+                axis="y",
+                distance=self._continuous_y * self._continuous_step,
+                speed=self._continuous_speed,
+            )
+            moved = True
+
+        return moved
