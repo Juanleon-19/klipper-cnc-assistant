@@ -113,6 +113,12 @@ class JogController:
                 "Jog distance cannot be zero"
             )
 
+        if not self.machine.axis_is_homed(axis):
+            raise JogError(
+                f"Axis {axis.upper()} must be homed "
+                "before jogging"
+            )
+
         if speed <= 0:
             raise JogError(
                 "Jog speed must be positive"
@@ -122,6 +128,11 @@ class JogController:
             raise JogError(
                 "Requested jog speed exceeds "
                 "the machine maximum velocity"
+            )
+
+        if self.machine.max_accel <= 0:
+            raise JogError(
+                "Machine maximum acceleration must be positive"
             )
 
         (
