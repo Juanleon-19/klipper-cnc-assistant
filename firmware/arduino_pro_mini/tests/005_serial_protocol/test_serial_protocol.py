@@ -4,7 +4,7 @@ import serial
 
 HEADER = 0xAA
 
-PORT = "/dev/ttyUSB1"
+PORT = "/dev/ttyUSB0"
 BAUDRATE = 115200
 
 DIRECTIONS = {

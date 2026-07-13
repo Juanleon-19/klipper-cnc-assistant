@@ -39,7 +39,7 @@ class SerialProtocolError(Exception):
 class SerialDriver:
     def __init__(
         self,
-        port: str = "/dev/ttyUSB1",
+        port: str = "/dev/ttyUSB0",
         baudrate: int = 115200,
         timeout: float = 1.0,
     ) -> None:
