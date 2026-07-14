@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "klipper-cnc-assistant"
+version = "0.1.0"
+description = "Klipper CNC Assistant production application base"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.139,<1.0",
+    "uvicorn>=0.51,<1.0",
+    "httpx>=0.28,<1.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]

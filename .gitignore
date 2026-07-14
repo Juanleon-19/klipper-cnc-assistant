@@ -40,3 +40,18 @@ Thumbs.db
 # Local configuration
 config.local.json
 .env
+.env.*
+!.env.example
+
+# Credentials and local secrets
+secrets/
+credentials/
+*.key
+*.pem
+*.p12
+
+# Temporary and runtime data
+tmp/
+temp/
+*.tmp
+runtime_data/

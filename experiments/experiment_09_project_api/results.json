@@ -1,0 +1,125 @@
+{
+  "project_id": "proj_47411b3f2b",
+  "top_analysis": {
+    "limites": {
+      "min_x_mm": 0.0,
+      "max_x_mm": 12.5,
+      "min_y_mm": 0.0,
+      "max_y_mm": 8.0,
+      "min_z_mm": -0.15,
+      "max_z_mm": 0.0,
+      "ancho_mm": 12.5,
+      "alto_mm": 8.0
+    },
+    "avances_mm_min": [
+      180.0
+    ],
+    "profundidad_min_mm": -0.15,
+    "profundidad_max_mm": 0.0,
+    "cantidad_movimientos": 2,
+    "comandos_desconocidos": [],
+    "comandos_no_compatibles": [],
+    "acciones_husillo": [
+      "M3",
+      "S12000"
+    ],
+    "cambios_herramienta": [],
+    "unidades_detectadas": [
+      "mm"
+    ],
+    "modos_posicionamiento": [
+      "absolute"
+    ],
+    "incidencias": [
+      {
+        "severidad": "advertencia",
+        "codigo": "accion_manual_husillo",
+        "mensaje": "El comando M3 requiere accion manual del husillo.",
+        "linea": 5,
+        "comando": "M3"
+      },
+      {
+        "severidad": "advertencia",
+        "codigo": "accion_manual_husillo",
+        "mensaje": "Se encontro una velocidad de husillo que requiere accion manual.",
+        "linea": 6,
+        "comando": "S12000"
+      }
+    ],
+    "analisis_incompleto": false,
+    "cabe_en_material": true,
+    "mensaje_material": "El G-code cabe dentro del material definido.",
+    "tiene_errores_criticos": false
+  },
+  "bottom_analysis": {
+    "limites": {
+      "min_x_mm": 0.0,
+      "max_x_mm": 10.0,
+      "min_y_mm": 0.0,
+      "max_y_mm": 6.0,
+      "min_z_mm": -0.8,
+      "max_z_mm": 0.0,
+      "ancho_mm": 10.0,
+      "alto_mm": 6.0
+    },
+    "avances_mm_min": [
+      150.0
+    ],
+    "profundidad_min_mm": -0.8,
+    "profundidad_max_mm": 0.0,
+    "cantidad_movimientos": 2,
+    "comandos_desconocidos": [],
+    "comandos_no_compatibles": [],
+    "acciones_husillo": [],
+    "cambios_herramienta": [
+      "T2",
+      "M6"
+    ],
+    "unidades_detectadas": [
+      "mm"
+    ],
+    "modos_posicionamiento": [
+      "absolute"
+    ],
+    "incidencias": [
+      {
+        "severidad": "advertencia",
+        "codigo": "cambio_manual_herramienta",
+        "mensaje": "Se encontro una seleccion manual de herramienta.",
+        "linea": 5,
+        "comando": "T2"
+      },
+      {
+        "severidad": "advertencia",
+        "codigo": "cambio_manual_herramienta",
+        "mensaje": "El comando M6 requiere cambio manual de herramienta.",
+        "linea": 6,
+        "comando": "M6"
+      }
+    ],
+    "analisis_incompleto": false,
+    "cabe_en_material": true,
+    "mensaje_material": "El G-code cabe dentro del material definido.",
+    "tiene_errores_criticos": false
+  },
+  "machine_session": {
+    "estado": "simulada_lista_para_preparacion",
+    "home_realizado": true,
+    "z_en_altura_segura": true,
+    "herramienta_en_centro_cama": true,
+    "material_montado": false,
+    "origen_xy_definido": false,
+    "cero_z_capturado": false,
+    "operaciones_permitidas": [
+      "crear proyecto",
+      "cargar gcode",
+      "analizar gcode"
+    ],
+    "z_puede_bajar_durante": [
+      "captura del cero",
+      "sondeo",
+      "mecanizado",
+      "movimiento manual autorizado"
+    ]
+  }
+}
