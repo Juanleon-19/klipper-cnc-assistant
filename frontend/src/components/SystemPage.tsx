@@ -11,6 +11,7 @@ type SystemPageProps = {
   machineRuntime: MachineRuntime | null;
   refreshing: boolean;
   onRefresh: () => Promise<void>;
+  onRuntimeRefresh: () => Promise<void>;
   onMachineAction: (action: string, targetZ?: number) => Promise<void>;
 };
 
@@ -38,17 +39,40 @@ function DiagnosticCard({ title, status, rows }: { title: string; status?: strin
   );
 }
 
-export function SystemPage({ health, systemInfo, machineSession, machineRuntime, refreshing, onRefresh, onMachineAction }: SystemPageProps) {
+export function SystemPage({ health, systemInfo, machineSession, machineRuntime, refreshing, onRefresh, onRuntimeRefresh, onMachineAction }: SystemPageProps) {
   const [targetZ, setTargetZ] = useState("10");
   const mode = machineRuntime?.mode_label ?? summarizeMachineMode(health?.modo_maquina).toUpperCase();
   const physical = machineRuntime?.mode === "PHYSICAL";
   const movementAuthorized = machineRuntime?.safety?.movement_authorized === true;
   const probeRequested = machineRuntime?.controller?.probe_requested === true;
+  const runtimeState = machineRuntime?.state ?? "DISCONNECTED";
+  const canConnect = physical && runtimeState === "DISCONNECTED";
+  const canHome = physical && ["DIAGNOSTIC", "READY_FOR_HOME", "ERROR", "CANCELLED"].includes(runtimeState);
+  const canEnableJoystick = physical && runtimeState === "WAITING_FOR_XY_REFERENCE" && !movementAuthorized;
+  const canArmReference = physical && runtimeState === "WAITING_FOR_XY_REFERENCE";
+  const canConfirmProbe = physical && probeRequested && runtimeState === "REFERENCE_ARMED";
 
   useEffect(() => {
-    const id = window.setInterval(() => { void onRefresh(); }, 200);
-    return () => window.clearInterval(id);
-  }, [onRefresh]);
+    let stopped = false;
+    let inFlight = false;
+    const refreshRuntime = async () => {
+      if (stopped || inFlight) return;
+      inFlight = true;
+      try {
+        await onRuntimeRefresh();
+      } catch {
+        // El botón manual muestra errores; el polling no debe dejar la vista en estado ocupado.
+      } finally {
+        inFlight = false;
+      }
+    };
+    void refreshRuntime();
+    const id = window.setInterval(() => { void refreshRuntime(); }, 200);
+    return () => {
+      stopped = true;
+      window.clearInterval(id);
+    };
+  }, [onRuntimeRefresh]);
 
   const parsedZ = Number(targetZ.replace(",", "."));
   const invalidZ = !Number.isFinite(parsedZ);
@@ -74,19 +98,22 @@ export function SystemPage({ health, systemInfo, machineSession, machineRuntime,
       </article>
 
       <div className="machine-action-strip">
-        <button className="button" type="button" onClick={() => void onMachineAction("connect")} disabled={!physical || refreshing}>Conectar</button>
-        <button className="button button--ghost" type="button" onClick={() => void onMachineAction("diagnostic")} disabled={!physical || refreshing}>Modo diagnóstico</button>
-        <label className="inline-field">
-          Z objetivo absoluto (mm)
-          <input value={targetZ} onChange={(event) => setTargetZ(event.target.value)} inputMode="decimal" disabled={!physical || refreshing} />
-        </label>
-        <button className="button" type="button" onClick={() => void onMachineAction("initialize", parsedZ)} disabled={!physical || refreshing || invalidZ}>Inicializar máquina</button>
-        <button className="button button--ghost" type="button" onClick={() => void onMachineAction("manual-on")} disabled={!physical || refreshing || !machineRuntime || movementAuthorized}>Habilitar joystick</button>
-        <button className="button button--ghost" type="button" onClick={() => void onMachineAction("probe-request")} disabled={!physical || refreshing}>Solicitar sonda</button>
-        <button className="button" type="button" onClick={() => void onMachineAction("probe-confirm")} disabled={!physical || refreshing || !probeRequested}>Confirmar sonda</button>
-        <button className="button button--ghost" type="button" onClick={() => void onMachineAction("cancel")} disabled={!physical || refreshing}>Cancelar</button>
-        <button className="button button--danger" type="button" onClick={() => { if (window.confirm("Enviar M112 a Klipper y bloquear movimientos?")) void onMachineAction("emergency"); }} disabled={!physical || refreshing}>Emergencia M112</button>
+        <button className="button" type="button" onClick={() => void onMachineAction("connect")} disabled={!canConnect || refreshing}>Conectar</button>
+        <button className="button button--ghost" type="button" onClick={() => void onMachineAction("diagnostic")} disabled={!physical || refreshing || runtimeState === "DISCONNECTED"}>Modo diagnóstico</button>
+        {canHome ? (
+          <label className="inline-field">
+            Z segura de traslado (mm)
+            <input value={targetZ} onChange={(event) => setTargetZ(event.target.value)} inputMode="decimal" disabled={!physical || refreshing} />
+          </label>
+        ) : null}
+        {canHome ? <button className="button" type="button" onClick={() => void onMachineAction("initialize", parsedZ)} disabled={!physical || refreshing || invalidZ}>Homing + Z segura + centro</button> : null}
+        {canEnableJoystick ? <button className="button button--ghost" type="button" onClick={() => void onMachineAction("manual-on")} disabled={refreshing}>Habilitar joystick X/Y</button> : null}
+        {canArmReference ? <button className="button button--ghost" type="button" onClick={() => void onMachineAction("probe-request")} disabled={refreshing}>Armar referencia</button> : null}
+        {canConfirmProbe ? <button className="button" type="button" onClick={() => void onMachineAction("probe-confirm")} disabled={refreshing}>Sondear referencia</button> : null}
+        <button className="button button--ghost" type="button" onClick={() => void onMachineAction("cancel")} disabled={!physical || refreshing || runtimeState === "DISCONNECTED"}>Cancelar</button>
+        <button className="button button--danger" type="button" onClick={() => { if (window.confirm("Enviar M112 a Klipper y bloquear movimientos?")) void onMachineAction("emergency"); }} disabled={!physical || refreshing || runtimeState === "DISCONNECTED"}>Emergencia M112</button>
       </div>
+      {!physical ? <p className="form-error">Conectar está bloqueado porque el backend inició en modo SIMULADO. Configure MACHINE_MODE=physical en el servicio y reinicie solo la aplicación.</p> : null}
       {invalidZ ? <p className="form-error">Z objetivo debe ser un número finito en milímetros.</p> : null}
 
       <div className="info-grid info-grid--triple">
@@ -117,8 +144,15 @@ export function SystemPage({ health, systemInfo, machineSession, machineRuntime,
           ["Puerto", value(machineRuntime?.arduino, "port")],
           ["Baudrate", value(machineRuntime?.arduino, "baudrate")],
           ["Abierto", value(machineRuntime?.arduino, "open")],
+          ["Hilo", value(machineRuntime?.arduino, "thread_active")],
+          ["Bytes", value(machineRuntime?.arduino, "bytes_received")],
+          ["Paquetes completos", value(machineRuntime?.arduino, "packets_complete")],
           ["Paquetes válidos", value(machineRuntime?.arduino, "valid_packets")],
-          ["Checksum", value(machineRuntime?.arduino, "checksum_errors")],
+          ["Inválidos", value(machineRuntime?.arduino, "runtime_invalid_packets")],
+          ["Checksum", value(machineRuntime?.arduino, "runtime_checksum_errors")],
+          ["Último válido", value(machineRuntime?.arduino, "last_valid_packet_age_s") + " s"],
+          ["Excepción", value(machineRuntime?.arduino, "last_exception")],
+          ["Bloqueo", value(machineRuntime?.arduino, "blocked_reason")],
         ]} />
         <DiagnosticCard title="Controlador" status={String(machineRuntime?.state ?? machineSession?.estado ?? "-")} rows={[
           ["Dirección", value(machineRuntime?.controller, "direction")],

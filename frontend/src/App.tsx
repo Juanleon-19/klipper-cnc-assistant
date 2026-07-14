@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { DashboardPage } from "./components/DashboardPage";
 import { ProjectForm } from "./components/ProjectForm";
@@ -105,7 +105,7 @@ export default function App() {
     setSelectedProjectId((current) => current ?? payload[0]?.id ?? null);
   };
 
-  const loadSystem = async () => {
+  const loadSystem = useCallback(async () => {
     const [healthPayload, infoPayload, machinePayload, runtimePayload] = await Promise.all([
       api.getHealth(),
       api.getSystemInfo(),
@@ -116,7 +116,12 @@ export default function App() {
     setSystemInfo(infoPayload);
     setMachineSession(machinePayload);
     setMachineRuntime(runtimePayload);
-  };
+  }, []);
+
+  const refreshMachineRuntime = useCallback(async () => {
+    const runtimePayload = await api.getMachineRuntime();
+    setMachineRuntime(runtimePayload);
+  }, []);
 
   const syncProject = async (projectId: string) => {
     const project = await api.getProject(projectId);
@@ -137,7 +142,7 @@ export default function App() {
       }
     };
     void run();
-  }, []);
+  }, [loadSystem]);
 
   const handleCreateProject = async (payload: ProjectPayload) => {
     setCreatingProject(true);
@@ -313,7 +318,7 @@ export default function App() {
     }
   };
 
-  const refreshSystem = async () => {
+  const refreshSystem = useCallback(async () => {
     setRefreshingSystem(true);
     setError("");
     try {
@@ -323,7 +328,7 @@ export default function App() {
     } finally {
       setRefreshingSystem(false);
     }
-  };
+  }, [loadSystem]);
 
   const handleMachineAction = async (action: string, targetZ?: number) => {
     setRefreshingSystem(true);
@@ -525,6 +530,7 @@ export default function App() {
               machineRuntime={machineRuntime}
               refreshing={refreshingSystem}
               onRefresh={refreshSystem}
+              onRuntimeRefresh={refreshMachineRuntime}
               onMachineAction={handleMachineAction}
             />
           ) : null}

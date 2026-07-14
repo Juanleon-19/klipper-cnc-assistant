@@ -3,6 +3,7 @@ import type {
   HealthResponse,
   HeightMap,
   MachineRuntime,
+  PhysicalMapResponse,
   MachineSession,
   Operation,
   OperationAnalysis,
@@ -124,7 +125,7 @@ export const api = {
   getHealth: () => request<HealthResponse>("/api/health"),
   getSystemInfo: () => request<SystemInfoResponse>("/api/system/info"),
   getMachineSession: () => request<MachineSession>("/api/machine/session"),
-  getMachineRuntime: () => request<MachineRuntime>("/api/machine/runtime"),
+  getMachineRuntime: () => request<MachineRuntime>("/api/machine/status"),
   connectMachine: () => request<MachineRuntime>("/api/machine/connect", { method: "POST" }),
   disconnectMachine: () => request<MachineRuntime>("/api/machine/disconnect", { method: "POST" }),
   setMachineDiagnosticMode: (enabled: boolean) =>
@@ -217,6 +218,21 @@ export const api = {
       method: "POST",
       body: JSON.stringify(payload),
     }),
+  planPhysicalMapFromReference: (projectId: string, operationId: string, payload: { max_spacing_mm?: number; margin_mm?: number }) =>
+    request<PhysicalMapResponse>(`/api/projects/${projectId}/operations/${operationId}/physical-map/plan-from-reference`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  getPhysicalMap: (projectId: string, operationId: string) =>
+    request<PhysicalMapResponse>(`/api/projects/${projectId}/operations/${operationId}/physical-map`),
+  executeNextPhysicalMapPoint: (projectId: string, mapId: string) =>
+    request<PhysicalMapResponse>(`/api/projects/${projectId}/physical-maps/${mapId}/execute-next`, { method: "POST" }),
+  pausePhysicalMap: (projectId: string, mapId: string) =>
+    request<PhysicalMapResponse>(`/api/projects/${projectId}/physical-maps/${mapId}/pause`, { method: "POST" }),
+  resumePhysicalMap: (projectId: string, mapId: string) =>
+    request<PhysicalMapResponse>(`/api/projects/${projectId}/physical-maps/${mapId}/resume`, { method: "POST" }),
+  cancelPhysicalMap: (projectId: string, mapId: string) =>
+    request<PhysicalMapResponse>(`/api/projects/${projectId}/physical-maps/${mapId}/cancel`, { method: "POST" }),
   getHeightMap: (projectId: string, operationId: string) =>
     request<HeightMap>(`/api/projects/${projectId}/operations/${operationId}/height-map`),
   configureHeightMap: (projectId: string, operationId: string, payload: Record<string, unknown>) =>

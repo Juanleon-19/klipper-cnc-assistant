@@ -125,6 +125,25 @@ class SurfaceResponse(BaseModel):
     puntos: list[SurfacePointResponse]
 
 
+
+
+class PhysicalMapPlanRequest(BaseModel):
+    max_spacing_mm: float = Field(default=10.0, gt=0)
+    margin_mm: float = Field(default=1.0, ge=0)
+
+
+class PhysicalMapPointUpdateRequest(BaseModel):
+    z_measured: float
+    status: str = "MEASURED"
+    attempts: int | None = None
+    duration_s: float | None = None
+    error: str | None = None
+
+
+class PhysicalMapResponse(BaseModel):
+    payload: dict
+
+
 class HeightMapResponse(BaseModel):
     proyecto_id: str
     operacion_id: str

@@ -377,3 +377,7 @@ export type ProjectPayload = {
   eje_volteo: string | null;
   agujeros_alineacion: AgujeroAlineacion[];
 };
+
+export type PhysicalMapResponse = {
+  payload: Record<string, unknown>;
+};

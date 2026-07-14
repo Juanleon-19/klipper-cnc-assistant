@@ -13,6 +13,7 @@ from klipper_cnc_assistant.application import (
     HeightMapService,
     MachineSessionService,
     NotFoundError,
+    PhysicalMapService,
     ProjectService,
     ReferenceSessionService,
     SystemStatusService,
@@ -41,6 +42,7 @@ def create_app(
     machine_session_service.machine_mode = "fisico" if machine_runtime.config.mode.value == "physical" else "simulado"
     project_service = ProjectService(repository)
     height_map_service = HeightMapService(repository)
+    physical_map_service = PhysicalMapService(repository)
     reference_session_service = ReferenceSessionService(
         repository,
         height_map_service,
@@ -61,6 +63,7 @@ def create_app(
     )
     app.state.project_service = project_service
     app.state.height_map_service = height_map_service
+    app.state.physical_map_service = physical_map_service
     app.state.machine_session_service = machine_session_service
     app.state.machine_runtime = machine_runtime
     app.state.reference_session_service = reference_session_service

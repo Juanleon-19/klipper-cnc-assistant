@@ -4,6 +4,7 @@ from fastapi import APIRouter, Request
 from starlette.datastructures import UploadFile
 
 from klipper_cnc_assistant.application import ApplicationError
+from klipper_cnc_assistant.application.physical_map_service import PhysicalMeshConfig
 from klipper_cnc_assistant.heightmap import ExclusionZone, ProbeRegion
 
 from .heightmap_schemas import (
@@ -11,6 +12,9 @@ from .heightmap_schemas import (
     HeightMapConfigRequest,
     HeightMapImportRequest,
     HeightMapResponse,
+    PhysicalMapPlanRequest,
+    PhysicalMapPointUpdateRequest,
+    PhysicalMapResponse,
     HeightMapSampleUpdateRequest,
     HeightMapSimulationRequest,
     HeightMapStatisticsResponse,
@@ -318,6 +322,84 @@ def build_router() -> APIRouter:
         position = runtime.last_probe_position()
         snapshot = runtime.snapshot()
         return _reference_session_to_response(reference_service.capture_physical_z_reference(project_id, operation_id, position=position, machine_label=str(snapshot["moonraker"].get("url") or "physical"), homed_axes=snapshot["klipper"].get("homed_axes"), session_id=snapshot.get("started_at")))
+
+    @router.post("/projects/{project_id}/operations/{operation_id}/physical-map/plan-from-reference", response_model=PhysicalMapResponse)
+    def plan_physical_map_from_reference(project_id: str, operation_id: str, payload: PhysicalMapPlanRequest, request: Request) -> PhysicalMapResponse:
+        runtime = request.app.state.machine_runtime
+        reference_service = request.app.state.reference_session_service
+        physical_map_service = request.app.state.physical_map_service
+        probe = runtime.last_probe_position()
+        snapshot = runtime.snapshot()
+        machine_label = str(snapshot["moonraker"].get("url") or "physical")
+        homed_axes = snapshot["klipper"].get("homed_axes")
+        session_id = snapshot.get("started_at")
+        reference_service.capture_physical_work_origin(project_id, operation_id, position=probe, machine_label=machine_label, homed_axes=homed_axes, session_id=session_id)
+        reference_service.capture_physical_z_reference(project_id, operation_id, position=probe, machine_label=machine_label, homed_axes=homed_axes, session_id=session_id)
+        plan = physical_map_service.capture_reference_and_plan(
+            project_id=project_id,
+            operation_id=operation_id,
+            machine_origin_x=probe["x_mm"],
+            machine_origin_y=probe["y_mm"],
+            reference_z=probe["z_mm"],
+            machine_position=probe,
+            homed_axes=homed_axes,
+            machine_label=machine_label,
+            session_id=session_id,
+            config=PhysicalMeshConfig(max_spacing_mm=payload.max_spacing_mm, margin_mm=payload.margin_mm),
+        )
+        return PhysicalMapResponse(payload=plan)
+
+    @router.get("/projects/{project_id}/operations/{operation_id}/physical-map", response_model=PhysicalMapResponse)
+    def get_physical_map(project_id: str, operation_id: str, request: Request) -> PhysicalMapResponse:
+        service = request.app.state.physical_map_service
+        return PhysicalMapResponse(payload=service.get_active(project_id, operation_id))
+
+    @router.post("/projects/{project_id}/physical-maps/{map_id:path}/execute-next", response_model=PhysicalMapResponse)
+    def execute_next_physical_map_point(project_id: str, map_id: str, request: Request) -> PhysicalMapResponse:
+        service = request.app.state.physical_map_service
+        runtime = request.app.state.machine_runtime
+        payload = service.get_by_id(project_id, map_id)
+        if payload.get("status") in {"CANCELLED", "MESH_COMPLETE"}:
+            raise ApplicationError("La malla no está en un estado ejecutable.")
+        point = service.next_pending_point(project_id, map_id)
+        result = runtime.probe_mesh_point(point)
+        updated = service.record_point(
+            project_id=project_id,
+            map_id=map_id,
+            point_index=int(point["index"]),
+            z_measured=float(result["z_measured"]),
+            status="MEASURED",
+            duration_s=float(result["duration_s"]),
+            error=None,
+        )
+        return PhysicalMapResponse(payload=updated)
+
+    @router.post("/projects/{project_id}/physical-maps/{map_id:path}/points/{point_index}", response_model=PhysicalMapResponse)
+    def update_physical_map_point(project_id: str, map_id: str, point_index: int, payload: PhysicalMapPointUpdateRequest, request: Request) -> PhysicalMapResponse:
+        service = request.app.state.physical_map_service
+        updated = service.record_point(
+            project_id=project_id,
+            map_id=map_id,
+            point_index=point_index,
+            z_measured=payload.z_measured,
+            status=payload.status,
+            attempts=payload.attempts,
+            duration_s=payload.duration_s,
+            error=payload.error,
+        )
+        return PhysicalMapResponse(payload=updated)
+
+    @router.post("/projects/{project_id}/physical-maps/{map_id:path}/pause", response_model=PhysicalMapResponse)
+    def pause_physical_map(project_id: str, map_id: str, request: Request) -> PhysicalMapResponse:
+        return PhysicalMapResponse(payload=request.app.state.physical_map_service.mark_status(project_id=project_id, map_id=map_id, status="MESH_PAUSED"))
+
+    @router.post("/projects/{project_id}/physical-maps/{map_id:path}/resume", response_model=PhysicalMapResponse)
+    def resume_physical_map(project_id: str, map_id: str, request: Request) -> PhysicalMapResponse:
+        return PhysicalMapResponse(payload=request.app.state.physical_map_service.mark_status(project_id=project_id, map_id=map_id, status="MESH_READY"))
+
+    @router.post("/projects/{project_id}/physical-maps/{map_id:path}/cancel", response_model=PhysicalMapResponse)
+    def cancel_physical_map(project_id: str, map_id: str, request: Request) -> PhysicalMapResponse:
+        return PhysicalMapResponse(payload=request.app.state.physical_map_service.mark_status(project_id=project_id, map_id=map_id, status="CANCELLED"))
 
     @router.put("/projects/{project_id}/operations/{operation_id}/height-map/config", response_model=HeightMapResponse)
     def configure_height_map(project_id: str, operation_id: str, payload: HeightMapConfigRequest, request: Request) -> HeightMapResponse:
