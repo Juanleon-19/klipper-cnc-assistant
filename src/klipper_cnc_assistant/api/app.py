@@ -18,8 +18,11 @@ from klipper_cnc_assistant.application import (
     SystemStatusService,
 )
 from klipper_cnc_assistant.domain import DomainError, ProjectValidationError
+from klipper_cnc_assistant.machine.config import load_machine_runtime_config
+from klipper_cnc_assistant.machine.runtime import MachineRuntime, MachineRuntimeError
 from klipper_cnc_assistant.storage import JsonProjectRepository
 
+from .machine_routes import build_machine_router
 from .routes import build_router
 
 
@@ -34,6 +37,8 @@ def create_app(
     )
     repository = JsonProjectRepository(resolved_data_dir)
     machine_session_service = MachineSessionService()
+    machine_runtime = MachineRuntime(load_machine_runtime_config())
+    machine_session_service.machine_mode = "fisico" if machine_runtime.config.mode.value == "physical" else "simulado"
     project_service = ProjectService(repository)
     height_map_service = HeightMapService(repository)
     reference_session_service = ReferenceSessionService(
@@ -57,28 +62,56 @@ def create_app(
     app.state.project_service = project_service
     app.state.height_map_service = height_map_service
     app.state.machine_session_service = machine_session_service
+    app.state.machine_runtime = machine_runtime
     app.state.reference_session_service = reference_session_service
     app.state.system_status_service = system_status_service
     app.state.frontend_dist_dir = resolved_frontend_dist
     app.include_router(build_router())
+    app.include_router(build_machine_router())
+
+    @app.on_event("startup")
+    async def start_machine_runtime() -> None:
+        machine_runtime.start()
+
+    @app.on_event("shutdown")
+    async def stop_machine_runtime() -> None:
+        machine_runtime.stop()
 
     @app.exception_handler(RequestValidationError)
     async def handle_validation_error(_request, exc: RequestValidationError) -> JSONResponse:
         translated: list[str] = []
+        structured: list[dict[str, object]] = []
         for error in exc.errors():
             location = ".".join(str(item) for item in error["loc"] if item != "body") or "solicitud"
             error_type = error.get("type", "")
+            received = error.get("input")
             if error_type in {"missing"}:
                 message = "campo obligatorio."
+                expected = "valor presente"
+                solution = "Complete el campo antes de enviar."
             elif error_type in {"float_parsing", "int_parsing", "finite_number", "float_type", "int_type"}:
                 message = "debe ser un numero valido."
+                expected = "numero JSON finito"
+                solution = "Use un numero con punto decimal si necesita decimales."
             elif error_type == "string_too_short":
                 message = "texto demasiado corto."
+                expected = "texto no vacio"
+                solution = "Ingrese un texto valido."
             else:
                 message = "valor invalido."
+                expected = "valor compatible con el esquema"
+                solution = "Revise el valor indicado y vuelva a intentar."
             translated.append(f"{location}: {message}")
+            structured.append({
+                "campo": location,
+                "valor_recibido": received,
+                "valor_esperado": expected,
+                "causa": message.rstrip("."),
+                "solucion": solution,
+                "accion_recomendada": "Corregir el campo y reenviar la solicitud.",
+            })
         detail = "Solicitud invalida. " + " ".join(translated)
-        return JSONResponse(status_code=422, content={"detalle": detail.strip()})
+        return JSONResponse(status_code=422, content={"detalle": detail.strip(), "errores": structured})
 
     @app.exception_handler(NotFoundError)
     async def handle_not_found(_request, exc: NotFoundError) -> JSONResponse:
@@ -89,6 +122,7 @@ def create_app(
 
     app.add_exception_handler(ApplicationError, handle_application_error)
     app.add_exception_handler(DomainError, handle_application_error)
+    app.add_exception_handler(MachineRuntimeError, handle_application_error)
     app.add_exception_handler(ProjectValidationError, handle_application_error)
     app.add_exception_handler(ValueError, handle_application_error)
 

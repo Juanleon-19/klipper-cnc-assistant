@@ -1945,3 +1945,77 @@ button {
     width: 100%;
   }
 }
+
+.system-physical {
+  min-width: 0;
+}
+
+.machine-action-strip {
+  display: flex;
+  align-items: end;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+}
+
+.machine-action-strip .button {
+  min-height: 2.4rem;
+}
+
+.inline-field {
+  display: grid;
+  gap: 0.35rem;
+  min-width: 11rem;
+  color: var(--text-soft);
+  font-size: 0.86rem;
+  font-weight: 700;
+}
+
+.inline-field input {
+  width: 100%;
+  min-width: 0;
+}
+
+.diagnostic-card {
+  min-width: 0;
+}
+
+.definition-grid--dense {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.definition-grid--dense dd {
+  overflow-wrap: anywhere;
+}
+
+.machine-event-list {
+  display: grid;
+  gap: 0.5rem;
+}
+
+.machine-event {
+  display: grid;
+  grid-template-columns: minmax(7rem, auto) minmax(0, 1fr);
+  gap: var(--space-3);
+  align-items: start;
+  padding: 0.55rem 0;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.machine-event span {
+  color: var(--text-soft);
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 768px) {
+  .machine-action-strip {
+    align-items: stretch;
+    flex-direction: column;
+  }
+  .machine-action-strip .button,
+  .inline-field {
+    width: 100%;
+  }
+  .machine-event {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

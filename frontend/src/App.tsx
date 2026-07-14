@@ -11,6 +11,7 @@ import { api, type OperationInput, type OperationUpdateInput } from "./lib/api";
 import { getRecentProject, summarizeMachineMode, toneForStatus, translateStatus } from "./lib/ui";
 import type {
   HealthResponse,
+  MachineRuntime,
   MachineSession,
   Operation,
   Project,
@@ -27,7 +28,7 @@ type NavItem = {
   icon: string;
 };
 
-const FRONTEND_SCHEMA_VERSION = "1.4";
+const FRONTEND_SCHEMA_VERSION = "1.5";
 const FRONTEND_BUILD = "0.1.0";
 
 const navItems: NavItem[] = [
@@ -56,6 +57,7 @@ export default function App() {
   const [health, setHealth] = useState<HealthResponse | null>(null);
   const [systemInfo, setSystemInfo] = useState<SystemInfoResponse | null>(null);
   const [machineSession, setMachineSession] = useState<MachineSession | null>(null);
+  const [machineRuntime, setMachineRuntime] = useState<MachineRuntime | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshingSystem, setRefreshingSystem] = useState(false);
   const [error, setError] = useState("");
@@ -104,14 +106,16 @@ export default function App() {
   };
 
   const loadSystem = async () => {
-    const [healthPayload, infoPayload, machinePayload] = await Promise.all([
+    const [healthPayload, infoPayload, machinePayload, runtimePayload] = await Promise.all([
       api.getHealth(),
       api.getSystemInfo(),
       api.getMachineSession(),
+      api.getMachineRuntime(),
     ]);
     setHealth(healthPayload);
     setSystemInfo(infoPayload);
     setMachineSession(machinePayload);
+    setMachineRuntime(runtimePayload);
   };
 
   const syncProject = async (projectId: string) => {
@@ -321,6 +325,32 @@ export default function App() {
     }
   };
 
+  const handleMachineAction = async (action: string, targetZ?: number) => {
+    setRefreshingSystem(true);
+    setError("");
+    try {
+      let runtime: MachineRuntime;
+      if (action === "connect") runtime = await api.connectMachine();
+      else if (action === "disconnect") runtime = await api.disconnectMachine();
+      else if (action === "diagnostic") runtime = await api.setMachineDiagnosticMode(true);
+      else if (action === "initialize") runtime = await api.initializeMachine(targetZ ?? 0);
+      else if (action === "manual-on") runtime = await api.setManualControl(true);
+      else if (action === "manual-off") runtime = await api.setManualControl(false);
+      else if (action === "probe-request") runtime = await api.requestProbe();
+      else if (action === "probe-confirm") runtime = await api.confirmProbe();
+      else if (action === "cancel") runtime = await api.cancelMachineOperation();
+      else if (action === "safe-stop") runtime = await api.safeStopMachine();
+      else if (action === "emergency") runtime = await api.emergencyStopMachine();
+      else runtime = await api.getMachineRuntime();
+      setMachineRuntime(runtime);
+      await loadSystem();
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : "No fue posible completar la acción física.");
+    } finally {
+      setRefreshingSystem(false);
+    }
+  };
+
   const titleByView: Record<View, { eyebrow: string; title: string; description: string }> = {
     inicio: {
       eyebrow: "Operación remota",
@@ -492,8 +522,10 @@ export default function App() {
               health={health}
               systemInfo={systemInfo}
               machineSession={machineSession}
+              machineRuntime={machineRuntime}
               refreshing={refreshingSystem}
               onRefresh={refreshSystem}
+              onMachineAction={handleMachineAction}
             />
           ) : null}
         </div>

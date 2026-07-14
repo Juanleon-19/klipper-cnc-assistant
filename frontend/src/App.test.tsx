@@ -5,7 +5,7 @@ import App from "./App";
 
 const mockFetch = vi.fn();
 
-function seedInitialFetch(projects: unknown[] = [], schemaVersion = "1.4") {
+function seedInitialFetch(projects: unknown[] = [], schemaVersion = "1.5") {
   mockFetch
     .mockResolvedValueOnce({
       ok: true,
@@ -44,6 +44,28 @@ function seedInitialFetch(projects: unknown[] = [], schemaVersion = "1.4") {
         cero_z_capturado: false,
         operaciones_permitidas: ["crear proyecto"],
         z_puede_bajar_durante: [],
+      }),
+    })
+    .mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        mode: "SIMULATED",
+        mode_label: "SIMULADO",
+        state: "READY",
+        health: "HEALTHY",
+        started_at: new Date().toISOString(),
+        application: { api_active: true, mode: "simulated", uptime_s: 1 },
+        moonraker: { http_connected: false, websocket_connected: false },
+        klipper: { ready: false, position: null, homed_axes: null, limits: null },
+        arduino: { open: false, valid_packets: 0, checksum_errors: 0 },
+        controller: { direction: "CENTER", probe_requested: false },
+        safety: { movement_authorized: false, blocked_reason: "Modo simulado" },
+        last_command: null,
+        last_movement: null,
+        last_error: null,
+        last_probe_result: null,
+        initialization_steps: [],
+        events: [],
       }),
     });
 }

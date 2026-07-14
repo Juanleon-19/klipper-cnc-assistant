@@ -2,6 +2,7 @@ import type {
   CompensationPreview,
   HealthResponse,
   HeightMap,
+  MachineRuntime,
   MachineSession,
   Operation,
   OperationAnalysis,
@@ -41,7 +42,24 @@ export class ApiError extends Error {
   }
 }
 
-function translateFastApiDetail(detail: unknown): { message: string; fieldErrors: Record<string, string> } {
+function translateFastApiDetail(detail: unknown, structuredErrors?: unknown): { message: string; fieldErrors: Record<string, string> } {
+  if (Array.isArray(structuredErrors)) {
+    const fieldErrors: Record<string, string> = {};
+    const messages = structuredErrors.map((item) => {
+      if (!item || typeof item !== "object") return null;
+      const record = item as Record<string, unknown>;
+      const field = typeof record.campo === "string" ? record.campo : "solicitud";
+      const cause = typeof record.causa === "string" ? record.causa : "valor inválido";
+      const solution = typeof record.solucion === "string" ? record.solucion : "Revise el valor.";
+      const message = `${field}: ${cause}. ${solution}`;
+      fieldErrors[field] = message;
+      return message;
+    }).filter((value): value is string => Boolean(value));
+    if (messages.length > 0) {
+      return { message: `Solicitud inválida. ${messages.join(" ")}`, fieldErrors };
+    }
+  }
+
   if (typeof detail === "string" && detail.trim()) {
     const fieldErrors: Record<string, string> = {};
     for (const field of ["x_mm", "y_mm", "z_mm"]) {
@@ -93,9 +111,10 @@ async function request<T>(input: RequestInfo, init?: RequestInit): Promise<T> {
     const payload = (await response.json().catch(() => ({}))) as {
       detalle?: unknown;
       detail?: unknown;
+      errores?: unknown;
     };
     const rawDetail = payload.detalle ?? payload.detail;
-    const { message, fieldErrors } = translateFastApiDetail(rawDetail);
+    const { message, fieldErrors } = translateFastApiDetail(rawDetail, payload.errores);
     throw new ApiError(message, response.status, fieldErrors);
   }
   return (await response.json()) as T;
@@ -105,6 +124,22 @@ export const api = {
   getHealth: () => request<HealthResponse>("/api/health"),
   getSystemInfo: () => request<SystemInfoResponse>("/api/system/info"),
   getMachineSession: () => request<MachineSession>("/api/machine/session"),
+  getMachineRuntime: () => request<MachineRuntime>("/api/machine/runtime"),
+  connectMachine: () => request<MachineRuntime>("/api/machine/connect", { method: "POST" }),
+  disconnectMachine: () => request<MachineRuntime>("/api/machine/disconnect", { method: "POST" }),
+  setMachineDiagnosticMode: (enabled: boolean) =>
+    request<MachineRuntime>("/api/machine/diagnostic-mode", { method: "POST", body: JSON.stringify({ enabled }) }),
+  initializeMachine: (target_z_mm: number) =>
+    request<MachineRuntime>("/api/machine/initialize", { method: "POST", body: JSON.stringify({ target_z_mm }) }),
+  setManualControl: (enabled: boolean) =>
+    request<MachineRuntime>("/api/machine/manual-control", { method: "POST", body: JSON.stringify({ enabled }) }),
+  setJogMode: (mode: "fine" | "normal" | "coarse") =>
+    request<MachineRuntime>("/api/machine/jog-mode", { method: "POST", body: JSON.stringify({ mode }) }),
+  requestProbe: () => request<MachineRuntime>("/api/machine/probe/request", { method: "POST" }),
+  confirmProbe: () => request<MachineRuntime>("/api/machine/probe/confirm", { method: "POST" }),
+  cancelMachineOperation: () => request<MachineRuntime>("/api/machine/cancel", { method: "POST" }),
+  safeStopMachine: () => request<MachineRuntime>("/api/machine/safe-stop", { method: "POST" }),
+  emergencyStopMachine: () => request<MachineRuntime>("/api/machine/emergency", { method: "POST", body: JSON.stringify({ confirm: true }) }),
   listProjects: () => request<Project[]>("/api/projects"),
   getProject: (projectId: string) => request<Project>(`/api/projects/${projectId}`),
   createProject: (payload: ProjectPayload) =>
