@@ -1,12 +1,13 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Circle, Layer, Line, Rect, Stage, Text } from "react-konva";
 
-import { formatMillimeters, formatNumber } from "../../lib/format";
+import { formatCoordinate, formatMillimeters, formatNumber } from "../../lib/format";
 import { translateStatus } from "../../lib/ui";
 import type { Material, OperationAnalysis } from "../../types";
 import { ViewerInspector } from "./ViewerInspector";
 import { ViewerLayers } from "./ViewerLayers";
 import { ViewerToolbar } from "./ViewerToolbar";
+import { useMeasuredViewport } from "./useMeasuredViewport";
 import {
   buildGridTicks,
   chooseGridStep,
@@ -23,7 +24,7 @@ import {
 } from "./viewerMath";
 import { colorForDepth, viewerTheme } from "./viewerTheme";
 import { defaultViewerLayers, rectFromBounds, rectFromMaterial } from "./viewerTypes";
-import type { ScreenPoint, ViewerFitMode, ViewerLayersState, ViewTransform, ViewportSize, WorldPoint } from "./viewerTypes";
+import type { ScreenPoint, ViewerFitMode, ViewerLayersState, ViewTransform } from "./viewerTypes";
 
 type ToolpathViewerProps = {
   material: Material;
@@ -46,7 +47,8 @@ type PinchState = {
   scale: number;
 };
 
-function buildFitTransform(mode: ViewerFitMode, material: Material, analysis: OperationAnalysis, viewport: ViewportSize): ViewTransform {
+function buildFitTransform(mode: ViewerFitMode, material: Material, analysis: OperationAnalysis, width: number, height: number): ViewTransform {
+  const viewport = { width, height };
   const materialRect = rectFromMaterial(material);
   const toolpathRect = rectFromBounds(analysis.limites);
   const rect =
@@ -59,10 +61,11 @@ function buildFitTransform(mode: ViewerFitMode, material: Material, analysis: Op
 }
 
 export function ToolpathViewer({ material, analysis, operationName }: ToolpathViewerProps) {
-  const containerRef = useRef<HTMLDivElement | null>(null);
   const dragRef = useRef<DragState | null>(null);
   const pinchRef = useRef<PinchState | null>(null);
-  const [viewport, setViewport] = useState<ViewportSize>({ width: 960, height: 560 });
+  const fullscreenRef = useRef<HTMLDivElement | null>(null);
+  const [stageNode, setStageNode] = useState<HTMLDivElement | null>(null);
+  const viewport = useMeasuredViewport(stageNode);
   const [transform, setTransform] = useState<ViewTransform>({ scale: 6, panX: VIEWER_MARGIN, panY: 520 });
   const [fitMode, setFitMode] = useState<ViewerFitMode>("all");
   const [layers, setLayers] = useState<ViewerLayersState>(defaultViewerLayers);
@@ -70,7 +73,9 @@ export function ToolpathViewer({ material, analysis, operationName }: ToolpathVi
   const [traceIndex, setTraceIndex] = useState<number | null>(null);
   const [selectedIndex, setSelectedIndex] = useState<number | null>(null);
   const [hoverIndex, setHoverIndex] = useState<number | null>(null);
-  const [cursor, setCursor] = useState<WorldPoint | null>(null);
+  const [cursor, setCursor] = useState<{ x: number; y: number } | null>(null);
+  const [wideMode, setWideMode] = useState(false);
+  const [inspectorOpen, setInspectorOpen] = useState(true);
   const hasToolpath = analysis.segmentos_vista_previa.length > 0;
 
   const autoFitMode = useMemo(
@@ -79,46 +84,32 @@ export function ToolpathViewer({ material, analysis, operationName }: ToolpathVi
   );
 
   useEffect(() => {
-    const node = containerRef.current;
-    if (!node) {
-      return;
-    }
-    const observer = new ResizeObserver((entries) => {
-      const entry = entries[0];
-      if (!entry) {
-        return;
-      }
-      setViewport({
-        width: Math.max(320, Math.floor(entry.contentRect.width)),
-        height: Math.max(320, Math.floor(entry.contentRect.height)),
-      });
-    });
-    observer.observe(node);
-    return () => observer.disconnect();
-  }, []);
-
-  useEffect(() => {
-    const next = buildFitTransform(autoFitMode, material, analysis, viewport);
-    setTransform(next);
+    setTransform(buildFitTransform(autoFitMode, material, analysis, viewport.width, viewport.height));
     setFitMode(autoFitMode);
     setSelectedIndex(null);
     setHoverIndex(null);
-  }, [analysis, autoFitMode, material, viewport]);
+  }, [analysis, autoFitMode, material, viewport.height, viewport.width]);
 
   const applyFit = (mode: ViewerFitMode) => {
-    setTransform(buildFitTransform(mode, material, analysis, viewport));
+    setTransform(buildFitTransform(mode, material, analysis, viewport.width, viewport.height));
     setFitMode(mode);
   };
 
-  const segments = useMemo(() => {
-    const visibleSegments = traceIndex == null ? analysis.segmentos_vista_previa : analysis.segmentos_vista_previa.slice(0, traceIndex + 1);
-    return visibleSegments.map((segment, index) => ({
-      index,
-      segment,
-      points: segmentToCanvasPoints(segment, transform),
-      outsideMaterial: isSegmentOutsideMaterial(segment, material),
-    }));
-  }, [analysis.segmentos_vista_previa, material, traceIndex, transform]);
+  const visibleSegments = useMemo(
+    () => (traceIndex == null ? analysis.segmentos_vista_previa : analysis.segmentos_vista_previa.slice(0, traceIndex + 1)),
+    [analysis.segmentos_vista_previa, traceIndex]
+  );
+
+  const segments = useMemo(
+    () =>
+      visibleSegments.map((segment, index) => ({
+        index,
+        segment,
+        points: segmentToCanvasPoints(segment, transform),
+        outsideMaterial: isSegmentOutsideMaterial(segment, material),
+      })),
+    [material, transform, visibleSegments]
+  );
 
   const selectedSegment = selectedIndex != null ? analysis.segmentos_vista_previa[selectedIndex] : hoverIndex != null ? analysis.segmentos_vista_previa[hoverIndex] : null;
   const materialRect = rectFromMaterial(material);
@@ -128,10 +119,10 @@ export function ToolpathViewer({ material, analysis, operationName }: ToolpathVi
   const gridStep = chooseGridStep(transform.scale);
   const gridTicks = buildGridTicks(visibleRect, gridStep);
   const startSegment = analysis.segmentos_vista_previa[0] ?? null;
-  const endSegment = analysis.segmentos_vista_previa.length > 0
-    ? analysis.segmentos_vista_previa[analysis.segmentos_vista_previa.length - 1]
-    : null;
+  const endSegment = analysis.segmentos_vista_previa.length > 0 ? analysis.segmentos_vista_previa[analysis.segmentos_vista_previa.length - 1] : null;
   const warningSegmentIndex = analysis.segmentos_vista_previa.findIndex((segment) => segment.advertencias.length > 0);
+  const scaleBarMillimeters = Math.max(gridStep * 4, 5);
+  const scaleBarPixels = scaleBarMillimeters * transform.scale;
 
   const handlePointerMove = (pointer: ScreenPoint | null) => {
     if (!pointer) {
@@ -172,7 +163,7 @@ export function ToolpathViewer({ material, analysis, operationName }: ToolpathVi
         fill={viewerTheme.materialFill}
         stroke={viewerTheme.materialStroke}
         strokeWidth={1.2}
-        cornerRadius={14}
+        cornerRadius={12}
       />
     );
   };
@@ -201,7 +192,7 @@ export function ToolpathViewer({ material, analysis, operationName }: ToolpathVi
   };
 
   const toggleFullscreen = async () => {
-    const node = containerRef.current;
+    const node = fullscreenRef.current;
     if (!node) {
       return;
     }
@@ -213,20 +204,25 @@ export function ToolpathViewer({ material, analysis, operationName }: ToolpathVi
   };
 
   return (
-    <section className="toolpath-viewer-shell">
-      <div className="toolpath-viewer-main">
+    <section className={`toolpath-viewer-shell${wideMode ? " toolpath-viewer-shell--wide" : ""}${!inspectorOpen ? " toolpath-viewer-shell--compact" : ""}`}>
+      <div className="toolpath-viewer-main" ref={fullscreenRef}>
         <div className="viewer-header">
           <div>
-            <h3>Visor técnico 2D V2</h3>
-            <p className="muted">Visualización informativa. No representa mecanizado real ni envía comandos a la máquina.</p>
+            <h3>Visor técnico 2D V3</h3>
+            <p className="muted">Visualización informativa en milímetros. No representa mecanizado real ni envía comandos a la máquina.</p>
           </div>
-          <div className="viewer-scale-meta mono-text">Escala {formatNumber(transform.scale, 2)} px/mm</div>
+          <div className="stack gap-sm viewer-header__meta">
+            <div className="viewer-scale-meta mono-text">Escala {formatNumber(transform.scale, 2)} px/mm</div>
+            <div className="viewer-scale-meta mono-text">Cursor {cursor ? `${formatCoordinate(cursor.x)}, ${formatCoordinate(cursor.y)}` : "-"}</div>
+          </div>
         </div>
 
         <ViewerToolbar
           activeFitMode={fitMode}
           gridEnabled={layers.grid}
           depthMode={depthMode}
+          wideMode={wideMode}
+          inspectorOpen={inspectorOpen}
           onZoomIn={() => setTransform((current) => zoomAtPoint(current, { x: viewport.width / 2, y: viewport.height / 2 }, 1.15))}
           onZoomOut={() => setTransform((current) => zoomAtPoint(current, { x: viewport.width / 2, y: viewport.height / 2 }, 1 / 1.15))}
           onFit={applyFit}
@@ -234,190 +230,203 @@ export function ToolpathViewer({ material, analysis, operationName }: ToolpathVi
           onToggleFullscreen={() => void toggleFullscreen()}
           onToggleGrid={() => toggleLayer("grid")}
           onToggleDepth={() => setDepthMode((current) => !current)}
+          onToggleWide={() => setWideMode((current) => !current)}
+          onToggleInspector={() => setInspectorOpen((current) => !current)}
         />
 
-        <div className="viewer-stage" ref={containerRef}>
-          <Stage
-            width={viewport.width}
-            height={viewport.height}
-            onWheel={(event) => {
-              event.evt.preventDefault();
-              const pointer = event.target.getStage()?.getPointerPosition();
-              if (!pointer) {
-                return;
-              }
-              const factor = event.evt.deltaY < 0 ? 1.12 : 1 / 1.12;
-              setTransform((current) => zoomAtPoint(current, pointer, factor));
-            }}
-            onMouseDown={(event) => {
-              const pointer = event.target.getStage()?.getPointerPosition() ?? null;
-              handlePointerMove(pointer);
-              if (event.target === event.target.getStage()) {
-                handlePanStart(event.evt);
-              }
-            }}
-            onMouseMove={(event) => {
-              const pointer = event.target.getStage()?.getPointerPosition() ?? null;
-              handlePointerMove(pointer);
-              if (dragRef.current) {
-                handlePanMove(event.evt);
-              }
-            }}
-            onMouseUp={() => {
-              dragRef.current = null;
-            }}
-            onMouseLeave={() => {
-              dragRef.current = null;
-            }}
-            onDblClick={() => applyFit(autoFitMode)}
-            onTouchStart={(event) => {
-              const touches = event.evt.touches;
-              if (touches.length === 1) {
-                handlePanStart(touches[0]);
-              }
-              if (touches.length === 2) {
-                const center = {
-                  x: (touches[0].clientX + touches[1].clientX) / 2,
-                  y: (touches[0].clientY + touches[1].clientY) / 2,
-                };
-                const distance = Math.hypot(touches[0].clientX - touches[1].clientX, touches[0].clientY - touches[1].clientY);
-                pinchRef.current = { distance, center, panX: transform.panX, panY: transform.panY, scale: transform.scale };
-              }
-            }}
-            onTouchMove={(event) => {
-              const stage = event.target.getStage();
-              const pointer = stage?.getPointerPosition() ?? null;
-              handlePointerMove(pointer);
-              const touches = event.evt.touches;
-              if (touches.length === 1 && dragRef.current) {
-                handlePanMove(touches[0]);
-              }
-              if (touches.length === 2 && pinchRef.current) {
+        <div className="viewer-stage-shell">
+          <div className="viewer-stage" ref={setStageNode}>
+            <Stage
+              width={viewport.width}
+              height={viewport.height}
+              pixelRatio={window.devicePixelRatio || 1}
+              onWheel={(event) => {
                 event.evt.preventDefault();
-                const center = {
-                  x: (touches[0].clientX + touches[1].clientX) / 2,
-                  y: (touches[0].clientY + touches[1].clientY) / 2,
-                };
-                const distance = Math.hypot(touches[0].clientX - touches[1].clientX, touches[0].clientY - touches[1].clientY);
-                const factor = distance / Math.max(1, pinchRef.current.distance);
-                const interim = { scale: pinchRef.current.scale, panX: pinchRef.current.panX, panY: pinchRef.current.panY };
-                const zoomed = zoomAtPoint(interim, center, factor);
-                setTransform({
-                  scale: zoomed.scale,
-                  panX: zoomed.panX + (center.x - pinchRef.current.center.x),
-                  panY: zoomed.panY + (center.y - pinchRef.current.center.y),
-                });
-              }
-            }}
-            onTouchEnd={() => {
-              dragRef.current = null;
-              pinchRef.current = null;
-            }}
-            pixelRatio={window.devicePixelRatio || 1}
-          >
-            <Layer>
-              <Rect x={0} y={0} width={viewport.width} height={viewport.height} fill={viewerTheme.background} />
-
-              {layers.grid
-                ? gridTicks.x.map((value) => {
-                    const screen = worldToScreen({ x: value, y: 0 }, transform);
-                    const isMajor = Math.round(value / gridStep) % 5 === 0;
-                    return (
-                      <Line
-                        key={`grid-x-${value}`}
-                        points={[screen.x, 0, screen.x, viewport.height]}
-                        stroke={isMajor ? viewerTheme.gridMajor : viewerTheme.gridMinor}
-                        strokeWidth={1}
-                      />
-                    );
-                  })
-                : null}
-              {layers.grid
-                ? gridTicks.y.map((value) => {
-                    const screen = worldToScreen({ x: 0, y: value }, transform);
-                    const isMajor = Math.round(value / gridStep) % 5 === 0;
-                    return (
-                      <Line
-                        key={`grid-y-${value}`}
-                        points={[0, screen.y, viewport.width, screen.y]}
-                        stroke={isMajor ? viewerTheme.gridMajor : viewerTheme.gridMinor}
-                        strokeWidth={1}
-                      />
-                    );
-                  })
-                : null}
-
-              {layers.material ? renderMaterialRect() : null}
-              {layers.bounds ? renderBoundsRect() : null}
-
-              {layers.origin ? (
-                <>
-                  {(() => {
-                    const materialOrigin = worldToScreen({ x: 0, y: 0 }, transform);
-                    return (
-                      <>
-                        <Line points={[materialOrigin.x - 8, materialOrigin.y, materialOrigin.x + 8, materialOrigin.y]} stroke={viewerTheme.originMaterial} strokeWidth={1.5} />
-                        <Line points={[materialOrigin.x, materialOrigin.y - 8, materialOrigin.x, materialOrigin.y + 8]} stroke={viewerTheme.originMaterial} strokeWidth={1.5} />
-                        <Text x={materialOrigin.x + 8} y={materialOrigin.y - 24} text="Origen material" fill={viewerTheme.axisText} fontSize={11} />
-                        <Text x={materialOrigin.x + 8} y={materialOrigin.y - 10} text="G-code 0,0" fill={viewerTheme.originGcode} fontSize={11} />
-                      </>
-                    );
-                  })()}
-                </>
-              ) : null}
-
-              {segments.map(({ index, segment, points, outsideMaterial }) => {
-                if (segment.tipo === "G0" && !layers.g0) {
-                  return null;
+                const pointer = event.target.getStage()?.getPointerPosition();
+                if (!pointer) {
+                  return;
                 }
-                if (segment.tipo === "G1" && !layers.g1) {
-                  return null;
+                const factor = event.evt.deltaY < 0 ? 1.12 : 1 / 1.12;
+                setTransform((current) => zoomAtPoint(current, pointer, factor));
+              }}
+              onMouseDown={(event) => {
+                const pointer = event.target.getStage()?.getPointerPosition() ?? null;
+                handlePointerMove(pointer);
+                if (event.target === event.target.getStage()) {
+                  handlePanStart(event.evt);
+                  setSelectedIndex(null);
                 }
-                if ((segment.tipo === "G2" || segment.tipo === "G3") && !layers.arcs) {
-                  return null;
+              }}
+              onMouseMove={(event) => {
+                const pointer = event.target.getStage()?.getPointerPosition() ?? null;
+                handlePointerMove(pointer);
+                if (dragRef.current) {
+                  handlePanMove(event.evt);
                 }
-                const selected = selectedIndex === index || hoverIndex === index;
-                const stroke = selected
-                  ? viewerTheme.selection
-                  : outsideMaterial && layers.warnings
-                    ? viewerTheme.warning
-                    : depthMode
-                      ? colorForDepth(segment.z_mm, analysis.profundidad_min_mm, analysis.profundidad_max_mm)
-                      : segment.tipo === "G0"
-                        ? viewerTheme.rapid
-                        : segment.tipo === "G1"
-                          ? viewerTheme.cut
-                          : viewerTheme.arc;
-                return (
-                  <Line
-                    key={`${segment.tipo}-${index}`}
-                    points={points}
-                    stroke={stroke}
-                    strokeWidth={selected ? 2.8 : 1.8}
-                    dash={segment.tipo === "G0" ? [8, 6] : undefined}
-                    lineCap="round"
-                    lineJoin="round"
-                    listening
-                    hitStrokeWidth={10}
-                    onMouseEnter={() => setHoverIndex(index)}
-                    onMouseLeave={() => setHoverIndex((current) => (current === index ? null : current))}
-                    onClick={() => setSelectedIndex(index)}
-                    onTap={() => setSelectedIndex(index)}
-                  />
-                );
-              })}
+              }}
+              onMouseUp={() => {
+                dragRef.current = null;
+              }}
+              onMouseLeave={() => {
+                dragRef.current = null;
+              }}
+              onDblClick={() => applyFit(autoFitMode)}
+              onTouchStart={(event) => {
+                const touches = event.evt.touches;
+                if (touches.length === 1) {
+                  handlePanStart(touches[0]);
+                }
+                if (touches.length === 2) {
+                  const center = {
+                    x: (touches[0].clientX + touches[1].clientX) / 2,
+                    y: (touches[0].clientY + touches[1].clientY) / 2,
+                  };
+                  const distance = Math.hypot(touches[0].clientX - touches[1].clientX, touches[0].clientY - touches[1].clientY);
+                  pinchRef.current = { distance, center, panX: transform.panX, panY: transform.panY, scale: transform.scale };
+                }
+              }}
+              onTouchMove={(event) => {
+                const stage = event.target.getStage();
+                const pointer = stage?.getPointerPosition() ?? null;
+                handlePointerMove(pointer);
+                const touches = event.evt.touches;
+                if (touches.length === 1 && dragRef.current) {
+                  handlePanMove(touches[0]);
+                }
+                if (touches.length === 2 && pinchRef.current) {
+                  event.evt.preventDefault();
+                  const center = {
+                    x: (touches[0].clientX + touches[1].clientX) / 2,
+                    y: (touches[0].clientY + touches[1].clientY) / 2,
+                  };
+                  const distance = Math.hypot(touches[0].clientX - touches[1].clientX, touches[0].clientY - touches[1].clientY);
+                  const factor = distance / Math.max(1, pinchRef.current.distance);
+                  const interim = { scale: pinchRef.current.scale, panX: pinchRef.current.panX, panY: pinchRef.current.panY };
+                  const zoomed = zoomAtPoint(interim, center, factor);
+                  setTransform({
+                    scale: zoomed.scale,
+                    panX: zoomed.panX + (center.x - pinchRef.current.center.x),
+                    panY: zoomed.panY + (center.y - pinchRef.current.center.y),
+                  });
+                }
+              }}
+              onTouchEnd={() => {
+                dragRef.current = null;
+                pinchRef.current = null;
+              }}
+            >
+              <Layer>
+                <Rect x={0} y={0} width={viewport.width} height={viewport.height} fill={viewerTheme.background} />
 
-              {layers.startPoint && startSegment ? (
-                <Circle radius={5} fill={viewerTheme.start} x={worldToScreen({ x: startSegment.desde.x_mm, y: startSegment.desde.y_mm }, transform).x} y={worldToScreen({ x: startSegment.desde.x_mm, y: startSegment.desde.y_mm }, transform).y} />
-              ) : null}
-              {layers.endPoint && endSegment ? (
-                <Circle radius={5} fill={viewerTheme.end} x={worldToScreen({ x: endSegment.hasta.x_mm, y: endSegment.hasta.y_mm }, transform).x} y={worldToScreen({ x: endSegment.hasta.x_mm, y: endSegment.hasta.y_mm }, transform).y} />
-              ) : null}
+                {layers.grid
+                  ? gridTicks.x.map((value) => {
+                      const screen = worldToScreen({ x: value, y: 0 }, transform);
+                      const isMajor = Math.round(value / gridStep) % 5 === 0;
+                      return (
+                        <Line
+                          key={`grid-x-${value}`}
+                          points={[screen.x, 0, screen.x, viewport.height]}
+                          stroke={isMajor ? viewerTheme.gridMajor : viewerTheme.gridMinor}
+                          strokeWidth={1}
+                        />
+                      );
+                    })
+                  : null}
+                {layers.grid
+                  ? gridTicks.y.map((value) => {
+                      const screen = worldToScreen({ x: 0, y: value }, transform);
+                      const isMajor = Math.round(value / gridStep) % 5 === 0;
+                      return (
+                        <Line
+                          key={`grid-y-${value}`}
+                          points={[0, screen.y, viewport.width, screen.y]}
+                          stroke={isMajor ? viewerTheme.gridMajor : viewerTheme.gridMinor}
+                          strokeWidth={1}
+                        />
+                      );
+                    })
+                  : null}
 
-              <Text x={12} y={10} text="Y" fill={viewerTheme.axisText} fontSize={12} />
-              <Text x={viewport.width - 20} y={viewport.height - 24} text="X" fill={viewerTheme.axisText} fontSize={12} />
-            </Layer>
-          </Stage>
+                {layers.material ? renderMaterialRect() : null}
+                {layers.bounds ? renderBoundsRect() : null}
+
+                {layers.origin ? (
+                  <>
+                    {(() => {
+                      const materialOrigin = worldToScreen({ x: 0, y: 0 }, transform);
+                      return (
+                        <>
+                          <Line points={[materialOrigin.x - 8, materialOrigin.y, materialOrigin.x + 8, materialOrigin.y]} stroke={viewerTheme.originMaterial} strokeWidth={1.5} />
+                          <Line points={[materialOrigin.x, materialOrigin.y - 8, materialOrigin.x, materialOrigin.y + 8]} stroke={viewerTheme.originMaterial} strokeWidth={1.5} />
+                          <Text x={materialOrigin.x + 8} y={materialOrigin.y - 24} text="Origen material" fill={viewerTheme.axisText} fontSize={11} />
+                          <Text x={materialOrigin.x + 8} y={materialOrigin.y - 10} text="Origen G-code" fill={viewerTheme.originGcode} fontSize={11} />
+                        </>
+                      );
+                    })()}
+                  </>
+                ) : null}
+
+                {segments.map(({ index, segment, points, outsideMaterial }) => {
+                  if (segment.tipo === "G0" && !layers.g0) {
+                    return null;
+                  }
+                  if (segment.tipo === "G1" && !layers.g1) {
+                    return null;
+                  }
+                  if ((segment.tipo === "G2" || segment.tipo === "G3") && !layers.arcs) {
+                    return null;
+                  }
+                  const selected = selectedIndex === index || hoverIndex === index;
+                  const stroke = selected
+                    ? viewerTheme.selection
+                    : outsideMaterial && layers.warnings
+                      ? viewerTheme.warning
+                      : depthMode
+                        ? colorForDepth(segment.z_mm, analysis.profundidad_min_mm, analysis.profundidad_max_mm)
+                        : segment.tipo === "G0"
+                          ? viewerTheme.rapid
+                          : segment.tipo === "G1"
+                            ? viewerTheme.cut
+                            : viewerTheme.arc;
+                  return (
+                    <Line
+                      key={`${segment.tipo}-${index}`}
+                      points={points}
+                      stroke={stroke}
+                      strokeWidth={selected ? 2.8 : 1.8}
+                      dash={segment.tipo === "G0" ? [8, 6] : undefined}
+                      lineCap="round"
+                      lineJoin="round"
+                      listening
+                      hitStrokeWidth={10}
+                      onMouseEnter={() => setHoverIndex(index)}
+                      onMouseLeave={() => setHoverIndex((current) => (current === index ? null : current))}
+                      onClick={() => setSelectedIndex(index)}
+                      onTap={() => setSelectedIndex(index)}
+                    />
+                  );
+                })}
+
+                {layers.startPoint && startSegment ? (
+                  <Circle radius={5} fill={viewerTheme.start} x={worldToScreen({ x: startSegment.desde.x_mm, y: startSegment.desde.y_mm }, transform).x} y={worldToScreen({ x: startSegment.desde.x_mm, y: startSegment.desde.y_mm }, transform).y} />
+                ) : null}
+                {layers.endPoint && endSegment ? (
+                  <Circle radius={5} fill={viewerTheme.end} x={worldToScreen({ x: endSegment.hasta.x_mm, y: endSegment.hasta.y_mm }, transform).x} y={worldToScreen({ x: endSegment.hasta.x_mm, y: endSegment.hasta.y_mm }, transform).y} />
+                ) : null}
+
+                <Text x={12} y={10} text="Y" fill={viewerTheme.axisText} fontSize={12} />
+                <Text x={viewport.width - 20} y={viewport.height - 24} text="X" fill={viewerTheme.axisText} fontSize={12} />
+              </Layer>
+            </Stage>
+
+            <div className="viewer-stage__overlay viewer-stage__overlay--top mono-text">
+              {translateStatus(fitMode)} · {analysis.segmentos_vista_previa.length} segmentos
+            </div>
+            <div className="viewer-stage__overlay viewer-stage__overlay--bottom mono-text">
+              <span className="viewer-scale-line" style={{ width: `${Math.min(scaleBarPixels, viewport.width * 0.35)}px` }} />
+              {formatNumber(scaleBarMillimeters, 1)} mm
+            </div>
+          </div>
         </div>
 
         <div className="viewer-footer">
@@ -445,60 +454,62 @@ export function ToolpathViewer({ material, analysis, operationName }: ToolpathVi
         </div>
       </div>
 
-      <aside className="toolpath-viewer-side">
-        <ViewerInspector
-          cursor={cursor}
-          selectedSegment={selectedSegment}
-          operationName={operationName}
-          totalSegments={analysis.segmentos_vista_previa.length}
-          traceIndex={traceIndex}
-        />
-        <ViewerLayers layers={layers} onToggle={toggleLayer} />
-        <section className="viewer-sidecard">
-          <div className="section-heading section-heading--compact">
-            <h4>Advertencias</h4>
-          </div>
-          {analysis.desbordes_material.length > 0 ? (
-            <div className="stack gap-sm">
-              {analysis.desbordes_material.map((overflow) => (
-                <div className="warning-card" key={`${overflow.eje}-${overflow.direccion}`}>
-                  <strong>{overflow.eje} {translateStatus(overflow.direccion)}</strong>
-                  <span>{formatMillimeters(overflow.exceso_mm, 3)} fuera del material</span>
+      {inspectorOpen ? (
+        <aside className="toolpath-viewer-side">
+          <ViewerInspector
+            cursor={cursor}
+            selectedSegment={selectedSegment}
+            operationName={operationName}
+            totalSegments={analysis.segmentos_vista_previa.length}
+            traceIndex={traceIndex}
+          />
+          <ViewerLayers layers={layers} onToggle={toggleLayer} />
+          <section className="viewer-sidecard">
+            <div className="section-heading section-heading--compact">
+              <h4>Advertencias</h4>
+            </div>
+            {analysis.desbordes_material.length > 0 ? (
+              <div className="stack gap-sm">
+                {analysis.desbordes_material.map((overflow) => (
+                  <div className="warning-card" key={`${overflow.eje}-${overflow.direccion}`}>
+                    <strong>{overflow.eje} {translateStatus(overflow.direccion)}</strong>
+                    <span>{formatMillimeters(overflow.exceso_mm, 3)} fuera del material</span>
+                  </div>
+                ))}
+                <div className="toolbar-inline">
+                  <button
+                    className="button button--ghost"
+                    type="button"
+                    onClick={() => {
+                      if (warningSegmentIndex >= 0) {
+                        setSelectedIndex(warningSegmentIndex);
+                        setTraceIndex(null);
+                      }
+                      applyFit("all");
+                    }}
+                  >
+                    Ver problema
+                  </button>
+                  <button className="button button--ghost" type="button" onClick={() => applyFit("all")}>Ajustar a todo</button>
                 </div>
-              ))}
-              <div className="toolbar-inline">
-                <button
-                  className="button button--ghost"
-                  type="button"
-                  onClick={() => {
-                    if (warningSegmentIndex >= 0) {
-                      setSelectedIndex(warningSegmentIndex);
-                      setTraceIndex(null);
-                    }
-                    applyFit("all");
-                  }}
-                >
-                  Ver problema
-                </button>
-                <button className="button button--ghost" type="button" onClick={() => applyFit("all")}>Ajustar a todo</button>
               </div>
-            </div>
-          ) : (
-            <p className="muted">Sin desbordes respecto al material bruto.</p>
-          )}
-          {analysis.analisis_incompleto ? (
-            <p className="muted">La geometría contiene soporte incompleto o comandos no representables de forma segura.</p>
-          ) : null}
-          {depthMode ? (
-            <div className="depth-legend">
-              <span>Color por Z</span>
-              <div className="depth-legend__bar" />
-              <small>{formatMillimeters(analysis.profundidad_min_mm)} a {formatMillimeters(analysis.profundidad_max_mm)}</small>
-            </div>
-          ) : null}
-          {allRect ? <p className="muted">Encuadre actual: {translateStatus(fitMode)}</p> : null}
-        </section>
-      </aside>
+            ) : (
+              <p className="muted">Sin desbordes respecto al material bruto.</p>
+            )}
+            {analysis.analisis_incompleto ? (
+              <p className="muted">La geometría contiene soporte incompleto o comandos no representables de forma segura.</p>
+            ) : null}
+            {depthMode ? (
+              <div className="depth-legend">
+                <span>Color por Z</span>
+                <div className="depth-legend__bar" />
+                <small>{formatMillimeters(analysis.profundidad_min_mm)} a {formatMillimeters(analysis.profundidad_max_mm)}</small>
+              </div>
+            ) : null}
+            {allRect ? <p className="muted">Encuadre actual: {translateStatus(fitMode)}</p> : null}
+          </section>
+        </aside>
+      ) : null}
     </section>
   );
 }

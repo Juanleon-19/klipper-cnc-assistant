@@ -5,6 +5,15 @@ from starlette.datastructures import UploadFile
 
 from klipper_cnc_assistant.application import ApplicationError
 
+from .heightmap_schemas import (
+    HeightMapConfigRequest,
+    HeightMapImportRequest,
+    HeightMapResponse,
+    HeightMapSampleUpdateRequest,
+    HeightMapSimulationRequest,
+    HeightMapStatisticsResponse,
+    height_map_to_response,
+)
 from .schemas import (
     GCodeUploadRequest,
     HealthResponse,
@@ -160,6 +169,104 @@ def build_router() -> APIRouter:
         service = request.app.state.project_service
         analysis = service.get_operation_analysis(project_id, operation_id)
         return analysis_to_response(analysis)
+
+    @router.put("/projects/{project_id}/operations/{operation_id}/height-map/config", response_model=HeightMapResponse)
+    def configure_height_map(project_id: str, operation_id: str, payload: HeightMapConfigRequest, request: Request) -> HeightMapResponse:
+        service = request.app.state.height_map_service
+        height_map = service.configure_map(
+            project_id=project_id,
+            operation_id=operation_id,
+            filas=payload.filas,
+            columnas=payload.columnas,
+        )
+        return height_map_to_response(height_map, service.build_surfaces(height_map))
+
+    @router.post("/projects/{project_id}/operations/{operation_id}/height-map/simulate", response_model=HeightMapResponse)
+    def simulate_height_map(project_id: str, operation_id: str, payload: HeightMapSimulationRequest, request: Request) -> HeightMapResponse:
+        service = request.app.state.height_map_service
+        height_map = service.generate_simulated_map(
+            project_id=project_id,
+            operation_id=operation_id,
+            filas=payload.filas,
+            columnas=payload.columnas,
+            escenario=payload.escenario,
+            semilla=payload.semilla,
+        )
+        return height_map_to_response(height_map, service.build_surfaces(height_map))
+
+    @router.post("/projects/{project_id}/operations/{operation_id}/height-map/import/json", response_model=HeightMapResponse)
+    def import_height_map_json(project_id: str, operation_id: str, payload: HeightMapImportRequest, request: Request) -> HeightMapResponse:
+        service = request.app.state.height_map_service
+        height_map = service.import_json_map(
+            project_id=project_id,
+            operation_id=operation_id,
+            content=payload.contenido,
+        )
+        return height_map_to_response(height_map, service.build_surfaces(height_map))
+
+    @router.post("/projects/{project_id}/operations/{operation_id}/height-map/import/csv", response_model=HeightMapResponse)
+    def import_height_map_csv(project_id: str, operation_id: str, payload: HeightMapImportRequest, request: Request) -> HeightMapResponse:
+        service = request.app.state.height_map_service
+        height_map = service.import_csv_map(
+            project_id=project_id,
+            operation_id=operation_id,
+            content=payload.contenido,
+        )
+        return height_map_to_response(height_map, service.build_surfaces(height_map))
+
+    @router.get("/projects/{project_id}/operations/{operation_id}/height-map", response_model=HeightMapResponse)
+    def get_height_map(project_id: str, operation_id: str, request: Request) -> HeightMapResponse:
+        service = request.app.state.height_map_service
+        height_map = service.get_map(project_id, operation_id)
+        return height_map_to_response(height_map, service.build_surfaces(height_map))
+
+    @router.get("/projects/{project_id}/operations/{operation_id}/height-map/statistics", response_model=HeightMapStatisticsResponse)
+    def get_height_map_statistics(project_id: str, operation_id: str, request: Request) -> HeightMapStatisticsResponse:
+        service = request.app.state.height_map_service
+        statistics = service.get_statistics(project_id, operation_id)
+        return HeightMapStatisticsResponse(
+            cantidad_puntos=statistics.cantidad_puntos,
+            cantidad_puntos_incluidos=statistics.cantidad_puntos_incluidos,
+            cantidad_puntos_faltantes=statistics.cantidad_puntos_faltantes,
+            cantidad_puntos_atipicos=statistics.cantidad_puntos_atipicos,
+            altura_min_mm=statistics.altura_min_mm,
+            altura_max_mm=statistics.altura_max_mm,
+            rango_alturas_mm=statistics.rango_alturas_mm,
+            rms_residuos_mm=statistics.rms_residuos_mm,
+            residuo_maximo_mm=statistics.residuo_maximo_mm,
+            ancho_cubierto_mm=statistics.ancho_cubierto_mm,
+            alto_cubierto_mm=statistics.alto_cubierto_mm,
+        )
+
+    @router.patch("/projects/{project_id}/operations/{operation_id}/height-map/samples/{sample_id}", response_model=HeightMapResponse)
+    def update_height_map_sample(project_id: str, operation_id: str, sample_id: str, payload: HeightMapSampleUpdateRequest, request: Request) -> HeightMapResponse:
+        service = request.app.state.height_map_service
+        update_kwargs = {}
+        if "z_mm" in payload.model_fields_set:
+            update_kwargs["z_mm"] = payload.z_mm
+        if "incluida" in payload.model_fields_set:
+            update_kwargs["incluida"] = payload.incluida
+        if "observacion" in payload.model_fields_set:
+            update_kwargs["observacion"] = payload.observacion
+        height_map = service.update_sample(
+            project_id=project_id,
+            operation_id=operation_id,
+            sample_id=sample_id,
+            **update_kwargs,
+        )
+        return height_map_to_response(height_map, service.build_surfaces(height_map))
+
+    @router.post("/projects/{project_id}/operations/{operation_id}/height-map/recalculate", response_model=HeightMapResponse)
+    def recalculate_height_map(project_id: str, operation_id: str, request: Request) -> HeightMapResponse:
+        service = request.app.state.height_map_service
+        height_map = service.recalculate_map(project_id, operation_id)
+        return height_map_to_response(height_map, service.build_surfaces(height_map))
+
+    @router.delete("/projects/{project_id}/operations/{operation_id}/height-map", response_model=dict[str, str])
+    def delete_height_map(project_id: str, operation_id: str, request: Request) -> dict[str, str]:
+        service = request.app.state.height_map_service
+        service.delete_map(project_id, operation_id)
+        return {"detalle": "Mapa de alturas eliminado."}
 
     @router.get("/machine/session", response_model=MachineSessionResponse)
     def get_machine_session(request: Request) -> MachineSessionResponse:

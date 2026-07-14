@@ -1,5 +1,6 @@
 import type {
   HealthResponse,
+  HeightMap,
   MachineSession,
   Operation,
   OperationAnalysis,
@@ -74,5 +75,45 @@ export const api = {
   analyzeOperation: (projectId: string, operationId: string) =>
     request<OperationAnalysis>(`/api/projects/${projectId}/operations/${operationId}/analyze`, {
       method: "POST",
+    }),
+  getHeightMap: (projectId: string, operationId: string) =>
+    request<HeightMap>(`/api/projects/${projectId}/operations/${operationId}/height-map`),
+  configureHeightMap: (projectId: string, operationId: string, payload: { filas: number; columnas: number }) =>
+    request<HeightMap>(`/api/projects/${projectId}/operations/${operationId}/height-map/config`, {
+      method: "PUT",
+      body: JSON.stringify(payload),
+    }),
+  simulateHeightMap: (projectId: string, operationId: string, payload: { filas: number; columnas: number; escenario: string; semilla: number }) =>
+    request<HeightMap>(`/api/projects/${projectId}/operations/${operationId}/height-map/simulate`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  importHeightMapJson: (projectId: string, operationId: string, contenido: string) =>
+    request<HeightMap>(`/api/projects/${projectId}/operations/${operationId}/height-map/import/json`, {
+      method: "POST",
+      body: JSON.stringify({ contenido }),
+    }),
+  importHeightMapCsv: (projectId: string, operationId: string, contenido: string) =>
+    request<HeightMap>(`/api/projects/${projectId}/operations/${operationId}/height-map/import/csv`, {
+      method: "POST",
+      body: JSON.stringify({ contenido }),
+    }),
+  updateHeightMapSample: (
+    projectId: string,
+    operationId: string,
+    sampleId: string,
+    payload: { z_mm?: number | null; incluida?: boolean; observacion?: string | null }
+  ) =>
+    request<HeightMap>(`/api/projects/${projectId}/operations/${operationId}/height-map/samples/${sampleId}`, {
+      method: "PATCH",
+      body: JSON.stringify(payload),
+    }),
+  recalculateHeightMap: (projectId: string, operationId: string) =>
+    request<HeightMap>(`/api/projects/${projectId}/operations/${operationId}/height-map/recalculate`, {
+      method: "POST",
+    }),
+  deleteHeightMap: (projectId: string, operationId: string) =>
+    request<{ detalle: string }>(`/api/projects/${projectId}/operations/${operationId}/height-map`, {
+      method: "DELETE",
     }),
 };

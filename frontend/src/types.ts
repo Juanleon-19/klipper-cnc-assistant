@@ -101,6 +101,90 @@ export type OperationAnalysis = {
   tolerancia_arco_mm: number | null;
 };
 
+export type HeightMapGrid = {
+  filas: number;
+  columnas: number;
+  ancho_mm: number;
+  alto_mm: number;
+  paso_x_mm: number;
+  paso_y_mm: number;
+};
+
+export type HeightMapSample = {
+  id: string;
+  x_mm: number;
+  y_mm: number;
+  z_mm: number | null;
+  fila: number;
+  columna: number;
+  origen_datos: string;
+  estado_calidad: string;
+  observacion: string | null;
+  incluida: boolean;
+  residuo_plano_mm: number | null;
+};
+
+export type HeightMapPlane = {
+  a: number;
+  b: number;
+  c: number;
+  inclinacion_x_mm_por_mm: number;
+  inclinacion_y_mm_por_mm: number;
+  rms_residuos_mm: number;
+  residuo_maximo_mm: number;
+  residuo_minimo_mm: number;
+};
+
+export type HeightMapStatistics = {
+  cantidad_puntos: number;
+  cantidad_puntos_incluidos: number;
+  cantidad_puntos_faltantes: number;
+  cantidad_puntos_atipicos: number;
+  altura_min_mm: number | null;
+  altura_max_mm: number | null;
+  rango_alturas_mm: number | null;
+  rms_residuos_mm: number | null;
+  residuo_maximo_mm: number | null;
+  ancho_cubierto_mm: number | null;
+  alto_cubierto_mm: number | null;
+};
+
+export type HeightMapSurfacePoint = {
+  fila: number;
+  columna: number;
+  x_mm: number;
+  y_mm: number;
+  z_mm: number | null;
+  estado: string;
+  observacion: string | null;
+};
+
+export type HeightMapSurface = {
+  filas: number;
+  columnas: number;
+  modo: string;
+  puntos: HeightMapSurfacePoint[];
+};
+
+export type HeightMap = {
+  proyecto_id: string;
+  operacion_id: string;
+  version: number;
+  version_algoritmo: string;
+  estado: string;
+  fuente_datos: string;
+  escenario: string | null;
+  semilla: number | null;
+  etiqueta_simulada: boolean;
+  grid: HeightMapGrid;
+  muestras: HeightMapSample[];
+  estadisticas: HeightMapStatistics;
+  plano: HeightMapPlane | null;
+  superficies: Record<string, HeightMapSurface>;
+  creado_en: string;
+  actualizado_en: string;
+};
+
 export type Operation = {
   id: string;
   nombre: string;

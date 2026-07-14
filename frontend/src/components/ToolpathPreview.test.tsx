@@ -82,7 +82,7 @@ describe("ToolpathPreview", () => {
       />
     );
 
-    expect(screen.getByText(/Visor técnico 2D V2/i)).toBeInTheDocument();
+    expect(screen.getByText(/Visor técnico 2D V3/i)).toBeInTheDocument();
     expect(screen.getByText(/Ver problema/i)).toBeInTheDocument();
     expect(screen.getByText(/4\.000 mm fuera del material/i)).toBeInTheDocument();
   });

@@ -143,6 +143,49 @@ class JsonProjectRepository:
         target = self._resolve_project_file(project_id, relative_path)
         return target.read_text(encoding="utf-8")
 
+    def save_height_map_payload(
+        self,
+        project_id: str,
+        operation_id: str,
+        payload: dict,
+    ) -> dict:
+        target = self._height_map_file(project_id, operation_id)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(
+            json.dumps(
+                payload,
+                ensure_ascii=True,
+                indent=2,
+                sort_keys=True,
+            ),
+            encoding="utf-8",
+        )
+        return payload
+
+    def load_height_map_payload(
+        self,
+        project_id: str,
+        operation_id: str,
+    ) -> dict:
+        target = self._height_map_file(project_id, operation_id)
+        if not target.exists():
+            raise FileNotFoundError(
+                f"El mapa de alturas para la operacion '{operation_id}' no existe."
+            )
+        return json.loads(target.read_text(encoding="utf-8"))
+
+    def delete_height_map(
+        self,
+        project_id: str,
+        operation_id: str,
+    ) -> None:
+        target = self._height_map_file(project_id, operation_id)
+        if not target.exists():
+            raise FileNotFoundError(
+                f"El mapa de alturas para la operacion '{operation_id}' no existe."
+            )
+        target.unlink()
+
     def _resolve_project_file(
         self,
         project_id: str,
@@ -391,3 +434,12 @@ class JsonProjectRepository:
             advertencias=tuple(payload.get("advertencias", [])),
             puntos=tuple(PreviewPoint(**point) for point in points_payload),
         )
+
+    def _height_map_file(
+        self,
+        project_id: str,
+        operation_id: str,
+    ) -> Path:
+        project_dir = self.project_dir(project_id)
+        self._ensure_project_layout(project_dir)
+        return project_dir / "maps" / operation_id / "height_map.json"

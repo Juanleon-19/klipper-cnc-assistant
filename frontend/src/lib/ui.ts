@@ -29,6 +29,13 @@ const DIRECT_LABELS: Record<string, string> = {
   arco_antihorario: "Arco antihorario",
   minimo: "Mínimo",
   maximo: "Máximo",
+  material: "Material",
+  toolpath: "Trayectoria",
+  all: "Todo",
+  bruto: "Altura bruta",
+  plano: "Plano estimado",
+  residuo: "Residuo local",
+  simulado: "Simulado",
 };
 
 function normalizeToken(value: string): string {

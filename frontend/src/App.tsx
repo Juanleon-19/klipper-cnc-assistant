@@ -23,6 +23,7 @@ type View = "inicio" | "proyectos" | "nuevo" | "sistema";
 export default function App() {
   const [view, setView] = useState<View>("inicio");
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [sidebarOpen, setSidebarOpen] = useState(false);
   const [projects, setProjects] = useState<Project[]>([]);
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
   const [health, setHealth] = useState<HealthResponse | null>(null);
@@ -40,6 +41,11 @@ export default function App() {
     [projects, selectedProjectId]
   );
   const recentProject = useMemo(() => getRecentProject(projects), [projects]);
+
+  const handleSelectView = (nextView: View) => {
+    setView(nextView);
+    setSidebarOpen(false);
+  };
 
   const loadProjects = async () => {
     const payload = await api.listProjects();
@@ -86,7 +92,7 @@ export default function App() {
       const project = await api.createProject(payload);
       setProjects((current) => [project, ...current]);
       setSelectedProjectId(project.id);
-      setView("proyectos");
+      handleSelectView("proyectos");
     } catch (requestError) {
       setError(requestError instanceof Error ? requestError.message : "No fue posible crear el proyecto.");
     } finally {
@@ -214,12 +220,12 @@ export default function App() {
     inicio: {
       eyebrow: "Operación remota",
       title: "Panel principal",
-      description: "Acceso privado, análisis G-code y preparación visual de proyectos PCB.",
+      description: "Acceso privado, análisis G-code, visor técnico y mapa de alturas completamente simulado.",
     },
     proyectos: {
       eyebrow: "Espacio de trabajo",
       title: selectedProject?.nombre ?? "Proyectos",
-      description: "Flujo visual de operaciones, carga de archivos y visor técnico 2D.",
+      description: "Flujo visual de operaciones, visor 2D/3D y análisis del material sin movimientos físicos.",
     },
     nuevo: {
       eyebrow: "Nuevo proyecto",
@@ -236,12 +242,14 @@ export default function App() {
   const header = titleByView[view];
 
   return (
-    <div className={`app-shell${sidebarCollapsed ? " app-shell--collapsed" : ""}`}>
-      <aside className="sidebar">
+    <div className={`app-shell${sidebarCollapsed ? " app-shell--collapsed" : ""}${sidebarOpen ? " app-shell--sidebar-open" : ""}`}>
+      <button className={`shell-backdrop${sidebarOpen ? " shell-backdrop--visible" : ""}`} type="button" aria-label="Cerrar navegación" onClick={() => setSidebarOpen(false)} />
+
+      <aside className="sidebar" aria-label="Navegación lateral">
         <div className="sidebar__top">
           <div>
             <p className="eyebrow">Klipper CNC Assistant</p>
-            <h1>Fase 3 · UX y visor técnico</h1>
+            <h1>Visor técnico y mapa de alturas</h1>
             <p className="muted">Aplicación privada para preparación remota de PCB en modo simulado.</p>
           </div>
           <button className="icon-button icon-button--sidebar" type="button" aria-label="Colapsar barra lateral" onClick={() => setSidebarCollapsed((current) => !current)}>
@@ -252,10 +260,10 @@ export default function App() {
         <SystemBanner />
 
         <nav className="sidebar-nav" aria-label="Navegación principal">
-          <button className={`nav-link${view === "inicio" ? " nav-link--active" : ""}`} type="button" onClick={() => setView("inicio")}>Inicio</button>
-          <button className={`nav-link${view === "proyectos" ? " nav-link--active" : ""}`} type="button" onClick={() => setView("proyectos")}>Proyectos</button>
-          <button className={`nav-link${view === "nuevo" ? " nav-link--active" : ""}`} type="button" onClick={() => setView("nuevo")}>Nuevo proyecto</button>
-          <button className={`nav-link${view === "sistema" ? " nav-link--active" : ""}`} type="button" onClick={() => setView("sistema")}>Sistema</button>
+          <button className={`nav-link${view === "inicio" ? " nav-link--active" : ""}`} type="button" onClick={() => handleSelectView("inicio")}>Inicio</button>
+          <button className={`nav-link${view === "proyectos" ? " nav-link--active" : ""}`} type="button" onClick={() => handleSelectView("proyectos")}>Proyectos</button>
+          <button className={`nav-link${view === "nuevo" ? " nav-link--active" : ""}`} type="button" onClick={() => handleSelectView("nuevo")}>Nuevo proyecto</button>
+          <button className={`nav-link${view === "sistema" ? " nav-link--active" : ""}`} type="button" onClick={() => handleSelectView("sistema")}>Sistema</button>
         </nav>
 
         <div className="sidebar-stats">
@@ -267,10 +275,15 @@ export default function App() {
 
       <main className="main-area">
         <header className="topbar">
-          <div>
-            <p className="eyebrow">{header.eyebrow}</p>
-            <h2>{header.title}</h2>
-            <p className="muted">{header.description}</p>
+          <div className="topbar__title">
+            <button className="icon-button topbar__menu" type="button" aria-label="Abrir navegación" onClick={() => setSidebarOpen(true)}>
+              ≡
+            </button>
+            <div>
+              <p className="eyebrow">{header.eyebrow}</p>
+              <h2>{header.title}</h2>
+              <p className="muted">{header.description}</p>
+            </div>
           </div>
           <div className="topbar__actions">
             <StatusBadge tone={toneForStatus(machineSession?.estado ?? health?.modo_maquina)}>{summarizeMachineMode(machineSession?.estado ?? health?.modo_maquina)}</StatusBadge>
@@ -289,12 +302,12 @@ export default function App() {
               recentProject={recentProject}
               health={health}
               machineSession={machineSession}
-              onCreateProject={() => setView("nuevo")}
+              onCreateProject={() => handleSelectView("nuevo")}
               onOpenProject={(projectId) => {
                 setSelectedProjectId(projectId);
-                setView("proyectos");
+                handleSelectView("proyectos");
               }}
-              onGoToProjects={() => setView("proyectos")}
+              onGoToProjects={() => handleSelectView("proyectos")}
             />
           ) : null}
 
@@ -307,8 +320,11 @@ export default function App() {
               <ProjectList
                 projects={projects}
                 selectedProjectId={selectedProjectId}
-                onSelect={setSelectedProjectId}
-                onCreateProject={() => setView("nuevo")}
+                onSelect={(projectId) => {
+                  setSelectedProjectId(projectId);
+                  setSidebarOpen(false);
+                }}
+                onCreateProject={() => handleSelectView("nuevo")}
               />
               <ProjectWorkspace
                 project={selectedProject}

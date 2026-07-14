@@ -1,6 +1,12 @@
 import { useEffect, useMemo, useState } from "react";
 
+import { HeightMapControlPanel } from "../features/heightmap/HeightMapControlPanel";
+import { HeightMapHeatmap } from "../features/heightmap/HeightMapHeatmap";
+import { HeightMapPointTable } from "../features/heightmap/HeightMapPointTable";
+import { HeightMapSurface3D } from "../features/heightmap/HeightMapSurface3D";
+import { ToolpathViewer } from "../features/viewer/ToolpathViewer";
 import { formatDate, formatFileSize, formatMillimeters } from "../lib/format";
+import { api } from "../lib/api";
 import { operationPresets } from "../lib/presets";
 import {
   buildOperationWorkflow,
@@ -11,8 +17,7 @@ import {
   translateOperationType,
   translateStatus,
 } from "../lib/ui";
-import type { Operation, Project, ProjectPayload } from "../types";
-import { ToolpathViewer } from "../features/viewer/ToolpathViewer";
+import type { HeightMap, Operation, Project, ProjectPayload } from "../types";
 import { ProjectForm } from "./ProjectForm";
 import { StatusBadge } from "./StatusBadge";
 
@@ -27,6 +32,9 @@ type ProjectWorkspaceProps = {
   onAnalyze: (operation: Operation) => Promise<void>;
   onUploadFile: (operation: Operation, file: File) => Promise<void>;
 };
+
+type WorkspaceTab = "trayectoria" | "mapa2d" | "superficie3d" | "tabla";
+type HeightMode = "bruto" | "plano" | "residuo";
 
 function findPresetOperation(project: Project, presetKey: string): Operation | undefined {
   const preset = operationPresets.find((item) => item.clave === presetKey);
@@ -56,6 +64,11 @@ export function ProjectWorkspace({
 }: ProjectWorkspaceProps) {
   const [editingProject, setEditingProject] = useState(false);
   const [selectedOperationId, setSelectedOperationId] = useState<string | null>(pickDefaultOperation(project));
+  const [activeTab, setActiveTab] = useState<WorkspaceTab>("trayectoria");
+  const [heightMode, setHeightMode] = useState<HeightMode>("bruto");
+  const [heightMap, setHeightMap] = useState<HeightMap | null>(null);
+  const [heightMapBusy, setHeightMapBusy] = useState(false);
+  const [heightMapError, setHeightMapError] = useState("");
 
   useEffect(() => {
     setSelectedOperationId((current) => {
@@ -74,12 +87,37 @@ export function ProjectWorkspace({
     [project, selectedOperationId]
   );
 
+  useEffect(() => {
+    if (!project || !selectedOperation) {
+      setHeightMap(null);
+      setHeightMapError("");
+      return;
+    }
+
+    const run = async () => {
+      setHeightMapError("");
+      try {
+        const payload = await api.getHeightMap(project.id, selectedOperation.id);
+        setHeightMap(payload);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "No fue posible cargar el mapa de alturas.";
+        if (message.toLowerCase().includes("no existe")) {
+          setHeightMap(null);
+          return;
+        }
+        setHeightMapError(message);
+      }
+    };
+
+    void run();
+  }, [project, selectedOperation]);
+
   if (!project) {
     return (
       <div className="panel empty-state">
         <p className="eyebrow">Espacio de trabajo</p>
         <h2>Seleccione un proyecto</h2>
-        <p>Abra un proyecto existente o cree uno nuevo para gestionar operaciones y revisar la trayectoria.</p>
+        <p>Abra un proyecto existente o cree uno nuevo para gestionar operaciones, revisar trayectorias y trabajar con el mapa de alturas simulado.</p>
       </div>
     );
   }
@@ -97,6 +135,21 @@ export function ProjectWorkspace({
   const analysisBusy = selectedOperation ? busyKey === `analyze:${selectedOperation.id}` : false;
   const fileBusy = selectedOperation ? busyKey === `file:${selectedOperation.id}` : false;
   const deleteBusy = selectedOperation ? busyKey === `delete:${selectedOperation.id}` : false;
+
+  const withHeightMapAction = async (action: () => Promise<HeightMap | void>) => {
+    setHeightMapBusy(true);
+    setHeightMapError("");
+    try {
+      const result = await action();
+      if (result) {
+        setHeightMap(result);
+      }
+    } catch (error) {
+      setHeightMapError(error instanceof Error ? error.message : "No fue posible actualizar el mapa de alturas.");
+    } finally {
+      setHeightMapBusy(false);
+    }
+  };
 
   return (
     <div className="workspace-stack">
@@ -179,14 +232,80 @@ export function ProjectWorkspace({
           </article>
 
           <article className="panel viewer-panel">
-            {selectedOperation?.analisis ? (
+            <div className="section-heading section-heading--stacked">
+              <div>
+                <p className="eyebrow">Espacio técnico</p>
+                <h3>{selectedOperation?.nombre ?? "Seleccione una operación"}</h3>
+              </div>
+              <div className="toolbar-inline">
+                <button className={`toolbar-pill${activeTab === "trayectoria" ? " toolbar-pill--active" : ""}`} type="button" onClick={() => setActiveTab("trayectoria")}>Trayectoria</button>
+                <button className={`toolbar-pill${activeTab === "mapa2d" ? " toolbar-pill--active" : ""}`} type="button" onClick={() => setActiveTab("mapa2d")}>Mapa 2D</button>
+                <button className={`toolbar-pill${activeTab === "superficie3d" ? " toolbar-pill--active" : ""}`} type="button" onClick={() => setActiveTab("superficie3d")}>Superficie 3D</button>
+                <button className={`toolbar-pill${activeTab === "tabla" ? " toolbar-pill--active" : ""}`} type="button" onClick={() => setActiveTab("tabla")}>Tabla de puntos</button>
+              </div>
+            </div>
+
+            {activeTab !== "trayectoria" ? (
+              <div className="toolbar-inline">
+                <button className={`toolbar-pill${heightMode === "bruto" ? " toolbar-pill--active" : ""}`} type="button" onClick={() => setHeightMode("bruto")}>Altura bruta</button>
+                <button className={`toolbar-pill${heightMode === "plano" ? " toolbar-pill--active" : ""}`} type="button" onClick={() => setHeightMode("plano")}>Plano estimado</button>
+                <button className={`toolbar-pill${heightMode === "residuo" ? " toolbar-pill--active" : ""}`} type="button" onClick={() => setHeightMode("residuo")}>Residuo local</button>
+              </div>
+            ) : null}
+
+            {selectedOperation?.analisis && activeTab === "trayectoria" ? (
               <ToolpathViewer material={project.material} analysis={selectedOperation.analisis} operationName={selectedOperation.nombre} />
-            ) : (
+            ) : null}
+
+            {activeTab === "trayectoria" && !selectedOperation?.analisis ? (
               <div className="empty-state empty-state--viewer">
                 <h3>Visor técnico preparado</h3>
                 <p>Cargue un archivo y ejecute el análisis para habilitar la vista técnica 2D, el inspector y el recorrido visual.</p>
               </div>
-            )}
+            ) : null}
+
+            {activeTab === "mapa2d" && heightMap ? (
+              <HeightMapHeatmap material={project.material} heightMap={heightMap} mode={heightMode} />
+            ) : null}
+
+            {activeTab === "superficie3d" && heightMap ? (
+              <HeightMapSurface3D heightMap={heightMap} mode={heightMode} />
+            ) : null}
+
+            {activeTab === "tabla" && heightMap ? (
+              <HeightMapPointTable
+                heightMap={heightMap}
+                busy={heightMapBusy}
+                onToggleInclude={async (sampleId, included) => {
+                  if (!project || !selectedOperation) {
+                    return;
+                  }
+                  await withHeightMapAction(() => api.updateHeightMapSample(project.id, selectedOperation.id, sampleId, { incluida: included }));
+                }}
+                onEditSample={async (sampleId, currentValue) => {
+                  if (!project || !selectedOperation) {
+                    return;
+                  }
+                  const prompted = window.prompt("Nuevo valor Z en milímetros. Deje vacío para marcarlo como faltante.", currentValue == null ? "" : String(currentValue));
+                  if (prompted == null) {
+                    return;
+                  }
+                  const nextValue = prompted.trim() === "" ? null : Number(prompted);
+                  if (nextValue !== null && Number.isNaN(nextValue)) {
+                    setHeightMapError("El valor Z debe ser numérico.");
+                    return;
+                  }
+                  await withHeightMapAction(() => api.updateHeightMapSample(project.id, selectedOperation.id, sampleId, { z_mm: nextValue }));
+                }}
+              />
+            ) : null}
+
+            {activeTab !== "trayectoria" && !heightMap ? (
+              <div className="empty-state empty-state--viewer">
+                <h3>Mapa de alturas no disponible</h3>
+                <p>Configure la malla, genere un escenario simulado o importe un archivo JSON/CSV para habilitar esta vista.</p>
+              </div>
+            ) : null}
           </article>
         </section>
 
@@ -326,6 +445,52 @@ export function ProjectWorkspace({
               <p className="muted">Aún no hay resultados de análisis para esta operación.</p>
             )}
           </article>
+
+          <HeightMapControlPanel
+            heightMap={heightMap}
+            busy={heightMapBusy}
+            onConfigure={async (rows, columns) => {
+              if (!selectedOperation) {
+                return;
+              }
+              await withHeightMapAction(() => api.configureHeightMap(project.id, selectedOperation.id, { filas: rows, columnas: columns }));
+            }}
+            onSimulate={async (rows, columns, scenario, seed) => {
+              if (!selectedOperation) {
+                return;
+              }
+              await withHeightMapAction(() => api.simulateHeightMap(project.id, selectedOperation.id, { filas: rows, columnas: columns, escenario: scenario, semilla: seed }));
+            }}
+            onImportJson={async (content) => {
+              if (!selectedOperation) {
+                return;
+              }
+              await withHeightMapAction(() => api.importHeightMapJson(project.id, selectedOperation.id, content));
+            }}
+            onImportCsv={async (content) => {
+              if (!selectedOperation) {
+                return;
+              }
+              await withHeightMapAction(() => api.importHeightMapCsv(project.id, selectedOperation.id, content));
+            }}
+            onRecalculate={async () => {
+              if (!selectedOperation) {
+                return;
+              }
+              await withHeightMapAction(() => api.recalculateHeightMap(project.id, selectedOperation.id));
+            }}
+            onDelete={async () => {
+              if (!selectedOperation) {
+                return;
+              }
+              await withHeightMapAction(async () => {
+                await api.deleteHeightMap(project.id, selectedOperation.id);
+                setHeightMap(null);
+              });
+            }}
+          />
+
+          {heightMapError ? <div className="panel alert alert--error">{heightMapError}</div> : null}
 
           <article className="panel panel--disabled">
             <div className="section-heading">

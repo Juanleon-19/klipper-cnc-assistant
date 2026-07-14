@@ -987,3 +987,371 @@ ul {
     display: none;
   }
 }
+
+/* Phase 4 responsive + height map overrides */
+
+body,
+#root,
+.app-shell,
+.main-area,
+.content-wrap,
+.projects-layout,
+.workspace-layout,
+.workspace-main,
+.workspace-side,
+.viewer-panel,
+.toolpath-viewer-shell,
+.toolpath-viewer-main,
+.toolpath-viewer-side,
+.panel,
+.heightmap-viewer,
+.heightmap-table-wrap {
+  min-width: 0;
+}
+
+p,
+h1,
+h2,
+h3,
+h4,
+span,
+strong,
+dd,
+dt,
+button {
+  overflow-wrap: break-word;
+  word-break: normal;
+}
+
+.shell-backdrop {
+  display: none;
+}
+
+.topbar__title {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-3);
+  min-width: 0;
+}
+
+.topbar__menu {
+  display: none;
+  flex: none;
+}
+
+.sidebar {
+  z-index: 30;
+}
+
+.projects-layout {
+  align-items: start;
+}
+
+.workspace-layout {
+  grid-template-columns: minmax(0, 1fr) minmax(300px, 360px);
+}
+
+.toolpath-viewer-shell {
+  grid-template-columns: minmax(0, 1fr) 320px;
+}
+
+.toolpath-viewer-shell--wide {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.toolpath-viewer-shell--compact {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.viewer-header__meta {
+  justify-items: end;
+}
+
+.viewer-stage-shell {
+  min-width: 0;
+}
+
+.viewer-stage {
+  block-size: clamp(360px, 58vh, 760px);
+  min-height: 360px;
+}
+
+.viewer-stage--heatmap {
+  block-size: clamp(360px, 56vh, 700px);
+}
+
+.viewer-stage__overlay {
+  position: absolute;
+  z-index: 2;
+  padding: 0.35rem 0.6rem;
+  border-radius: 999px;
+  background: rgba(6, 10, 14, 0.72);
+  border: 1px solid rgba(116, 145, 164, 0.18);
+  color: #d7e7f2;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.55rem;
+  pointer-events: none;
+}
+
+.viewer-stage__overlay--top {
+  top: 0.9rem;
+  left: 0.9rem;
+}
+
+.viewer-stage__overlay--bottom {
+  left: 0.9rem;
+  bottom: 0.9rem;
+}
+
+.viewer-scale-line {
+  display: inline-block;
+  height: 0.35rem;
+  border-radius: 999px;
+  background: linear-gradient(90deg, #4ed6ff, #f0bf6b);
+}
+
+.viewer-toolbar {
+  gap: 0.45rem;
+}
+
+.viewer-toolbar .toolbar-pill,
+.viewer-toolbar .icon-button {
+  min-height: 38px;
+  padding-block: 0.55rem;
+}
+
+.viewer-tracebar {
+  min-width: 0;
+  width: min(100%, 360px);
+  justify-items: stretch;
+}
+
+.viewer-footer {
+  align-items: flex-end;
+}
+
+.toolpath-viewer-side {
+  display: grid;
+  gap: var(--space-3);
+  align-content: start;
+}
+
+.heightmap-control-panel .machine-banner {
+  width: fit-content;
+}
+
+.heightmap-viewer,
+.heightmap-surface-panel,
+.heightmap-table-panel {
+  display: grid;
+  gap: var(--space-4);
+}
+
+.heightmap-legend {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.65rem;
+}
+
+.heightmap-legend .depth-legend__bar {
+  min-width: 160px;
+}
+
+.heightmap-plotly {
+  min-height: 420px;
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  border: 1px solid rgba(105, 199, 255, 0.12);
+  background: #091015;
+}
+
+.heightmap-table-wrap {
+  overflow: auto;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--line);
+}
+
+.heightmap-table {
+  width: 100%;
+  border-collapse: collapse;
+  min-width: 720px;
+}
+
+.heightmap-table th,
+.heightmap-table td {
+  padding: 0.75rem;
+  border-bottom: 1px solid var(--line);
+  text-align: left;
+  vertical-align: top;
+}
+
+.heightmap-table thead {
+  background: rgba(18, 29, 38, 0.9);
+}
+
+.heightmap-banner {
+  justify-self: start;
+}
+
+@media (max-width: 1180px) {
+  .workspace-layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .toolpath-viewer-shell,
+  .toolpath-viewer-shell--wide,
+  .toolpath-viewer-shell--compact {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .toolpath-viewer-side {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 1100px) {
+  .app-shell,
+  .app-shell--collapsed,
+  .app-shell.app-shell--sidebar-open,
+  .app-shell.app-shell--collapsed.app-shell--sidebar-open {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .shell-backdrop {
+    position: fixed;
+    inset: 0;
+    background: rgba(5, 8, 12, 0.58);
+    border: 0;
+    margin: 0;
+    padding: 0;
+    z-index: 24;
+  }
+
+  .shell-backdrop--visible {
+    display: block;
+  }
+
+  .sidebar {
+    position: fixed;
+    inset: 0 auto 0 0;
+    width: min(320px, calc(100vw - 2rem));
+    height: 100dvh;
+    transform: translateX(-110%);
+    transition: transform 0.2s ease;
+    padding: var(--space-4);
+    overflow-y: auto;
+  }
+
+  .app-shell--sidebar-open .sidebar {
+    transform: translateX(0);
+  }
+
+  .sidebar-nav,
+  .sidebar-stats {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .topbar__menu {
+    display: inline-flex;
+  }
+
+  .main-area {
+    padding: var(--space-4);
+  }
+
+  .projects-layout,
+  .workspace-layout,
+  .toolpath-viewer-shell,
+  .dashboard-grid,
+  .hero-grid,
+  .hero-grid--project,
+  .workflow-grid,
+  .definition-grid,
+  .info-grid,
+  .toolpath-viewer-side,
+  .form-grid,
+  .compact-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .project-list,
+  .workspace-side,
+  .workspace-main,
+  .toolpath-viewer-main {
+    min-width: 0;
+  }
+
+  .viewer-stage {
+    block-size: clamp(340px, 54vh, 620px);
+  }
+
+  .heightmap-table {
+    min-width: 640px;
+  }
+}
+
+@media (max-width: 700px) {
+  .main-area,
+  .content-wrap,
+  .sidebar,
+  .panel,
+  .viewer-panel,
+  .project-hero,
+  .hero-panel,
+  .form-panel {
+    padding: var(--space-4);
+  }
+
+  .topbar {
+    align-items: flex-start;
+  }
+
+  .topbar__actions,
+  .hero-actions,
+  .toolbar-inline,
+  .viewer-toolbar,
+  .viewer-footer {
+    justify-content: flex-start;
+  }
+
+  .viewer-stage,
+  .viewer-stage--heatmap,
+  .heightmap-plotly {
+    min-height: 320px;
+    block-size: clamp(320px, 50vh, 520px);
+  }
+
+  .heightmap-legend {
+    flex-wrap: wrap;
+  }
+
+  .heightmap-table {
+    min-width: 560px;
+  }
+}
+
+@media (max-width: 480px) {
+  .nav-link,
+  .button,
+  .toolbar-pill {
+    width: 100%;
+  }
+
+  .topbar__title {
+    width: 100%;
+  }
+
+  .sidebar {
+    width: calc(100vw - 1rem);
+  }
+
+  .viewer-stage__overlay {
+    max-width: calc(100% - 1.8rem);
+    white-space: normal;
+  }
+
+  .heightmap-table {
+    min-width: 520px;
+  }
+}
