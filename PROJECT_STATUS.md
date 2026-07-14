@@ -1,139 +1,157 @@
-# Estado del proyecto — Klipper CNC Assistant
+# Estado del proyecto: Klipper CNC Assistant
 
-**Última actualización:** 2026-07-13  
-**Estado global:** Pre-MVP / control manual discreto integrado en experimentos
+**Última actualización:** 2026-07-14
+**Rama local:** `fix/phase-43-stability-workflow`
+**Estado global:** Fase 1 implementada y validada en software; pendiente validación física supervisada
 
-Este documento es vivo: debe actualizarse al cerrar un experimento, migrar una capacidad a `src/`, cambiar una decisión de arquitectura o descubrir un riesgo relevante.
+Este documento resume el estado local real del repositorio. La rama contiene cambios no publicados de Fase 1 sobre la base `3911214`.
 
-## Objetivo final
+## Resumen ejecutivo
 
-Construir un asistente CNC para máquinas adaptadas a Klipper que permita:
+La aplicación conserva el modo simulado como predeterminado y añade una integración física segura y explícita con Moonraker, Klipper y el controlador Arduino. El producto sigue separando preparación digital, simulación y control físico.
 
-- Control manual seguro desde un controlador Arduino.
-- Descubrimiento dinámico de límites, homing y capacidades de la máquina mediante Moonraker.
-- Captura de referencias de PCB y definición de coordenadas de trabajo.
-- Sondeo eléctrico independiente y generación de un mapa de altura.
-- Compensación de superficie e interpretación de G-code para mecanizado de PCB.
+Implementado en esta fase:
 
-La prioridad es la seguridad de movimiento. Una característica no se considera terminada si puede producir movimiento no acotado o no supervisable.
+- runtime físico singleton por proceso FastAPI;
+- modo `SIMULATED` predeterminado y modo `PHYSICAL` mediante `MACHINE_MODE=physical`;
+- diagnóstico consolidado de aplicación, Moonraker, Klipper, Arduino, controlador y seguridad;
+- flujo físico guiado de conexión, diagnóstico, Z objetivo, homing, cálculo de centro con límites reales, Z segura, XY centro y Z objetivo;
+- joystick discreto cardinal usando `ManualJogController` y `JogController`;
+- solicitud y confirmación de sonda de un punto;
+- captura física de origen X/Y y referencia Z de montaje, con fuente `MEASURED`;
+- separación de referencias `SIMULATED` y `MEASURED`;
+- bloqueo de sobrescritura silenciosa de referencias medidas con simuladas;
+- dominio de compensación con tolerancia explícita, detalle de puntos fuera, distancia al dominio y bloqueo de validación si la cobertura es insuficiente;
+- vista web “Sistema físico” con modo permanente SIMULADO/FÍSICO y acciones físicas bloqueadas fuera de modo físico;
+- documentación de variables y procedimiento manual.
 
-## Estado actual
+No se implementó todavía:
 
-La base de comunicación host–Moonraker y Arduino–host está validada de forma independiente.
+- sondeo físico de malla completa;
+- recorrido automático de múltiples puntos;
+- generación o descarga de G-code compensado ejecutable;
+- ejecución completa de trabajos;
+- control automático de spindle;
+- jog continuo;
+- rotación automática de PCB;
+- extrapolación fuera del dominio;
+- cambios automáticos de herramienta.
 
-El proyecto puede:
+## Arquitectura actual
 
-- Consultar Moonraker por HTTP.
-- Descubrir posición, límites, homing, velocidad y aceleración.
-- Recibir posición y velocidad mediante WebSocket.
-- Emitir jog relativo discreto mediante G-code.
-- Leer paquetes binarios válidos desde el Arduino Pro Mini por `/dev/ttyUSB0` a 115200 baudios.
+```text
+Frontend React/Vite
+        |
+        v
+FastAPI /api + SPA estática
+        |
+        +-- ProjectService / HeightMapService / ReferenceSessionService
+        |       +-- Dominio, persistencia JSON, analizador G-code, mapas y compensación
+        |
+        +-- MachineRuntime singleton
+                +-- MoonrakerClient HTTP
+                +-- MoonrakerTelemetry WebSocket
+                +-- MachineState
+                +-- SerialDriver + CommandMapper
+                +-- ManualJogController -> JogController -> Moonraker
+```
 
-El proyecto todavía no dispone de una aplicación de producto integrada en `src/` que conecte de forma segura Arduino, telemetría, jog y sondeo. Sin embargo, los Experimentos 007 y 008 ya validan esa integración en el espacio experimental bajo supervisión física.
+El runtime físico existe una sola vez durante la vida de la aplicación. No abre puerto serie ni WebSocket en modo simulado. En modo físico requiere conexión explícita o `MACHINE_AUTO_CONNECT=true`.
 
-## Componentes terminados o validados
+## Configuración física
 
-| Componente | Estado | Evidencia / alcance |
-| --- | --- | --- |
-| Entorno Arduino Pro Mini | Validado | Compilación, carga y comunicación serie documentadas. |
-| Firmware de controlador | Validado | Lee ejes, botones y sonda; emite paquetes binarios de 8 bytes cada 20 ms. |
-| Protocolo serie | Validado | Cabecera `0xAA`, dirección, flags, valores X/Y y checksum XOR. |
-| `SerialDriver` | Implementado y verificado | Decodifica paquetes del Arduino conectado en `/dev/ttyUSB0`. |
-| `CommandMapper` | Implementado | Convierte direcciones en intención X/Y y flags de entrada. |
-| Cliente Moonraker HTTP | Implementado | Estado del servidor, consulta de objetos y envío de G-code. |
-| Descubrimiento de máquina | Implementado | Posición, límites, homing, velocidad y aceleración desde `toolhead`. |
-| Telemetría Moonraker | Implementada | Suscripción a `motion_report.live_position` y `live_velocity`. |
-| Jog discreto relativo | Validado manualmente | Movimiento por eje, perfiles y limitación por límites configurados. |
-| Perfiles manuales | Validados manualmente | COARSE, NORMAL y FINE sobre X, Y y Z. |
-| Experimento 007: controlador manual Arduino | Validado manualmente | Jog discreto cardinal por transición `CENTER -> dirección`, con telemetría y confirmación del operador. |
-| Experimento 008: secuencia de sonda discreta | Parcialmente validado | Una corrida física completó detección de contacto, captura de punto y retract seguro. |
+Variables principales:
 
-“Validado” no significa “listo para producto”; indica que el comportamiento fue comprobado bajo un alcance limitado.
+- `MACHINE_MODE=simulated|physical`
+- `MACHINE_AUTO_CONNECT=false|true`
+- `MOONRAKER_URL=http://host:puerto`
+- `MOONRAKER_WS=ws://host:puerto/websocket`
+- `SERIAL_PORT=/dev/ttyUSB0`
+- `SERIAL_BAUDRATE=115200`
+- `MACHINE_SAFE_Z=10.0`
+- `MACHINE_TELEMETRY_FRESH_TIMEOUT=2.0`
+- `MACHINE_SERIAL_FRESH_TIMEOUT=2.0`
+- `MACHINE_SETTLE_TOLERANCE=0.02`
+- `MACHINE_VELOCITY_TOLERANCE=0.05`
+- `MACHINE_MOVE_TIMEOUT=8.0`
+- `PROBE_STEP_DISTANCE=0.05`
+- `PROBE_LOWER_SPEED=1.0`
+- `PROBE_RETRACT_DISTANCE=1.0`
+- `PROBE_RETRACT_SPEED=2.0`
 
-## Componentes en desarrollo
+En esta máquina se detectaron dos instancias Moonraker activas: puerto 7125 y puerto 7126. Por seguridad el producto no elige una automáticamente; `MOONRAKER_URL` y `MOONRAKER_WS` deben declararse explícitamente en modo físico.
 
-| Componente | Estado | Próxima acción |
-| --- | --- | --- |
-| Política de seguridad de jog | Parcialmente implementada | Consolidar cobertura de pruebas y definir comportamiento ante estado obsoleto o desconexión. |
-| Experimento 008: rutina de sonda | Validación parcial | Medir repetibilidad, rebote de señal y abortos seguros en más escenarios. |
-| Manejo robusto de serie | Incompleto | Definir reconexión, timeout, recuperación ante checksum inválido y watchdog. |
-| Integración de telemetría con control | Incompleta | Mantener `MachineState` actualizado durante movimientos manuales. |
-| Horizonte de movimiento con TrapQ | Investigación en curso | Caracterizar y validar control de cola antes de cualquier migración a producto. |
+## Klipper local
 
-## Componentes pendientes
+Se inspeccionaron:
 
-- Punto de entrada de aplicación que integre Arduino, Moonraker, telemetría y control de jog.
-- Pruebas automatizadas unitarias y mocks de Moonraker/serial.
-- Configuración de proyecto y dependencias reproducibles (`pyproject.toml`, lockfile o equivalente).
-- Gestión de errores y reconexión HTTP/WebSocket.
-- Migración aprobada de la rutina de sonda y el botón externo desde `experiments/` a `src/`, si supera validación adicional.
-- Calibración persistente del joystick y zona muerta configurable.
-- Referencias de PCB, transformación de coordenadas y corrección de rotación.
-- Mapa de altura, interpolación y visualización de superficie.
-- Transformación y envío de G-code compensado.
-- Empaquetado, CI y documentación operativa de despliegue.
+- `/home/impresora/printer_kp3s1_data/config/printer.cfg`
+- `/home/impresora/printer_kp3s2_data/config/printer.cfg`
 
-## Próximo objetivo
+No se modificó configuración Klipper, no se reinició Klipper y no se creó macro `HOME_AND_CENTER`. El cálculo de centro, Z segura y Z objetivo pertenecen al backend. Existe un riesgo preexistente: ambos `printer.cfg` incluyen `mainsail.cfg` dos veces. Queda documentado, pero no se tocó porque no era necesario para Fase 1.
 
-**Experimento 008 — repetibilidad y robustez de la secuencia de sonda.**
+## Modelo de coordenadas y dominio
 
-Alcance aprobado:
+Convención usada por la compensación:
 
-1. Repetir la captura del mismo punto para medir dispersión en Z.
-2. Confirmar que la secuencia se inicia una vez por flanco ascendente del botón externo.
-3. Caracterizar los eventos repetidos de `probe_triggered` durante contacto y retract.
-4. Ejecutar escenarios de aborto por límite Z, timeout de telemetría y señal de sonda activa antes de bajar.
-5. Decidir si hay cambios de seguridad o filtrado que deban mantenerse en el experimento antes de proponer migración a `src/`.
+- el archivo G-code se analiza en coordenadas propias del archivo;
+- para PCB, esas coordenadas se tratan como coordenadas locales del montaje/material;
+- el mapa se define en coordenadas locales del montaje/material mediante `probe_region`;
+- las referencias físicas guardan posición de máquina para ubicar ese montaje en la CNC;
+- la compensación matemática consulta el mapa en X/Y local del montaje;
+- la transformación a máquina se reserva para movimientos físicos y no genera G-code ejecutable en esta fase.
 
-Quedan fuera de este objetivo: jog continuo, compensación PCB, persistencia de offsets y migración automática a producto.
+Un punto está dentro del mapa rectangular si:
 
-## Riesgos conocidos
+```text
+map_x_min - 0.000001 <= x <= map_x_max + 0.000001
+map_y_min - 0.000001 <= y <= map_y_max + 0.000001
+```
 
-| Riesgo | Impacto | Estado / mitigación |
-| --- | --- | --- |
-| Cola de movimiento Klipper al enviar segmentos repetidos | Alto | El jog continuo no está autorizado; Experiment 006 sigue en investigación. |
-| Rebote o duplicación de eventos de sonda | Alto para captura fiable | Experiment 008 mostró flancos repetidos; falta caracterizar si son rebote eléctrico o solo logging redundante. |
-| Estado de posición obsoleto en jog manual o sondeo | Alto | Telemetría activa y `discover_machine(...)` al iniciar la sonda reducen el riesgo, pero falta endurecer la política global. |
-| Un movimiento por paquete serie de 20 ms | Alto | Experiment 007 actúa por transición, no por repetición de paquetes. |
-| Telemetría más lenta que el bucle de control | Alto para jog continuo | No usar posición WebSocket como reloj de control de horizonte. |
-| Desconexión de serie/WebSocket sin reconexión | Medio/alto | Implementar fallo seguro y recuperación controlada. |
-| Puertos serie divergentes en documentación | Medio | Documentación menciona `/dev/ttyUSB1`; implementación actual usa `/dev/ttyUSB0`. |
-| Límites de joystick codificados en firmware | Medio | Calibración y zona muerta configurable pendientes. |
-| Ausencia de pruebas automatizadas y CI | Medio | Añadir antes de migrar capacidades experimentales. |
+La tolerancia de `0.000001 mm` solo absorbe error numérico en bordes. Las zonas excluidas siguen bloqueando interpolación.
 
-## Decisiones técnicas importantes
+El caso observado de muchos puntos fuera de dominio era real: el mapa activo `setup-main` cubría `X=10..45`, `Y=10..45`, mientras la trayectoria local usaba puntos hasta `Y=51.474` y también puntos con `X/Y=0`. Ahora el sistema reporta cantidad, operación, punto, causa y distancia al dominio, y bloquea la validación si la cobertura es insuficiente.
 
-- Moonraker HTTP se usa para operaciones discretas y envío de G-code.
-- Moonraker WebSocket se usa para telemetría persistente.
-- Los límites, posición y capacidades se descubren desde Klipper; no se codifican dimensiones de máquina.
-- Arduino es un dispositivo de interfaz humana: no ejecuta control de máquina.
-- La capa `jog` es la única autorizada para transformar intención en G-code de movimiento.
-- El G-code de jog conserva y restaura el estado mediante `SAVE_GCODE_STATE` y `RESTORE_GCODE_STATE`.
-- El jog continuo no se migrará a `src/` sin una garantía experimental de horizonte pendiente y parada acotada.
-- Los experimentos permanecen aislados de `src/` hasta cumplir criterios explícitos de migración.
+## Seguridad física
 
-## Historial de decisiones de arquitectura
+Reglas implementadas:
 
-| Fecha / etapa | Decisión | Motivo | Estado |
-| --- | --- | --- | --- |
-| Experimento 001 | Usar Moonraker HTTP para conectividad y consultas | API disponible para operaciones discretas | Adoptada |
-| Experimento 002 | Usar WebSocket para telemetría viva | `motion_report` entrega posición y velocidad durante movimiento | Adoptada |
-| Experimento 003 | Separar emisión de G-code y observación de movimiento | La telemetría y el control son canales distintos | Adoptada |
-| Experimento 004 | Rechazar jog continuo ingenuo por segmentos | Se observó desplazamiento posterior a la liberación del control | Adoptada |
-| Experimento 005 | Separar dispositivo de entrada de intención de velocidad | El teclado SSH no representa bien estado simultáneo de teclas | Adoptada |
-| Experimento 006, iteraciones 1–4 | No basar horizonte continuo solo en tiempo, posición o estimación híbrida | No lograron continuidad y parada acotada a la vez | Adoptada |
-| Experimento 006, dirección actual | Investigar la cola interna TrapQ de Klipper | Es la fuente apropiada para medir trayectoria pendiente | En investigación |
-| Firmware Arduino | Usar protocolo binario de 8 bytes con checksum XOR | Comunicación compacta y validable entre controlador y host | Adoptada |
-| Preparación de Experimento 007 | Implementar primero jog discreto por transición | Evita acumulación de órdenes a 50 Hz y reutiliza arquitectura existente | Completada en experimento |
-| Experimento 008 | Reusar `JogController` para cada paso de sonda y retract | Mantiene una sola frontera de seguridad para movimiento manual y sondeo discreto | Adoptada en experimento |
+- modo simulado predeterminado;
+- consultas de estado sin efectos laterales;
+- comandos físicos solo mediante `POST` explícitos;
+- inicialización bloqueada si falta modo físico, conexión, Klipper ready, homing, límites o si existe otra operación activa;
+- joystick bloqueado hasta inicialización y habilitación manual;
+- movimiento manual discreto, cardinal y por transición `CENTER -> dirección`;
+- diagonales descartadas;
+- botón externo genera `PROBE_REQUESTED`;
+- la sonda baja solo tras confirmación explícita;
+- emergencia `M112` separada de cancelar operación y requiere confirmación API;
+- no existe jog continuo de producto.
 
-## Criterio de actualización
+## Pruebas ejecutadas
 
-Actualizar este documento cuando ocurra cualquiera de estos eventos:
+| Verificación | Resultado |
+| --- | --- |
+| `PYTHONPATH=src .venv/bin/python -m unittest discover -s tests -v` | 57 pruebas correctas |
+| `.venv/bin/python -m pip check` | Sin dependencias rotas |
+| `npm run lint` | Correcto |
+| `npm run test` | 37 pruebas correctas en 10 archivos |
+| `npm run build` | Correcto, con advertencia no bloqueante por tamaño de Plotly |
 
-- Un experimento cambia de estado o produce una nueva conclusión.
-- Una capacidad migra a `src/`.
-- Se descubre, corrige o acepta un riesgo de seguridad.
-- Cambia el alcance del MVP.
-- Se aprueba una nueva decisión de arquitectura.
+## Riesgos pendientes
 
+- La integración física aún no fue validada manualmente desde la web.
+- La sonda de un punto depende de pasos discretos; no cancela un paso ya enviado a Klipper, igual que el experimento 008.
+- La repetibilidad y rebote de sonda requieren validación física supervisada.
+- La persistencia JSON sigue siendo local y simple; no hay bloqueo multiusuario robusto.
+- La UI de diagnóstico usa polling moderado, no streaming dedicado.
+- El bundle de Plotly sigue siendo grande.
+
+## Pendiente para Fase 2
+
+- Validación física supervisada completa.
+- Endurecer reconexión y recuperación de Moonraker/WebSocket/serie.
+- Medir repetibilidad de sonda y definir debounce si la evidencia lo exige.
+- Implementar malla física completa solo después de validar sonda de un punto.
+- Diseñar generación revisable de G-code compensado, todavía sin ejecución automática.
+- Separar carga diferida de Plotly si afecta operación real.

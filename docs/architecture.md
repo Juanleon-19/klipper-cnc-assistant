@@ -129,3 +129,14 @@ Detalles de implementación:
 - no existe movimiento real desde la aplicación web;
 - la sesión de máquina reportada es simulada;
 - la compensación actual es solo analítica y visual.
+
+
+## Fase 1: runtime físico
+
+La aplicación añade `MachineRuntime` como singleton por proceso FastAPI. En modo `SIMULATED` no abre puerto serie, no inicia WebSocket y no envía comandos de movimiento. En modo `PHYSICAL`, la conexión es explícita y usa `MOONRAKER_URL`, `MOONRAKER_WS`, `SERIAL_PORT` y `SERIAL_BAUDRATE`.
+
+`MachineRuntime` administra Moonraker HTTP, Moonraker WebSocket, `MachineState`, `SerialDriver`, `CommandMapper`, `ManualJogController`, `JogController`, estado del joystick, botones, sonda, permisos de movimiento, eventos y parada.
+
+Los comandos físicos son operaciones `POST`; las consultas de diagnóstico no tienen efectos laterales. La inicialización física se orquesta en backend y no depende de una macro `HOME_AND_CENTER`. El centro se calcula con límites descubiertos desde Klipper.
+
+La compensación usa coordenadas locales del montaje/G-code para consultar el mapa. La posición física del montaje se guarda como referencia `MEASURED` y se usa para ubicar físicamente el montaje, no para extrapolar ni corregir fuera de dominio.

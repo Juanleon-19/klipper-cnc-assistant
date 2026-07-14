@@ -169,3 +169,12 @@ npm run build
 - no hay exportación de G-code compensado ejecutable;
 - no hay comandos de movimiento ni integración de control seguro;
 - la superficie 3D es una visualización del mapa, no una simulación física del mecanizado.
+
+
+## Fase 1: sistema físico
+
+La vista `Sistema` muestra el modo permanente `SIMULADO` o `FÍSICO`, diagnóstico de aplicación, Moonraker, Klipper, Arduino, controlador y seguridad. En modo simulado los controles físicos quedan bloqueados.
+
+Acciones disponibles en modo físico: conectar, activar diagnóstico, inicializar con Z objetivo absoluto, habilitar joystick, solicitar sonda, confirmar sonda, cancelar operación, parada segura y emergencia `M112` con confirmación.
+
+La UI no ofrece ejecución de trabajos, exportación de G-code compensado ni malla física completa.

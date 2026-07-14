@@ -1,40 +1,35 @@
 # Klipper CNC Assistant
 
-Klipper CNC Assistant es una aplicación para preparar trabajos PCB sobre una CNC adaptada a Klipper, priorizando seguridad de máquina y separación estricta entre análisis digital y control físico.
+Klipper CNC Assistant prepara trabajos PCB sobre una CNC adaptada a Klipper. El principio operativo es separar claramente simulación, preparación digital y control físico supervisado.
 
 ## Estado actual
 
-La entrega actual implementa la **Fase 4.3: estabilidad responsive, montajes y trayectorias independientes por operación**.
+La entrega local implementa la **Fase 1: integración física segura inicial y correcciones de producto**.
 
 Incluye:
 
 - backend FastAPI en `src/klipper_cnc_assistant/`;
 - frontend React + TypeScript + Vite en `frontend/`;
-- persistencia JSON real con jerarquía Proyecto → Montaje → Operaciones ordenadas y repetibles;
-- migración automática de proyectos 1.3 a “Montaje principal” sin perder archivos, análisis ni mapas;
-- carga segura de G-code por archivo;
-- archivo, herramienta, análisis, trayectoria, advertencias y estado independientes por operación;
-- análisis G-code con versionado persistido y detección de análisis obsoleto;
-- soporte de `G0`, `G1`, `G2`, `G3`, `G20`, `G21`, `G90`, `G91` y `G94`;
-- visor técnico 2D de trayectoria;
-- selector de operación activa y guía de progreso global, por montaje y por operación;
-- workflow interno por vistas: Archivo, Trayectoria, Referencia, Mapa de alturas y Validación;
-- sesión de referencia completamente simulada con confirmaciones por pasos y sin control físico;
-- mapa de alturas simulado con `probe_region`, zonas excluidas, superficie interpolada y vista 3D;
-- previsualización matemática de compensación sobre la trayectoria, sin generar G-code ejecutable;
-- servicio systemd preparado;
-- acceso remoto privado documentado para Tailscale Serve.
+- persistencia JSON con esquema `1.5`;
+- jerarquía Proyecto -> Montaje -> Operaciones ordenadas y repetibles;
+- G-code, análisis, herramienta, advertencias y trayectoria independientes por operación;
+- referencias y mapa compartidos por montaje;
+- mapas simulados/importados, interpolación, plano, residuos, visor 2D y superficie 3D;
+- previsualización matemática de compensación, sin exportación ejecutable;
+- validación de dominio con detalle de puntos fuera y distancia al dominio;
+- modo `SIMULATED` predeterminado;
+- modo `PHYSICAL` explícito mediante configuración;
+- runtime físico singleton con Moonraker HTTP, WebSocket, Arduino, joystick, botones y sonda;
+- vista “Sistema físico” con diagnóstico consolidado y acciones físicas explícitas.
 
 No incluye todavía:
 
-- movimiento real;
-- homing real;
-- jog real;
-- probe físico;
-- spindle controlado por la aplicación;
-- ejecución de G-code;
-- exportación de G-code compensado ejecutable;
-- comandos de control hacia Moonraker.
+- sondeo físico de malla completa;
+- generación o descarga de G-code compensado ejecutable;
+- ejecución completa de trabajos;
+- spindle automático;
+- jog continuo;
+- cambios automáticos de herramienta.
 
 ## Arquitectura
 
@@ -44,24 +39,46 @@ Frontend React/Vite
         v
 FastAPI /api + SPA estática
         |
-        v
-ProjectService / HeightMapService / ReferenceSessionService
+        +-- Servicios de proyecto, montaje, operación, mapas y referencias
         |
-        v
-Dominio + Repositorio JSON + Analizador G-code + Matemática de compensación
+        +-- MachineRuntime singleton
+                +-- MoonrakerClient HTTP
+                +-- MoonrakerTelemetry WebSocket
+                +-- MachineState
+                +-- SerialDriver + CommandMapper
+                +-- ManualJogController -> JogController -> Moonraker
 ```
 
 Detalles ampliados: [docs/architecture.md](docs/architecture.md)
 
 ## Seguridad
 
-Todo permanece en **modo simulado**.
+Modo predeterminado:
 
-- No se ejecuta G-code.
-- No se envían comandos de movimiento a la CNC.
-- No se llama a endpoints de control de Moonraker para home, jog, probe o spindle.
-- La referencia de máquina se confirma solo en simulación.
-- La compensación actual es una vista previa matemática, no una salida para producción.
+```bash
+MACHINE_MODE=simulated
+```
+
+En modo simulado:
+
+- no se abre puerto serie;
+- no se inicia telemetría física;
+- no se envían movimientos;
+- no se habilitan controles reales;
+- los datos simulados no se presentan como mediciones físicas.
+
+Modo físico explícito:
+
+```bash
+MACHINE_MODE=physical
+MOONRAKER_URL=http://127.0.0.1:7126
+MOONRAKER_WS=ws://127.0.0.1:7126/websocket
+SERIAL_PORT=/dev/ttyUSB0
+SERIAL_BAUDRATE=115200
+MACHINE_SAFE_Z=10
+```
+
+Hay dos instancias Moonraker detectadas en la máquina local; por seguridad no se elige una automáticamente. Configure URL y WebSocket de forma explícita.
 
 ## Instalación del backend
 
@@ -105,22 +122,34 @@ Si la aplicación se ejecuta como servicio, después de cada build de producció
 sudo systemctl restart klipper-cnc-assistant.service
 ```
 
-Resultado esperado:
+No reinicie Klipper ni systemd de Klipper salvo que esté validando físicamente y sepa qué instancia corresponde.
 
-- `http://127.0.0.1:8000/`
-- `http://127.0.0.1:8000/docs`
-- `http://127.0.0.1:8000/api/health`
+## Flujo web principal
 
-## Flujo funcional actual
+1. Crear proyecto y montaje.
+2. Crear operaciones repetibles y asignar herramientas.
+3. Cargar G-code propio de cada operación.
+4. Analizar cada operación.
+5. Confirmar referencias simuladas o capturar referencias físicas del montaje.
+6. Configurar región sondeable y exclusiones.
+7. Generar/importar mapa.
+8. Validar cobertura del mapa.
+9. Previsualizar compensación matemática.
 
-1. Crear un proyecto; el sistema crea “Montaje principal” automáticamente.
-2. Añadir uno o más montajes y operaciones repetibles, asignando una herramienta a cada instancia.
-3. Cargar y analizar el G-code propio de cada operación.
-4. Confirmar en simulación la referencia de máquina, el origen X/Y y la referencia Z.
-5. Configurar la región sondeable interior y las zonas excluidas.
-6. Generar o importar el mapa de alturas.
-7. Validar el mapa.
-8. Abrir la previsualización matemática de compensación.
+## Flujo físico de Fase 1
+
+1. Abrir “Sistema”.
+2. Confirmar que la etiqueta muestra `FÍSICO`.
+3. Conectar Moonraker/Klipper/Arduino.
+4. Revisar diagnóstico y seguridad.
+5. Ingresar Z objetivo absoluto en mm.
+6. Confirmar inicialización.
+7. El backend ejecuta homing, calcula centro con límites reales, mueve Z segura, mueve XY al centro y mueve a Z objetivo.
+8. Habilitar joystick solo después de inicialización correcta.
+9. Capturar origen X/Y desde la posición actual.
+10. Solicitar sonda, confirmar sonda y guardar referencia Z desde el contacto.
+
+Guía detallada: [docs/physical-validation.md](docs/physical-validation.md)
 
 ## Pruebas
 
@@ -141,9 +170,4 @@ npm run test
 npm run build
 ```
 
-## Limitaciones actuales del análisis G-code y del mapa
-
-- el análisis sigue siendo descriptivo, no ejecuta mecanizado real;
-- la compensación no crea archivos descargables ni trayectorias ejecutables;
-- la superficie de alturas actual es simulada o importada, no capturada desde hardware;
-- el dominio interpolable queda limitado a `probe_region` menos las zonas excluidas.
+Última validación local: backend 57 pruebas, frontend 37 pruebas, `pip check`, lint y build correctos.

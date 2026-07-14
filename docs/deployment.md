@@ -65,3 +65,20 @@ bash deploy/uninstall_service.sh
 sudo systemctl status klipper-cnc-assistant.service
 sudo journalctl -u klipper-cnc-assistant.service -n 100 --no-pager
 ```
+
+
+## Variables de modo físico
+
+El modo predeterminado es simulado. Para validación física supervisada configure explícitamente:
+
+```bash
+MACHINE_MODE=physical
+MACHINE_AUTO_CONNECT=false
+MOONRAKER_URL=http://127.0.0.1:7126
+MOONRAKER_WS=ws://127.0.0.1:7126/websocket
+SERIAL_PORT=/dev/ttyUSB0
+SERIAL_BAUDRATE=115200
+MACHINE_SAFE_Z=10
+```
+
+Después de `npm run build` debe reiniciarse el servicio de la aplicación para servir el nuevo frontend. No se requiere modificar systemd ni reiniciar Klipper para esta fase.
