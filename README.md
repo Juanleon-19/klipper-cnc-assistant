@@ -4,17 +4,20 @@ Klipper CNC Assistant es una aplicación para preparar trabajos PCB sobre una CN
 
 ## Estado actual
 
-La entrega actual implementa la **Fase 4.2: flujo de referencia simulado, mapa de alturas con dominio interior y previsualización matemática de compensación**.
+La entrega actual implementa la **Fase 4.3: estabilidad responsive, montajes y trayectorias independientes por operación**.
 
 Incluye:
 
 - backend FastAPI en `src/klipper_cnc_assistant/`;
 - frontend React + TypeScript + Vite en `frontend/`;
-- persistencia JSON real de proyectos PCB y operaciones;
+- persistencia JSON real con jerarquía Proyecto → Montaje → Operaciones ordenadas y repetibles;
+- migración automática de proyectos 1.3 a “Montaje principal” sin perder archivos, análisis ni mapas;
 - carga segura de G-code por archivo;
+- archivo, herramienta, análisis, trayectoria, advertencias y estado independientes por operación;
 - análisis G-code con versionado persistido y detección de análisis obsoleto;
 - soporte de `G0`, `G1`, `G2`, `G3`, `G20`, `G21`, `G90`, `G91` y `G94`;
 - visor técnico 2D de trayectoria;
+- selector de operación activa y guía de progreso global, por montaje y por operación;
 - workflow interno por vistas: Archivo, Trayectoria, Referencia, Mapa de alturas y Validación;
 - sesión de referencia completamente simulada con confirmaciones por pasos y sin control físico;
 - mapa de alturas simulado con `probe_region`, zonas excluidas, superficie interpolada y vista 3D;
@@ -96,6 +99,12 @@ source .venv/bin/activate
 python -m klipper_cnc_assistant serve --host 127.0.0.1 --port 8000 --data-dir data
 ```
 
+Si la aplicación se ejecuta como servicio, después de cada build de producción hay que reiniciarlo una sola vez para que FastAPI sirva el frontend nuevo:
+
+```bash
+sudo systemctl restart klipper-cnc-assistant.service
+```
+
 Resultado esperado:
 
 - `http://127.0.0.1:8000/`
@@ -104,13 +113,14 @@ Resultado esperado:
 
 ## Flujo funcional actual
 
-1. Crear un proyecto y una operación.
-2. Cargar el G-code y analizarlo.
-3. Confirmar en simulación la referencia de máquina, el origen X/Y y la referencia Z.
-4. Configurar la región sondeable interior y las zonas excluidas.
-5. Generar o importar el mapa de alturas.
-6. Validar el mapa.
-7. Abrir la previsualización matemática de compensación.
+1. Crear un proyecto; el sistema crea “Montaje principal” automáticamente.
+2. Añadir uno o más montajes y operaciones repetibles, asignando una herramienta a cada instancia.
+3. Cargar y analizar el G-code propio de cada operación.
+4. Confirmar en simulación la referencia de máquina, el origen X/Y y la referencia Z.
+5. Configurar la región sondeable interior y las zonas excluidas.
+6. Generar o importar el mapa de alturas.
+7. Validar el mapa.
+8. Abrir la previsualización matemática de compensación.
 
 ## Pruebas
 

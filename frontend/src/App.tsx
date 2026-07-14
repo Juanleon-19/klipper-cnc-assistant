@@ -7,7 +7,7 @@ import { ProjectWorkspace } from "./components/ProjectWorkspace";
 import { StatusBadge } from "./components/StatusBadge";
 import { SystemBanner } from "./components/SystemBanner";
 import { SystemPage } from "./components/SystemPage";
-import { api } from "./lib/api";
+import { api, type OperationInput, type OperationUpdateInput } from "./lib/api";
 import { getRecentProject, summarizeMachineMode, toneForStatus, translateStatus } from "./lib/ui";
 import type {
   HealthResponse,
@@ -26,6 +26,9 @@ type NavItem = {
   shortLabel: string;
   icon: string;
 };
+
+const FRONTEND_SCHEMA_VERSION = "1.4";
+const FRONTEND_BUILD = "0.1.0";
 
 const navItems: NavItem[] = [
   { id: "inicio", label: "Inicio", shortLabel: "Inicio", icon: "⌂" },
@@ -68,6 +71,7 @@ export default function App() {
     [projects, selectedProjectId]
   );
   const recentProject = useMemo(() => getRecentProject(projects), [projects]);
+  const appIncompatible = Boolean(systemInfo && systemInfo.schema_version !== FRONTEND_SCHEMA_VERSION);
 
   useEffect(() => {
     if (isDesktop) {
@@ -161,26 +165,81 @@ export default function App() {
     }
   };
 
-  const handleAddOperation = async (presetKey: string) => {
+  const handleAddSetup = async (nombre: string) => {
     if (!selectedProjectId) {
       return;
     }
-    const preset = {
-      "fresado-superior": { nombre: "Fresado cara superior", tipo: "aislamiento", cara: "superior", orden: 0, herramienta: "V-bit 30" },
-      "fresado-inferior": { nombre: "Fresado cara inferior", tipo: "aislamiento", cara: "inferior", orden: 1, herramienta: "V-bit 30" },
-      perforado: { nombre: "Perforado", tipo: "taladrado", cara: "superior", orden: 2, herramienta: "Broca 0.8" },
-      "corte-contorno": { nombre: "Corte del contorno", tipo: "corte exterior", cara: "superior", orden: 3, herramienta: "Fresa 1.0" },
-    }[presetKey];
-    if (!preset) {
-      return;
-    }
-    setBusyKey(`add:${presetKey}`);
+    setBusyKey("setup:add");
     setError("");
     try {
-      await api.addOperation(selectedProjectId, preset);
+      await api.addSetup(selectedProjectId, nombre);
+      await syncProject(selectedProjectId);
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : "No fue posible crear el montaje.");
+    } finally {
+      setBusyKey(null);
+    }
+  };
+
+  const handleAddOperation = async (payload: OperationInput) => {
+    if (!selectedProjectId) {
+      return;
+    }
+    setBusyKey("operation:add");
+    setError("");
+    try {
+      await api.addOperation(selectedProjectId, payload);
       await syncProject(selectedProjectId);
     } catch (requestError) {
       setError(requestError instanceof Error ? requestError.message : "No fue posible crear la operación.");
+    } finally {
+      setBusyKey(null);
+    }
+  };
+
+  const handleUpdateOperation = async (operationId: string, payload: OperationUpdateInput) => {
+    if (!selectedProjectId) {
+      return;
+    }
+    setBusyKey("operation:update:" + operationId);
+    setError("");
+    try {
+      await api.updateOperation(selectedProjectId, operationId, payload);
+      await syncProject(selectedProjectId);
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : "No fue posible actualizar la operación.");
+    } finally {
+      setBusyKey(null);
+    }
+  };
+
+  const handleDuplicateOperation = async (operationId: string) => {
+    if (!selectedProjectId) {
+      return;
+    }
+    setBusyKey("operation:duplicate:" + operationId);
+    setError("");
+    try {
+      await api.duplicateOperation(selectedProjectId, operationId);
+      await syncProject(selectedProjectId);
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : "No fue posible duplicar la operación.");
+    } finally {
+      setBusyKey(null);
+    }
+  };
+
+  const handleMoveOperation = async (operationId: string, direction: "up" | "down") => {
+    if (!selectedProjectId) {
+      return;
+    }
+    setBusyKey("operation:move:" + operationId);
+    setError("");
+    try {
+      await api.moveOperation(selectedProjectId, operationId, direction);
+      await syncProject(selectedProjectId);
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : "No fue posible reordenar la operación.");
     } finally {
       setBusyKey(null);
     }
@@ -370,11 +429,17 @@ export default function App() {
         </header>
 
         {error ? <div className="alert alert--error">{error}</div> : null}
+        {appIncompatible ? (
+          <div className="alert alert--error compatibility-alert" role="alert">
+            <div><strong>La aplicación necesita actualizarse</strong><p>Frontend {FRONTEND_BUILD} · esquema {FRONTEND_SCHEMA_VERSION}; backend {systemInfo?.backend_version} · esquema {systemInfo?.schema_version}.</p></div>
+            <button className="button" type="button" onClick={() => window.location.reload()}>Recargar aplicación</button>
+          </div>
+        ) : null}
 
         <div className="content-wrap">
           {loading ? <div className="panel empty-state"><h3>Cargando aplicación...</h3></div> : null}
 
-          {!loading && view === "inicio" ? (
+          {!loading && !appIncompatible && view === "inicio" ? (
             <DashboardPage
               projects={projects}
               recentProject={recentProject}
@@ -389,11 +454,11 @@ export default function App() {
             />
           ) : null}
 
-          {!loading && view === "nuevo" ? (
+          {!loading && !appIncompatible && view === "nuevo" ? (
             <ProjectForm mode="create" onSubmit={handleCreateProject} submitting={creatingProject} />
           ) : null}
 
-          {!loading && view === "proyectos" ? (
+          {!loading && !appIncompatible && view === "proyectos" ? (
             <div className="projects-layout">
               <ProjectList
                 projects={projects}
@@ -409,7 +474,11 @@ export default function App() {
                 busyKey={busyKey}
                 savingProject={savingProject}
                 onSaveProject={handleSaveProject}
+                onAddSetup={handleAddSetup}
                 onAddOperation={handleAddOperation}
+                onUpdateOperation={handleUpdateOperation}
+                onDuplicateOperation={handleDuplicateOperation}
+                onMoveOperation={handleMoveOperation}
                 onDeleteOperation={handleDeleteOperation}
                 onRemoveFile={handleRemoveFile}
                 onAnalyze={handleAnalyze}
@@ -418,7 +487,7 @@ export default function App() {
             </div>
           ) : null}
 
-          {!loading && view === "sistema" ? (
+          {!loading && !appIncompatible && view === "sistema" ? (
             <SystemPage
               health={health}
               systemInfo={systemInfo}

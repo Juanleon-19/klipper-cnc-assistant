@@ -18,6 +18,7 @@ from klipper_cnc_assistant.domain import (
     IssueSeverity,
     MaterialBruto,
     MaterialOverflow,
+    MontajePCB,
     OperationAnalysis,
     OperationPreparation,
     OperationStatus,
@@ -26,6 +27,8 @@ from klipper_cnc_assistant.domain import (
     PreviewPoint,
     PreviewSegment,
     ProyectoPCB,
+    PROJECT_SCHEMA_VERSION,
+    ProjectValidationError,
 )
 from klipper_cnc_assistant.gcode import CURRENT_ANALYSIS_VERSION
 
@@ -54,11 +57,11 @@ class JsonProjectRepository:
     def list_projects(self) -> list[ProyectoPCB]:
         projects: list[ProyectoPCB] = []
         for project_file in sorted(self.projects_dir.glob("*/project.json")):
-            projects.append(
-                self._deserialize_project(
-                    json.loads(project_file.read_text(encoding="utf-8"))
-                )
-            )
+            payload = json.loads(project_file.read_text(encoding="utf-8"))
+            project = self._deserialize_project(payload)
+            if self._needs_project_migration(payload):
+                self.save_project(project)
+            projects.append(project)
         return projects
 
     def save_project(
@@ -88,8 +91,17 @@ class JsonProjectRepository:
             raise FileNotFoundError(
                 f"El proyecto '{project_id}' no existe."
             )
-        return self._deserialize_project(
-            json.loads(project_file.read_text(encoding="utf-8"))
+        payload = json.loads(project_file.read_text(encoding="utf-8"))
+        project = self._deserialize_project(payload)
+        if self._needs_project_migration(payload):
+            self.save_project(project)
+        return project
+
+    def _needs_project_migration(self, payload: dict) -> bool:
+        return (
+            payload.get("version_esquema") != PROJECT_SCHEMA_VERSION
+            or not payload.get("montajes")
+            or any("setup_id" not in item for item in payload.get("operaciones", []))
         )
 
     def project_dir(
@@ -172,8 +184,10 @@ class JsonProjectRepository:
     ) -> dict:
         target = self._height_map_file(project_id, operation_id)
         if not target.exists():
+            target = self._shared_height_map_file(project_id, operation_id)
+        if target is None or not target.exists():
             raise FileNotFoundError(
-                f"El mapa de alturas para la operacion '{operation_id}' no existe."
+                f"El mapa de alturas para la operacion {operation_id} no existe."
             )
         return json.loads(target.read_text(encoding="utf-8"))
 
@@ -238,10 +252,19 @@ class JsonProjectRepository:
                     for hole in project.configuracion_alineacion.agujeros_alineacion
                 ],
             },
+            "montajes": [self._serialize_setup(setup) for setup in project.montajes],
             "operaciones": [self._serialize_operation(operation) for operation in project.operaciones],
             "creado_en": project.creado_en.isoformat(),
             "actualizado_en": project.actualizado_en.isoformat(),
             "version_esquema": project.version_esquema,
+        }
+
+    def _serialize_setup(self, setup: MontajePCB) -> dict:
+        return {
+            "id": setup.id,
+            "nombre": setup.nombre,
+            "orden": setup.orden,
+            "preparacion": self._serialize_preparation(setup.preparacion),
         }
 
     def _serialize_operation(
@@ -254,13 +277,14 @@ class JsonProjectRepository:
             "tipo": operation.tipo,
             "cara": operation.cara,
             "orden": operation.orden,
+            "setup_id": operation.setup_id,
             "archivo_gcode": operation.archivo_gcode,
             "nombre_archivo_original": operation.nombre_archivo_original,
             "tamano_archivo_bytes": operation.tamano_archivo_bytes,
             "sha256": operation.sha256,
+            "tool_id": operation.tool_id,
             "herramienta": operation.herramienta,
             "analisis": self._serialize_analysis(operation.analisis),
-            "preparacion": self._serialize_preparation(operation.preparacion),
             "estado": operation.estado,
         }
 
@@ -343,17 +367,49 @@ class JsonProjectRepository:
         payload: dict,
     ) -> ProyectoPCB:
         alignment_data = payload.get("configuracion_alineacion", {})
+        operation_payloads = payload.get("operaciones", [])
+        setup_payloads = payload.get("montajes", [])
+        if setup_payloads:
+            setups = tuple(
+                MontajePCB(
+                    id=item["id"],
+                    nombre=item["nombre"],
+                    orden=item["orden"],
+                    preparacion=self._deserialize_preparation(item.get("preparacion")),
+                )
+                for item in setup_payloads
+            )
+        else:
+            legacy_preparations = [
+                self._deserialize_preparation(item.get("preparacion"))
+                for item in operation_payloads
+            ]
+            preparation = max(
+                legacy_preparations,
+                key=self._preparation_score,
+                default=OperationPreparation(),
+            )
+            setups = (
+                MontajePCB(
+                    id="setup-main",
+                    nombre="Montaje principal",
+                    orden=0,
+                    preparacion=preparation,
+                ),
+            )
+        default_setup_id = setups[0].id
         return ProyectoPCB(
             id=payload["id"],
             nombre=payload["nombre"],
             material=MaterialBruto(**payload["material"]),
+            montajes=setups,
             operaciones=tuple(
-                self._deserialize_operation(item)
-                for item in payload.get("operaciones", [])
+                self._deserialize_operation(item, default_setup_id=default_setup_id)
+                for item in operation_payloads
             ),
             creado_en=datetime.fromisoformat(payload["creado_en"]),
             actualizado_en=datetime.fromisoformat(payload["actualizado_en"]),
-            version_esquema=payload.get("version_esquema", "1.0"),
+            version_esquema=PROJECT_SCHEMA_VERSION,
             configuracion_alineacion=ConfiguracionAlineacion(
                 doble_cara=alignment_data.get("doble_cara", False),
                 eje_volteo=(
@@ -368,9 +424,24 @@ class JsonProjectRepository:
             ),
         )
 
+    def _preparation_score(self, preparation: OperationPreparation) -> int:
+        return sum(
+            value is not None
+            for value in (
+                preparation.origen_trabajo,
+                preparation.referencia_z,
+                preparation.region_sondeable_configurada_en,
+                preparation.mapa_disponible_en,
+                preparation.mapa_validado_en,
+                preparation.compensacion_previsualizada_en,
+            )
+        )
+
     def _deserialize_operation(
         self,
         payload: dict,
+        *,
+        default_setup_id: str,
     ) -> OperacionPCB:
         return OperacionPCB(
             id=payload["id"],
@@ -378,13 +449,14 @@ class JsonProjectRepository:
             tipo=OperationType(payload["tipo"]),
             cara=BoardFace(payload["cara"]),
             orden=payload["orden"],
+            setup_id=payload.get("setup_id", default_setup_id),
             archivo_gcode=payload.get("archivo_gcode"),
             nombre_archivo_original=payload.get("nombre_archivo_original"),
             tamano_archivo_bytes=payload.get("tamano_archivo_bytes"),
             sha256=payload.get("sha256"),
+            tool_id=payload.get("tool_id"),
             herramienta=payload.get("herramienta"),
             analisis=self._deserialize_analysis(payload.get("analisis")),
-            preparacion=self._deserialize_preparation(payload.get("preparacion")),
             estado=OperationStatus(payload.get("estado", OperationStatus.ESPERANDO_ARCHIVO)),
         )
 
@@ -492,6 +564,14 @@ class JsonProjectRepository:
             advertencias=tuple(payload.get("advertencias", [])),
             puntos=tuple(PreviewPoint(**point) for point in points_payload),
         )
+
+    def _shared_height_map_file(self, project_id: str, operation_id: str) -> Path | None:
+        try:
+            project = self.load_project(project_id)
+            setup_id = project.get_operation(operation_id).setup_id
+        except (FileNotFoundError, ProjectValidationError):
+            return None
+        return self._height_map_file(project_id, setup_id)
 
     def _height_map_file(
         self,

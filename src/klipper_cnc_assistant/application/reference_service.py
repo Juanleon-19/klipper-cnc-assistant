@@ -30,8 +30,9 @@ class ReferenceSessionService:
     def get_session(self, project_id: str, operation_id: str) -> dict[str, object]:
         project = self._load_project(project_id)
         operation = project.get_operation(operation_id)
+        setup = project.get_setup(operation.setup_id)
         machine = self.machine_session_service.get_status()
-        return self._build_session_payload(project, operation, machine)
+        return self._build_session_payload(project, operation, setup, machine)
 
     def confirm_machine_reference(self, project_id: str, operation_id: str) -> dict[str, object]:
         self._load_project(project_id).get_operation(operation_id)
@@ -41,19 +42,20 @@ class ReferenceSessionService:
     def confirm_work_origin(self, project_id: str, operation_id: str, *, x_mm: float, y_mm: float) -> dict[str, object]:
         project = self._load_project(project_id)
         operation = project.get_operation(operation_id)
+        setup = project.get_setup(operation.setup_id)
         machine = self.machine_session_service.get_status()
         if not machine.home_realizado:
             raise ApplicationError("Primero confirme la referencia de maquina en simulacion.")
         self._validate_xy_against_material(project.material.ancho_mm, project.material.alto_mm, x_mm, y_mm, "origen de trabajo")
         timestamp = utc_now()
         invalidation = self._build_invalidation_reason(
-            operation.preparacion,
+            setup.preparacion,
             "Se invalidó la preparación porque cambió el origen de trabajo X/Y.",
         )
         updated = replace(
-            operation,
+            setup,
             preparacion=replace(
-                operation.preparacion,
+                setup.preparacion,
                 origen_trabajo=CoordinateReference(x_mm=x_mm, y_mm=y_mm, confirmado_en=timestamp),
                 referencia_z=None,
                 mapa_validado_en=None,
@@ -61,7 +63,7 @@ class ReferenceSessionService:
                 motivo_invalidacion=invalidation,
             ),
         )
-        self.repository.save_project(project.replace_operation(updated))
+        self.repository.save_project(project.replace_setup(updated))
         return self.get_session(project_id, operation_id)
 
     def confirm_z_reference(
@@ -75,28 +77,29 @@ class ReferenceSessionService:
     ) -> dict[str, object]:
         project = self._load_project(project_id)
         operation = project.get_operation(operation_id)
+        setup = project.get_setup(operation.setup_id)
         machine = self.machine_session_service.get_status()
         if not machine.home_realizado:
             raise ApplicationError("Primero confirme la referencia de maquina en simulacion.")
-        if operation.preparacion.origen_trabajo is None:
+        if setup.preparacion.origen_trabajo is None:
             raise ApplicationError("Primero confirme el origen de trabajo X/Y en simulacion.")
         self._validate_xy_against_material(project.material.ancho_mm, project.material.alto_mm, x_mm, y_mm, "referencia Z")
         timestamp = utc_now()
         invalidation = self._build_invalidation_reason(
-            operation.preparacion,
+            setup.preparacion,
             "Se invalidó la preparación porque cambió la referencia Z.",
         )
         updated = replace(
-            operation,
+            setup,
             preparacion=replace(
-                operation.preparacion,
+                setup.preparacion,
                 referencia_z=CoordinateReference(x_mm=x_mm, y_mm=y_mm, z_mm=z_mm, confirmado_en=timestamp),
                 mapa_validado_en=None,
                 compensacion_previsualizada_en=None,
                 motivo_invalidacion=invalidation,
             ),
         )
-        self.repository.save_project(project.replace_operation(updated))
+        self.repository.save_project(project.replace_setup(updated))
         return self.get_session(project_id, operation_id)
 
     def mark_map_validated(self, project_id: str, operation_id: str) -> dict[str, object]:
@@ -106,8 +109,9 @@ class ReferenceSessionService:
     def build_compensation_preview(self, project_id: str, operation_id: str) -> dict[str, object]:
         project = self._load_project(project_id)
         operation = project.get_operation(operation_id)
+        setup = project.get_setup(operation.setup_id)
         machine = self.machine_session_service.get_status()
-        blocks = self._build_compensation_blocks(operation.preparacion, machine.home_realizado)
+        blocks = self._build_compensation_blocks(setup.preparacion, machine.home_realizado)
         if blocks:
             raise ApplicationError("La previsualizacion sigue bloqueada. " + " ".join(blocks))
         if operation.analisis is None:
@@ -116,19 +120,19 @@ class ReferenceSessionService:
         preview = build_compensation_preview(
             analysis=operation.analisis,
             height_map=height_map,
-            reference_z_mm=operation.preparacion.referencia_z.z_mm if operation.preparacion.referencia_z and operation.preparacion.referencia_z.z_mm is not None else 0.0,
+            reference_z_mm=setup.preparacion.referencia_z.z_mm if setup.preparacion.referencia_z and setup.preparacion.referencia_z.z_mm is not None else 0.0,
         )
         updated = replace(
-            operation,
-            preparacion=replace(operation.preparacion, compensacion_previsualizada_en=utc_now(), motivo_invalidacion=None),
+            setup,
+            preparacion=replace(setup.preparacion, compensacion_previsualizada_en=utc_now(), motivo_invalidacion=None),
         )
-        self.repository.save_project(project.replace_operation(updated))
+        self.repository.save_project(project.replace_setup(updated))
         session = self.get_session(project_id, operation_id)
         return {"session": session, "preview": preview}
 
-    def _build_session_payload(self, project, operation, machine) -> dict[str, object]:
-        prep = operation.preparacion
-        state = self._derive_state(operation.preparacion, machine.home_realizado)
+    def _build_session_payload(self, project, operation, setup, machine) -> dict[str, object]:
+        prep = setup.preparacion
+        state = self._derive_state(setup.preparacion, machine.home_realizado)
         gcode_origin = self._build_gcode_origin(operation.analisis)
         ready_for_compensation = not self._build_compensation_blocks(prep, machine.home_realizado)
         map_step_state, map_step_detail = self._map_step_status(prep, machine.home_realizado)

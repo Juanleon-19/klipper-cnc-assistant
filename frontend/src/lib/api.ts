@@ -10,14 +10,23 @@ import type {
   ReferenceConfirmation,
   ReferenceSession,
   SystemInfoResponse,
+  Setup,
 } from "../types";
 
 export type OperationInput = {
   nombre: string;
   tipo: string;
-  cara: string;
-  orden: number;
-  herramienta?: string;
+  cara?: string;
+  orden?: number;
+  setup_id?: string;
+  tool_id?: string | null;
+  herramienta?: string | null;
+};
+
+export type OperationUpdateInput = {
+  nombre: string;
+  tool_id?: string | null;
+  herramienta?: string | null;
 };
 
 export class ApiError extends Error {
@@ -108,10 +117,34 @@ export const api = {
       method: "PUT",
       body: JSON.stringify(payload),
     }),
+  addSetup: (projectId: string, nombre: string) =>
+    request<Setup>(`/api/projects/${projectId}/setups`, {
+      method: "POST",
+      body: JSON.stringify({ nombre }),
+    }),
+  updateSetup: (projectId: string, setupId: string, nombre: string) =>
+    request<Setup>(`/api/projects/${projectId}/setups/${setupId}`, {
+      method: "PATCH",
+      body: JSON.stringify({ nombre }),
+    }),
   addOperation: (projectId: string, payload: OperationInput) =>
     request<Operation>(`/api/projects/${projectId}/operations`, {
       method: "POST",
       body: JSON.stringify(payload),
+    }),
+  updateOperation: (projectId: string, operationId: string, payload: OperationUpdateInput) =>
+    request<Operation>(`/api/projects/${projectId}/operations/${operationId}`, {
+      method: "PATCH",
+      body: JSON.stringify(payload),
+    }),
+  duplicateOperation: (projectId: string, operationId: string) =>
+    request<Operation>(`/api/projects/${projectId}/operations/${operationId}/duplicate`, {
+      method: "POST",
+    }),
+  moveOperation: (projectId: string, operationId: string, direccion: "up" | "down") =>
+    request<Operation>(`/api/projects/${projectId}/operations/${operationId}/move`, {
+      method: "POST",
+      body: JSON.stringify({ direccion }),
     }),
   deleteOperation: (projectId: string, operationId: string) =>
     request<{ detalle: string }>(`/api/projects/${projectId}/operations/${operationId}`, {

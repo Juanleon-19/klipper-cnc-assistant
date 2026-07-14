@@ -48,6 +48,10 @@ export function SystemPage({ health, systemInfo, machineSession, refreshing, onR
             <div><dt>Python</dt><dd>{systemInfo?.version_python ?? "-"}</dd></div>
             <div><dt>Hora</dt><dd>{systemInfo?.hora_servidor ?? "-"}</dd></div>
             <div><dt>Aplicación</dt><dd>{systemInfo?.version_aplicacion ?? "-"}</dd></div>
+            <div><dt>Backend</dt><dd>{systemInfo?.backend_version ?? "-"}</dd></div>
+            <div><dt>Frontend build</dt><dd>{systemInfo?.frontend_build ?? "-"}</dd></div>
+            <div><dt>Esquema</dt><dd>{systemInfo?.schema_version ?? "-"}</dd></div>
+            <div><dt>Commit</dt><dd>{systemInfo?.git_commit ?? "No disponible"}</dd></div>
           </dl>
         </article>
 

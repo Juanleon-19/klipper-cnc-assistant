@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import tempfile
 import unittest
 from pathlib import Path
 
 from klipper_cnc_assistant.application import (
+    HeightMapService,
     ProjectService,
 )
+from klipper_cnc_assistant.heightmap import ProbeRegion
 from klipper_cnc_assistant.storage import (
     JsonProjectRepository,
 )
@@ -263,3 +266,131 @@ class ProjectServiceTest(unittest.TestCase):
             analyzed.analisis.cantidad_movimientos,
             2,
         )
+
+
+    def test_repeated_drilling_operations_keep_tools_and_order(self) -> None:
+        project = self.service.create_project(
+            nombre="Taladrados", ancho_mm=50.0, alto_mm=40.0
+        )
+        setup_id = project.montajes[0].id
+        tools = ("Broca 0,8 mm", "Broca 1,0 mm", "Broca 3,0 mm")
+        for tool in tools:
+            self.service.add_operation(
+                project_id=project.id,
+                setup_id=setup_id,
+                nombre=f"Taladrado {tool.split()[-2]}",
+                tipo="taladrado",
+                herramienta=tool,
+            )
+
+        loaded = self.service.get_project(project.id)
+        operations = loaded.operations_for_setup(setup_id)
+        self.assertEqual(len(operations), 3)
+        self.assertEqual(tuple(item.orden for item in operations), (0, 1, 2))
+        self.assertEqual(tuple(item.herramienta for item in operations), tools)
+
+    def test_move_operation_changes_only_setup_order(self) -> None:
+        project = self.service.create_project(
+            nombre="Orden", ancho_mm=50.0, alto_mm=40.0
+        )
+        setup_id = project.montajes[0].id
+        operations = [
+            self.service.add_operation(
+                project_id=project.id,
+                setup_id=setup_id,
+                nombre=name,
+                tipo="taladrado",
+            )
+            for name in ("A", "B", "C")
+        ]
+
+        self.service.move_operation(
+            project_id=project.id, operation_id=operations[2].id, direction="up"
+        )
+
+        loaded = self.service.get_project(project.id)
+        self.assertEqual(
+            tuple(item.nombre for item in loaded.operations_for_setup(setup_id)),
+            ("A", "C", "B"),
+        )
+
+    def test_files_and_analyses_are_independent_per_operation(self) -> None:
+        project = self.service.create_project(
+            nombre="Trayectorias", ancho_mm=50.0, alto_mm=40.0
+        )
+        first = self.service.add_operation(
+            project_id=project.id, nombre="Taladrado 0,8", tipo="taladrado"
+        )
+        second = self.service.add_operation(
+            project_id=project.id, nombre="Taladrado 1,0", tipo="taladrado"
+        )
+        self.service.upload_operation_gcode(
+            project_id=project.id, operation_id=first.id, filename="first.nc",
+            content="G21\nG90\nG1 X1 Y1 F100\n",
+        )
+        self.service.upload_operation_gcode(
+            project_id=project.id, operation_id=second.id, filename="second.nc",
+            content="G21\nG90\nG1 X20 Y10 F200\n",
+        )
+        first_result = self.service.analyze_operation(project.id, first.id)
+        second_result = self.service.analyze_operation(project.id, second.id)
+
+        self.assertEqual(first_result.nombre_archivo_original, "first.nc")
+        self.assertEqual(second_result.nombre_archivo_original, "second.nc")
+        self.assertNotEqual(
+            first_result.analisis.limites.max_x_mm,
+            second_result.analisis.limites.max_x_mm,
+        )
+
+    def test_legacy_project_and_map_migrate_to_main_setup(self) -> None:
+        project = self.service.create_project(
+            nombre="Legado", ancho_mm=50.0, alto_mm=40.0
+        )
+        operation = self.service.add_operation(
+            project_id=project.id, nombre="Legada", tipo="taladrado"
+        )
+        self.service.upload_operation_gcode(
+            project_id=project.id, operation_id=operation.id, filename="legacy.nc",
+            content="G21\nG90\nG1 X5 Y5 F100\n",
+        )
+        self.service.analyze_operation(project.id, operation.id)
+        repository = self.service.repository
+        height_maps = HeightMapService(repository)
+        height_maps.generate_simulated_map(
+            project_id=project.id,
+            operation_id=operation.id,
+            filas=3,
+            columnas=3,
+            superficie_simulada="inclinada",
+            repeticion_simulacion=2,
+            probe_region=ProbeRegion(
+                min_x_mm=2.0, min_y_mm=2.0, max_x_mm=48.0, max_y_mm=38.0
+            ),
+            exclusion_zones=(),
+        )
+        project_dir = self.base_dir / "projects" / project.id
+        (project_dir / "maps" / "setup-main").rename(project_dir / "maps" / operation.id)
+        project_file = project_dir / "project.json"
+        payload = json.loads(project_file.read_text(encoding="utf-8"))
+        payload.pop("montajes")
+        payload["version_esquema"] = "1.3"
+        for item in payload["operaciones"]:
+            item.pop("setup_id", None)
+            item.pop("tool_id", None)
+        project_file.write_text(json.dumps(payload), encoding="utf-8")
+
+        migrated_service = ProjectService(JsonProjectRepository(self.base_dir))
+        migrated = migrated_service.get_project(project.id)
+        migrated_map = HeightMapService(migrated_service.repository).get_map(
+            project.id, operation.id
+        )
+        self.assertEqual(migrated.montajes[0].nombre, "Montaje principal")
+        persisted = json.loads(project_file.read_text(encoding="utf-8"))
+        self.assertEqual(persisted["version_esquema"], "1.4")
+        self.assertEqual(persisted["montajes"][0]["nombre"], "Montaje principal")
+        self.assertEqual(migrated.operaciones[0].setup_id, "setup-main")
+        self.assertEqual(migrated.operaciones[0].nombre_archivo_original, "legacy.nc")
+        self.assertIsNotNone(migrated.operaciones[0].analisis)
+        self.assertEqual(migrated_map.version, 1)
+        self.assertTrue((project_dir / "maps" / operation.id / "height_map.json").exists())
+        self.assertTrue((project_dir / "maps" / "setup-main" / "height_map.json").exists())

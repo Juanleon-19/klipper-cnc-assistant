@@ -1709,3 +1709,239 @@ button {
     width: 100%;
   }
 }
+
+
+/* Phase 4.3: ordered setup and operation workflow */
+.setup-toolbar,
+.operation-create-form,
+.operation-selector-panel,
+.operation-selector-meta {
+  display: flex;
+  align-items: end;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.setup-toolbar > label,
+.operation-create-form > label,
+.operation-selector-panel > label {
+  flex: 1 1 190px;
+  min-width: 0;
+}
+
+.inline-create-form {
+  display: flex;
+  align-items: end;
+  gap: var(--space-2);
+  flex: 2 1 320px;
+  min-width: 0;
+}
+
+.inline-create-form label {
+  flex: 1 1 180px;
+}
+
+.operation-create-form {
+  margin-top: var(--space-4);
+  padding: var(--space-4);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: rgba(16, 27, 35, 0.68);
+}
+
+.setup-operation-tree {
+  display: grid;
+  gap: var(--space-4);
+  margin-top: var(--space-5);
+}
+
+.setup-group {
+  display: grid;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.setup-group__header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: var(--space-3);
+  padding-bottom: var(--space-2);
+  border-bottom: 1px solid var(--line);
+}
+
+.operation-row {
+  display: grid;
+  grid-template-columns: minmax(210px, 1.7fr) auto minmax(150px, 0.8fr) auto;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2);
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
+  min-width: 0;
+}
+
+.operation-row--active {
+  border-color: var(--info);
+  background: rgba(65, 214, 255, 0.08);
+}
+
+.operation-row__select {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  min-width: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.operation-row__select span:last-child {
+  display: grid;
+  min-width: 0;
+}
+
+.operation-row__select small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-soft);
+}
+
+.operation-order {
+  display: inline-grid;
+  place-items: center;
+  width: 2rem;
+  height: 2rem;
+  flex: none;
+  border-radius: 0.55rem;
+  background: var(--surface-strong);
+}
+
+.operation-tool-field input {
+  min-width: 0;
+}
+
+.operation-row__actions {
+  display: flex;
+  gap: 0.35rem;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.operation-selector-panel {
+  justify-content: space-between;
+}
+
+.operation-selector-meta {
+  align-items: center;
+  color: var(--text-soft);
+}
+
+.workflow-guide summary {
+  cursor: pointer;
+  font-weight: 700;
+}
+
+.workflow-guide__content {
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) minmax(220px, 1fr);
+  gap: var(--space-4);
+  align-items: start;
+  margin-top: var(--space-4);
+}
+
+.workflow-guide__steps {
+  display: grid;
+  gap: 0.45rem;
+  margin: 0;
+  padding-left: 1.4rem;
+}
+
+.workflow-guide__steps li {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
+.workflow-guide__steps li[data-status="completado"] strong { color: var(--success); }
+.workflow-guide__steps li[data-status="en progreso"] strong { color: var(--warning); }
+.workflow-guide__steps li[data-status="pendiente"] strong { color: var(--text-soft); }
+
+.workflow-progress-tree {
+  display: grid;
+  gap: var(--space-3);
+}
+
+.workflow-progress-tree > div,
+.workflow-progress-tree span {
+  display: grid;
+  gap: 0.3rem;
+}
+
+.workflow-guide__content > .button {
+  grid-column: 1 / -1;
+  justify-self: start;
+}
+
+.compatibility-alert {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-4);
+}
+
+.compact-issue-list {
+  margin-bottom: 0;
+}
+
+@media (max-width: 1024px) {
+  .operation-row {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+  .operation-tool-field,
+  .operation-row__actions {
+    grid-column: 1 / -1;
+  }
+  .operation-row__actions {
+    justify-content: flex-start;
+  }
+}
+
+@media (max-width: 768px) {
+  .inline-create-form,
+  .operation-create-form,
+  .operation-selector-panel,
+  .compatibility-alert {
+    align-items: stretch;
+    flex-direction: column;
+  }
+  .setup-toolbar > label,
+  .operation-create-form > label,
+  .operation-selector-panel > label,
+  .inline-create-form {
+    flex-basis: auto;
+    width: 100%;
+  }
+  .operation-row {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .operation-row > .status-badge,
+  .operation-tool-field,
+  .operation-row__actions {
+    grid-column: 1;
+  }
+  .operation-row__actions .button {
+    flex: 1 1 120px;
+  }
+  .workflow-guide__content {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .workflow-guide__content > .button {
+    grid-column: 1;
+    width: 100%;
+  }
+}

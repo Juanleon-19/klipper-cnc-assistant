@@ -22,6 +22,14 @@ npm ci
 npm run build
 ```
 
+Después de `npm run build` en producción hay que reiniciar el servicio para que se sirvan juntos el backend y los assets nuevos:
+
+```bash
+sudo systemctl restart klipper-cnc-assistant.service
+```
+
+No es necesario modificar la unidad systemd ni repetir instalaciones para cada build. Opcionalmente se pueden definir `KCA_FRONTEND_BUILD` y `KCA_GIT_COMMIT` en el entorno del servicio.
+
 ## Servicio systemd
 
 Archivos incluidos:

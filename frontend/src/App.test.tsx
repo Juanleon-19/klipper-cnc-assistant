@@ -5,7 +5,7 @@ import App from "./App";
 
 const mockFetch = vi.fn();
 
-function seedInitialFetch(projects: unknown[] = []) {
+function seedInitialFetch(projects: unknown[] = [], schemaVersion = "1.4") {
   mockFetch
     .mockResolvedValueOnce({
       ok: true,
@@ -25,6 +25,10 @@ function seedInitialFetch(projects: unknown[] = []) {
         estado_api: "operativa",
         modo_maquina: "simulado",
         hora_servidor: new Date().toISOString(),
+        backend_version: "0.1.0",
+        frontend_build: "0.1.0",
+        git_commit: null,
+        schema_version: schemaVersion,
       }),
     })
     .mockResolvedValueOnce({
@@ -88,5 +92,39 @@ describe("App", () => {
 
     fireEvent.click(screen.getAllByRole("button", { name: /Cerrar menú/i })[0]);
     expect(container.querySelector(".app-shell--sidebar-open")).toBeNull();
+  });
+
+  it("bloquea la interfaz cuando frontend y backend son incompatibles", async () => {
+    window.innerWidth = 1440;
+    seedInitialFetch([], "1.3");
+
+    render(<App />);
+
+    expect(await screen.findByText(/La aplicación necesita actualizarse/i)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Recargar aplicación/i })).toBeInTheDocument();
+    expect(screen.queryByText(/Panel de trabajo/i)).toBeNull();
+  });
+
+  it.each([
+    [1920, 1080, "desktop"],
+    [1366, 768, "desktop"],
+    [1024, 768, "drawer"],
+    [768, 1024, "drawer"],
+    [390, 844, "drawer"],
+  ])("mantiene el AppShell responsive en %i × %i", async (width, height, mode) => {
+    window.innerWidth = width;
+    window.innerHeight = height;
+    seedInitialFetch();
+
+    const { container } = render(<App />);
+    await waitFor(() => expect(screen.getByText(/Panel de trabajo/i)).toBeInTheDocument());
+
+    expect(container.querySelector(mode === "desktop" ? ".app-shell--desktop" : ".app-shell--drawer")).not.toBeNull();
+    if (mode === "drawer") {
+      expect(screen.getByRole("button", { name: /Abrir menú/i })).toHaveAttribute("aria-expanded", "false");
+      expect(container.querySelector(".app-shell--sidebar-open")).toBeNull();
+    } else {
+      expect(screen.getAllByRole("button", { name: /Cerrar menú/i })[0]).toHaveAttribute("aria-expanded", "true");
+    }
   });
 });

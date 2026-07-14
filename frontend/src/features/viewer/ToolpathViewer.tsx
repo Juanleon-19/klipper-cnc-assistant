@@ -30,7 +30,26 @@ type ToolpathViewerProps = {
   material: Material;
   analysis: OperationAnalysis;
   operationName: string;
+  storageKey?: string;
 };
+
+type StoredViewerState = {
+  transform: ViewTransform;
+  fitMode: ViewerFitMode;
+  layers: ViewerLayersState;
+  depthMode: boolean;
+};
+
+function loadStoredViewerState(storageKey?: string): StoredViewerState | null {
+  if (!storageKey) {
+    return null;
+  }
+  try {
+    return JSON.parse(window.localStorage.getItem("kca:toolpath:" + storageKey) ?? "null") as StoredViewerState | null;
+  } catch {
+    return null;
+  }
+}
 
 type DragState = {
   x: number;
@@ -60,7 +79,7 @@ function buildFitTransform(mode: ViewerFitMode, material: Material, analysis: Op
   return fitRectWithinViewport(rect, viewport);
 }
 
-export function ToolpathViewer({ material, analysis, operationName }: ToolpathViewerProps) {
+export function ToolpathViewer({ material, analysis, operationName, storageKey }: ToolpathViewerProps) {
   const dragRef = useRef<DragState | null>(null);
   const pinchRef = useRef<PinchState | null>(null);
   const fullscreenRef = useRef<HTMLDivElement | null>(null);
@@ -84,11 +103,29 @@ export function ToolpathViewer({ material, analysis, operationName }: ToolpathVi
   );
 
   useEffect(() => {
-    setTransform(buildFitTransform(autoFitMode, material, analysis, viewport.width, viewport.height));
-    setFitMode(autoFitMode);
+    const stored = loadStoredViewerState(storageKey);
+    if (stored) {
+      setTransform(stored.transform);
+      setFitMode(stored.fitMode);
+      setLayers(stored.layers);
+      setDepthMode(stored.depthMode);
+    } else {
+      setTransform(buildFitTransform(autoFitMode, material, analysis, viewport.width, viewport.height));
+      setFitMode(autoFitMode);
+    }
     setSelectedIndex(null);
     setHoverIndex(null);
-  }, [analysis, autoFitMode, material, viewport.height, viewport.width]);
+  }, [analysis, autoFitMode, material, storageKey, viewport.height, viewport.width]);
+
+  useEffect(() => {
+    if (!storageKey) {
+      return;
+    }
+    window.localStorage.setItem(
+      "kca:toolpath:" + storageKey,
+      JSON.stringify({ transform, fitMode, layers, depthMode })
+    );
+  }, [depthMode, fitMode, layers, storageKey, transform]);
 
   const applyFit = (mode: ViewerFitMode) => {
     setTransform(buildFitTransform(mode, material, analysis, viewport.width, viewport.height));

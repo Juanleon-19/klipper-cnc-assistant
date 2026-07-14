@@ -15,10 +15,12 @@ describe("ui helpers", () => {
       tipo: "taladrado",
       cara: "superior",
       orden: 2,
+      setup_id: "setup-main",
       archivo_gcode: "originals/a.nc",
       nombre_archivo_original: "a.nc",
       tamano_archivo_bytes: 32,
       sha256: "abc",
+      tool_id: null,
       herramienta: "Broca",
       estado: "valida",
       analisis: {

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import platform
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -14,10 +15,12 @@ from klipper_cnc_assistant.domain import (
     FlipAxis,
     MachineSessionStatus,
     MaterialBruto,
+    MontajePCB,
     OperationType,
     OperacionPCB,
     ProyectoPCB,
     ProjectValidationError,
+    PROJECT_SCHEMA_VERSION,
 )
 from klipper_cnc_assistant.gcode import analyze_gcode_text
 from klipper_cnc_assistant.storage import JsonProjectRepository
@@ -109,28 +112,142 @@ class ProjectService:
     ) -> ProyectoPCB:
         return self._load_project(project_id)
 
+    def add_setup(
+        self,
+        *,
+        project_id: str,
+        nombre: str,
+    ) -> MontajePCB:
+        project = self._load_project(project_id)
+        setup = MontajePCB(
+            id=_new_id("setup"),
+            nombre=nombre,
+            orden=len(project.montajes),
+        )
+        updated = project.add_setup(setup)
+        self.repository.save_project(updated)
+        return updated.get_setup(setup.id)
+
+    def update_setup(
+        self,
+        *,
+        project_id: str,
+        setup_id: str,
+        nombre: str,
+    ) -> MontajePCB:
+        project = self._load_project(project_id)
+        updated_setup = replace(project.get_setup(setup_id), nombre=nombre)
+        updated = project.replace_setup(updated_setup)
+        self.repository.save_project(updated)
+        return updated.get_setup(setup_id)
+
     def add_operation(
         self,
         *,
         project_id: str,
         nombre: str,
         tipo: str,
-        cara: str,
-        orden: int,
+        cara: str | None = None,
+        orden: int | None = None,
+        setup_id: str | None = None,
+        tool_id: str | None = None,
         herramienta: str | None = None,
     ) -> OperacionPCB:
         project = self._load_project(project_id)
+        target_setup_id = setup_id or project.montajes[0].id
+        project.get_setup(target_setup_id)
+        operation_type = OperationType(tipo)
+        operation_face = BoardFace(
+            cara
+            or (
+                BoardFace.INFERIOR
+                if operation_type == OperationType.FRESADO_INFERIOR
+                else BoardFace.SUPERIOR
+            )
+        )
+        setup_operations = project.operations_for_setup(target_setup_id)
+        next_order = len(setup_operations) if orden is None else orden
         operation = OperacionPCB(
             id=_new_id("op"),
             nombre=nombre,
-            tipo=OperationType(tipo),
-            cara=BoardFace(cara),
-            orden=orden,
+            tipo=operation_type,
+            cara=operation_face,
+            orden=next_order,
+            setup_id=target_setup_id,
+            tool_id=tool_id,
             herramienta=herramienta,
         )
         updated = project.add_operation(operation)
         self.repository.save_project(updated)
         return updated.get_operation(operation.id)
+
+    def update_operation(
+        self,
+        *,
+        project_id: str,
+        operation_id: str,
+        nombre: str,
+        tool_id: str | None = None,
+        herramienta: str | None = None,
+    ) -> OperacionPCB:
+        project = self._load_project(project_id)
+        operation = project.get_operation(operation_id)
+        updated_operation = replace(
+            operation,
+            nombre=nombre,
+            tool_id=tool_id,
+            herramienta=herramienta,
+        )
+        updated = project.replace_operation(updated_operation)
+        self.repository.save_project(updated)
+        return updated.get_operation(operation_id)
+
+    def duplicate_operation(
+        self,
+        *,
+        project_id: str,
+        operation_id: str,
+    ) -> OperacionPCB:
+        project = self._load_project(project_id)
+        source = project.get_operation(operation_id)
+        return self.add_operation(
+            project_id=project_id,
+            nombre=f"{source.nombre} (copia)",
+            tipo=source.tipo,
+            cara=source.cara,
+            setup_id=source.setup_id,
+            tool_id=source.tool_id,
+            herramienta=source.herramienta,
+        )
+
+    def move_operation(
+        self,
+        *,
+        project_id: str,
+        operation_id: str,
+        direction: str,
+    ) -> OperacionPCB:
+        if direction not in {"up", "down"}:
+            raise ApplicationError("La direccion debe ser up o down.")
+        project = self._load_project(project_id)
+        operation = project.get_operation(operation_id)
+        ordered = list(project.operations_for_setup(operation.setup_id))
+        index = next(index for index, item in enumerate(ordered) if item.id == operation_id)
+        target = index - 1 if direction == "up" else index + 1
+        if target < 0 or target >= len(ordered):
+            return operation
+        ordered[index], ordered[target] = ordered[target], ordered[index]
+        reordered = {item.id: replace(item, orden=order) for order, item in enumerate(ordered)}
+        updated = replace(
+            project,
+            operaciones=tuple(
+                reordered.get(item.id, item)
+                for item in project.operaciones
+            ),
+            actualizado_en=datetime.now(timezone.utc),
+        )
+        self.repository.save_project(updated)
+        return updated.get_operation(operation_id)
 
     def delete_operation(
         self,
@@ -138,8 +255,16 @@ class ProjectService:
         operation_id: str,
     ) -> None:
         project = self._load_project(project_id)
+        operation = project.get_operation(operation_id)
         updated = project.remove_operation(operation_id)
-        self.repository.save_project(updated)
+        ordered = updated.operations_for_setup(operation.setup_id)
+        reordered = {item.id: replace(item, orden=order) for order, item in enumerate(ordered)}
+        normalized = replace(
+            updated,
+            operaciones=tuple(reordered.get(item.id, item) for item in updated.operaciones),
+            actualizado_en=datetime.now(timezone.utc),
+        )
+        self.repository.save_project(normalized)
 
     def remove_operation_gcode(
         self,
@@ -394,6 +519,10 @@ class SystemStatusService:
             "estado_api": "operativa",
             "modo_maquina": self.machine_session_service.machine_mode,
             "hora_servidor": now.isoformat(),
+            "backend_version": __version__,
+            "frontend_build": os.getenv("KCA_FRONTEND_BUILD", "dev"),
+            "git_commit": os.getenv("KCA_GIT_COMMIT"),
+            "schema_version": PROJECT_SCHEMA_VERSION,
         }
 
     def _storage_label(self) -> str:

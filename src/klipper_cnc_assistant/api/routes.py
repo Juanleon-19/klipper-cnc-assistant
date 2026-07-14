@@ -22,6 +22,8 @@ from .schemas import (
     MachineSessionResponse,
     OperationAnalysisResponse,
     OperationCreateRequest,
+    OperationMoveRequest,
+    OperationUpdateRequest,
     OperationResponse,
     ProjectCreateRequest,
     ProjectResponse,
@@ -31,11 +33,15 @@ from .schemas import (
     ReferenceStepResponse,
     ReferenceWorkOriginRequest,
     ReferenceZRequest,
+    SetupCreateRequest,
+    SetupResponse,
+    SetupUpdateRequest,
     SystemInfoResponse,
     analysis_to_response,
     machine_session_to_response,
     operation_to_response,
     project_to_response,
+    setup_to_response,
 )
 
 
@@ -154,6 +160,24 @@ def build_router() -> APIRouter:
         project = service.get_project(project_id)
         return project_to_response(project)
 
+    @router.post("/projects/{project_id}/setups", response_model=SetupResponse, status_code=201)
+    def add_setup(project_id: str, payload: SetupCreateRequest, request: Request) -> SetupResponse:
+        service = request.app.state.project_service
+        return setup_to_response(
+            service.add_setup(project_id=project_id, nombre=payload.nombre)
+        )
+
+    @router.patch("/projects/{project_id}/setups/{setup_id}", response_model=SetupResponse)
+    def update_setup(project_id: str, setup_id: str, payload: SetupUpdateRequest, request: Request) -> SetupResponse:
+        service = request.app.state.project_service
+        return setup_to_response(
+            service.update_setup(
+                project_id=project_id,
+                setup_id=setup_id,
+                nombre=payload.nombre,
+            )
+        )
+
     @router.post("/projects/{project_id}/operations", response_model=OperationResponse, status_code=201)
     def add_operation(project_id: str, payload: OperationCreateRequest, request: Request) -> OperationResponse:
         service = request.app.state.project_service
@@ -163,9 +187,41 @@ def build_router() -> APIRouter:
             tipo=payload.tipo,
             cara=payload.cara,
             orden=payload.orden,
+            setup_id=payload.setup_id,
+            tool_id=payload.tool_id,
             herramienta=payload.herramienta,
         )
         return operation_to_response(operation)
+
+    @router.patch("/projects/{project_id}/operations/{operation_id}", response_model=OperationResponse)
+    def update_operation(project_id: str, operation_id: str, payload: OperationUpdateRequest, request: Request) -> OperationResponse:
+        service = request.app.state.project_service
+        operation = service.update_operation(
+            project_id=project_id,
+            operation_id=operation_id,
+            nombre=payload.nombre,
+            tool_id=payload.tool_id,
+            herramienta=payload.herramienta,
+        )
+        return operation_to_response(operation)
+
+    @router.post("/projects/{project_id}/operations/{operation_id}/duplicate", response_model=OperationResponse, status_code=201)
+    def duplicate_operation(project_id: str, operation_id: str, request: Request) -> OperationResponse:
+        service = request.app.state.project_service
+        return operation_to_response(
+            service.duplicate_operation(project_id=project_id, operation_id=operation_id)
+        )
+
+    @router.post("/projects/{project_id}/operations/{operation_id}/move", response_model=OperationResponse)
+    def move_operation(project_id: str, operation_id: str, payload: OperationMoveRequest, request: Request) -> OperationResponse:
+        service = request.app.state.project_service
+        return operation_to_response(
+            service.move_operation(
+                project_id=project_id,
+                operation_id=operation_id,
+                direction=payload.direccion,
+            )
+        )
 
     @router.delete("/projects/{project_id}/operations/{operation_id}", response_model=dict[str, str])
     def delete_operation(project_id: str, operation_id: str, request: Request) -> dict[str, str]:

@@ -6,9 +6,8 @@ import { HeightMapPointTable } from "../features/heightmap/HeightMapPointTable";
 import { HeightMapSurface3D } from "../features/heightmap/HeightMapSurface3D";
 import { ToolpathViewer } from "../features/viewer/ToolpathViewer";
 import { formatDate, formatFileSize, formatMillimeters } from "../lib/format";
-import { ApiError, api } from "../lib/api";
+import { ApiError, api, type OperationInput, type OperationUpdateInput } from "../lib/api";
 import { parseFiniteNumber } from "../lib/numbers";
-import { operationPresets } from "../lib/presets";
 import { toneForStatus, translateFace, translateOperationType, translateStatus } from "../lib/ui";
 import type {
   CompensationPreview,
@@ -27,7 +26,11 @@ type ProjectWorkspaceProps = {
   busyKey: string | null;
   savingProject: boolean;
   onSaveProject: (payload: ProjectPayload) => Promise<void>;
-  onAddOperation: (presetKey: string) => Promise<void>;
+  onAddSetup: (nombre: string) => Promise<void>;
+  onAddOperation: (payload: OperationInput) => Promise<void>;
+  onUpdateOperation: (operationId: string, payload: OperationUpdateInput) => Promise<void>;
+  onDuplicateOperation: (operationId: string) => Promise<void>;
+  onMoveOperation: (operationId: string, direction: "up" | "down") => Promise<void>;
   onDeleteOperation: (operation: Operation) => Promise<void>;
   onRemoveFile: (operation: Operation) => Promise<void>;
   onAnalyze: (operation: Operation) => Promise<void>;
@@ -42,13 +45,13 @@ type ReferenceFieldErrors = Partial<Record<"x_mm" | "y_mm" | "z_mm", string>>;
 type InputState = { x_mm: string; y_mm: string };
 type ZInputState = { x_mm: string; y_mm: string; z_mm: string };
 
-function findPresetOperation(project: Project, presetKey: string): Operation | undefined {
-  const preset = operationPresets.find((item) => item.clave === presetKey);
-  if (!preset) {
-    return undefined;
-  }
-  return project.operaciones.find((operation) => operation.tipo === preset.tipo && operation.cara === preset.cara);
-}
+const operationTypeOptions = [
+  { value: "fresado_superior", label: "Fresado superior" },
+  { value: "fresado_inferior", label: "Fresado inferior" },
+  { value: "taladrado", label: "Taladrado" },
+  { value: "contorno", label: "Contorno" },
+  { value: "personalizado", label: "Personalizado" },
+];
 
 function pickDefaultOperation(project: Project | null): string | null {
   if (!project || project.operaciones.length === 0) {
@@ -93,7 +96,11 @@ export function ProjectWorkspace({
   busyKey,
   savingProject,
   onSaveProject,
+  onAddSetup,
   onAddOperation,
+  onUpdateOperation,
+  onDuplicateOperation,
+  onMoveOperation,
   onDeleteOperation,
   onRemoveFile,
   onAnalyze,
@@ -101,6 +108,11 @@ export function ProjectWorkspace({
 }: ProjectWorkspaceProps) {
   const [editingProject, setEditingProject] = useState(false);
   const [selectedOperationId, setSelectedOperationId] = useState<string | null>(pickDefaultOperation(project));
+  const [selectedSetupId, setSelectedSetupId] = useState<string | null>(project?.montajes[0]?.id ?? null);
+  const [newSetupName, setNewSetupName] = useState("");
+  const [newOperationName, setNewOperationName] = useState("Fresado superior");
+  const [newOperationType, setNewOperationType] = useState("fresado_superior");
+  const [newOperationTool, setNewOperationTool] = useState("");
   const [activeView, setActiveView] = useState<WorkspaceView>("archivo");
   const [activeMapTab, setActiveMapTab] = useState<MapTab>("mapa2d");
   const [heightMode, setHeightMode] = useState<HeightMode>("bruto");
@@ -134,6 +146,23 @@ export function ProjectWorkspace({
     () => project?.operaciones.find((operation) => operation.id === selectedOperationId) ?? null,
     [project, selectedOperationId]
   );
+
+  const selectedSetup = useMemo(
+    () => project?.montajes.find((setup) => setup.id === selectedSetupId) ?? project?.montajes[0] ?? null,
+    [project, selectedSetupId]
+  );
+
+  useEffect(() => {
+    if (!project) {
+      setSelectedSetupId(null);
+      return;
+    }
+    if (selectedOperation) {
+      setSelectedSetupId(selectedOperation.setup_id);
+      return;
+    }
+    setSelectedSetupId((current) => project.montajes.some((setup) => setup.id === current) ? current : project.montajes[0]?.id ?? null);
+  }, [project, selectedOperation]);
 
   useEffect(() => {
     if (!project || !selectedOperation) {
@@ -194,7 +223,6 @@ export function ProjectWorkspace({
       setActiveView(stored);
       return;
     }
-    setActiveView("archivo");
   }, [project, selectedOperation]);
 
   useEffect(() => {
@@ -230,7 +258,6 @@ export function ProjectWorkspace({
 
   const analysisBusy = selectedOperation ? busyKey === `analyze:${selectedOperation.id}` : false;
   const fileBusy = selectedOperation ? busyKey === `file:${selectedOperation.id}` : false;
-  const deleteBusy = selectedOperation ? busyKey === `delete:${selectedOperation.id}` : false;
 
   const focusWorkOriginField = (field: "x_mm" | "y_mm") => {
     workOriginRefs.current[field]?.focus();
@@ -376,43 +403,167 @@ export function ProjectWorkspace({
     );
   };
 
+  const continueWorkflow = () => {
+    const withoutFile = project.operaciones.find((operation) => !operation.archivo_gcode);
+    if (project.operaciones.length === 0 || withoutFile) {
+      setSelectedOperationId(withoutFile?.id ?? null);
+      setActiveView("archivo");
+      return;
+    }
+    const withoutAnalysis = project.operaciones.find((operation) => !operation.analisis || operation.analisis.analisis_desactualizado);
+    if (withoutAnalysis) {
+      setSelectedOperationId(withoutAnalysis.id);
+      setActiveView("trayectoria");
+      return;
+    }
+    if (!referenceSession?.machine_reference.confirmada || !referenceSession.origen_trabajo || !referenceSession.referencia_z) {
+      setActiveView("referencia");
+      return;
+    }
+    if (!heightMap) {
+      setActiveView("mapa");
+      return;
+    }
+    setActiveView("validacion");
+  };
+
+  const workflowStatus = (complete: boolean, started = false) => complete ? "completado" : started ? "en progreso" : "pendiente";
+
   const renderArchivo = () => (
     <div className="stack gap-md">
-      <article className="panel workflow-panel">
+      <article className="panel operation-workflow-panel">
         <div className="section-heading section-heading--stacked">
           <div>
-            <p className="eyebrow">Archivo</p>
-            <h3>Operaciones del proyecto</h3>
+            <p className="eyebrow">Proyecto / Montaje / Operaciones</p>
+            <h3>Flujo ordenado de procesos</h3>
           </div>
-          <p className="muted">Seleccione solo las operaciones necesarias. Ninguna acción aquí realiza movimientos físicos.</p>
+          <p className="muted">Cada operación conserva su propio archivo, análisis, trayectoria, advertencias, herramienta y estado.</p>
         </div>
-        <div className="workflow-grid">
-          {operationPresets.map((preset, index) => {
-            const operation = findPresetOperation(project, preset.clave);
-            const disabled = preset.cara === "inferior" && !project.doble_cara;
-            const isSelected = operation?.id === selectedOperationId;
+
+        <div className="setup-toolbar">
+          <label>
+            Montaje activo
+            <select
+              aria-label="Montaje activo"
+              value={selectedSetup?.id ?? ""}
+              onChange={(event) => {
+                const setupId = event.target.value;
+                setSelectedSetupId(setupId);
+                const firstOperation = project.operaciones
+                  .filter((operation) => operation.setup_id === setupId)
+                  .sort((a, b) => a.orden - b.orden)[0];
+                setSelectedOperationId(firstOperation?.id ?? null);
+              }}
+            >
+              {project.montajes.map((setup) => <option key={setup.id} value={setup.id}>{setup.nombre}</option>)}
+            </select>
+          </label>
+          <form
+            className="inline-create-form"
+            onSubmit={async (event) => {
+              event.preventDefault();
+              const name = newSetupName.trim();
+              if (!name) {
+                return;
+              }
+              await onAddSetup(name);
+              setNewSetupName("");
+            }}
+          >
+            <label>
+              Nuevo montaje
+              <input value={newSetupName} onChange={(event) => setNewSetupName(event.target.value)} placeholder="Ej. Cara inferior" />
+            </label>
+            <button className="button button--ghost" type="submit" disabled={!newSetupName.trim() || busyKey === "setup:add"}>Agregar montaje</button>
+          </form>
+        </div>
+
+        <form
+          className="operation-create-form"
+          onSubmit={async (event) => {
+            event.preventDefault();
+            if (!selectedSetup || !newOperationName.trim()) {
+              return;
+            }
+            await onAddOperation({
+              setup_id: selectedSetup.id,
+              nombre: newOperationName.trim(),
+              tipo: newOperationType,
+              herramienta: newOperationTool.trim() || null,
+            });
+          }}
+        >
+          <label>
+            Tipo de operación
+            <select
+              value={newOperationType}
+              onChange={(event) => {
+                const type = event.target.value;
+                setNewOperationType(type);
+                setNewOperationName(operationTypeOptions.find((item) => item.value === type)?.label ?? "Operación");
+              }}
+            >
+              {operationTypeOptions.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}
+            </select>
+          </label>
+          <label>
+            Nombre
+            <input value={newOperationName} onChange={(event) => setNewOperationName(event.target.value)} />
+          </label>
+          <label>
+            Herramienta
+            <input value={newOperationTool} onChange={(event) => setNewOperationTool(event.target.value)} placeholder="Ej. Broca 0,8 mm" />
+          </label>
+          <button className="button" type="submit" disabled={!selectedSetup || !newOperationName.trim() || busyKey === "operation:add"}>Agregar operación</button>
+        </form>
+
+        <div className="setup-operation-tree" aria-label="Operaciones por montaje">
+          {project.montajes.map((setup) => {
+            const operations = project.operaciones
+              .filter((operation) => operation.setup_id === setup.id)
+              .sort((a, b) => a.orden - b.orden);
             return (
-              <article key={preset.clave} className={`workflow-card${isSelected ? " workflow-card--selected" : ""}${disabled ? " workflow-card--disabled" : ""}`}>
-                <div className="workflow-card__header">
-                  <span className="workflow-step">{index + 1}</span>
-                  <div>
-                    <h4>{preset.etiqueta}</h4>
-                    <p className="muted">{preset.descripcion}</p>
-                  </div>
+              <section className="setup-group" key={setup.id}>
+                <div className="setup-group__header">
+                  <strong>{setup.nombre}</strong>
+                  <StatusBadge tone={operations.length > 0 ? "info" : "neutral"}>{operations.length} operaciones</StatusBadge>
                 </div>
-                <StatusBadge tone={disabled ? "neutral" : toneForStatus(operation?.estado ?? "sin configurar")}>
-                  {disabled ? "Solo para PCB doble cara" : operation ? translateStatus(operation.estado) : "Sin configurar"}
-                </StatusBadge>
-                {operation ? (
-                  <button className="button button--ghost" type="button" onClick={() => setSelectedOperationId(operation.id)}>
-                    Abrir operación
-                  </button>
-                ) : (
-                  <button className="button" type="button" disabled={disabled || busyKey === `add:${preset.clave}`} onClick={() => void onAddOperation(preset.clave)}>
-                    {busyKey === `add:${preset.clave}` ? "Configurando..." : "Configurar operación"}
-                  </button>
-                )}
-              </article>
+                {operations.length === 0 ? <p className="muted">Este montaje todavía no tiene operaciones.</p> : null}
+                {operations.map((operation, index) => (
+                  <div className={"operation-row" + (operation.id === selectedOperationId ? " operation-row--active" : "")} key={operation.id}>
+                    <button className="operation-row__select" type="button" onClick={() => setSelectedOperationId(operation.id)}>
+                      <span className="operation-order">{index + 1}</span>
+                      <span><strong>{operation.nombre}</strong><small>{translateOperationType(operation.tipo)} · {operation.nombre_archivo_original ?? "Sin G-code"}</small></span>
+                    </button>
+                    <StatusBadge tone={toneForStatus(operation.estado)}>{translateStatus(operation.estado)}</StatusBadge>
+                    <label className="operation-tool-field">
+                      <span className="sr-only">Herramienta de {operation.nombre}</span>
+                      <input
+                        aria-label={"Herramienta de " + operation.nombre}
+                        defaultValue={operation.herramienta ?? ""}
+                        placeholder="Herramienta"
+                        onBlur={(event) => void onUpdateOperation(operation.id, { nombre: operation.nombre, tool_id: operation.tool_id, herramienta: event.target.value || null })}
+                      />
+                    </label>
+                    <div className="operation-row__actions">
+                      <button type="button" className="icon-button" aria-label={"Mover arriba " + operation.nombre} disabled={index === 0} onClick={() => void onMoveOperation(operation.id, "up")}>↑</button>
+                      <button type="button" className="icon-button" aria-label={"Mover abajo " + operation.nombre} disabled={index === operations.length - 1} onClick={() => void onMoveOperation(operation.id, "down")}>↓</button>
+                      <button type="button" className="button button--ghost" onClick={async () => {
+                        const name = window.prompt("Nuevo nombre de la operación", operation.nombre)?.trim();
+                        if (name) {
+                          await onUpdateOperation(operation.id, { nombre: name, tool_id: operation.tool_id, herramienta: operation.herramienta });
+                        }
+                      }}>Renombrar</button>
+                      <button type="button" className="button button--ghost" onClick={() => void onDuplicateOperation(operation.id)}>Duplicar</button>
+                      <button type="button" className="button button--ghost button--danger" onClick={async () => {
+                        if (window.confirm("La operación seleccionada se eliminará del proyecto. ¿Desea continuar?")) {
+                          await onDeleteOperation(operation);
+                        }
+                      }}>Eliminar</button>
+                    </div>
+                  </div>
+                ))}
+              </section>
             );
           })}
         </div>
@@ -420,107 +571,113 @@ export function ProjectWorkspace({
 
       <article className="panel operation-detail-panel">
         <div className="section-heading">
-          <div>
-            <p className="eyebrow">Archivo</p>
-            <h3>{selectedOperation?.nombre ?? "Seleccione una operación"}</h3>
-          </div>
+          <div><p className="eyebrow">Archivo de la operación activa</p><h3>{selectedOperation?.nombre ?? "Seleccione una operación"}</h3></div>
           {selectedOperation ? <StatusBadge tone={toneForStatus(selectedOperation.estado)}>{translateStatus(selectedOperation.estado)}</StatusBadge> : null}
         </div>
         {selectedOperation ? (
           <>
             <dl className="definition-grid definition-grid--compact">
+              <div><dt>Montaje</dt><dd>{project.montajes.find((setup) => setup.id === selectedOperation.setup_id)?.nombre ?? "-"}</dd></div>
               <div><dt>Tipo</dt><dd>{translateOperationType(selectedOperation.tipo)}</dd></div>
-              <div><dt>Cara</dt><dd>{translateFace(selectedOperation.cara)}</dd></div>
+              <div><dt>Herramienta</dt><dd>{selectedOperation.herramienta ?? "Sin asignar"}</dd></div>
               <div><dt>Archivo</dt><dd>{selectedOperation.nombre_archivo_original ?? "Sin archivo"}</dd></div>
               <div><dt>Tamaño</dt><dd>{formatFileSize(selectedOperation.tamano_archivo_bytes)}</dd></div>
             </dl>
-
-            {selectedOperation.analisis?.analisis_desactualizado ? (
-              <div className="alert alert--warning">
-                Este análisis está desactualizado. Versión actual: {selectedOperation.analisis.current_analysis_version}.
-              </div>
-            ) : null}
-
+            {selectedOperation.analisis?.analisis_desactualizado ? <div className="alert alert--warning">Este análisis está desactualizado. Versión actual: {selectedOperation.analisis.current_analysis_version}.</div> : null}
             <div className="action-grid action-grid--inline">
               <label className="button file-button">
                 {selectedOperation.archivo_gcode ? "Reemplazar archivo" : "Cargar archivo"}
-                <input
-                  aria-label={`Cargar archivo para ${selectedOperation.nombre}`}
-                  type="file"
-                  accept=".nc,.gcode,.tap"
-                  disabled={fileBusy}
-                  onChange={async (event) => {
-                    const file = event.target.files?.[0];
-                    if (!file) {
-                      return;
-                    }
+                <input aria-label={"Cargar archivo para " + selectedOperation.nombre} type="file" accept=".nc,.gcode,.tap" disabled={fileBusy} onChange={async (event) => {
+                  const file = event.target.files?.[0];
+                  if (file) {
                     await onUploadFile(selectedOperation, file);
                     event.target.value = "";
-                  }}
-                />
+                  }
+                }} />
               </label>
               <button className="button button--ghost" type="button" disabled={!selectedOperation.archivo_gcode || analysisBusy} onClick={() => void onAnalyze(selectedOperation)}>
                 {analysisBusy ? "Analizando archivo..." : selectedOperation.analisis?.analisis_desactualizado ? "Volver a analizar" : "Analizar archivo"}
               </button>
-              <button
-                className="button button--ghost"
-                type="button"
-                disabled={!selectedOperation.archivo_gcode || fileBusy}
-                onClick={async () => {
-                  if (window.confirm("Se quitará la asociación del archivo actual. ¿Desea continuar?")) {
-                    await onRemoveFile(selectedOperation);
-                  }
-                }}
-              >
-                Eliminar asociación
-              </button>
-              <button
-                className="button button--ghost button--danger"
-                type="button"
-                disabled={deleteBusy}
-                onClick={async () => {
-                  if (window.confirm("La operación seleccionada se eliminará del proyecto. ¿Desea continuar?")) {
-                    await onDeleteOperation(selectedOperation);
-                  }
-                }}
-              >
-                Eliminar operación
-              </button>
+              <button className="button button--ghost" type="button" disabled={!selectedOperation.archivo_gcode || fileBusy} onClick={async () => {
+                if (window.confirm("Se quitará la asociación del archivo actual. ¿Desea continuar?")) {
+                  await onRemoveFile(selectedOperation);
+                }
+              }}>Eliminar asociación</button>
             </div>
           </>
-        ) : (
-          <p className="muted">Seleccione una operación configurada para gestionar archivo y análisis.</p>
-        )}
+        ) : <p className="muted">Seleccione una operación para gestionar su archivo y análisis.</p>}
       </article>
     </div>
   );
 
   const renderTrayectoria = () => {
+    const selector = (
+      <article className="panel operation-selector-panel">
+        <label>
+          Operación activa
+          <select
+            aria-label="Operación activa"
+            value={selectedOperationId ?? ""}
+            onChange={(event) => setSelectedOperationId(event.target.value || null)}
+          >
+            <option value="">Seleccione una operación</option>
+            {project.montajes.map((setup) => (
+              <optgroup key={setup.id} label={setup.nombre}>
+                {project.operaciones
+                  .filter((operation) => operation.setup_id === setup.id)
+                  .sort((a, b) => a.orden - b.orden)
+                  .map((operation) => <option key={operation.id} value={operation.id}>{operation.orden + 1}. {operation.nombre}</option>)}
+              </optgroup>
+            ))}
+          </select>
+        </label>
+        {selectedOperation ? (
+          <div className="operation-selector-meta">
+            <span><strong>Archivo:</strong> {selectedOperation.nombre_archivo_original ?? "Sin G-code"}</span>
+            <span><strong>Herramienta:</strong> {selectedOperation.herramienta ?? "Sin asignar"}</span>
+            <span><strong>Estado:</strong> {translateStatus(selectedOperation.estado)}</span>
+          </div>
+        ) : null}
+      </article>
+    );
     if (!selectedOperation) {
-      return <div className="panel empty-state"><p>Seleccione una operación para ver su trayectoria.</p></div>;
+      return <div className="stack gap-md">{selector}<div className="panel empty-state"><p>Seleccione una operación para ver su trayectoria.</p></div></div>;
+    }
+    if (!selectedOperation.archivo_gcode) {
+      return <div className="stack gap-md">{selector}<div className="panel empty-state"><p>Esta operación todavía no tiene G-code.</p></div></div>;
     }
     if (!selectedOperation.analisis) {
-      return <div className="panel empty-state"><p>Esta operación todavía no tiene análisis de trayectoria.</p></div>;
+      return <div className="stack gap-md">{selector}<div className="panel empty-state"><p>Analice el archivo de esta operación para ver su trayectoria.</p></div></div>;
     }
     return (
       <div className="stack gap-md">
+        {selector}
         <article className="panel analysis-summary-panel">
           <div className="section-heading section-heading--stacked">
-            <div>
-              <p className="eyebrow">Trayectoria</p>
-              <h3>Alturas de la trayectoria G-code</h3>
-            </div>
-            <p className="muted">Estas métricas pertenecen al G-code y no se mezclan con las alturas del mapa de superficie.</p>
+            <div><p className="eyebrow">Trayectoria exclusiva de {selectedOperation.nombre}</p><h3>Alturas de la trayectoria G-code</h3></div>
+            <p className="muted">Estas métricas y advertencias pertenecen únicamente a la operación activa.</p>
           </div>
           <div className="info-grid info-grid--double compact-grid">
             <div className="metric-box"><span>Movimientos</span><strong>{selectedOperation.analisis.cantidad_movimientos}</strong></div>
-            <div className="metric-box"><span>Avances</span><strong>{selectedOperation.analisis.avances_mm_min.join(", ") || "-"}</strong></div>
+            <div className="metric-box"><span>Advertencias</span><strong>{selectedOperation.analisis.incidencias.length}</strong></div>
+            <div className="metric-box"><span>X</span><strong>{formatMillimeters(selectedOperation.analisis.limites?.ancho_mm, 3)}</strong></div>
+            <div className="metric-box"><span>Y</span><strong>{formatMillimeters(selectedOperation.analisis.limites?.alto_mm, 3)}</strong></div>
             <div className="metric-box"><span>Z mínima</span><strong>{formatMillimeters(selectedOperation.analisis.profundidad_min_mm, 3)}</strong></div>
             <div className="metric-box"><span>Z máxima</span><strong>{formatMillimeters(selectedOperation.analisis.profundidad_max_mm, 3)}</strong></div>
           </div>
+          {selectedOperation.analisis.incidencias.length > 0 ? (
+            <ul className="compact-issue-list">
+              {selectedOperation.analisis.incidencias.map((issue, index) => <li key={issue.codigo + index}>{issue.mensaje}</li>)}
+            </ul>
+          ) : null}
         </article>
         <article className="panel viewer-panel">
-          <ToolpathViewer material={project.material} analysis={selectedOperation.analisis} operationName={selectedOperation.nombre} />
+          <ToolpathViewer
+            material={project.material}
+            analysis={selectedOperation.analisis}
+            operationName={selectedOperation.nombre}
+            storageKey={project.id + ":" + selectedOperation.id}
+          />
         </article>
       </div>
     );
@@ -893,6 +1050,33 @@ export function ProjectWorkspace({
           </div>
         ) : <p className="muted">Seleccione una operación para abrir el workspace.</p>}
       </article>
+
+      <details className="panel workflow-guide">
+        <summary>Flujo de trabajo</summary>
+        <div className="workflow-guide__content">
+          <ol className="workflow-guide__steps">
+            <li data-status="completado"><span>Proyecto</span><strong>completado</strong></li>
+            <li data-status={workflowStatus(project.montajes.length > 0)}><span>Montajes</span><strong>{workflowStatus(project.montajes.length > 0)}</strong></li>
+            <li data-status={workflowStatus(project.operaciones.length > 0)}><span>Operaciones</span><strong>{workflowStatus(project.operaciones.length > 0)}</strong></li>
+            <li data-status={workflowStatus(project.operaciones.length > 0 && project.operaciones.every((operation) => Boolean(operation.archivo_gcode)), project.operaciones.some((operation) => Boolean(operation.archivo_gcode)))}><span>Archivos G-code</span><strong>{workflowStatus(project.operaciones.length > 0 && project.operaciones.every((operation) => Boolean(operation.archivo_gcode)), project.operaciones.some((operation) => Boolean(operation.archivo_gcode)))}</strong></li>
+            <li data-status={workflowStatus(project.operaciones.length > 0 && project.operaciones.every((operation) => Boolean(operation.analisis)), project.operaciones.some((operation) => Boolean(operation.analisis)))}><span>Análisis</span><strong>{workflowStatus(project.operaciones.length > 0 && project.operaciones.every((operation) => Boolean(operation.analisis)), project.operaciones.some((operation) => Boolean(operation.analisis)))}</strong></li>
+            <li data-status={workflowStatus(Boolean(referenceSession?.referencia_z), Boolean(referenceSession?.origen_trabajo))}><span>Referencias</span><strong>{workflowStatus(Boolean(referenceSession?.referencia_z), Boolean(referenceSession?.origen_trabajo))}</strong></li>
+            <li data-status={workflowStatus(Boolean(heightMap))}><span>Mapa</span><strong>{workflowStatus(Boolean(heightMap))}</strong></li>
+            <li data-status={workflowStatus(Boolean(referenceSession?.lista_para_compensacion), Boolean(referenceSession?.motivo_invalidacion))}><span>Validación</span><strong>{workflowStatus(Boolean(referenceSession?.lista_para_compensacion), Boolean(referenceSession?.motivo_invalidacion))}</strong></li>
+          </ol>
+          <div className="workflow-progress-tree">
+            {project.montajes.map((setup) => (
+              <div key={setup.id}>
+                <strong>{setup.nombre}</strong>
+                {project.operaciones.filter((operation) => operation.setup_id === setup.id).map((operation) => (
+                  <span key={operation.id}>{operation.analisis ? "✓" : operation.archivo_gcode ? "!" : "○"} {operation.nombre}</span>
+                ))}
+              </div>
+            ))}
+          </div>
+          <button className="button" type="button" onClick={continueWorkflow}>Continuar con el siguiente paso</button>
+        </div>
+      </details>
 
       <article className="panel workspace-navigation-panel">
         <div className="toolbar-inline toolbar-inline--scrollable workspace-tabs" role="tablist" aria-label="Navegación del workspace">

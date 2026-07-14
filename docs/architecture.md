@@ -2,7 +2,7 @@
 
 ## Objetivo de esta fase
 
-La Fase 4.2 reorganiza el workspace, corrige el modelo del mapa de alturas y añade un flujo de referencia completamente simulado, manteniendo todo el sistema en **modo seguro y sin control físico**.
+La Fase 4.3 estabiliza el workspace responsive e introduce montajes y operaciones ordenadas sobre el flujo simulado de mapa y referencias, manteniendo todo el sistema en **modo seguro y sin control físico**.
 
 ## Capas productivas
 
@@ -28,21 +28,32 @@ Módulos funcionales principales:
 - `gcode/`: análisis sintáctico y geométrico del archivo cargado.
 - `heightmap/`: modelos, interpolación, simulación y previsualización matemática de compensación.
 - `application/heightmap_service.py`: reglas de negocio del mapa y persistencia asociada.
-- `application/reference_service.py`: sesión de preparación simulada por operación.
+- `application/reference_service.py`: sesión de preparación simulada compartida por montaje.
 - `application/services.py`: proyectos, sesión de máquina simulada y estado general.
 
 ## Flujo de datos actual
 
-1. El usuario crea un proyecto y una operación desde la interfaz web.
-2. FastAPI valida el payload y lo entrega a `ProjectService`.
-3. `JsonProjectRepository` persiste el proyecto en `data/projects/<id>/project.json`.
-4. El usuario carga un archivo `.nc`, `.gcode` o `.tap`.
-5. El analizador produce límites, incidencias, alturas de trayectoria, metadatos y `analysis_version`.
-6. El frontend muestra la trayectoria y detecta si el análisis guardado quedó obsoleto respecto a la versión actual.
-7. La sesión de referencia simulada confirma estado de máquina, origen X/Y y referencia Z sin mover hardware.
-8. `HeightMapService` valida `probe_region`, exclusiones, muestras y dominio interpolable.
-9. `heightmap/analysis.py` interpola solo dentro de la región medida y nunca compensa fuera del dominio.
-10. `heightmap/compensation.py` genera una vista previa matemática sobre la trayectoria, subdividiendo segmentos cuando hace falta.
+1. El usuario crea un proyecto; el dominio crea automáticamente “Montaje principal”.
+2. Cada operación se asigna a un montaje mediante setup_id y conserva su propio archivo, herramienta, análisis y estado.
+3. FastAPI valida el payload y lo entrega a `ProjectService`.
+4. `JsonProjectRepository` persiste el proyecto en `data/projects/<id>/project.json`.
+5. El usuario carga un archivo `.nc`, `.gcode` o `.tap`.
+6. El analizador produce límites, incidencias, alturas de trayectoria, metadatos y `analysis_version`.
+7. El frontend muestra la trayectoria y detecta si el análisis guardado quedó obsoleto respecto a la versión actual.
+8. La sesión de referencia simulada confirma estado de máquina, origen X/Y y referencia Z sin mover hardware.
+9. `HeightMapService` valida `probe_region`, exclusiones, muestras y dominio interpolable.
+10. `heightmap/analysis.py` interpola solo dentro de la región medida y nunca compensa fuera del dominio.
+11. `heightmap/compensation.py` genera una vista previa matemática sobre la trayectoria, subdividiendo segmentos cuando hace falta.
+
+## Jerarquía de preparación
+
+```text
+ProyectoPCB
+└── MontajePCB (preparación, referencias y mapa)
+    └── OperacionPCB (archivo, herramienta, análisis, trayectoria y estado)
+```
+
+El esquema 1.4 acepta operaciones repetidas del mismo tipo dentro de un montaje. Los órdenes son únicos solo dentro de cada montaje. Al leer un proyecto antiguo sin `setup_id` se crea “Montaje principal”; los mapas legados bajo `maps/<operation_id>` se adoptan sin eliminar el original.
 
 ## Modelo de mapa de alturas
 
@@ -87,7 +98,7 @@ Restricciones de negocio:
 Separación de sesión:
 
 - la referencia de máquina pertenece a la sesión de máquina;
-- origen X/Y, referencia Z, mapa y validación pertenecen a la operación;
+- origen X/Y, referencia Z, región sondeable, mapa y validación pertenecen al montaje y se comparten entre sus operaciones;
 - si se pierde la sesión de máquina, la referencia vuelve a estado desconocido;
 - no se asume homing real en ningún punto.
 

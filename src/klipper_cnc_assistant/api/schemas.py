@@ -5,6 +5,7 @@ from pydantic import BaseModel, Field
 from klipper_cnc_assistant.domain import (
     AnalysisIssue,
     MachineSessionStatus,
+    MontajePCB,
     MaterialOverflow,
     OperacionPCB,
     OperationAnalysis,
@@ -29,6 +30,10 @@ class SystemInfoResponse(BaseModel):
     estado_api: str
     modo_maquina: str
     hora_servidor: str
+    backend_version: str
+    frontend_build: str
+    git_commit: str | None
+    schema_version: str
 
 
 class ErrorResponse(BaseModel):
@@ -59,12 +64,32 @@ class ProjectUpdateRequest(ProjectCreateRequest):
     pass
 
 
+class SetupCreateRequest(BaseModel):
+    nombre: str = Field(min_length=1)
+
+
+class SetupUpdateRequest(SetupCreateRequest):
+    pass
+
+
 class OperationCreateRequest(BaseModel):
     nombre: str = Field(min_length=1)
     tipo: str
-    cara: str
-    orden: int = Field(ge=0)
+    cara: str | None = None
+    orden: int | None = Field(default=None, ge=0)
+    setup_id: str | None = None
+    tool_id: str | None = None
     herramienta: str | None = None
+
+
+class OperationUpdateRequest(BaseModel):
+    nombre: str = Field(min_length=1)
+    tool_id: str | None = None
+    herramienta: str | None = None
+
+
+class OperationMoveRequest(BaseModel):
+    direccion: str
 
 
 class GCodeUploadRequest(BaseModel):
@@ -161,16 +186,24 @@ class OperationAnalysisResponse(BaseModel):
     tolerancia_arco_mm: float | None
 
 
+class SetupResponse(BaseModel):
+    id: str
+    nombre: str
+    orden: int
+
+
 class OperationResponse(BaseModel):
     id: str
     nombre: str
     tipo: str
     cara: str
     orden: int
+    setup_id: str
     archivo_gcode: str | None
     nombre_archivo_original: str | None
     tamano_archivo_bytes: int | None
     sha256: str | None
+    tool_id: str | None
     herramienta: str | None
     estado: str
     analisis: OperationAnalysisResponse | None
@@ -183,6 +216,7 @@ class ProjectResponse(BaseModel):
     doble_cara: bool
     eje_volteo: str | None
     agujeros_alineacion: list[AgujeroAlineacionResponse]
+    montajes: list[SetupResponse]
     operaciones: list[OperationResponse]
     creado_en: str
     actualizado_en: str
@@ -264,12 +298,17 @@ def project_to_response(project: ProyectoPCB) -> ProjectResponse:
             )
             for hole in project.configuracion_alineacion.agujeros_alineacion
         ],
+        montajes=[setup_to_response(setup) for setup in project.montajes],
         operaciones=[operation_to_response(operation) for operation in project.operaciones],
         creado_en=project.creado_en.isoformat(),
         actualizado_en=project.actualizado_en.isoformat(),
         version_esquema=project.version_esquema,
         estado_general=project.estado_general,
     )
+
+
+def setup_to_response(setup: MontajePCB) -> SetupResponse:
+    return SetupResponse(id=setup.id, nombre=setup.nombre, orden=setup.orden)
 
 
 def operation_to_response(operation: OperacionPCB) -> OperationResponse:
@@ -279,10 +318,12 @@ def operation_to_response(operation: OperacionPCB) -> OperationResponse:
         tipo=operation.tipo,
         cara=operation.cara,
         orden=operation.orden,
+        setup_id=operation.setup_id,
         archivo_gcode=operation.archivo_gcode,
         nombre_archivo_original=operation.nombre_archivo_original,
         tamano_archivo_bytes=operation.tamano_archivo_bytes,
         sha256=operation.sha256,
+        tool_id=operation.tool_id,
         herramienta=operation.herramienta,
         estado=operation.estado,
         analisis=None if operation.analisis is None else analysis_to_response(operation.analisis),

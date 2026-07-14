@@ -164,3 +164,66 @@ class ApiTest(unittest.TestCase):
             response = client.post(f"/api/projects/{project_id}/operations/{operation_id}/reference-session/machine-reference")
             self.assertEqual(response.status_code, 200)
             client.close()
+
+
+    def test_setup_operations_api_and_shared_references(self) -> None:
+        project_id = self._create_project()
+        project = self.client.get(f"/api/projects/{project_id}").json()
+        setup_id = project["montajes"][0]["id"]
+        first = self.client.post(
+            f"/api/projects/{project_id}/operations",
+            json={
+                "setup_id": setup_id, "nombre": "Taladrado 0,8 mm",
+                "tipo": "taladrado", "herramienta": "Broca 0,8 mm",
+            },
+        ).json()
+        second = self.client.post(
+            f"/api/projects/{project_id}/operations",
+            json={
+                "setup_id": setup_id, "nombre": "Taladrado 1,0 mm",
+                "tipo": "taladrado", "herramienta": "Broca 1,0 mm",
+            },
+        ).json()
+        self.assertEqual(first["setup_id"], setup_id)
+        self.assertEqual(second["orden"], 1)
+
+        self.client.post(
+            f"/api/projects/{project_id}/operations/{first['id']}/reference-session/machine-reference"
+        )
+        self.client.post(
+            f"/api/projects/{project_id}/operations/{first['id']}/reference-session/work-origin",
+            json={"x_mm": 0, "y_mm": 0},
+        )
+        shared = self.client.get(
+            f"/api/projects/{project_id}/operations/{second['id']}/reference-session"
+        ).json()
+        self.assertEqual(shared["origen_trabajo"]["x_mm"], 0)
+        self.assertEqual(shared["origen_trabajo"]["y_mm"], 0)
+
+        simulated = self.client.post(
+            f"/api/projects/{project_id}/operations/{first['id']}/height-map/simulate",
+            json={
+                "filas": 3,
+                "columnas": 3,
+                "superficie_simulada": "inclinada",
+                "repeticion_simulacion": 4,
+                "probe_region": {
+                    "min_x_mm": 2, "min_y_mm": 2,
+                    "max_x_mm": 78, "max_y_mm": 48,
+                },
+                "exclusion_zones": [],
+            },
+        )
+        self.assertEqual(simulated.status_code, 200)
+        shared_map = self.client.get(
+            f"/api/projects/{project_id}/operations/{second['id']}/height-map"
+        )
+        self.assertEqual(shared_map.status_code, 200)
+        self.assertEqual(shared_map.json()["version"], simulated.json()["version"])
+
+    def test_system_info_exposes_build_compatibility(self) -> None:
+        payload = self.client.get("/api/system/info").json()
+        self.assertIn("backend_version", payload)
+        self.assertIn("frontend_build", payload)
+        self.assertIn("git_commit", payload)
+        self.assertEqual(payload["schema_version"], "1.4")

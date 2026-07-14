@@ -36,6 +36,9 @@ La interfaz está completamente en español e incluye:
 - dashboard de trabajo;
 - listado real de proyectos;
 - formulario de creación y edición;
+- gestor de montajes y operaciones ordenadas, repetibles y con herramienta propia;
+- selector de operación activa que nunca mezcla trayectorias;
+- guía “Flujo de trabajo” con progreso global, por montaje y por operación;
 - workspace por pestañas internas: Archivo, Trayectoria, Referencia, Mapa de alturas y Validación;
 - carga de G-code por archivo real;
 - análisis técnico por operación con aviso de análisis desactualizado;
@@ -46,12 +49,13 @@ La interfaz está completamente en español e incluye:
 
 ## Workspace de operación
 
-`components/ProjectWorkspace.tsx` concentra la navegación de la operación y muestra una sola sección principal a la vez.
+`components/ProjectWorkspace.tsx` concentra la navegación del proyecto, montaje y operación activa y muestra una sola sección principal a la vez.
 
 Resumen fijo:
 
 - proyecto activo;
-- operación activa;
+- montaje y operación activa;
+- archivo y herramienta de la operación seleccionada;
 - estado de análisis;
 - estado del mapa;
 - estado de referencia simulada.
@@ -135,6 +139,10 @@ La vista del mapa distingue:
 - escala Z exagerada como estado inicial;
 - cambio a escala Z real;
 - factor de exageración visible sin alterar los valores reales en etiquetas ni tooltips.
+
+## Compatibilidad de build
+
+La respuesta `/api/system/info` incluye `backend_version`, `frontend_build`, `git_commit` y `schema_version`. Si el esquema servido no coincide con el esperado por React, la interfaz bloquea el workspace, muestra “La aplicación necesita actualizarse” y ofrece “Recargar aplicación”.
 
 ## Desarrollo local
 

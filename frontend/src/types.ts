@@ -13,6 +13,10 @@ export type SystemInfoResponse = {
   estado_api: string;
   modo_maquina: string;
   hora_servidor: string;
+  backend_version: string;
+  frontend_build: string;
+  git_commit: string | null;
+  schema_version: string;
 };
 
 export type Material = {
@@ -278,16 +282,24 @@ export type CompensationPreview = {
   segmentos: CompensationPreviewSegment[];
 };
 
+export type Setup = {
+  id: string;
+  nombre: string;
+  orden: number;
+};
+
 export type Operation = {
   id: string;
   nombre: string;
   tipo: string;
   cara: string;
   orden: number;
+  setup_id: string;
   archivo_gcode: string | null;
   nombre_archivo_original: string | null;
   tamano_archivo_bytes: number | null;
   sha256: string | null;
+  tool_id: string | null;
   herramienta: string | null;
   estado: string;
   analisis: OperationAnalysis | null;
@@ -300,6 +312,7 @@ export type Project = {
   doble_cara: boolean;
   eje_volteo: string | null;
   agujeros_alineacion: AgujeroAlineacion[];
+  montajes: Setup[];
   operaciones: Operation[];
   creado_en: string;
   actualizado_en: string;

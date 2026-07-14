@@ -85,7 +85,7 @@ class HeightMapService:
                 estado="region sondeable configurada",
             )
             reason = "Se invalidó la preparación porque cambió la región sondeable."
-        self.repository.save_height_map_payload(project_id, operation_id, self._serialize_map(height_map))
+        self.repository.save_height_map_payload(project_id, self._map_key(project_id, operation_id), self._serialize_map(height_map))
         if self._has_measured_data(height_map):
             self._mark_map_available(project_id, operation_id, reason=reason)
         else:
@@ -131,7 +131,7 @@ class HeightMapService:
             superficie_simulada=superficie_simulada,
             repeticion_simulacion=repeticion_simulacion,
         )
-        self.repository.save_height_map_payload(project_id, operation_id, self._serialize_map(height_map))
+        self.repository.save_height_map_payload(project_id, self._map_key(project_id, operation_id), self._serialize_map(height_map))
         self._mark_map_available(project_id, operation_id, reason="Se invalidó la preparación porque se generó un nuevo mapa simulado.")
         return height_map
 
@@ -161,7 +161,7 @@ class HeightMapService:
             muestras=samples,
             estado="importado",
         )
-        self.repository.save_height_map_payload(project_id, operation_id, self._serialize_map(height_map))
+        self.repository.save_height_map_payload(project_id, self._map_key(project_id, operation_id), self._serialize_map(height_map))
         self._mark_map_available(project_id, operation_id, reason="Se invalidó la preparación porque se importó un mapa nuevo.")
         return height_map
 
@@ -191,17 +191,38 @@ class HeightMapService:
             muestras=samples,
             estado="importado",
         )
-        self.repository.save_height_map_payload(project_id, operation_id, self._serialize_map(height_map))
+        self.repository.save_height_map_payload(project_id, self._map_key(project_id, operation_id), self._serialize_map(height_map))
         self._mark_map_available(project_id, operation_id, reason="Se invalidó la preparación porque se importó un mapa nuevo.")
         return height_map
 
     def get_map(self, project_id: str, operation_id: str) -> HeightMap:
-        self._load_project(project_id).get_operation(operation_id)
+        project = self._load_project(project_id)
+        operation = project.get_operation(operation_id)
+        map_key = operation.setup_id
         try:
-            payload = self.repository.load_height_map_payload(project_id, operation_id)
-        except FileNotFoundError as error:
-            raise NotFoundError(str(error)) from error
+            payload = self.repository.load_height_map_payload(project_id, map_key)
+        except FileNotFoundError:
+            payload = self._load_legacy_map(project, operation_id)
+            if payload is None:
+                raise NotFoundError(
+                    f"El mapa de alturas para el montaje {map_key} no existe."
+                )
+            self.repository.save_height_map_payload(project_id, map_key, payload)
         return self._deserialize_map(payload)
+
+    def _load_legacy_map(self, project, operation_id: str) -> dict | None:
+        operation = project.get_operation(operation_id)
+        candidates = (operation_id,) + tuple(
+            item.id
+            for item in project.operations_for_setup(operation.setup_id)
+            if item.id != operation_id
+        )
+        for candidate in candidates:
+            try:
+                return self.repository.load_height_map_payload(project.id, candidate)
+            except FileNotFoundError:
+                continue
+        return None
 
     def get_statistics(self, project_id: str, operation_id: str):
         return self.get_map(project_id, operation_id).estadisticas
@@ -239,14 +260,14 @@ class HeightMapService:
         if not found:
             raise NotFoundError(f"La muestra '{sample_id}' no existe.")
         recalculated = self._rebuild(current, updated_samples)
-        self.repository.save_height_map_payload(project_id, operation_id, self._serialize_map(recalculated))
+        self.repository.save_height_map_payload(project_id, self._map_key(project_id, operation_id), self._serialize_map(recalculated))
         self._mark_map_available(project_id, operation_id, reason="Se invalidó la preparación porque cambió el contenido del mapa.")
         return recalculated
 
     def recalculate_map(self, project_id: str, operation_id: str) -> HeightMap:
         current = self.get_map(project_id, operation_id)
         recalculated = self._rebuild(current, list(current.muestras))
-        self.repository.save_height_map_payload(project_id, operation_id, self._serialize_map(recalculated))
+        self.repository.save_height_map_payload(project_id, self._map_key(project_id, operation_id), self._serialize_map(recalculated))
         self._mark_map_available(project_id, operation_id, reason="Se invalidó la preparación porque se recalculó el mapa.")
         return recalculated
 
@@ -265,7 +286,7 @@ class HeightMapService:
     def delete_map(self, project_id: str, operation_id: str) -> None:
         self._load_project(project_id).get_operation(operation_id)
         try:
-            self.repository.delete_height_map(project_id, operation_id)
+            self.repository.delete_height_map(project_id, self._map_key(project_id, operation_id))
         except FileNotFoundError as error:
             raise NotFoundError(str(error)) from error
         self._update_preparation(project_id, operation_id, lambda _: OperationPreparation())
@@ -301,12 +322,16 @@ class HeightMapService:
         except ProjectValidationError as error:
             raise ApplicationError(str(error)) from error
 
+    def _map_key(self, project_id: str, operation_id: str) -> str:
+        project = self._load_project(project_id)
+        return project.get_operation(operation_id).setup_id
+
     def _next_version(self, project_id: str, operation_id: str) -> int:
         try:
-            current = self.repository.load_height_map_payload(project_id, operation_id)
-        except FileNotFoundError:
+            current = self.get_map(project_id, operation_id)
+        except NotFoundError:
             return 1
-        return int(current.get("version", 0)) + 1
+        return current.version + 1
 
     def _grid_from_region(self, probe_region: ProbeRegion, filas: int, columnas: int) -> HeightGrid:
         if filas < 2 or columnas < 2:
@@ -413,9 +438,9 @@ class HeightMapService:
 
     def _update_preparation(self, project_id: str, operation_id: str, updater) -> None:
         project = self._load_project(project_id)
-        operation = project.get_operation(operation_id)
-        updated_operation = replace(operation, preparacion=updater(operation.preparacion))
-        self.repository.save_project(project.replace_operation(updated_operation))
+        setup = project.setup_for_operation(operation_id)
+        updated_setup = replace(setup, preparacion=updater(setup.preparacion))
+        self.repository.save_project(project.replace_setup(updated_setup))
 
     def _try_get_map(self, project_id: str, operation_id: str) -> HeightMap | None:
         try:

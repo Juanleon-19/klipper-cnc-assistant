@@ -119,6 +119,7 @@ const project: Project = {
   doble_cara: false,
   eje_volteo: null,
   agujeros_alineacion: [],
+  montajes: [{ id: "setup-main", nombre: "Montaje principal", orden: 0 }],
   operaciones: [
     {
       id: "op_1",
@@ -126,10 +127,12 @@ const project: Project = {
       tipo: "aislamiento",
       cara: "superior",
       orden: 0,
+      setup_id: "setup-main",
       archivo_gcode: "originals/job.nc",
       nombre_archivo_original: "job.nc",
       tamano_archivo_bytes: 120,
       sha256: "abc",
+      tool_id: null,
       herramienta: "V-bit 30",
       estado: "valida",
       analisis: {
@@ -174,7 +177,11 @@ function renderWorkspace() {
       busyKey={null}
       savingProject={false}
       onSaveProject={vi.fn()}
+      onAddSetup={vi.fn()}
       onAddOperation={vi.fn()}
+      onUpdateOperation={vi.fn()}
+      onDuplicateOperation={vi.fn()}
+      onMoveOperation={vi.fn()}
       onDeleteOperation={vi.fn()}
       onRemoveFile={vi.fn()}
       onAnalyze={vi.fn()}
@@ -308,5 +315,79 @@ describe("ProjectWorkspace", () => {
     expect(screen.getByRole("button", { name: /Previsualizar compensación/i })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /Exportar/i })).toBeNull();
     expect(screen.queryByText(/Descargar G-code/i)).toBeNull();
+  });
+
+  it("crea una operación repetible dentro del montaje activo", async () => {
+    const onAddOperation = vi.fn().mockResolvedValue(undefined);
+    render(
+      <ProjectWorkspace
+        project={project}
+        busyKey={null}
+        savingProject={false}
+        onSaveProject={vi.fn()}
+        onAddSetup={vi.fn()}
+        onAddOperation={onAddOperation}
+        onUpdateOperation={vi.fn()}
+        onDuplicateOperation={vi.fn()}
+        onMoveOperation={vi.fn()}
+        onDeleteOperation={vi.fn()}
+        onRemoveFile={vi.fn()}
+        onAnalyze={vi.fn()}
+        onUploadFile={vi.fn()}
+      />
+    );
+
+    fireEvent.change(screen.getByLabelText(/Tipo de operación/i), { target: { value: "taladrado" } });
+    fireEvent.change(screen.getByLabelText("Nombre"), { target: { value: "Taladrado 0,8 mm" } });
+    fireEvent.change(screen.getByLabelText("Herramienta"), { target: { value: "Broca 0,8 mm" } });
+    fireEvent.click(screen.getByRole("button", { name: /Agregar operación/i }));
+
+    await waitFor(() => expect(onAddOperation).toHaveBeenCalledWith({
+      setup_id: "setup-main",
+      nombre: "Taladrado 0,8 mm",
+      tipo: "taladrado",
+      herramienta: "Broca 0,8 mm",
+    }));
+  });
+
+  it("selecciona una trayectoria independiente por operation_id", async () => {
+    const secondProject: Project = {
+      ...project,
+      operaciones: [
+        ...project.operaciones,
+        {
+          ...project.operaciones[0],
+          id: "op_2",
+          nombre: "Taladrado 1,0 mm",
+          tipo: "taladrado",
+          orden: 1,
+          archivo_gcode: null,
+          nombre_archivo_original: null,
+          analisis: null,
+        },
+      ],
+    };
+    render(
+      <ProjectWorkspace
+        project={secondProject}
+        busyKey={null}
+        savingProject={false}
+        onSaveProject={vi.fn()}
+        onAddSetup={vi.fn()}
+        onAddOperation={vi.fn()}
+        onUpdateOperation={vi.fn()}
+        onDuplicateOperation={vi.fn()}
+        onMoveOperation={vi.fn()}
+        onDeleteOperation={vi.fn()}
+        onRemoveFile={vi.fn()}
+        onAnalyze={vi.fn()}
+        onUploadFile={vi.fn()}
+      />
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Trayectoria" }));
+    fireEvent.change(screen.getByLabelText(/Operación activa/i), { target: { value: "op_2" } });
+    expect(await screen.findByText("Esta operación todavía no tiene G-code.")).toBeInTheDocument();
+    expect(screen.getAllByText(/Taladrado 1,0 mm/).length).toBeGreaterThan(0);
   });
 });
