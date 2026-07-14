@@ -13,6 +13,7 @@ from .models import (
     OperationStatus,
     OperationType,
     OperacionPCB,
+    PreviewSegment,
     ProyectoPCB,
     PROJECT_SCHEMA_VERSION,
 )
@@ -32,6 +33,7 @@ __all__ = [
     "OperationStatus",
     "OperationType",
     "OperacionPCB",
+    "PreviewSegment",
     "PROJECT_SCHEMA_VERSION",
     "ProjectValidationError",
     "ProyectoPCB",

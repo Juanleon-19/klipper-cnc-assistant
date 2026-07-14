@@ -8,6 +8,7 @@ from klipper_cnc_assistant.domain import (
     IssueSeverity,
     MaterialBruto,
     OperationAnalysis,
+    PreviewSegment,
 )
 
 from .models import GCodeLine, GCodeToken, ModalState
@@ -72,9 +73,7 @@ def _update_bounds(
             bounds[key] = max(current, value)
 
 
-def _build_bounds(
-    bounds: dict[str, float | None],
-) -> Bounds3D | None:
+def _build_bounds(bounds: dict[str, float | None]) -> Bounds3D | None:
     if bounds["min_x"] is None:
         return None
     return Bounds3D(
@@ -128,13 +127,14 @@ def analyze_gcode_text(
     unknown_commands: list[str] = []
     unsupported_commands: list[str] = []
     issues: list[AnalysisIssue] = []
+    preview_segments: list[PreviewSegment] = []
     movement_count = 0
     analysis_incomplete = False
 
     for line in lines:
         if not line.tokens:
             continue
-        _handle_line(
+        movement_count, line_incomplete = _handle_line(
             line=line,
             state=state,
             bounds=bounds,
@@ -144,13 +144,10 @@ def analyze_gcode_text(
             unknown_commands=unknown_commands,
             unsupported_commands=unsupported_commands,
             issues=issues,
-            movement_count_ref=[movement_count],
+            preview_segments=preview_segments,
+            movement_count=movement_count,
         )
-        movement_count = _handle_line.last_movement_count
-        analysis_incomplete = (
-            analysis_incomplete
-            or _handle_line.last_analysis_incomplete
-        )
+        analysis_incomplete = analysis_incomplete or line_incomplete
 
     limits = _build_bounds(bounds)
     analysis = OperationAnalysis(
@@ -163,14 +160,11 @@ def analyze_gcode_text(
         comandos_no_compatibles=tuple(unsupported_commands),
         acciones_husillo=tuple(spindle_actions),
         cambios_herramienta=tuple(tool_changes),
-        unidades_detectadas=tuple(
-            sorted(state.seen_units)
-        ),
-        modos_posicionamiento=tuple(
-            sorted(state.seen_positioning)
-        ),
+        unidades_detectadas=tuple(sorted(state.seen_units)),
+        modos_posicionamiento=tuple(sorted(state.seen_positioning)),
         incidencias=tuple(issues),
         analisis_incompleto=analysis_incomplete,
+        segmentos_lineales=tuple(preview_segments),
     )
 
     if material is None or limits is None:
@@ -205,9 +199,10 @@ def _handle_line(
     unknown_commands: list[str],
     unsupported_commands: list[str],
     issues: list[AnalysisIssue],
-    movement_count_ref: list[int],
-) -> None:
-    _handle_line.last_analysis_incomplete = False
+    preview_segments: list[PreviewSegment],
+    movement_count: int,
+) -> tuple[int, bool]:
+    analysis_incomplete = False
     motion_command = state.active_motion
     axes: dict[str, float] = {}
 
@@ -252,8 +247,9 @@ def _handle_line(
                     line=line.line_number,
                     command=command,
                 )
-                _handle_line.last_analysis_incomplete = True
+                analysis_incomplete = True
                 motion_command = command
+                state.active_motion = command
             elif command not in SUPPORTED_SETUP_CODES:
                 unknown_commands.append(command)
                 _append_issue(
@@ -357,9 +353,10 @@ def _handle_line(
             )
 
     if not axes:
-        _handle_line.last_movement_count = movement_count_ref[0]
-        return
+        return movement_count, analysis_incomplete
 
+    start_x = state.x_mm
+    start_y = state.y_mm
     target_x = state.x_mm
     target_y = state.y_mm
     target_z = state.z_mm
@@ -388,9 +385,15 @@ def _handle_line(
     _update_bounds(bounds, target_x, target_y, target_z)
 
     if motion_command in SUPPORTED_MOTION_CODES | UNSUPPORTED_ARC_CODES:
-        movement_count_ref[0] += 1
-    _handle_line.last_movement_count = movement_count_ref[0]
-
-
-_handle_line.last_movement_count = 0
-_handle_line.last_analysis_incomplete = False
+        movement_count += 1
+    if motion_command in SUPPORTED_MOTION_CODES and (start_x != target_x or start_y != target_y):
+        preview_segments.append(
+            PreviewSegment(
+                tipo=motion_command,
+                inicio_x_mm=start_x,
+                inicio_y_mm=start_y,
+                fin_x_mm=target_x,
+                fin_y_mm=target_y,
+            )
+        )
+    return movement_count, analysis_incomplete

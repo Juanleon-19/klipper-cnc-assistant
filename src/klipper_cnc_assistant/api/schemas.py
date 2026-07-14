@@ -8,12 +8,26 @@ from klipper_cnc_assistant.domain import (
     MachineSessionStatus,
     OperacionPCB,
     OperationAnalysis,
+    PreviewSegment,
     ProyectoPCB,
 )
 
 
 class HealthResponse(BaseModel):
     estado: str
+    version: str
+    modo_maquina: str
+    almacenamiento: str
+
+
+class SystemInfoResponse(BaseModel):
+    estado: str
+    version_aplicacion: str
+    version_python: str
+    almacenamiento_disponible: bool
+    estado_api: str
+    modo_maquina: str
+    hora_servidor: str
 
 
 class ErrorResponse(BaseModel):
@@ -23,19 +37,13 @@ class ErrorResponse(BaseModel):
 class MaterialRequest(BaseModel):
     ancho_mm: float = Field(gt=0)
     alto_mm: float = Field(gt=0)
-    espesor_mm: float | None = Field(
-        default=None,
-        gt=0,
-    )
+    espesor_mm: float | None = Field(default=None, gt=0)
 
 
 class AgujeroAlineacionRequest(BaseModel):
     x_mm: float
     y_mm: float
-    diametro_mm: float | None = Field(
-        default=None,
-        gt=0,
-    )
+    diametro_mm: float | None = Field(default=None, gt=0)
 
 
 class ProjectCreateRequest(BaseModel):
@@ -43,9 +51,11 @@ class ProjectCreateRequest(BaseModel):
     material: MaterialRequest
     doble_cara: bool = False
     eje_volteo: str | None = None
-    agujeros_alineacion: list[
-        AgujeroAlineacionRequest
-    ] = Field(default_factory=list)
+    agujeros_alineacion: list[AgujeroAlineacionRequest] = Field(default_factory=list)
+
+
+class ProjectUpdateRequest(ProjectCreateRequest):
+    pass
 
 
 class OperationCreateRequest(BaseModel):
@@ -58,7 +68,7 @@ class OperationCreateRequest(BaseModel):
 
 class GCodeUploadRequest(BaseModel):
     nombre_archivo: str = Field(min_length=1)
-    contenido: str
+    contenido: str = Field(min_length=1)
 
 
 class AgujeroAlineacionResponse(BaseModel):
@@ -92,6 +102,14 @@ class BoundsResponse(BaseModel):
     alto_mm: float
 
 
+class PreviewSegmentResponse(BaseModel):
+    tipo: str
+    inicio_x_mm: float
+    inicio_y_mm: float
+    fin_x_mm: float
+    fin_y_mm: float
+
+
 class OperationAnalysisResponse(BaseModel):
     limites: BoundsResponse | None
     avances_mm_min: list[float]
@@ -102,13 +120,16 @@ class OperationAnalysisResponse(BaseModel):
     comandos_no_compatibles: list[str]
     acciones_husillo: list[str]
     cambios_herramienta: list[str]
+    comandos_manuales: list[str]
     unidades_detectadas: list[str]
     modos_posicionamiento: list[str]
     incidencias: list[AnalysisIssueResponse]
     analisis_incompleto: bool
+    soporte_geometrico_incompleto: bool
     cabe_en_material: bool | None
     mensaje_material: str | None
     tiene_errores_criticos: bool
+    segmentos_lineales: list[PreviewSegmentResponse]
 
 
 class OperationResponse(BaseModel):
@@ -118,6 +139,8 @@ class OperationResponse(BaseModel):
     cara: str
     orden: int
     archivo_gcode: str | None
+    nombre_archivo_original: str | None
+    tamano_archivo_bytes: int | None
     sha256: str | None
     herramienta: str | None
     estado: str
@@ -130,13 +153,12 @@ class ProjectResponse(BaseModel):
     material: MaterialResponse
     doble_cara: bool
     eje_volteo: str | None
-    agujeros_alineacion: list[
-        AgujeroAlineacionResponse
-    ]
+    agujeros_alineacion: list[AgujeroAlineacionResponse]
     operaciones: list[OperationResponse]
     creado_en: str
     actualizado_en: str
     version_esquema: str
+    estado_general: str
 
 
 class MachineSessionResponse(BaseModel):
@@ -151,9 +173,7 @@ class MachineSessionResponse(BaseModel):
     z_puede_bajar_durante: list[str]
 
 
-def project_to_response(
-    project: ProyectoPCB,
-) -> ProjectResponse:
+def project_to_response(project: ProyectoPCB) -> ProjectResponse:
     return ProjectResponse(
         id=project.id,
         nombre=project.nombre,
@@ -172,19 +192,15 @@ def project_to_response(
             )
             for hole in project.configuracion_alineacion.agujeros_alineacion
         ],
-        operaciones=[
-            operation_to_response(operation)
-            for operation in project.operaciones
-        ],
+        operaciones=[operation_to_response(operation) for operation in project.operaciones],
         creado_en=project.creado_en.isoformat(),
         actualizado_en=project.actualizado_en.isoformat(),
         version_esquema=project.version_esquema,
+        estado_general=project.estado_general,
     )
 
 
-def operation_to_response(
-    operation: OperacionPCB,
-) -> OperationResponse:
+def operation_to_response(operation: OperacionPCB) -> OperationResponse:
     return OperationResponse(
         id=operation.id,
         nombre=operation.nombre,
@@ -192,75 +208,51 @@ def operation_to_response(
         cara=operation.cara,
         orden=operation.orden,
         archivo_gcode=operation.archivo_gcode,
+        nombre_archivo_original=operation.nombre_archivo_original,
+        tamano_archivo_bytes=operation.tamano_archivo_bytes,
         sha256=operation.sha256,
         herramienta=operation.herramienta,
         estado=operation.estado,
-        analisis=(
-            None
-            if operation.analisis is None
-            else analysis_to_response(
-                operation.analisis
-            )
-        ),
+        analisis=None if operation.analisis is None else analysis_to_response(operation.analisis),
     )
 
 
-def analysis_to_response(
-    analysis: OperationAnalysis,
-) -> OperationAnalysisResponse:
+def analysis_to_response(analysis: OperationAnalysis) -> OperationAnalysisResponse:
     return OperationAnalysisResponse(
-        limites=(
-            None
-            if analysis.limites is None
-            else BoundsResponse(
-                min_x_mm=analysis.limites.min_x_mm,
-                max_x_mm=analysis.limites.max_x_mm,
-                min_y_mm=analysis.limites.min_y_mm,
-                max_y_mm=analysis.limites.max_y_mm,
-                min_z_mm=analysis.limites.min_z_mm,
-                max_z_mm=analysis.limites.max_z_mm,
-                ancho_mm=analysis.limites.ancho_mm,
-                alto_mm=analysis.limites.alto_mm,
-            )
+        limites=None
+        if analysis.limites is None
+        else BoundsResponse(
+            min_x_mm=analysis.limites.min_x_mm,
+            max_x_mm=analysis.limites.max_x_mm,
+            min_y_mm=analysis.limites.min_y_mm,
+            max_y_mm=analysis.limites.max_y_mm,
+            min_z_mm=analysis.limites.min_z_mm,
+            max_z_mm=analysis.limites.max_z_mm,
+            ancho_mm=analysis.limites.ancho_mm,
+            alto_mm=analysis.limites.alto_mm,
         ),
-        avances_mm_min=list(
-            analysis.avances_mm_min
-        ),
+        avances_mm_min=list(analysis.avances_mm_min),
         profundidad_min_mm=analysis.profundidad_min_mm,
         profundidad_max_mm=analysis.profundidad_max_mm,
         cantidad_movimientos=analysis.cantidad_movimientos,
-        comandos_desconocidos=list(
-            analysis.comandos_desconocidos
-        ),
-        comandos_no_compatibles=list(
-            analysis.comandos_no_compatibles
-        ),
-        acciones_husillo=list(
-            analysis.acciones_husillo
-        ),
-        cambios_herramienta=list(
-            analysis.cambios_herramienta
-        ),
-        unidades_detectadas=list(
-            analysis.unidades_detectadas
-        ),
-        modos_posicionamiento=list(
-            analysis.modos_posicionamiento
-        ),
-        incidencias=[
-            issue_to_response(issue)
-            for issue in analysis.incidencias
-        ],
+        comandos_desconocidos=list(analysis.comandos_desconocidos),
+        comandos_no_compatibles=list(analysis.comandos_no_compatibles),
+        acciones_husillo=list(analysis.acciones_husillo),
+        cambios_herramienta=list(analysis.cambios_herramienta),
+        comandos_manuales=list(analysis.comandos_manuales),
+        unidades_detectadas=list(analysis.unidades_detectadas),
+        modos_posicionamiento=list(analysis.modos_posicionamiento),
+        incidencias=[issue_to_response(issue) for issue in analysis.incidencias],
         analisis_incompleto=analysis.analisis_incompleto,
+        soporte_geometrico_incompleto=analysis.analisis_incompleto,
         cabe_en_material=analysis.cabe_en_material,
         mensaje_material=analysis.mensaje_material,
         tiene_errores_criticos=analysis.tiene_errores_criticos,
+        segmentos_lineales=[segment_to_response(segment) for segment in analysis.segmentos_lineales],
     )
 
 
-def issue_to_response(
-    issue: AnalysisIssue,
-) -> AnalysisIssueResponse:
+def issue_to_response(issue: AnalysisIssue) -> AnalysisIssueResponse:
     return AnalysisIssueResponse(
         severidad=issue.severidad,
         codigo=issue.codigo,
@@ -270,9 +262,17 @@ def issue_to_response(
     )
 
 
-def machine_session_to_response(
-    session: MachineSessionStatus,
-) -> MachineSessionResponse:
+def segment_to_response(segment: PreviewSegment) -> PreviewSegmentResponse:
+    return PreviewSegmentResponse(
+        tipo=segment.tipo,
+        inicio_x_mm=segment.inicio_x_mm,
+        inicio_y_mm=segment.inicio_y_mm,
+        fin_x_mm=segment.fin_x_mm,
+        fin_y_mm=segment.fin_y_mm,
+    )
+
+
+def machine_session_to_response(session: MachineSessionStatus) -> MachineSessionResponse:
     return MachineSessionResponse(
         estado=session.estado,
         home_realizado=session.home_realizado,
@@ -281,10 +281,6 @@ def machine_session_to_response(
         material_montado=session.material_montado,
         origen_xy_definido=session.origen_xy_definido,
         cero_z_capturado=session.cero_z_capturado,
-        operaciones_permitidas=list(
-            session.operaciones_permitidas
-        ),
-        z_puede_bajar_durante=list(
-            session.z_puede_bajar_durante
-        ),
+        operaciones_permitidas=list(session.operaciones_permitidas),
+        z_puede_bajar_durante=list(session.z_puede_bajar_durante),
     )

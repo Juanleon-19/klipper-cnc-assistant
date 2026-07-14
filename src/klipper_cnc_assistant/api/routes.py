@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Request
+from starlette.datastructures import UploadFile
+
+from klipper_cnc_assistant.application import ApplicationError
 
 from .schemas import (
     GCodeUploadRequest,
@@ -11,6 +14,8 @@ from .schemas import (
     OperationResponse,
     ProjectCreateRequest,
     ProjectResponse,
+    ProjectUpdateRequest,
+    SystemInfoResponse,
     analysis_to_response,
     machine_session_to_response,
     operation_to_response,
@@ -18,12 +23,43 @@ from .schemas import (
 )
 
 
+async def _parse_gcode_upload_request(request: Request) -> tuple[str, str | bytes, bool]:
+    content_type = request.headers.get("content-type", "")
+    if content_type.startswith("application/json"):
+        payload = GCodeUploadRequest.model_validate(await request.json())
+        return payload.nombre_archivo, payload.contenido, False
+
+    if content_type.startswith("multipart/form-data"):
+        form = await request.form()
+        uploaded = form.get("archivo")
+        if not isinstance(uploaded, UploadFile):
+            raise ApplicationError(
+                "Debe enviar el archivo G-code en el campo 'archivo'."
+            )
+        try:
+            filename = uploaded.filename or ""
+            content = await uploaded.read()
+        finally:
+            await uploaded.close()
+        return filename, content, True
+
+    raise ApplicationError(
+        "Tipo de contenido no soportado. Use JSON o multipart/form-data."
+    )
+
+
 def build_router() -> APIRouter:
     router = APIRouter(prefix="/api")
 
     @router.get("/health", response_model=HealthResponse)
-    def health() -> HealthResponse:
-        return HealthResponse(estado="ok")
+    def health(request: Request) -> HealthResponse:
+        service = request.app.state.system_status_service
+        return HealthResponse(**service.get_health())
+
+    @router.get("/system/info", response_model=SystemInfoResponse)
+    def system_info(request: Request) -> SystemInfoResponse:
+        service = request.app.state.system_status_service
+        return SystemInfoResponse(**service.get_system_info())
 
     @router.get("/projects", response_model=list[ProjectResponse])
     def list_projects(request: Request) -> list[ProjectResponse]:
@@ -34,6 +70,21 @@ def build_router() -> APIRouter:
     def create_project(payload: ProjectCreateRequest, request: Request) -> ProjectResponse:
         service = request.app.state.project_service
         project = service.create_project(
+            nombre=payload.nombre,
+            ancho_mm=payload.material.ancho_mm,
+            alto_mm=payload.material.alto_mm,
+            espesor_mm=payload.material.espesor_mm,
+            doble_cara=payload.doble_cara,
+            eje_volteo=payload.eje_volteo,
+            agujeros_alineacion=[item.model_dump() for item in payload.agujeros_alineacion],
+        )
+        return project_to_response(project)
+
+    @router.put("/projects/{project_id}", response_model=ProjectResponse)
+    def update_project(project_id: str, payload: ProjectUpdateRequest, request: Request) -> ProjectResponse:
+        service = request.app.state.project_service
+        project = service.update_project(
+            project_id=project_id,
             nombre=payload.nombre,
             ancho_mm=payload.material.ancho_mm,
             alto_mm=payload.material.alto_mm,
@@ -69,15 +120,33 @@ def build_router() -> APIRouter:
         service.delete_operation(project_id, operation_id)
         return {"detalle": "Operacion eliminada."}
 
-    @router.post("/projects/{project_id}/operations/{operation_id}/gcode", response_model=OperationResponse)
-    def upload_gcode(project_id: str, operation_id: str, payload: GCodeUploadRequest, request: Request) -> OperationResponse:
+    @router.delete("/projects/{project_id}/operations/{operation_id}/gcode", response_model=OperationResponse)
+    def remove_gcode(project_id: str, operation_id: str, request: Request) -> OperationResponse:
         service = request.app.state.project_service
-        operation = service.upload_operation_gcode(
+        operation = service.remove_operation_gcode(
             project_id=project_id,
             operation_id=operation_id,
-            filename=payload.nombre_archivo,
-            content=payload.contenido,
         )
+        return operation_to_response(operation)
+
+    @router.post("/projects/{project_id}/operations/{operation_id}/gcode", response_model=OperationResponse)
+    async def upload_gcode(project_id: str, operation_id: str, request: Request) -> OperationResponse:
+        service = request.app.state.project_service
+        filename, payload, is_binary = await _parse_gcode_upload_request(request)
+        if is_binary:
+            operation = service.upload_operation_gcode_bytes(
+                project_id=project_id,
+                operation_id=operation_id,
+                filename=filename,
+                content_bytes=payload,
+            )
+        else:
+            operation = service.upload_operation_gcode(
+                project_id=project_id,
+                operation_id=operation_id,
+                filename=filename,
+                content=payload,
+            )
         return operation_to_response(operation)
 
     @router.post("/projects/{project_id}/operations/{operation_id}/analyze", response_model=OperationAnalysisResponse)
