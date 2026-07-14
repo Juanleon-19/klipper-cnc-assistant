@@ -5,6 +5,7 @@ from math import sqrt
 
 import numpy
 
+from .coverage import DOMAIN_TOLERANCE_MM, check_domain
 from .models import (
     ExclusionZone,
     HeightGrid,
@@ -127,17 +128,15 @@ def interpolate_height(
 ) -> InterpolationResult:
     grid = height_map.grid
     region = height_map.probe_region
-    if not region.contains(x_mm, y_mm):
+    domain_check = check_domain(height_map, x_mm, y_mm, tolerance_mm=DOMAIN_TOLERANCE_MM)
+    if not domain_check.inside:
         return InterpolationResult(
             estado="fuera de dominio",
             valor_mm=None,
-            observacion="La coordenada solicitada cae fuera de la region sondeable.",
-        )
-    if point_in_exclusion_zone(x_mm, y_mm, height_map.exclusion_zones):
-        return InterpolationResult(
-            estado="fuera de dominio",
-            valor_mm=None,
-            observacion="La coordenada solicitada cae dentro de una zona excluida.",
+            observacion=(
+                f"La coordenada solicitada cae {domain_check.reason}; "
+                f"distancia al dominio {domain_check.distance_mm:.6f} mm."
+            ),
         )
     if grid.columnas < 2 or grid.filas < 2:
         return InterpolationResult(

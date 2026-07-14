@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 from klipper_cnc_assistant.api import create_app
 from klipper_cnc_assistant.application.errors import ApplicationError
 from klipper_cnc_assistant.heightmap import ProbeRegion, interpolate_height
+from klipper_cnc_assistant.heightmap.coverage import DOMAIN_TOLERANCE_MM, build_coverage_report, check_domain
 from klipper_cnc_assistant.storage import JsonProjectRepository
 
 
@@ -196,7 +197,7 @@ class HeightMapBackendTest(unittest.TestCase):
         self.assertEqual(reference_z.status_code, 200)
         self.assertEqual(reference_z.json()["referencia_z"]["z_mm"], 0)
 
-    def test_compensation_preview_detects_points_outside_domain(self) -> None:
+    def test_validation_blocks_points_outside_domain(self) -> None:
         gcode = "G21\nG90\nG1 X5 Y5 Z-0.1 F100\nG1 X75 Y45 Z-0.1 F100\n"
         self.project_service.upload_operation_gcode(
             project_id=self.project.id,
@@ -226,11 +227,74 @@ class HeightMapBackendTest(unittest.TestCase):
                 "repeticion_simulacion": 2,
             },
         )
-        self.client.post(f"/api/projects/{self.project.id}/operations/{self.operation.id}/height-map/validate")
-        preview = self.client.post(f"/api/projects/{self.project.id}/operations/{self.operation.id}/compensation-preview")
-        self.assertEqual(preview.status_code, 200)
-        self.assertGreater(preview.json()["preview"]["puntos_fuera_dominio"], 0)
-        self.assertIn("z_compensada = z_original", preview.json()["preview"]["convencion_matematica"])
+        validation = self.client.post(f"/api/projects/{self.project.id}/operations/{self.operation.id}/height-map/validate")
+        self.assertEqual(validation.status_code, 400)
+        self.assertIn("cobertura", validation.json()["detalle"].lower())
+        self.assertIn("puntos quedan fuera", validation.json()["detalle"])
+
+
+    def test_domain_checks_edges_tolerance_and_real_outside_points(self) -> None:
+        current = self.height_map_service.generate_simulated_map(
+            project_id=self.project.id,
+            operation_id=self.operation.id,
+            filas=3,
+            columnas=3,
+            superficie_simulada="inclinada",
+            repeticion_simulacion=1,
+            probe_region=ProbeRegion(**self._probe_region()),
+            exclusion_zones=(),
+        )
+        self.assertTrue(check_domain(current, 20.0, 20.0).inside)
+        self.assertTrue(check_domain(current, 10.0, 8.0).inside)
+        self.assertTrue(check_domain(current, 10.0 - DOMAIN_TOLERANCE_MM / 2, 8.0).inside)
+        just_outside = check_domain(current, 10.0 - DOMAIN_TOLERANCE_MM * 2, 8.0)
+        clearly_outside = check_domain(current, 2.0, 8.0)
+        self.assertFalse(just_outside.inside)
+        self.assertLess(just_outside.distance_mm, 0.001)
+        self.assertFalse(clearly_outside.inside)
+        self.assertGreater(clearly_outside.distance_mm, 1.0)
+
+    def test_coverage_report_identifies_operation_and_arc_points_outside_domain(self) -> None:
+        gcode = "G21\nG90\nG1 X20 Y20 Z-0.1 F100\nG2 X75 Y20 I20 J0 Z-0.1 F100\n"
+        self.project_service.upload_operation_gcode(
+            project_id=self.project.id,
+            operation_id=self.operation.id,
+            filename="arc.nc",
+            content=gcode,
+        )
+        operation = self.project_service.analyze_operation(self.project.id, self.operation.id)
+        second = self.project_service.add_operation(
+            project_id=self.project.id,
+            nombre="Taladrado 0,8 mm",
+            tipo="taladrado",
+            cara="superior",
+            orden=1,
+        )
+        self.project_service.upload_operation_gcode(
+            project_id=self.project.id,
+            operation_id=second.id,
+            filename="drill.nc",
+            content="G21\nG90\nG1 X30 Y30 Z-0.1 F100\n",
+        )
+        second = self.project_service.analyze_operation(self.project.id, second.id)
+        current = self.height_map_service.generate_simulated_map(
+            project_id=self.project.id,
+            operation_id=self.operation.id,
+            filas=3,
+            columnas=3,
+            superficie_simulada="inclinada",
+            repeticion_simulacion=1,
+            probe_region=ProbeRegion(**self._probe_region()),
+            exclusion_zones=(),
+        )
+        report = build_coverage_report(
+            height_map=current,
+            operations=((operation.id, operation.nombre, operation.analisis), (second.id, second.nombre, second.analisis)),
+        )
+        self.assertFalse(report.sufficient)
+        self.assertGreater(report.points_outside, 0)
+        self.assertEqual(report.issues[0].operation_id, operation.id)
+        self.assertGreater(report.max_distance_outside_mm, 0.0)
 
     def test_import_json_csv_and_recalculate_increment_version(self) -> None:
         json_payload = {

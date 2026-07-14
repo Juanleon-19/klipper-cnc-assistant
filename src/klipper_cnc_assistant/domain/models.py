@@ -7,7 +7,7 @@ from enum import StrEnum
 from .errors import ProjectValidationError
 
 
-PROJECT_SCHEMA_VERSION = "1.4"
+PROJECT_SCHEMA_VERSION = "1.5"
 
 
 def utc_now() -> datetime:
@@ -164,6 +164,11 @@ class CoordinateReference:
     y_mm: float
     z_mm: float | None = None
     confirmado_en: datetime | None = None
+    fuente: str = "SIMULATED"
+    maquina: str | None = None
+    homed_axes: str | None = None
+    posicion_captura: dict[str, float] | None = None
+    sesion: str | None = None
 
 
 @dataclass(frozen=True)

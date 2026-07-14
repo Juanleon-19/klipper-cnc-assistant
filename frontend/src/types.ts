@@ -275,7 +275,23 @@ export type CompensationPreview = {
   convencion_matematica: string;
   z_referencia_mm: number;
   paso_muestreo_virtual_mm: number;
+  tolerancia_dominio_mm: number;
+  puntos_dentro_dominio: number;
   puntos_fuera_dominio: number;
+  puntos_fuera_dominio_bloqueantes: number;
+  distancia_maxima_fuera_dominio_mm: number;
+  cobertura_suficiente: boolean;
+  puntos_fuera_dominio_detalle: Array<{
+    operation_id: string;
+    operation_name: string;
+    segment_index: number;
+    point_index: number;
+    x_mm: number;
+    y_mm: number;
+    distance_mm: number;
+    reason: string;
+    numerical_only: boolean;
+  }>;
   puntos_virtuales_agregados: number;
   resumen_z_original: { min_mm: number | null; max_mm: number | null };
   resumen_z_compensada: { min_mm: number | null; max_mm: number | null };
@@ -318,6 +334,27 @@ export type Project = {
   actualizado_en: string;
   version_esquema: string;
   estado_general: string;
+};
+
+
+export type MachineRuntime = {
+  mode: string;
+  mode_label: string;
+  state: string;
+  health: string;
+  started_at: string;
+  application: Record<string, unknown>;
+  moonraker: Record<string, unknown>;
+  klipper: Record<string, unknown>;
+  arduino: Record<string, unknown>;
+  controller: Record<string, unknown>;
+  safety: Record<string, unknown>;
+  last_command: string | null;
+  last_movement: Record<string, unknown> | null;
+  last_error: string | null;
+  last_probe_result: Record<string, unknown> | null;
+  initialization_steps: Array<Record<string, unknown>>;
+  events: Array<Record<string, unknown>>;
 };
 
 export type MachineSession = {

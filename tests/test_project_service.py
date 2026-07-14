@@ -386,7 +386,7 @@ class ProjectServiceTest(unittest.TestCase):
         )
         self.assertEqual(migrated.montajes[0].nombre, "Montaje principal")
         persisted = json.loads(project_file.read_text(encoding="utf-8"))
-        self.assertEqual(persisted["version_esquema"], "1.4")
+        self.assertEqual(persisted["version_esquema"], "1.5")
         self.assertEqual(persisted["montajes"][0]["nombre"], "Montaje principal")
         self.assertEqual(migrated.operaciones[0].setup_id, "setup-main")
         self.assertEqual(migrated.operaciones[0].nombre_archivo_original, "legacy.nc")

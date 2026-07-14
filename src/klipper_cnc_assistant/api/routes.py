@@ -295,6 +295,30 @@ def build_router() -> APIRouter:
             service.confirm_z_reference(project_id, operation_id, x_mm=payload.x_mm, y_mm=payload.y_mm, z_mm=payload.z_mm)
         )
 
+    @router.post("/projects/{project_id}/operations/{operation_id}/reference-session/physical-work-origin", response_model=ReferenceSessionResponse)
+    def capture_physical_work_origin(project_id: str, operation_id: str, request: Request) -> ReferenceSessionResponse:
+        reference_service = request.app.state.reference_session_service
+        runtime = request.app.state.machine_runtime
+        position = runtime.capture_current_position()
+        snapshot = runtime.snapshot()
+        return _reference_session_to_response(reference_service.capture_physical_work_origin(project_id, operation_id, position=position, machine_label=str(snapshot["moonraker"].get("url") or "physical"), homed_axes=snapshot["klipper"].get("homed_axes"), session_id=snapshot.get("started_at")))
+
+    @router.post("/projects/{project_id}/operations/{operation_id}/reference-session/physical-z-reference", response_model=ReferenceSessionResponse)
+    def capture_physical_z_reference(project_id: str, operation_id: str, request: Request) -> ReferenceSessionResponse:
+        reference_service = request.app.state.reference_session_service
+        runtime = request.app.state.machine_runtime
+        position = runtime.capture_current_position()
+        snapshot = runtime.snapshot()
+        return _reference_session_to_response(reference_service.capture_physical_z_reference(project_id, operation_id, position=position, machine_label=str(snapshot["moonraker"].get("url") or "physical"), homed_axes=snapshot["klipper"].get("homed_axes"), session_id=snapshot.get("started_at")))
+
+    @router.post("/projects/{project_id}/operations/{operation_id}/reference-session/physical-z-reference-from-probe", response_model=ReferenceSessionResponse)
+    def capture_physical_z_reference_from_probe(project_id: str, operation_id: str, request: Request) -> ReferenceSessionResponse:
+        reference_service = request.app.state.reference_session_service
+        runtime = request.app.state.machine_runtime
+        position = runtime.last_probe_position()
+        snapshot = runtime.snapshot()
+        return _reference_session_to_response(reference_service.capture_physical_z_reference(project_id, operation_id, position=position, machine_label=str(snapshot["moonraker"].get("url") or "physical"), homed_axes=snapshot["klipper"].get("homed_axes"), session_id=snapshot.get("started_at")))
+
     @router.put("/projects/{project_id}/operations/{operation_id}/height-map/config", response_model=HeightMapResponse)
     def configure_height_map(project_id: str, operation_id: str, payload: HeightMapConfigRequest, request: Request) -> HeightMapResponse:
         service = request.app.state.height_map_service

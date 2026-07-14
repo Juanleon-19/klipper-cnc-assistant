@@ -5,6 +5,7 @@ import math
 from klipper_cnc_assistant.domain import OperationAnalysis, PreviewPoint
 
 from .analysis import interpolate_height
+from .coverage import DOMAIN_TOLERANCE_MM, build_coverage_report
 from .models import HeightMap
 
 
@@ -13,8 +14,15 @@ def build_compensation_preview(
     analysis: OperationAnalysis,
     height_map: HeightMap,
     reference_z_mm: float,
+    operation_id: str = "operation",
+    operation_name: str = "Operacion",
 ) -> dict[str, object]:
     sample_spacing_mm = _sample_spacing_mm(height_map)
+    coverage = build_coverage_report(
+        height_map=height_map,
+        operations=((operation_id, operation_name, analysis),),
+        tolerance_mm=DOMAIN_TOLERANCE_MM,
+    )
     segments: list[dict[str, object]] = []
     outside_points = 0
     virtual_points = 0
@@ -67,7 +75,26 @@ def build_compensation_preview(
         ),
         "z_referencia_mm": reference_z_mm,
         "paso_muestreo_virtual_mm": sample_spacing_mm,
+        "tolerancia_dominio_mm": coverage.tolerance_mm,
+        "puntos_dentro_dominio": coverage.points_inside,
         "puntos_fuera_dominio": outside_points,
+        "puntos_fuera_dominio_bloqueantes": coverage.blocking_outside_points,
+        "distancia_maxima_fuera_dominio_mm": coverage.max_distance_outside_mm,
+        "cobertura_suficiente": coverage.sufficient and outside_points == 0,
+        "puntos_fuera_dominio_detalle": [
+            {
+                "operation_id": issue.operation_id,
+                "operation_name": issue.operation_name,
+                "segment_index": issue.segment_index,
+                "point_index": issue.point_index,
+                "x_mm": issue.x_mm,
+                "y_mm": issue.y_mm,
+                "distance_mm": issue.distance_mm,
+                "reason": issue.reason,
+                "numerical_only": issue.numerical_only,
+            }
+            for issue in coverage.issues
+        ],
         "puntos_virtuales_agregados": virtual_points,
         "resumen_z_original": _z_summary(original_z_values),
         "resumen_z_compensada": _z_summary(compensated_z_values),

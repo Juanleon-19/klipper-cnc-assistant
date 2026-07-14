@@ -166,11 +166,29 @@ class CompensationPreviewSegmentResponse(BaseModel):
     puntos: list[CompensationPreviewPointResponse]
 
 
+class CompensationDomainIssueResponse(BaseModel):
+    operation_id: str
+    operation_name: str
+    segment_index: int
+    point_index: int
+    x_mm: float
+    y_mm: float
+    distance_mm: float
+    reason: str
+    numerical_only: bool
+
+
 class CompensationPreviewResponse(BaseModel):
     convencion_matematica: str
     z_referencia_mm: float
     paso_muestreo_virtual_mm: float
+    tolerancia_dominio_mm: float = 0.0
+    puntos_dentro_dominio: int = 0
     puntos_fuera_dominio: int
+    puntos_fuera_dominio_bloqueantes: int = 0
+    distancia_maxima_fuera_dominio_mm: float = 0.0
+    cobertura_suficiente: bool = False
+    puntos_fuera_dominio_detalle: list[CompensationDomainIssueResponse] = Field(default_factory=list)
     puntos_virtuales_agregados: int
     resumen_z_original: dict[str, float | None]
     resumen_z_compensada: dict[str, float | None]

@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 
 from klipper_cnc_assistant.domain import CoordinateReference, PreparationState, ProjectValidationError
 from klipper_cnc_assistant.heightmap.compensation import build_compensation_preview
+from klipper_cnc_assistant.heightmap.coverage import DOMAIN_TOLERANCE_MM, build_coverage_report
 from klipper_cnc_assistant.storage import JsonProjectRepository
 
 from .errors import ApplicationError, NotFoundError
@@ -47,6 +48,7 @@ class ReferenceSessionService:
         if not machine.home_realizado:
             raise ApplicationError("Primero confirme la referencia de maquina en simulacion.")
         self._validate_xy_against_material(project.material.ancho_mm, project.material.alto_mm, x_mm, y_mm, "origen de trabajo")
+        self._reject_simulated_overwrite_of_measured(setup.preparacion.origen_trabajo, "origen de trabajo X/Y")
         timestamp = utc_now()
         invalidation = self._build_invalidation_reason(
             setup.preparacion,
@@ -84,6 +86,7 @@ class ReferenceSessionService:
         if setup.preparacion.origen_trabajo is None:
             raise ApplicationError("Primero confirme el origen de trabajo X/Y en simulacion.")
         self._validate_xy_against_material(project.material.ancho_mm, project.material.alto_mm, x_mm, y_mm, "referencia Z")
+        self._reject_simulated_overwrite_of_measured(setup.preparacion.referencia_z, "referencia Z")
         timestamp = utc_now()
         invalidation = self._build_invalidation_reason(
             setup.preparacion,
@@ -102,7 +105,120 @@ class ReferenceSessionService:
         self.repository.save_project(project.replace_setup(updated))
         return self.get_session(project_id, operation_id)
 
+    def capture_physical_work_origin(
+        self,
+        project_id: str,
+        operation_id: str,
+        *,
+        position: dict[str, float],
+        machine_label: str,
+        homed_axes: str | None,
+        session_id: str | None = None,
+    ) -> dict[str, object]:
+        project = self._load_project(project_id)
+        operation = project.get_operation(operation_id)
+        setup = project.get_setup(operation.setup_id)
+        timestamp = utc_now()
+        invalidation = self._build_invalidation_reason(
+            setup.preparacion,
+            "Se invalidó la preparación porque cambió el origen físico X/Y del montaje.",
+        )
+        reference = CoordinateReference(
+            x_mm=float(position["x_mm"]),
+            y_mm=float(position["y_mm"]),
+            z_mm=None,
+            confirmado_en=timestamp,
+            fuente="MEASURED",
+            maquina=machine_label,
+            homed_axes=homed_axes,
+            posicion_captura=dict(position),
+            sesion=session_id,
+        )
+        updated = replace(
+            setup,
+            preparacion=replace(
+                setup.preparacion,
+                origen_trabajo=reference,
+                mapa_validado_en=None,
+                compensacion_previsualizada_en=None,
+                motivo_invalidacion=invalidation,
+            ),
+        )
+        self.repository.save_project(project.replace_setup(updated))
+        return self.get_session(project_id, operation_id)
+
+    def capture_physical_z_reference(
+        self,
+        project_id: str,
+        operation_id: str,
+        *,
+        position: dict[str, float],
+        machine_label: str,
+        homed_axes: str | None,
+        session_id: str | None = None,
+    ) -> dict[str, object]:
+        project = self._load_project(project_id)
+        operation = project.get_operation(operation_id)
+        setup = project.get_setup(operation.setup_id)
+        timestamp = utc_now()
+        invalidation = self._build_invalidation_reason(
+            setup.preparacion,
+            "Se invalidó la preparación porque cambió la referencia física Z del montaje.",
+        )
+        reference = CoordinateReference(
+            x_mm=float(position["x_mm"]),
+            y_mm=float(position["y_mm"]),
+            z_mm=float(position["z_mm"]),
+            confirmado_en=timestamp,
+            fuente="MEASURED",
+            maquina=machine_label,
+            homed_axes=homed_axes,
+            posicion_captura=dict(position),
+            sesion=session_id,
+        )
+        updated = replace(
+            setup,
+            preparacion=replace(
+                setup.preparacion,
+                referencia_z=reference,
+                mapa_validado_en=None,
+                compensacion_previsualizada_en=None,
+                motivo_invalidacion=invalidation,
+            ),
+        )
+        self.repository.save_project(project.replace_setup(updated))
+        return self.get_session(project_id, operation_id)
+
     def mark_map_validated(self, project_id: str, operation_id: str) -> dict[str, object]:
+        project = self._load_project(project_id)
+        operation = project.get_operation(operation_id)
+        setup = project.get_setup(operation.setup_id)
+        height_map = self.height_map_service.get_map(project_id, operation_id)
+        operations_with_analysis = tuple(
+            (item.id, item.nombre, item.analisis)
+            for item in project.operations_for_setup(setup.id)
+            if item.analisis is not None
+        )
+        if operations_with_analysis:
+            coverage = build_coverage_report(
+                height_map=height_map,
+                operations=operations_with_analysis,
+                tolerance_mm=DOMAIN_TOLERANCE_MM,
+            )
+            if not coverage.sufficient:
+                first = coverage.issues[0] if coverage.issues else None
+                hint = "Amplie la region sondeable o corrija la referencia/origen del montaje."
+                detail = (
+                    f" Primer punto: operacion {first.operation_name}, "
+                    f"X={first.x_mm:.3f} mm, Y={first.y_mm:.3f} mm, "
+                    f"distancia={first.distance_mm:.3f} mm, causa={first.reason}."
+                    if first
+                    else ""
+                )
+                raise ApplicationError(
+                    f"La cobertura del mapa es insuficiente: {coverage.blocking_outside_points} puntos quedan fuera del dominio medido. "
+                    f"Tolerancia numerica {coverage.tolerance_mm:.6f} mm. {hint}{detail}"
+                )
         self.height_map_service.validate_map(project_id, operation_id)
         return self.get_session(project_id, operation_id)
 
@@ -121,6 +237,8 @@ class ReferenceSessionService:
             analysis=operation.analisis,
             height_map=height_map,
             reference_z_mm=setup.preparacion.referencia_z.z_mm if setup.preparacion.referencia_z and setup.preparacion.referencia_z.z_mm is not None else 0.0,
+            operation_id=operation.id,
+            operation_name=operation.nombre,
         )
         updated = replace(
             setup,
@@ -239,7 +357,18 @@ class ReferenceSessionService:
             "y_mm": reference.y_mm,
             "z_mm": reference.z_mm,
             "fecha": None if reference.confirmado_en is None else reference.confirmado_en.isoformat(),
+            "fuente": reference.fuente,
+            "maquina": reference.maquina,
+            "homed_axes": reference.homed_axes,
+            "posicion_captura": reference.posicion_captura,
+            "sesion": reference.sesion,
         }
+
+    def _reject_simulated_overwrite_of_measured(self, reference: CoordinateReference | None, label: str) -> None:
+        if reference is not None and reference.fuente == "MEASURED":
+            raise ApplicationError(
+                f"No se reemplaza una {label} medida con una referencia simulada. Capture una nueva referencia física o elimine la referencia existente de forma explícita."
+            )
 
     def _validate_xy_against_material(self, material_x: float, material_y: float, x_mm: float, y_mm: float, label: str) -> None:
         if x_mm < 0 or y_mm < 0 or x_mm > material_x or y_mm > material_y:

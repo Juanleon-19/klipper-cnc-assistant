@@ -344,6 +344,11 @@ class JsonProjectRepository:
             "y_mm": reference.y_mm,
             "z_mm": reference.z_mm,
             "confirmado_en": None if reference.confirmado_en is None else reference.confirmado_en.isoformat(),
+            "fuente": reference.fuente,
+            "maquina": reference.maquina,
+            "homed_axes": reference.homed_axes,
+            "posicion_captura": reference.posicion_captura,
+            "sesion": reference.sesion,
         }
 
     def _serialize_segment(self, segment: PreviewSegment) -> dict:
@@ -531,6 +536,11 @@ class JsonProjectRepository:
             y_mm=payload["y_mm"],
             z_mm=payload.get("z_mm"),
             confirmado_en=self._parse_datetime(payload.get("confirmado_en")),
+            fuente=payload.get("fuente", "SIMULATED"),
+            maquina=payload.get("maquina"),
+            homed_axes=payload.get("homed_axes"),
+            posicion_captura=payload.get("posicion_captura"),
+            sesion=payload.get("sesion"),
         )
 
     def _parse_datetime(self, value: str | None):
