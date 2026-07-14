@@ -109,3 +109,52 @@ Esta guía no debe ejecutarse sin operador presente, máquina despejada y parada
 11. Completar todos los puntos y revisar mapa 2D, superficie 3D, plano, residuos, rango, RMS y cobertura de operaciones.
 
 No ejecutar este procedimiento sin operador presente, máquina despejada y parada física disponible. No reiniciar Klipper automáticamente.
+
+
+## Prueba integral con PCB de descarte
+
+No ejecutar este procedimiento sin operador presente, material de descarte, recorrido despejado, sonda verificada y parada física disponible. La implementación no ejecutó movimientos durante desarrollo.
+
+1. Iniciar el servicio en modo físico con `MACHINE_MODE=physical`, Moonraker y Arduino explícitos.
+2. Abrir la web.
+3. Seleccionar proyecto.
+4. Seleccionar montaje superior o la cara correspondiente.
+5. Cargar operaciones FlatCAM si faltan.
+6. Confirmar herramienta de cada operación.
+7. Revisar trayectorias y límites analizados.
+8. Abrir `Sistema` y conectar máquina.
+9. Verificar Moonraker HTTP.
+10. Verificar WebSocket.
+11. Verificar Klipper `ready`.
+12. Verificar Arduino: hilo activo, bytes, paquetes completos, paquetes válidos y edad reciente.
+13. Observar joystick, botones y sonda sin movimiento.
+14. Ejecutar homing desde la preparación física.
+15. Confirmar `toolhead.homed_axes=xyz` y velocidad cero.
+16. Introducir Z segura de traslado; no usarla como referencia Z ni profundidad de corte.
+17. Mover Z a la altura segura.
+18. Mover X/Y al centro calculado desde límites reales.
+19. Habilitar joystick X/Y.
+20. Posicionar la herramienta sobre el X0/Y0 real del G-code de FlatCAM.
+21. Armar referencia.
+22. Pulsar el botón externo.
+23. Verificar descenso discreto, contacto, captura X/Y/Z y retracto.
+24. Abrir `Mapa de alturas`.
+25. Seleccionar `MEDIDO FÍSICAMENTE`.
+26. Pulsar `Preparar mapa físico`.
+27. Revisar región local, región de máquina, margen, filas, columnas, dx, dy, puntos y recorrido serpentino.
+28. Confirmar límites y que no haya puntos inválidos.
+29. Pulsar `Iniciar sondeo de malla` para ejecutar punto por punto.
+30. Observar progreso `MOVING/PROBING/MEASURED`.
+31. Probar `Pausar` después de un punto medido.
+32. Probar `Reanudar`.
+33. Completar todos los puntos.
+34. Revisar mapa 2D, superficie 3D, plano, residuos, rango y RMS.
+35. Validar cobertura de operaciones.
+36. Abrir `Compensación`.
+37. Generar G-code compensado.
+38. Descargar el archivo de `generated/compensated/`.
+39. Comparar original y compensado: X/Y deben conservarse; solo Z debe cambiar por `delta_superficie`.
+40. Abrir `Ejecución` y revisar preflight.
+41. Dejar la ejecución real final para confirmación supervisada separada.
+
+Criterio de parada: ante ruido de sonda, pérdida de paquetes Arduino, telemetría obsoleta, homing incompleto, punto fuera de límites o cualquier movimiento inesperado, cancelar la secuencia. Usar `M112` solo como emergencia real.

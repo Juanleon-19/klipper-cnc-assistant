@@ -98,3 +98,39 @@ SERIAL_STARTUP_DELAY=2
 ```
 
 `MOONRAKER_REQUEST_TIMEOUT` no significa que el movimiento terminó; solo limita la llamada HTTP. Homing y movimientos se confirman por estado de Klipper. `SERIAL_STARTUP_DELAY` contempla el reinicio del Arduino al abrir `/dev/ttyUSB0`.
+
+
+## Inicio del servicio físico para la prueba integral
+
+No cambie firmware, pasos, límites ni configuración mecánica. No reinicie Klipper automáticamente.
+
+1. Editar la unidad o override del servicio de la aplicación para incluir:
+
+```bash
+Environment=MACHINE_MODE=physical
+Environment=MOONRAKER_URL=http://127.0.0.1:7126
+Environment=MOONRAKER_WS=ws://127.0.0.1:7126/websocket
+Environment=SERIAL_PORT=/dev/ttyUSB0
+Environment=SERIAL_BAUDRATE=115200
+Environment=MACHINE_SAFE_Z=10
+```
+
+2. Recargar systemd si cambió la unidad:
+
+```bash
+sudo systemctl daemon-reload
+```
+
+3. Reiniciar solo la aplicación:
+
+```bash
+sudo systemctl restart klipper-cnc-assistant.service
+```
+
+4. Verificar entorno efectivo:
+
+```bash
+sudo systemctl show klipper-cnc-assistant.service -p Environment
+```
+
+Si `/dev/ttyUSB0` está ocupado, identifique el proceso con `sudo fuser -v /dev/ttyUSB0` y detenga solo ese proceso si corresponde. No use `M112` para liberar el puerto serie.

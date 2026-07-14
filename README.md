@@ -151,10 +151,11 @@ No reinicie Klipper ni systemd de Klipper salvo que esté validando físicamente
 6. Ingresar Z segura de traslado, mover Z, calcular centro real y mover X/Y al centro con Z segura.
 7. Habilitar joystick X/Y discreto para ubicar el 0,0 del G-code de FlatCAM.
 8. Armar referencia, pulsar botón externo o confirmar desde la interfaz, sondear Z en pasos discretos y guardar X/Y/Z medidos.
-9. Generar mapa físico medido por montaje + herramienta + referencia + configuración de malla.
+9. Generar mapa físico medido por montaje + cara + revisión de colocación + configuración de malla; la referencia Z queda separada por herramienta.
 10. Revisar puntos, límites, separación, recorrido serpentino y estado.
 11. Ejecutar la malla solo tras confirmación explícita: un punto por etapa, con persistencia inmediata.
 12. Pausar, reanudar o cancelar conservando puntos medidos; `M112` queda separado como emergencia real.
+13. Generar G-code compensado real en `generated/compensated/` conservando X/Y y aplicando `Z += delta_superficie(x,y)`.
 
 Guía detallada: [docs/physical-validation.md](docs/physical-validation.md)
 
@@ -177,4 +178,4 @@ npm run test
 npm run build
 ```
 
-Última validación local: backend 60 pruebas, frontend 37 pruebas, `pip check`, lint y build correctos.
+Última validación local: backend 62 pruebas, frontend 37 pruebas, `pip check`, lint y build correctos. `npm run build` conserva la advertencia no bloqueante de tamaño de Plotly.

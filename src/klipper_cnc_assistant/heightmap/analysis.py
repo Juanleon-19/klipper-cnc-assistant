@@ -138,53 +138,73 @@ def interpolate_height(
                 f"distancia al dominio {domain_check.distance_mm:.6f} mm."
             ),
         )
-    if grid.columnas < 2 or grid.filas < 2:
-        return InterpolationResult(
-            estado="insuficiente",
-            valor_mm=None,
-            observacion="La malla requiere al menos dos columnas y dos filas.",
-        )
-
     local_x = x_mm - region.min_x_mm
     local_y = y_mm - region.min_y_mm
     column_position = (local_x / grid.paso_x_mm) if grid.paso_x_mm > 0 else 0.0
     row_position = (local_y / grid.paso_y_mm) if grid.paso_y_mm > 0 else 0.0
+    sample_index = {(sample.fila, sample.columna): sample for sample in height_map.muestras}
+
+    if grid.columnas == 1 and grid.filas == 1:
+        sample = sample_index.get((0, 0))
+        value = None if sample is None else _value_for_mode(sample, height_map.plano, mode)
+        if sample is None or value is None or not sample.incluida:
+            return InterpolationResult(estado="insuficiente", valor_mm=None, observacion="El único punto de la malla no tiene medición válida.")
+        return InterpolationResult(estado="ok", valor_mm=float(value))
+
+    if grid.filas == 1:
+        left_column = min(grid.columnas - 2, max(0, int(column_position)))
+        tx = min(1.0, max(0.0, column_position - left_column))
+        samples = [sample_index.get((0, left_column)), sample_index.get((0, left_column + 1))]
+        values = _interpolation_values(samples, height_map.plano, mode)
+        if values is None:
+            return InterpolationResult(estado="insuficiente", valor_mm=None, observacion="La fila contiene puntos faltantes o excluidos.")
+        return InterpolationResult(estado="ok", valor_mm=float(values[0] * (1.0 - tx) + values[1] * tx))
+
+    if grid.columnas == 1:
+        top_row = min(grid.filas - 2, max(0, int(row_position)))
+        ty = min(1.0, max(0.0, row_position - top_row))
+        samples = [sample_index.get((top_row, 0)), sample_index.get((top_row + 1, 0))]
+        values = _interpolation_values(samples, height_map.plano, mode)
+        if values is None:
+            return InterpolationResult(estado="insuficiente", valor_mm=None, observacion="La columna contiene puntos faltantes o excluidos.")
+        return InterpolationResult(estado="ok", valor_mm=float(values[0] * (1.0 - ty) + values[1] * ty))
+
     left_column = min(grid.columnas - 2, max(0, int(column_position)))
     top_row = min(grid.filas - 2, max(0, int(row_position)))
     tx = min(1.0, max(0.0, column_position - left_column))
     ty = min(1.0, max(0.0, row_position - top_row))
 
-    sample_index = {(sample.fila, sample.columna): sample for sample in height_map.muestras}
     corners = [
         sample_index.get((top_row, left_column)),
         sample_index.get((top_row, left_column + 1)),
         sample_index.get((top_row + 1, left_column)),
         sample_index.get((top_row + 1, left_column + 1)),
     ]
-    if any(sample is None for sample in corners):
+    values = _interpolation_values(corners, height_map.plano, mode)
+    if values is None:
         return InterpolationResult(
             estado="insuficiente",
             valor_mm=None,
-            observacion="Faltan esquinas para interpolar la celda solicitada.",
+            observacion="La celda contiene puntos faltantes o excluidos.",
         )
-
-    values: list[float] = []
-    for sample in corners:
-        assert sample is not None
-        value = _value_for_mode(sample, height_map.plano, mode)
-        if value is None or not sample.incluida:
-            return InterpolationResult(
-                estado="insuficiente",
-                valor_mm=None,
-                observacion="La celda contiene puntos faltantes o excluidos.",
-            )
-        values.append(value)
 
     top = values[0] * (1.0 - tx) + values[1] * tx
     bottom = values[2] * (1.0 - tx) + values[3] * tx
     value = top * (1.0 - ty) + bottom * ty
     return InterpolationResult(estado="ok", valor_mm=float(value))
 
+
+
+def _interpolation_values(samples, plane: PlaneFit | None, mode: str) -> list[float] | None:
+    values: list[float] = []
+    for sample in samples:
+        if sample is None:
+            return None
+        value = _value_for_mode(sample, plane, mode)
+        if value is None or not sample.incluida:
+            return None
+        values.append(value)
+    return values
 
 def build_dense_surface(
     height_map: HeightMap,

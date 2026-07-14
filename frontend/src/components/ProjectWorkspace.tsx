@@ -11,11 +11,13 @@ import { parseFiniteNumber } from "../lib/numbers";
 import { toneForStatus, translateFace, translateOperationType, translateStatus } from "../lib/ui";
 import type {
   CompensationPreview,
+  CompensatedGCodeResult,
   HeightMap,
   Operation,
   Project,
   ProjectPayload,
   ReferenceSession,
+  PhysicalMapPayload,
   ReferenceStep,
 } from "../types";
 import { ProjectForm } from "./ProjectForm";
@@ -37,9 +39,10 @@ type ProjectWorkspaceProps = {
   onUploadFile: (operation: Operation, file: File) => Promise<void>;
 };
 
-type WorkspaceView = "archivo" | "trayectoria" | "referencia" | "mapa" | "validacion";
+type WorkspaceView = "archivo" | "trayectoria" | "referencia" | "mapa" | "validacion" | "ejecucion";
 type MapTab = "mapa2d" | "superficie3d" | "puntos" | "configuracion";
 type HeightMode = "bruto" | "plano" | "residuo";
+type HeightMapSource = "SIMULATED" | "MEASURED";
 
 type ReferenceFieldErrors = Partial<Record<"x_mm" | "y_mm" | "z_mm", string>>;
 type InputState = { x_mm: string; y_mm: string };
@@ -116,9 +119,12 @@ export function ProjectWorkspace({
   const [activeView, setActiveView] = useState<WorkspaceView>("archivo");
   const [activeMapTab, setActiveMapTab] = useState<MapTab>("mapa2d");
   const [heightMode, setHeightMode] = useState<HeightMode>("bruto");
+  const [mapSource, setMapSource] = useState<HeightMapSource>("SIMULATED");
   const [heightMap, setHeightMap] = useState<HeightMap | null>(null);
+  const [physicalMap, setPhysicalMap] = useState<PhysicalMapPayload | null>(null);
   const [referenceSession, setReferenceSession] = useState<ReferenceSession | null>(null);
   const [compensationPreview, setCompensationPreview] = useState<CompensationPreview | null>(null);
+  const [generatedGCode, setGeneratedGCode] = useState<CompensatedGCodeResult | null>(null);
   const [heightMapBusy, setHeightMapBusy] = useState(false);
   const [referenceBusy, setReferenceBusy] = useState(false);
   const [workspaceError, setWorkspaceError] = useState("");
@@ -167,15 +173,18 @@ export function ProjectWorkspace({
   useEffect(() => {
     if (!project || !selectedOperation) {
       setHeightMap(null);
+      setPhysicalMap(null);
       setReferenceSession(null);
       setCompensationPreview(null);
+      setGeneratedGCode(null);
+      setGeneratedGCode(null);
       return;
     }
 
     const run = async () => {
       setWorkspaceError("");
       try {
-        const [referencePayload, maybeMap] = await Promise.all([
+        const [referencePayload, maybeMap, maybePhysicalMap] = await Promise.all([
           api.getReferenceSession(project.id, selectedOperation.id),
           api.getHeightMap(project.id, selectedOperation.id).catch((error) => {
             if (error instanceof Error && error.message.toLowerCase().includes("no existe")) {
@@ -183,8 +192,15 @@ export function ProjectWorkspace({
             }
             throw error;
           }),
+          api.getPhysicalMap(project.id, selectedOperation.id).then((result) => result.payload).catch((error) => {
+            if (error instanceof Error && error.message.toLowerCase().includes("no existe")) {
+              return null;
+            }
+            return null;
+          }),
         ]);
         setReferenceSession(referencePayload);
+        setPhysicalMap(maybePhysicalMap);
         setHeightMap(maybeMap);
       } catch (error) {
         setWorkspaceError(error instanceof Error ? error.message : "No fue posible cargar el espacio de trabajo técnico.");
@@ -219,7 +235,7 @@ export function ProjectWorkspace({
       return;
     }
     const stored = window.localStorage.getItem(workspaceViewStorageKey(project.id, selectedOperation.id));
-    if (stored === "archivo" || stored === "trayectoria" || stored === "referencia" || stored === "mapa" || stored === "validacion") {
+    if (stored === "archivo" || stored === "trayectoria" || stored === "referencia" || stored === "mapa" || stored === "validacion" || stored === "ejecucion") {
       setActiveView(stored);
       return;
     }
@@ -347,8 +363,18 @@ export function ProjectWorkspace({
   };
 
   const submitZReference = async () => {
-    const xSource = useWorkOriginXYForZ ? workOrigin.x_mm : zReference.x_mm;
-    const ySource = useWorkOriginXYForZ ? workOrigin.y_mm : zReference.y_mm;
+    const referenceFallbackX = referenceValue(referenceSession?.referencia_z ?? null, "x_mm");
+    const referenceFallbackY = referenceValue(referenceSession?.referencia_z ?? null, "y_mm");
+    const xSource = useWorkOriginXYForZ
+      ? workOrigin.x_mm
+      : zReference.x_mm === "0" && referenceFallbackX && referenceFallbackX !== "0"
+        ? referenceFallbackX
+        : zReference.x_mm;
+    const ySource = useWorkOriginXYForZ
+      ? workOrigin.y_mm
+      : zReference.y_mm === "0" && referenceFallbackY && referenceFallbackY !== "0"
+        ? referenceFallbackY
+        : zReference.y_mm;
     const xParsed = parseFiniteNumber(xSource);
     const yParsed = parseFiniteNumber(ySource);
     const zParsed = parseFiniteNumber(zReference.z_mm);
@@ -843,6 +869,34 @@ export function ProjectWorkspace({
     </div>
   );
 
+
+  const withPhysicalMapAction = async (action: () => Promise<PhysicalMapPayload | null>) => {
+    setHeightMapBusy(true);
+    setWorkspaceError("");
+    try {
+      const result = await action();
+      if (result) {
+        setPhysicalMap(result);
+      }
+      if (project && selectedOperation) {
+        const measured = await api.getPhysicalHeightMap(project.id, selectedOperation.id);
+        setHeightMap(measured);
+        setMapSource("MEASURED");
+      }
+      setCompensationPreview(null);
+      setGeneratedGCode(null);
+    } catch (error) {
+      setWorkspaceError(error instanceof Error ? error.message : "No fue posible actualizar el mapa físico medido.");
+    } finally {
+      setHeightMapBusy(false);
+    }
+  };
+
+  const selectedToolKey = selectedOperation?.tool_id || selectedOperation?.herramienta || "sin herramienta";
+  const physicalMeasuredPoints = physicalMap?.points?.filter((point) => point.status === "MEASURED").length ?? 0;
+  const physicalPointCount = typeof physicalMap?.point_count === "number" ? physicalMap.point_count : physicalMap?.points?.length ?? 0;
+  const physicalMapId = typeof physicalMap?.map_id === "string" ? physicalMap.map_id : "";
+
   const renderMapa = () => (
     <div className="stack gap-md">
       <article className="panel">
@@ -863,7 +917,57 @@ export function ProjectWorkspace({
           <button className={`toolbar-pill${heightMode === "plano" ? " toolbar-pill--active" : ""}`} type="button" onClick={() => setHeightMode("plano")}>Plano</button>
           <button className={`toolbar-pill${heightMode === "residuo" ? " toolbar-pill--active" : ""}`} type="button" onClick={() => setHeightMode("residuo")}>Residuo</button>
         </div>
+        <div className="toolbar-inline toolbar-inline--scrollable" aria-label="Fuente del mapa">
+          <span className="eyebrow">Fuente del mapa</span>
+          <button className={`toolbar-pill${mapSource === "SIMULATED" ? " toolbar-pill--active" : ""}`} type="button" onClick={async () => {
+            setMapSource("SIMULATED");
+            if (selectedOperation) {
+              const maybeMap = await api.getHeightMap(project.id, selectedOperation.id).catch(() => null);
+              setHeightMap(maybeMap);
+            }
+          }}>SIMULADO</button>
+          <button className={`toolbar-pill${mapSource === "MEASURED" ? " toolbar-pill--active" : ""}`} type="button" onClick={() => void withPhysicalMapAction(async () => {
+            if (!selectedOperation) return null;
+            const payload = await api.getPhysicalMap(project.id, selectedOperation.id);
+            return payload.payload;
+          })}>MEDIDO FÍSICAMENTE</button>
+        </div>
       </article>
+
+      {mapSource === "MEASURED" ? (
+        <article className="panel">
+          <div className="section-heading section-heading--stacked">
+            <div>
+              <p className="eyebrow">Preparación física del montaje</p>
+              <h3>Mapa medido desde operaciones activas</h3>
+            </div>
+            <StatusBadge tone={physicalMap?.status === "MESH_COMPLETE" ? "success" : physicalMap ? "info" : "neutral"}>{physicalMap?.status ?? "sin mapa medido"}</StatusBadge>
+          </div>
+          <div className="info-grid info-grid--double compact-grid">
+            <div className="metric-box"><span>Herramienta seleccionada</span><strong>{selectedToolKey}</strong></div>
+            <div className="metric-box"><span>Puntos medidos</span><strong>{physicalMeasuredPoints}/{physicalPointCount}</strong></div>
+            <div className="metric-box"><span>Filas</span><strong>{physicalMap?.grid?.rows ?? "-"}</strong></div>
+            <div className="metric-box"><span>Columnas</span><strong>{physicalMap?.grid?.columns ?? "-"}</strong></div>
+            <div className="metric-box"><span>dx</span><strong>{formatMillimeters(physicalMap?.grid?.dx_mm, 3)}</strong></div>
+            <div className="metric-box"><span>dy</span><strong>{formatMillimeters(physicalMap?.grid?.dy_mm, 3)}</strong></div>
+          </div>
+          <p className="muted">El origen X/Y pertenece al montaje. El mapa de superficie se comparte por montaje/cara; cada herramienta conserva su propia referencia Z.</p>
+          <div className="action-grid">
+            <button className="button" type="button" disabled={heightMapBusy || !selectedOperation} onClick={() => void withPhysicalMapAction(async () => {
+              if (!selectedOperation) return null;
+              const result = await api.planPhysicalMapFromReference(project.id, selectedOperation.id, { max_spacing_mm: 10, margin_mm: 1 });
+              return result.payload;
+            })}>Preparar mapa físico</button>
+            <button className="button" type="button" disabled={heightMapBusy || !physicalMapId || physicalMap?.status === "MESH_COMPLETE"} onClick={() => void withPhysicalMapAction(async () => {
+              const result = await api.executeNextPhysicalMapPoint(project.id, physicalMapId);
+              return result.payload;
+            })}>Iniciar sondeo de malla</button>
+            <button className="button button--ghost" type="button" disabled={heightMapBusy || !physicalMapId} onClick={() => void withPhysicalMapAction(async () => (await api.pausePhysicalMap(project.id, physicalMapId)).payload)}>Pausar</button>
+            <button className="button button--ghost" type="button" disabled={heightMapBusy || !physicalMapId} onClick={() => void withPhysicalMapAction(async () => (await api.resumePhysicalMap(project.id, physicalMapId)).payload)}>Reanudar</button>
+            <button className="button button--ghost button--danger" type="button" disabled={heightMapBusy || !physicalMapId} onClick={() => void withPhysicalMapAction(async () => (await api.cancelPhysicalMap(project.id, physicalMapId)).payload)}>Cancelar</button>
+          </div>
+        </article>
+      ) : null}
 
       {heightMap ? (
         <article className="panel">
@@ -934,6 +1038,27 @@ export function ProjectWorkspace({
     </div>
   );
 
+
+  const renderEjecucion = () => (
+    <div className="stack gap-md">
+      <article className="panel">
+        <div className="section-heading section-heading--stacked">
+          <div>
+            <p className="eyebrow">Ejecución controlada</p>
+            <h3>Preflight Moonraker/Klipper</h3>
+          </div>
+          <StatusBadge tone="info">preparado en software</StatusBadge>
+        </div>
+        <div className="checklist-list">
+          <li data-status={physicalMap?.status === "MESH_COMPLETE" ? "confirmado" : "pendiente"}><span>Mapa medido del montaje</span><strong>{physicalMap?.status ?? "pendiente"}</strong></li>
+          <li data-status={generatedGCode ? "confirmado" : "pendiente"}><span>Archivo compensado</span><strong>{generatedGCode?.relative_path ?? "pendiente"}</strong></li>
+          <li data-status={referenceSession?.referencia_z ? "confirmado" : "pendiente"}><span>Referencia Z de herramienta</span><strong>{referenceSession?.referencia_z ? "vigente" : "pendiente"}</strong></li>
+        </div>
+        <p className="muted">La subida a Moonraker y el inicio real quedan bloqueados para validación supervisada. No se ejecuta ningún archivo desde esta pantalla durante desarrollo.</p>
+      </article>
+    </div>
+  );
+
   const renderValidacion = () => (
     <div className="stack gap-md">
       <article className="panel">
@@ -942,7 +1067,7 @@ export function ProjectWorkspace({
             <p className="eyebrow">Validación</p>
             <h3>Previsualización matemática de compensación</h3>
           </div>
-          <p className="muted">Bloqueada si faltan referencias o el mapa no está validado. No genera ni descarga G-code ejecutable.</p>
+          <p className="muted">Bloqueada si faltan referencias o el mapa no está validado. La generación real conserva X/Y y aplica Z += delta_superficie.</p>
         </div>
         {!referenceSession?.lista_para_compensacion ? (
           <div className="alert alert--warning">
@@ -972,6 +1097,29 @@ export function ProjectWorkspace({
         >
           Previsualizar compensación
         </button>
+        <button
+          className="button button--ghost"
+          type="button"
+          disabled={referenceBusy || !selectedOperation}
+          onClick={async () => {
+            if (!selectedOperation) return;
+            setReferenceBusy(true);
+            setWorkspaceError("");
+            try {
+              const result = await api.generateCompensatedGCode(project.id, selectedOperation.id);
+              setGeneratedGCode(result);
+            } catch (error) {
+              setWorkspaceError(error instanceof Error ? error.message : "No fue posible generar el G-code compensado.");
+            } finally {
+              setReferenceBusy(false);
+            }
+          }}
+        >
+          Generar G-code compensado
+        </button>
+        {generatedGCode ? (
+          <p className="muted">Archivo generado: <a href={api.generatedFileUrl(project.id, generatedGCode.relative_path)}>{generatedGCode.relative_path}</a></p>
+        ) : null}
       </article>
 
       {compensationPreview ? (
@@ -1084,7 +1232,8 @@ export function ProjectWorkspace({
           <button className={`toolbar-pill${activeView === "trayectoria" ? " toolbar-pill--active" : ""}`} type="button" onClick={() => setActiveView("trayectoria")}>Trayectoria</button>
           <button className={`toolbar-pill${activeView === "referencia" ? " toolbar-pill--active" : ""}`} type="button" onClick={() => setActiveView("referencia")}>Referencia</button>
           <button className={`toolbar-pill${activeView === "mapa" ? " toolbar-pill--active" : ""}`} type="button" onClick={() => setActiveView("mapa")}>Mapa de alturas</button>
-          <button className={`toolbar-pill${activeView === "validacion" ? " toolbar-pill--active" : ""}`} type="button" onClick={() => setActiveView("validacion")}>Validación</button>
+          <button className={`toolbar-pill${activeView === "validacion" ? " toolbar-pill--active" : ""}`} type="button" onClick={() => setActiveView("validacion")}>Compensación</button>
+          <button className={`toolbar-pill${activeView === "ejecucion" ? " toolbar-pill--active" : ""}`} type="button" onClick={() => setActiveView("ejecucion")}>Ejecución</button>
         </div>
       </article>
 
@@ -1096,6 +1245,7 @@ export function ProjectWorkspace({
         {activeView === "referencia" ? renderReferencia() : null}
         {activeView === "mapa" ? renderMapa() : null}
         {activeView === "validacion" ? renderValidacion() : null}
+      {activeView === "ejecucion" ? renderEjecucion() : null}
       </section>
     </div>
   );

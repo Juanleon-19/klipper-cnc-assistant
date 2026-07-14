@@ -1,3 +1,4 @@
+from .compensated_gcode_service import CompensatedGCodeService
 from .errors import ApplicationError, NotFoundError
 from .heightmap_service import HeightMapService
 from .physical_map_service import PhysicalMapService
@@ -6,6 +7,7 @@ from .services import MachineSessionService, ProjectService, SystemStatusService
 
 __all__ = [
     "ApplicationError",
+    "CompensatedGCodeService",
     "HeightMapService",
     "MachineSessionService",
     "NotFoundError",

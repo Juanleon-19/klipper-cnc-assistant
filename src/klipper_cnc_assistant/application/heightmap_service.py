@@ -334,15 +334,15 @@ class HeightMapService:
         return current.version + 1
 
     def _grid_from_region(self, probe_region: ProbeRegion, filas: int, columnas: int) -> HeightGrid:
-        if filas < 2 or columnas < 2:
-            raise ApplicationError("La malla del mapa requiere al menos 2 filas y 2 columnas.")
+        if filas < 1 or columnas < 1:
+            raise ApplicationError("La malla del mapa requiere al menos 1 fila y 1 columna.")
         return HeightGrid(
             filas=filas,
             columnas=columnas,
             ancho_mm=probe_region.ancho_mm,
             alto_mm=probe_region.alto_mm,
-            paso_x_mm=probe_region.ancho_mm / (columnas - 1),
-            paso_y_mm=probe_region.alto_mm / (filas - 1),
+            paso_x_mm=0.0 if columnas == 1 else probe_region.ancho_mm / (columnas - 1),
+            paso_y_mm=0.0 if filas == 1 else probe_region.alto_mm / (filas - 1),
         )
 
     def _blank_samples(self, grid: HeightGrid, probe_region: ProbeRegion) -> list[HeightSample]:
@@ -377,8 +377,8 @@ class HeightMapService:
         self._validate_domain(material, probe_region, exclusion_zones, rows, columns)
         width = grid.ancho_mm or probe_region.ancho_mm
         height = grid.alto_mm or probe_region.alto_mm
-        step_x = grid.paso_x_mm or (width / (columns - 1))
-        step_y = grid.paso_y_mm or (height / (rows - 1))
+        step_x = grid.paso_x_mm or (0.0 if columns == 1 else width / (columns - 1))
+        step_y = grid.paso_y_mm or (0.0 if rows == 1 else height / (rows - 1))
         return HeightGrid(
             filas=rows,
             columnas=columns,
@@ -396,14 +396,20 @@ class HeightMapService:
         filas: int,
         columnas: int,
     ) -> None:
-        if probe_region.ancho_mm <= 0 or probe_region.alto_mm <= 0:
+        if probe_region.ancho_mm < 0 or probe_region.alto_mm < 0:
             raise ApplicationError("La region sondeable debe tener dimensiones validas.")
+        if probe_region.ancho_mm == 0 and columnas != 1:
+            raise ApplicationError("Una region sin ancho requiere exactamente 1 columna.")
+        if probe_region.alto_mm == 0 and filas != 1:
+            raise ApplicationError("Una region sin alto requiere exactamente 1 fila.")
+        if probe_region.ancho_mm == 0 and probe_region.alto_mm == 0 and (filas, columnas) != (1, 1):
+            raise ApplicationError("Una region puntual requiere una malla 1 x 1.")
         if probe_region.min_x_mm < 0 or probe_region.min_y_mm < 0:
             raise ApplicationError("La region sondeable debe estar dentro del material.")
         if probe_region.max_x_mm > material.ancho_mm or probe_region.max_y_mm > material.alto_mm:
             raise ApplicationError("La region sondeable debe estar dentro del material.")
-        if filas < 2 or columnas < 2:
-            raise ApplicationError("La malla del mapa requiere al menos 2 filas y 2 columnas.")
+        if filas < 1 or columnas < 1:
+            raise ApplicationError("La malla del mapa requiere al menos 1 fila y 1 columna.")
         for zone in exclusion_zones:
             if zone.max_x_mm <= zone.min_x_mm or zone.max_y_mm <= zone.min_y_mm:
                 raise ApplicationError(f"La zona excluida '{zone.nombre}' no tiene dimensiones validas.")

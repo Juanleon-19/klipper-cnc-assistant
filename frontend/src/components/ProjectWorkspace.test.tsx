@@ -20,6 +20,15 @@ const apiMock = vi.hoisted(() => ({
   confirmZReference: vi.fn(),
   validateHeightMap: vi.fn(),
   getCompensationPreview: vi.fn(),
+  getPhysicalMap: vi.fn(),
+  getPhysicalHeightMap: vi.fn(),
+  planPhysicalMapFromReference: vi.fn(),
+  executeNextPhysicalMapPoint: vi.fn(),
+  pausePhysicalMap: vi.fn(),
+  resumePhysicalMap: vi.fn(),
+  cancelPhysicalMap: vi.fn(),
+  generateCompensatedGCode: vi.fn(),
+  generatedFileUrl: vi.fn(),
 }));
 
 vi.mock("../lib/api", async () => {
@@ -195,6 +204,9 @@ describe("ProjectWorkspace", () => {
     Object.values(apiMock).forEach((fn) => fn.mockReset());
     apiMock.getHeightMap.mockResolvedValue(heightMap);
     apiMock.getReferenceSession.mockResolvedValue(referenceSession);
+    apiMock.getPhysicalMap.mockRejectedValue(new Error("No existe mapa físico medido para este montaje y cara."));
+    apiMock.getPhysicalHeightMap.mockResolvedValue(heightMap);
+    apiMock.generatedFileUrl.mockImplementation((_projectId: string, relativePath: string) => `/api/projects/proj_1/generated/${relativePath}`);
     apiMock.confirmWorkOrigin.mockResolvedValue(referenceSession);
     apiMock.confirmZReference.mockResolvedValue(referenceSession);
     apiMock.getCompensationPreview.mockResolvedValue({
@@ -311,7 +323,7 @@ describe("ProjectWorkspace", () => {
     renderWorkspace();
 
     await waitFor(() => expect(screen.getAllByRole("button", { name: /^Archivo$/i }).length).toBeGreaterThan(0));
-    fireEvent.click(screen.getByRole("button", { name: /Validación/i }));
+    fireEvent.click(screen.getByRole("button", { name: /Compensación/i }));
     expect(screen.getByRole("button", { name: /Previsualizar compensación/i })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /Exportar/i })).toBeNull();
     expect(screen.queryByText(/Descargar G-code/i)).toBeNull();

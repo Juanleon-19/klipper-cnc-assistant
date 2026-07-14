@@ -1,5 +1,6 @@
 import type {
   CompensationPreview,
+  CompensatedGCodeResult,
   HealthResponse,
   HeightMap,
   MachineRuntime,
@@ -225,6 +226,8 @@ export const api = {
     }),
   getPhysicalMap: (projectId: string, operationId: string) =>
     request<PhysicalMapResponse>(`/api/projects/${projectId}/operations/${operationId}/physical-map`),
+  getPhysicalHeightMap: (projectId: string, operationId: string) =>
+    request<HeightMap>(`/api/projects/${projectId}/operations/${operationId}/physical-map/height-map`),
   executeNextPhysicalMapPoint: (projectId: string, mapId: string) =>
     request<PhysicalMapResponse>(`/api/projects/${projectId}/physical-maps/${mapId}/execute-next`, { method: "POST" }),
   pausePhysicalMap: (projectId: string, mapId: string) =>
@@ -277,6 +280,12 @@ export const api = {
     request<{ session: ReferenceSession; preview: CompensationPreview }>(`/api/projects/${projectId}/operations/${operationId}/compensation-preview`, {
       method: "POST",
     }),
+  generateCompensatedGCode: (projectId: string, operationId: string) =>
+    request<CompensatedGCodeResult>(`/api/projects/${projectId}/operations/${operationId}/compensated-gcode/generate`, {
+      method: "POST",
+    }),
+  generatedFileUrl: (projectId: string, relativePath: string) =>
+    `/api/projects/${projectId}/generated/${relativePath}`,
   deleteHeightMap: (projectId: string, operationId: string) =>
     request<{ detalle: string }>(`/api/projects/${projectId}/operations/${operationId}/height-map`, {
       method: "DELETE",

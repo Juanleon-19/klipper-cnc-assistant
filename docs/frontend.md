@@ -165,9 +165,9 @@ npm run build
 
 ## Limitaciones actuales
 
-- la referencia sigue siendo solo simulada;
-- no hay exportación de G-code compensado ejecutable;
-- no hay comandos de movimiento ni integración de control seguro;
+- la referencia puede ser simulada o medida físicamente por sonda, según el modo;
+- existe generación y descarga de G-code compensado en `generated/compensated/`, con ejecución real todavía bloqueada por preflight supervisado;
+- el control seguro físico está integrado en `Sistema` y el flujo de mapa medido vive en el workspace;
 - la superficie 3D es una visualización del mapa, no una simulación física del mecanizado.
 
 
@@ -185,3 +185,27 @@ La UI no ofrece ejecución de trabajos, exportación de G-code compensado ni mal
 La vista `Sistema` queda como diagnóstico técnico: muestra estado del runtime, Moonraker, Klipper, Arduino, controlador y seguridad. Las acciones se filtran por estado; no se muestran todos los botones como acciones equivalentes. El operador ve conexión, homing, Z segura, centro, espera de referencia, referencia armada, sondeo, malla y error.
 
 El diagnóstico Arduino muestra hilo activo, bytes recibidos, paquetes completos, paquetes válidos, inválidos, checksums, edad del último paquete válido, excepción y causa exacta de bloqueo. Los endpoints de mapa físico permiten planificar desde la referencia medida, consultar mapa activo, ejecutar el siguiente punto, pausar, reanudar y cancelar.
+
+
+## Flujo físico en el workspace
+
+El flujo de producción vive dentro del proyecto/montaje:
+
+```text
+Archivo -> Trayectoria -> Referencia -> Mapa de alturas -> Compensación -> Ejecución
+```
+
+`Sistema` queda como diagnóstico técnico de servicio, Moonraker, Klipper, Arduino, logs, errores y emergencia `M112`.
+
+En `Mapa de alturas` existe selector explícito de fuente:
+
+- `SIMULADO`: conserva configuración, simulación e importación matemática.
+- `MEDIDO FÍSICAMENTE`: muestra el mapa físico del montaje/cara, puntos medidos, grid, separación, referencia de herramienta y acciones de sondeo punto a punto.
+
+La acción `Preparar mapa físico` usa la referencia física capturada por la sonda y calcula la región desde operaciones activas analizadas. `Iniciar sondeo de malla` ejecuta solo el siguiente punto desde backend; la interfaz permite pausar, reanudar y cancelar sin borrar puntos.
+
+`Compensación` permite previsualizar y generar un archivo real. El enlace de descarga apunta a `generated/compensated/`. `Ejecución` muestra preflight, pero no inicia el trabajo real sin una validación física posterior.
+
+## Visor 2D
+
+El visor mantiene escala igual X/Y, grid adaptativa, ticks, unidad mm, cursor, material, trayectoria, región, muestras y superficie. En pantalla completa conserva barra compacta, controles de encuadre y leyenda; las pruebas de viewport siguen cubriendo zoom, pan y fullscreen.

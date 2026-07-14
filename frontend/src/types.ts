@@ -378,6 +378,25 @@ export type ProjectPayload = {
   agujeros_alineacion: AgujeroAlineacion[];
 };
 
+export type PhysicalMapPayload = Record<string, unknown> & {
+  map_id?: string;
+  status?: string;
+  source?: string;
+  point_count?: number;
+  points?: Array<Record<string, unknown>>;
+  grid?: { rows: number; columns: number; dx_mm: number; dy_mm: number };
+  local_region?: { min_x_mm: number; min_y_mm: number; max_x_mm: number; max_y_mm: number };
+  machine_region?: { min_x_mm: number; min_y_mm: number; max_x_mm: number; max_y_mm: number };
+  tool_references?: Record<string, unknown>;
+};
+
 export type PhysicalMapResponse = {
-  payload: Record<string, unknown>;
+  payload: PhysicalMapPayload;
+};
+
+export type CompensatedGCodeResult = {
+  relative_path: string;
+  metadata_path: string;
+  metadata: Record<string, unknown>;
+  preview: Record<string, unknown>;
 };

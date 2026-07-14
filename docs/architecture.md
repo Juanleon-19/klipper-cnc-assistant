@@ -120,7 +120,7 @@ Detalles de implementación:
 
 - cada segmento puede subdividirse virtualmente usando medio paso mínimo de la rejilla;
 - los valores fuera del dominio se marcan y bloquean la vista previa utilizable;
-- no se genera G-code, ni archivos, ni comandos hacia la máquina.
+- se genera G-code compensado bajo confirmación explícita, pero no se envía ni ejecuta automáticamente durante desarrollo.
 
 ## Seguridad actual
 
@@ -148,4 +148,34 @@ El runtime productivo conserva el protocolo validado en los experimentos 007 y 0
 
 Moonraker separa aceptación HTTP, ejecución física y confirmación de estado. `G28` puede producir timeout de transporte sin declararse fallo físico si Klipper sigue conectado; el backend consulta `toolhead.homed_axes`, velocidad y límites hasta `MACHINE_HOME_TIMEOUT`. Los movimientos automáticos esperan posición objetivo y velocidad cero hasta `MACHINE_MOVE_TIMEOUT`.
 
-El servicio `PhysicalMapService` planifica mapas `MEASURED` por montaje/herramienta/referencia/configuración, usa la unión de límites analizados de operaciones de la misma herramienta y genera recorrido serpentino. La ejecución de malla es punto a punto: Z segura, XY, sondeo discreto, retracto y persistencia inmediata.
+El servicio `PhysicalMapService` planifica mapas `MEASURED` por montaje/cara/revisión de colocación/configuración, usa la unión de límites analizados de operaciones activas del montaje/cara y genera recorrido serpentino. La ejecución de malla es punto a punto: Z segura, XY, sondeo discreto, retracto y persistencia inmediata. Las referencias Z viven por herramienta en `tool_references`.
+
+
+## Modelo físico de superficie y referencias
+
+El modelo físico actual separa dos conceptos:
+
+```text
+Mapa de superficie = montaje físico + cara + placement_revision + región/configuración de malla
+Referencia Z = montaje + herramienta instalada + instalación/revisión de esa herramienta
+```
+
+`PhysicalMapService` persiste mapas medidos bajo `maps/measured/<setup>/<face>/placement-1/<timestamp>/height_map.json`. Cada punto guarda Z absoluto (`z_measured_abs`) y `delta_z = z_measured_abs - acquisition_reference_z`. El `height_map` usado para compensación contiene la superficie relativa `delta_z`, por eso puede reutilizarse con otra herramienta si la PCB no se movió.
+
+Los mapas legados por herramienta siguen leyéndose y se migran en memoria a `surface-map-v2`; no se eliminan ni sobrescriben. La identidad de herramienta se conserva en `tool_references` y en `acquisition_tool_id` para trazabilidad.
+
+## Generación real de G-code compensado
+
+`CompensatedGCodeService` genera archivos nuevos en `generated/compensated/` y un JSON de metadatos. La convención es:
+
+```text
+x_compensado = x_original
+y_compensado = y_original
+z_compensado = z_original + delta_superficie(x,y)
+```
+
+La generación bloquea si falta mapa medido completo, si el mapa pertenece a otro montaje/cara, si falta referencia Z vigente de la herramienta, si la operación no está cubierta o si un punto cae fuera del dominio. Los movimientos largos se subdividen usando un límite derivado de la separación de malla; los arcos usan los segmentos discretizados por el analizador G-code actual.
+
+## Ejecución física
+
+La web no controla motores directamente. El backend orquesta estados y Moonraker/Klipper ejecutan movimiento. El paso `Ejecución` solo prepara preflight y trazabilidad en esta fase; no arranca trabajos durante desarrollo.

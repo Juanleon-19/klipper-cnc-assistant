@@ -5,6 +5,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from klipper_cnc_assistant.application.compensated_gcode_service import CompensatedGCodeService
 from klipper_cnc_assistant.application.physical_map_service import PhysicalMapService
 from klipper_cnc_assistant.input.serial_driver import HEADER, SerialDriver
 from klipper_cnc_assistant.machine.state import AxisLimits, MachinePosition, MachineState
@@ -92,7 +93,7 @@ class PhysicalIntegrationTest(unittest.TestCase):
         self.assertEqual(machine.x_limits.minimum, -5)
         self.assertEqual(machine.position.z, 3)
 
-    def test_physical_map_is_keyed_by_tool_and_persists_points(self) -> None:
+    def test_physical_map_is_keyed_by_setup_face_and_persists_relative_points(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             repository = JsonProjectRepository(Path(temp))
             project_service = ProjectService(repository)
@@ -116,12 +117,62 @@ class PhysicalIntegrationTest(unittest.TestCase):
                 session_id="session",
             )
             self.assertEqual(plan["tool_id"], "tool-02")
-            self.assertEqual(plan["operation_ids"], [first.id])
+            self.assertEqual(set(plan["operation_ids"]), {first.id, second.id})
             self.assertEqual(plan["source"], "MEASURED")
-            self.assertTrue(plan["map_id"].startswith("measured/setup-main/tool-02/"))
+            self.assertEqual(plan["map_model"], "SURFACE_BY_SETUP_FACE_PLACEMENT")
+            self.assertTrue(plan["map_id"].startswith("measured/setup-main/superior/placement-1/"))
+            self.assertLess(plan["local_region"]["min_x_mm"], 2.0)
             updated = service.record_point(project_id=project.id, map_id=plan["map_id"], point_index=0, z_measured=1.2)
             self.assertEqual(updated["points"][0]["status"], "MEASURED")
+            self.assertAlmostEqual(updated["points"][0]["delta_z"], -0.03)
             self.assertEqual(updated["height_map"]["fuente_datos"], "measured")
+
+            second_reference = service.capture_reference_and_plan(
+                project_id=project.id,
+                operation_id=second.id,
+                machine_origin_x=100.0,
+                machine_origin_y=200.0,
+                reference_z=2.5,
+                machine_position={"x_mm": 100.0, "y_mm": 200.0, "z_mm": 2.5},
+                homed_axes="xyz",
+                machine_label="test",
+                session_id="session-2",
+            )
+            self.assertEqual(second_reference["map_id"], plan["map_id"])
+            self.assertIn("tool-10", second_reference["tool_references"])
+
+
+    def test_compensated_gcode_generation_preserves_xy_and_uses_relative_surface(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            repository = JsonProjectRepository(Path(temp))
+            project_service = ProjectService(repository)
+            project = project_service.create_project(nombre="PCB", ancho_mm=50, alto_mm=40, espesor_mm=1.6)
+            operation = project_service.add_operation(project_id=project.id, nombre="Aislamiento", tipo="aislamiento", cara="superior", orden=0, tool_id="tool-v", herramienta="V-bit 0.2 mm")
+            project_service.upload_operation_gcode(project_id=project.id, operation_id=operation.id, filename="job.nc", content="G21\nG90\nG1 X0 Y0 Z-0.10 F120\nG1 X10 Y0 Z-0.10 F120\nG1 X10 Y10 Z-0.10 F120\n")
+            project_service.analyze_operation(project.id, operation.id)
+            service = PhysicalMapService(repository)
+            plan = service.capture_reference_and_plan(
+                project_id=project.id,
+                operation_id=operation.id,
+                machine_origin_x=20.0,
+                machine_origin_y=30.0,
+                reference_z=1.0,
+                machine_position={"x_mm": 20.0, "y_mm": 30.0, "z_mm": 1.0},
+                homed_axes="xyz",
+                machine_label="test",
+                session_id="session",
+            )
+            for point in plan["points"]:
+                z = 1.0 + 0.001 * float(point["x_local"]) + 0.002 * float(point["y_local"])
+                plan = service.record_point(project_id=project.id, map_id=plan["map_id"], point_index=int(point["index"]), z_measured=z)
+            self.assertEqual(plan["status"], "MESH_COMPLETE")
+            generator = CompensatedGCodeService(repository, service)
+            result = generator.generate(project.id, operation.id)
+            generated = repository.read_project_file(project.id, result["relative_path"])
+            self.assertIn("X10.00000 Y0.00000", generated)
+            self.assertIn("Z-0.09000", generated)
+            self.assertEqual(result["metadata"]["tool_id"], "tool-v")
+            self.assertTrue(result["relative_path"].startswith("generated/compensated/"))
 
 
 if __name__ == "__main__":

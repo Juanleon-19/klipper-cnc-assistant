@@ -8,7 +8,7 @@ Este documento resume el estado local real del repositorio. La rama contiene cam
 
 ## Resumen ejecutivo
 
-La aplicación conserva el modo simulado como predeterminado y ahora integra el flujo físico supervisado hasta planificar y ejecutar punto a punto una malla medida por herramienta. El producto sigue separando preparación digital, simulación y control físico.
+La aplicación conserva el modo simulado como predeterminado e integra el flujo físico supervisado dentro del montaje: referencia por herramienta, mapa de superficie por montaje/cara, sondeo punto a punto y generación de G-code compensado. El producto sigue separando preparación digital, simulación y control físico.
 
 Implementado en esta fase:
 
@@ -100,7 +100,7 @@ Convención usada por la compensación:
 - el mapa se define en coordenadas locales del montaje/material mediante `probe_region`;
 - las referencias físicas guardan posición de máquina para ubicar ese montaje en la CNC;
 - la compensación matemática consulta el mapa en X/Y local del montaje;
-- la transformación a máquina se reserva para movimientos físicos y no genera G-code ejecutable en esta fase.
+- la transformación a máquina se reserva para movimientos físicos; la generación de G-code compensado conserva coordenadas locales X/Y y solo modifica Z con la superficie relativa.
 
 Un punto está dentro del mapa rectangular si:
 
@@ -133,7 +133,7 @@ Reglas implementadas:
 
 | Verificación | Resultado |
 | --- | --- |
-| `PYTHONPATH=src .venv/bin/python -m unittest discover -s tests -v` | 60 pruebas correctas |
+| `PYTHONPATH=src .venv/bin/python -m unittest discover -s tests -v` | 62 pruebas correctas |
 | `.venv/bin/python -m pip check` | Sin dependencias rotas |
 | `npm run lint` | Correcto |
 | `npm run test` | 37 pruebas correctas en 10 archivos |
@@ -153,7 +153,7 @@ Reglas implementadas:
 - Validación física supervisada completa.
 - Endurecer reconexión y recuperación de Moonraker/WebSocket/serie.
 - Medir repetibilidad de sonda y definir debounce si la evidencia lo exige.
-- Implementar malla física completa solo después de validar sonda de un punto.
+- Validar físicamente la malla completa con PCB de descarte antes de usar trabajos reales.
 - Diseñar generación revisable de G-code compensado, todavía sin ejecución automática.
 - Separar carga diferida de Plotly si afecta operación real.
 
@@ -164,9 +164,9 @@ Se revisaron los experimentos `001` a `008`. La migración productiva reutiliza 
 
 La causa del timeout observado era el uso del timeout HTTP fijo de 5 s como si fuera confirmación de ejecución física. Ahora el comando se trata como aceptación de transporte y la finalización se confirma por estado Klipper. La causa del homing no reconocido era que la WebSocket solo suscribía `motion_report`, no `toolhead.homed_axes`. La causa de “puerto abierto, paquetes válidos = 0” queda diagnosticable: el runtime distingue bytes, paquetes completos, checksums, drops de sincronía, hilo serial, edad del último paquete, última excepción y espera de reinicio Arduino al abrir el puerto.
 
-## Mapas medidos por herramienta
+## Mapas medidos por montaje/cara
 
-Un mapa físico medido se identifica por montaje, herramienta, referencia medida y configuración de malla. Se guarda bajo `maps/measured/<setup>/<tool>/<timestamp...>/height_map.json`, conserva `source=MEASURED`, no reemplaza mapas simulados y persiste cada punto inmediatamente. Herramientas diferentes no comparten mapa automáticamente.
+Un mapa físico medido se identifica por montaje, cara, revisión de colocación, región y configuración de malla. Se guarda bajo `maps/measured/<setup>/<face>/placement-1/<timestamp...>/height_map.json`, conserva `source=MEASURED`, no reemplaza mapas simulados y persiste cada punto inmediatamente. Las herramientas no comparten referencia Z: cada una conserva su propia entrada en `tool_references`, pero reutilizan la superficie relativa si la PCB no se movió.
 
 
 ## Configuración local verificada el 2026-07-14
@@ -174,3 +174,32 @@ Un mapa físico medido se identifica por montaje, herramienta, referencia medida
 `systemctl show klipper-cnc-assistant.service -p Environment` reporta `MACHINE_MODE=physical`, `MOONRAKER_URL=http://127.0.0.1:7126`, `MOONRAKER_WS=ws://127.0.0.1:7126/websocket`, `SERIAL_PORT=/dev/ttyUSB0`, `SERIAL_BAUDRATE=115200` y `MACHINE_SAFE_Z=10`.
 
 Se leyeron `printer_kp3s1_data/config/printer.cfg` y `printer_kp3s2_data/config/printer.cfg`. No se modificaron límites, pasos, dirección de motores, macros ni firmware. Ambos archivos mantienen doble `[include mainsail.cfg]`, observado como condición preexistente.
+
+
+## Estado actualizado 2026-07-14: flujo físico dentro del montaje
+
+Implementado en software sobre los commits locales existentes, sin push y sin ejecutar movimientos físicos:
+
+- El mapa físico medido cambió al modelo correcto: superficie del montaje/cara/revisión de colocación, no exclusiva de herramienta.
+- `PhysicalMapService` guarda `schema_version=surface-map-v2`, `map_model=SURFACE_BY_SETUP_FACE_PLACEMENT`, origen físico X/Y, región local, región de máquina, puntos absolutos y `delta_z` relativo.
+- Las referencias Z quedan en `tool_references` por herramienta/instalación. Cambiar herramienta permite guardar nueva referencia Z y reutilizar el mapa relativo del montaje si la PCB no cambió.
+- Se mantiene migración compatible en lectura para mapas legados `maps/measured/<setup>/<tool>/...`; no se destruyen datos existentes.
+- La pestaña `Mapa de alturas` ahora muestra selector `SIMULADO` / `MEDIDO FÍSICAMENTE`, acciones `Preparar mapa físico`, `Iniciar sondeo de malla`, `Pausar`, `Reanudar` y `Cancelar`.
+- La pestaña `Compensación` genera un archivo real nuevo en `generated/compensated/` y no sobrescribe el original.
+- La pestaña `Ejecución` agrega preflight visual para mapa medido, archivo compensado y referencia Z; no inicia ejecución física durante desarrollo.
+- La interpolación bilineal ahora admite bordes, una fila, una columna y un solo punto sin extrapolar fuera del dominio.
+- La generación de G-code compensado conserva X/Y, usa el mapa relativo `delta_z`, subdivide movimientos según la separación de malla, bloquea cobertura incompleta y registra metadatos/hash.
+
+Validación local:
+
+- `PYTHONPATH=src .venv/bin/python -m unittest discover -s tests -v`: 62 pruebas OK.
+- `.venv/bin/python -m pip check`: sin dependencias rotas.
+- `npm run lint`: OK.
+- `npm run test`: 37 pruebas OK.
+- `npm run build`: OK, con advertencia no bloqueante por tamaño de Plotly.
+
+Riesgos pendientes:
+
+- Falta validar físicamente el ciclo completo con PCB de descarte.
+- La subida y arranque de archivo compensado por Moonraker está preparada como preflight/UI, pero el inicio real queda para confirmación supervisada.
+- La linealización usa la geometría discretizada por el analizador actual; comandos incompatibles siguen bloqueándose por análisis/preflight.

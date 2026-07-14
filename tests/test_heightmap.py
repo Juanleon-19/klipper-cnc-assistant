@@ -296,6 +296,32 @@ class HeightMapBackendTest(unittest.TestCase):
         self.assertEqual(report.issues[0].operation_id, operation.id)
         self.assertGreater(report.max_distance_outside_mm, 0.0)
 
+
+    def test_interpolation_supports_single_row_and_single_column(self) -> None:
+        row_map = self.height_map_service.configure_map(
+            project_id=self.project.id,
+            operation_id=self.operation.id,
+            filas=1,
+            columnas=2,
+            probe_region=ProbeRegion(min_x_mm=0, min_y_mm=0, max_x_mm=10, max_y_mm=0),
+            exclusion_zones=(),
+        )
+        row_map = self.height_map_service.update_sample(project_id=self.project.id, operation_id=self.operation.id, sample_id="hm_0_0", z_mm=0.0)
+        row_map = self.height_map_service.update_sample(project_id=self.project.id, operation_id=self.operation.id, sample_id="hm_0_1", z_mm=0.1)
+        self.assertAlmostEqual(interpolate_height(row_map, x_mm=5, y_mm=0).valor_mm or 0.0, 0.05)
+
+        column_map = self.height_map_service.configure_map(
+            project_id=self.project.id,
+            operation_id=self.operation.id,
+            filas=2,
+            columnas=1,
+            probe_region=ProbeRegion(min_x_mm=0, min_y_mm=0, max_x_mm=0, max_y_mm=10),
+            exclusion_zones=(),
+        )
+        column_map = self.height_map_service.update_sample(project_id=self.project.id, operation_id=self.operation.id, sample_id="hm_0_0", z_mm=0.0)
+        column_map = self.height_map_service.update_sample(project_id=self.project.id, operation_id=self.operation.id, sample_id="hm_1_0", z_mm=0.2)
+        self.assertAlmostEqual(interpolate_height(column_map, x_mm=0, y_mm=5).valor_mm or 0.0, 0.1)
+
     def test_import_json_csv_and_recalculate_increment_version(self) -> None:
         json_payload = {
             "probe_region": self._probe_region(),

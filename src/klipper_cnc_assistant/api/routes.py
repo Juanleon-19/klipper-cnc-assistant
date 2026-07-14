@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Request
+from fastapi.responses import FileResponse
 from starlette.datastructures import UploadFile
 
 from klipper_cnc_assistant.application import ApplicationError
@@ -401,6 +402,14 @@ def build_router() -> APIRouter:
     def cancel_physical_map(project_id: str, map_id: str, request: Request) -> PhysicalMapResponse:
         return PhysicalMapResponse(payload=request.app.state.physical_map_service.mark_status(project_id=project_id, map_id=map_id, status="CANCELLED"))
 
+    @router.get("/projects/{project_id}/operations/{operation_id}/physical-map/height-map", response_model=HeightMapResponse)
+    def get_physical_map_as_height_map(project_id: str, operation_id: str, request: Request) -> HeightMapResponse:
+        physical_service = request.app.state.physical_map_service
+        height_service = request.app.state.height_map_service
+        payload = physical_service.get_active(project_id, operation_id)
+        height_map = height_service._deserialize_map(payload["height_map"])
+        return height_map_to_response(height_map, height_service.build_surfaces(height_map))
+
     @router.put("/projects/{project_id}/operations/{operation_id}/height-map/config", response_model=HeightMapResponse)
     def configure_height_map(project_id: str, operation_id: str, payload: HeightMapConfigRequest, request: Request) -> HeightMapResponse:
         service = request.app.state.height_map_service
@@ -497,6 +506,15 @@ def build_router() -> APIRouter:
         preview = CompensationPreviewResponse(**result["preview"])
         session = _reference_session_to_response(result["session"])
         return {"session": session.model_dump(), "preview": preview.model_dump()}
+
+    @router.post("/projects/{project_id}/operations/{operation_id}/compensated-gcode/generate", response_model=dict[str, object])
+    def generate_compensated_gcode(project_id: str, operation_id: str, request: Request) -> dict[str, object]:
+        return request.app.state.compensated_gcode_service.generate(project_id, operation_id)
+
+    @router.get("/projects/{project_id}/generated/{file_path:path}")
+    def download_generated_file(project_id: str, file_path: str, request: Request) -> FileResponse:
+        target = request.app.state.compensated_gcode_service.resolve_generated_file(project_id, file_path)
+        return FileResponse(target, media_type="text/plain", filename=target.name)
 
     @router.delete("/projects/{project_id}/operations/{operation_id}/height-map", response_model=dict[str, str])
     def delete_height_map(project_id: str, operation_id: str, request: Request) -> dict[str, str]:

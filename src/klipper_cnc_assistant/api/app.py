@@ -10,6 +10,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from klipper_cnc_assistant import __version__
 from klipper_cnc_assistant.application import (
     ApplicationError,
+    CompensatedGCodeService,
     HeightMapService,
     MachineSessionService,
     NotFoundError,
@@ -43,6 +44,7 @@ def create_app(
     project_service = ProjectService(repository)
     height_map_service = HeightMapService(repository)
     physical_map_service = PhysicalMapService(repository)
+    compensated_gcode_service = CompensatedGCodeService(repository, physical_map_service)
     reference_session_service = ReferenceSessionService(
         repository,
         height_map_service,
@@ -58,12 +60,13 @@ def create_app(
         version=__version__,
         description=(
             "API web para proyectos PCB, analisis de G-code, "
-            "diagnostico y sesion de maquina simulada."
+            "diagnostico y sesion de maquina fisica o simulada."
         ),
     )
     app.state.project_service = project_service
     app.state.height_map_service = height_map_service
     app.state.physical_map_service = physical_map_service
+    app.state.compensated_gcode_service = compensated_gcode_service
     app.state.machine_session_service = machine_session_service
     app.state.machine_runtime = machine_runtime
     app.state.reference_session_service = reference_session_service
