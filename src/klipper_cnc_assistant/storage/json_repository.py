@@ -309,6 +309,7 @@ class JsonProjectRepository:
             "mapa_disponible_en": None if preparation.mapa_disponible_en is None else preparation.mapa_disponible_en.isoformat(),
             "mapa_validado_en": None if preparation.mapa_validado_en is None else preparation.mapa_validado_en.isoformat(),
             "compensacion_previsualizada_en": None if preparation.compensacion_previsualizada_en is None else preparation.compensacion_previsualizada_en.isoformat(),
+            "motivo_invalidacion": preparation.motivo_invalidacion,
         }
 
     def _serialize_reference(self, reference: CoordinateReference | None) -> dict | None:
@@ -447,6 +448,7 @@ class JsonProjectRepository:
             mapa_disponible_en=self._parse_datetime(payload.get("mapa_disponible_en")),
             mapa_validado_en=self._parse_datetime(payload.get("mapa_validado_en")),
             compensacion_previsualizada_en=self._parse_datetime(payload.get("compensacion_previsualizada_en")),
+            motivo_invalidacion=payload.get("motivo_invalidacion"),
         )
 
     def _deserialize_reference(self, payload: dict | None) -> CoordinateReference | None:

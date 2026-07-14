@@ -20,6 +20,30 @@ import type {
 
 type View = "inicio" | "proyectos" | "nuevo" | "sistema";
 
+type NavItem = {
+  id: View;
+  label: string;
+  shortLabel: string;
+  icon: string;
+};
+
+const navItems: NavItem[] = [
+  { id: "inicio", label: "Inicio", shortLabel: "Inicio", icon: "⌂" },
+  { id: "proyectos", label: "Proyectos", shortLabel: "PCB", icon: "▣" },
+  { id: "nuevo", label: "Nuevo proyecto", shortLabel: "Nuevo", icon: "+" },
+  { id: "sistema", label: "Sistema", shortLabel: "Sistema", icon: "⚙" },
+];
+
+function useViewportWidth() {
+  const [width, setWidth] = useState(() => window.innerWidth);
+  useEffect(() => {
+    const handleResize = () => setWidth(window.innerWidth);
+    window.addEventListener("resize", handleResize);
+    return () => window.removeEventListener("resize", handleResize);
+  }, []);
+  return width;
+}
+
 export default function App() {
   const [view, setView] = useState<View>("inicio");
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
@@ -35,12 +59,34 @@ export default function App() {
   const [busyKey, setBusyKey] = useState<string | null>(null);
   const [creatingProject, setCreatingProject] = useState(false);
   const [savingProject, setSavingProject] = useState(false);
+  const viewportWidth = useViewportWidth();
+  const isDesktop = viewportWidth >= 1200;
+  const isTabletOrSmaller = viewportWidth < 1200;
 
   const selectedProject = useMemo(
     () => projects.find((project) => project.id === selectedProjectId) ?? null,
     [projects, selectedProjectId]
   );
   const recentProject = useMemo(() => getRecentProject(projects), [projects]);
+
+  useEffect(() => {
+    if (isDesktop) {
+      setSidebarOpen(false);
+      return;
+    }
+    setSidebarCollapsed(false);
+  }, [isDesktop]);
+
+  useEffect(() => {
+    if (!isTabletOrSmaller || !sidebarOpen) {
+      document.body.style.overflow = "";
+      return;
+    }
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.body.style.overflow = "";
+    };
+  }, [isTabletOrSmaller, sidebarOpen]);
 
   const handleSelectView = (nextView: View) => {
     setView(nextView);
@@ -241,32 +287,55 @@ export default function App() {
 
   const header = titleByView[view];
 
-  return (
-    <div className={`app-shell${sidebarCollapsed ? " app-shell--collapsed" : ""}${sidebarOpen ? " app-shell--sidebar-open" : ""}`}>
-      <button className={`shell-backdrop${sidebarOpen ? " shell-backdrop--visible" : ""}`} type="button" aria-label="Cerrar navegación" onClick={() => setSidebarOpen(false)} />
+  const sidebarExpanded = isDesktop && !sidebarCollapsed;
+  const sidebarVisible = isDesktop || sidebarOpen;
 
-      <aside className="sidebar" aria-label="Navegación lateral">
+  return (
+    <div className={`app-shell${isDesktop ? " app-shell--desktop" : " app-shell--drawer"}${sidebarCollapsed && isDesktop ? " app-shell--collapsed" : ""}${sidebarOpen && !isDesktop ? " app-shell--sidebar-open" : ""}`}>
+      {!isDesktop ? (
+        <button className={`shell-backdrop${sidebarOpen ? " shell-backdrop--visible" : ""}`} type="button" aria-label="Cerrar menú" onClick={() => setSidebarOpen(false)} />
+      ) : null}
+
+      <aside className={`sidebar${sidebarVisible ? " sidebar--visible" : ""}`} aria-label="Navegación lateral">
         <div className="sidebar__top">
-          <div>
+          <div className="sidebar__brand">
             <p className="eyebrow">Klipper CNC Assistant</p>
-            <h1>Visor técnico y mapa de alturas</h1>
-            <p className="muted">Aplicación privada para preparación remota de PCB en modo simulado.</p>
+            <h1>{sidebarExpanded ? "Visor técnico y mapa de alturas" : "KCA"}</h1>
+            {sidebarExpanded ? <p className="muted">Aplicación privada para preparación remota de PCB en modo simulado.</p> : null}
           </div>
-          <button className="icon-button icon-button--sidebar" type="button" aria-label="Colapsar barra lateral" onClick={() => setSidebarCollapsed((current) => !current)}>
-            {sidebarCollapsed ? ">" : "<"}
-          </button>
+          {isDesktop ? (
+            <button
+              className="icon-button icon-button--sidebar"
+              type="button"
+              aria-label={sidebarCollapsed ? "Abrir menú" : "Cerrar menú"}
+              aria-expanded={!sidebarCollapsed}
+              title={sidebarCollapsed ? "Abrir menú" : "Cerrar menú"}
+              onClick={() => setSidebarCollapsed((current) => !current)}
+            >
+              {sidebarCollapsed ? "☰" : "✕"}
+            </button>
+          ) : null}
         </div>
 
         <SystemBanner />
 
         <nav className="sidebar-nav" aria-label="Navegación principal">
-          <button className={`nav-link${view === "inicio" ? " nav-link--active" : ""}`} type="button" onClick={() => handleSelectView("inicio")}>Inicio</button>
-          <button className={`nav-link${view === "proyectos" ? " nav-link--active" : ""}`} type="button" onClick={() => handleSelectView("proyectos")}>Proyectos</button>
-          <button className={`nav-link${view === "nuevo" ? " nav-link--active" : ""}`} type="button" onClick={() => handleSelectView("nuevo")}>Nuevo proyecto</button>
-          <button className={`nav-link${view === "sistema" ? " nav-link--active" : ""}`} type="button" onClick={() => handleSelectView("sistema")}>Sistema</button>
+          {navItems.map((item) => (
+            <button
+              key={item.id}
+              className={`nav-link${view === item.id ? " nav-link--active" : ""}${sidebarCollapsed && isDesktop ? " nav-link--compact" : ""}`}
+              type="button"
+              aria-label={item.label}
+              title={sidebarCollapsed && isDesktop ? item.label : undefined}
+              onClick={() => handleSelectView(item.id)}
+            >
+              <span className="nav-link__icon" aria-hidden="true">{item.icon}</span>
+              {(!isDesktop || !sidebarCollapsed) ? <span className="nav-link__label">{item.label}</span> : null}
+            </button>
+          ))}
         </nav>
 
-        <div className="sidebar-stats">
+        <div className={`sidebar-stats${sidebarCollapsed && isDesktop ? " sidebar-stats--compact" : ""}`}>
           <div className="stat-card"><span>API</span><strong>{translateStatus(health?.estado)}</strong></div>
           <div className="stat-card"><span>Modo</span><strong>{summarizeMachineMode(health?.modo_maquina)}</strong></div>
           <div className="stat-card"><span>Proyectos</span><strong>{projects.length}</strong></div>
@@ -274,11 +343,20 @@ export default function App() {
       </aside>
 
       <main className="main-area">
-        <header className="topbar">
+        <header className="topbar topbar--app">
           <div className="topbar__title">
-            <button className="icon-button topbar__menu" type="button" aria-label="Abrir navegación" onClick={() => setSidebarOpen(true)}>
-              ≡
-            </button>
+            {!isDesktop ? (
+              <button
+                className="icon-button topbar__menu"
+                type="button"
+                aria-label={sidebarOpen ? "Cerrar menú" : "Abrir menú"}
+                aria-expanded={sidebarOpen}
+                title={sidebarOpen ? "Cerrar menú" : "Abrir menú"}
+                onClick={() => setSidebarOpen((current) => !current)}
+              >
+                {sidebarOpen ? "✕" : "☰"}
+              </button>
+            ) : null}
             <div>
               <p className="eyebrow">{header.eyebrow}</p>
               <h2>{header.title}</h2>

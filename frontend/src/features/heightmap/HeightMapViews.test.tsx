@@ -1,5 +1,5 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { HeightMap } from "../../types";
 import { HeightMapHeatmap } from "./HeightMapHeatmap";
@@ -8,6 +8,7 @@ import { HeightMapSurface3D } from "./HeightMapSurface3D";
 
 const newPlot = vi.fn().mockResolvedValue(undefined);
 const purge = vi.fn();
+let fullscreenTarget: Element | null = null;
 
 vi.mock("plotly.js-dist-min", () => ({
   newPlot,
@@ -110,12 +111,43 @@ const heightMap: HeightMap = {
 };
 
 describe("HeightMap views", () => {
-  it("renderiza el heatmap 2D con región interior y zonas excluidas", () => {
-    render(<HeightMapHeatmap material={{ ancho_mm: 80, alto_mm: 60, espesor_mm: 1.6 }} heightMap={heightMap} mode="bruto" />);
+  beforeEach(() => {
+    fullscreenTarget = null;
+    Object.defineProperty(document, "fullscreenElement", {
+      configurable: true,
+      get: () => fullscreenTarget,
+    });
+    Object.defineProperty(HTMLElement.prototype, "requestFullscreen", {
+      configurable: true,
+      value: vi.fn(() => {
+        fullscreenTarget = document.querySelector(".heightmap-viewer");
+        document.dispatchEvent(new Event("fullscreenchange"));
+        return Promise.resolve();
+      }),
+    });
+    Object.defineProperty(document, "exitFullscreen", {
+      configurable: true,
+      value: vi.fn(() => {
+        fullscreenTarget = null;
+        document.dispatchEvent(new Event("fullscreenchange"));
+        return Promise.resolve();
+      }),
+    });
+  });
+
+  it("renderiza el heatmap 2D con leyenda compacta y fullscreen", async () => {
+    render(<HeightMapHeatmap material={{ ancho_mm: 80, alto_mm: 60, espesor_mm: 1.6 }} heightMap={heightMap} mode="bruto" toolpathBounds={{ min_x_mm: 5, max_x_mm: 50, min_y_mm: 4, max_y_mm: 40, min_z_mm: -0.1, max_z_mm: 0.02, ancho_mm: 45, alto_mm: 36 }} />);
 
     expect(screen.getByText(/Mapa de alturas 2D/i)).toBeInTheDocument();
-    expect(screen.getAllByText(/región sondeable/i).length).toBeGreaterThan(0);
-    expect(screen.getAllByText(/Zonas excluidas/i).length).toBeGreaterThan(0);
+    expect(screen.getByLabelText(/Contorno material/i)).toBeInTheDocument();
+    expect(screen.getByLabelText(/Región sondeable/i)).toBeInTheDocument();
+    expect(screen.getByLabelText(/Zona excluida/i)).toBeInTheDocument();
+    expect(screen.getByLabelText(/Muestra/i)).toBeInTheDocument();
+    expect(screen.getByLabelText(/Superficie/i)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /Pantalla completa/i }));
+    await waitFor(() => expect(HTMLElement.prototype.requestFullscreen).toHaveBeenCalled());
+    expect(screen.getByRole("button", { name: /Salir de pantalla completa/i })).toBeInTheDocument();
   });
 
   it("permite excluir y editar puntos desde la tabla", async () => {

@@ -20,6 +20,57 @@ export type OperationInput = {
   herramienta?: string;
 };
 
+export class ApiError extends Error {
+  status: number;
+  fieldErrors: Record<string, string>;
+
+  constructor(message: string, status: number, fieldErrors: Record<string, string> = {}) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+    this.fieldErrors = fieldErrors;
+  }
+}
+
+function translateFastApiDetail(detail: unknown): { message: string; fieldErrors: Record<string, string> } {
+  if (typeof detail === "string" && detail.trim()) {
+    const fieldErrors: Record<string, string> = {};
+    for (const field of ["x_mm", "y_mm", "z_mm"]) {
+      if (detail.includes(`${field}:`)) {
+        fieldErrors[field] = detail;
+      }
+    }
+    return { message: detail, fieldErrors };
+  }
+
+  if (Array.isArray(detail)) {
+    const fieldErrors: Record<string, string> = {};
+    const messages = detail
+      .map((item) => {
+        if (!item || typeof item !== "object") {
+          return null;
+        }
+        const record = item as Record<string, unknown>;
+        const location = Array.isArray(record.loc)
+          ? record.loc.filter((part) => part !== "body").map(String).join(".")
+          : "solicitud";
+        const message = typeof record.msg === "string" ? record.msg : "valor inválido";
+        const translated = `${location || "solicitud"}: ${message}.`;
+        if (location) {
+          fieldErrors[location] = translated;
+        }
+        return translated;
+      })
+      .filter((value): value is string => Boolean(value));
+    return {
+      message: messages.length > 0 ? `Solicitud inválida. ${messages.join(" ")}` : "Solicitud inválida.",
+      fieldErrors,
+    };
+  }
+
+  return { message: "La solicitud no pudo validarse.", fieldErrors: {} };
+}
+
 async function request<T>(input: RequestInfo, init?: RequestInit): Promise<T> {
   const response = await fetch(input, {
     headers: {
@@ -30,10 +81,13 @@ async function request<T>(input: RequestInfo, init?: RequestInit): Promise<T> {
   });
 
   if (!response.ok) {
-    const payload = (await response.json().catch(() => ({ detalhe: "Error desconocido." }))) as {
-      detalle?: string;
+    const payload = (await response.json().catch(() => ({}))) as {
+      detalle?: unknown;
+      detail?: unknown;
     };
-    throw new Error(payload.detalle ?? "Error desconocido.");
+    const rawDetail = payload.detalle ?? payload.detail;
+    const { message, fieldErrors } = translateFastApiDetail(rawDetail);
+    throw new ApiError(message, response.status, fieldErrors);
   }
   return (await response.json()) as T;
 }

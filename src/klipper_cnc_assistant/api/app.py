@@ -64,17 +64,20 @@ def create_app(
 
     @app.exception_handler(RequestValidationError)
     async def handle_validation_error(_request, exc: RequestValidationError) -> JSONResponse:
-        details = []
+        translated: list[str] = []
         for error in exc.errors():
-            location = ".".join(
-                str(item)
-                for item in error["loc"]
-                if item != "body"
-            )
-            details.append(
-                f"{location or 'solicitud'}: valor invalido."
-            )
-        detail = "Solicitud invalida. " + " ".join(details)
+            location = ".".join(str(item) for item in error["loc"] if item != "body") or "solicitud"
+            error_type = error.get("type", "")
+            if error_type in {"missing"}:
+                message = "campo obligatorio."
+            elif error_type in {"float_parsing", "int_parsing", "finite_number", "float_type", "int_type"}:
+                message = "debe ser un numero valido."
+            elif error_type == "string_too_short":
+                message = "texto demasiado corto."
+            else:
+                message = "valor invalido."
+            translated.append(f"{location}: {message}")
+        detail = "Solicitud invalida. " + " ".join(translated)
         return JSONResponse(status_code=422, content={"detalle": detail.strip()})
 
     @app.exception_handler(NotFoundError)

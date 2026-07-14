@@ -136,21 +136,7 @@ class HeightMapBackendTest(unittest.TestCase):
     def test_reference_session_states_and_invalidations(self) -> None:
         session = self.client.get(f"/api/projects/{self.project.id}/operations/{self.operation.id}/reference-session").json()
         self.assertEqual(session["estado"], "sin_iniciar")
-
-        session = self.client.post(f"/api/projects/{self.project.id}/operations/{self.operation.id}/reference-session/machine-reference").json()
-        self.assertEqual(session["estado"], "origen_xy_pendiente")
-
-        session = self.client.post(
-            f"/api/projects/{self.project.id}/operations/{self.operation.id}/reference-session/work-origin",
-            json={"x_mm": 0, "y_mm": 0, "z_mm": None},
-        ).json()
-        self.assertEqual(session["estado"], "referencia_z_pendiente")
-
-        session = self.client.post(
-            f"/api/projects/{self.project.id}/operations/{self.operation.id}/reference-session/z-reference",
-            json={"x_mm": 10, "y_mm": 8, "z_mm": 0},
-        ).json()
-        self.assertEqual(session["estado"], "referencia_z_confirmada")
+        self.assertFalse(session["lista_para_compensacion"])
 
         self.client.post(
             f"/api/projects/{self.project.id}/operations/{self.operation.id}/height-map/simulate",
@@ -164,18 +150,51 @@ class HeightMapBackendTest(unittest.TestCase):
             },
         )
         session = self.client.get(f"/api/projects/{self.project.id}/operations/{self.operation.id}/reference-session").json()
+        self.assertEqual(session["estado"], "referencia_maquina_pendiente")
+        self.assertEqual(session["pasos"][4]["estado"], "disponible")
+        self.assertEqual(session["pasos"][4]["detalle"], "Mapa disponible, pendiente de referencias.")
+
+        session = self.client.post(f"/api/projects/{self.project.id}/operations/{self.operation.id}/reference-session/machine-reference").json()
+        self.assertEqual(session["estado"], "origen_xy_pendiente")
+
+        session = self.client.post(
+            f"/api/projects/{self.project.id}/operations/{self.operation.id}/reference-session/work-origin",
+            json={"x_mm": 0, "y_mm": 0},
+        ).json()
+        self.assertEqual(session["estado"], "referencia_z_pendiente")
+
+        session = self.client.post(
+            f"/api/projects/{self.project.id}/operations/{self.operation.id}/reference-session/z-reference",
+            json={"x_mm": 0, "y_mm": 0, "z_mm": 0},
+        ).json()
         self.assertEqual(session["estado"], "mapa_disponible")
+        self.assertFalse(session["lista_para_compensacion"])
 
         session = self.client.post(f"/api/projects/{self.project.id}/operations/{self.operation.id}/height-map/validate").json()
         self.assertEqual(session["estado"], "mapa_validado")
+        self.assertTrue(session["lista_para_compensacion"])
 
-        current_map = self.client.get(f"/api/projects/{self.project.id}/operations/{self.operation.id}/height-map").json()
-        self.client.patch(
-            f"/api/projects/{self.project.id}/operations/{self.operation.id}/height-map/samples/{current_map['muestras'][0]['id']}",
-            json={"z_mm": 0.123},
-        )
-        session = self.client.get(f"/api/projects/{self.project.id}/operations/{self.operation.id}/reference-session").json()
+        session = self.client.post(
+            f"/api/projects/{self.project.id}/operations/{self.operation.id}/reference-session/z-reference",
+            json={"x_mm": 0, "y_mm": 0, "z_mm": 0.15},
+        ).json()
         self.assertEqual(session["estado"], "mapa_disponible")
+        self.assertFalse(session["lista_para_compensacion"])
+        self.assertIn("referencia Z", session["motivo_invalidacion"])
+
+    def test_zero_values_are_valid_for_xy_and_z(self) -> None:
+        self.client.post(f"/api/projects/{self.project.id}/operations/{self.operation.id}/reference-session/machine-reference")
+        origin = self.client.post(
+            f"/api/projects/{self.project.id}/operations/{self.operation.id}/reference-session/work-origin",
+            json={"x_mm": 0, "y_mm": 0},
+        )
+        reference_z = self.client.post(
+            f"/api/projects/{self.project.id}/operations/{self.operation.id}/reference-session/z-reference",
+            json={"x_mm": 0, "y_mm": 0, "z_mm": 0},
+        )
+        self.assertEqual(origin.status_code, 200)
+        self.assertEqual(reference_z.status_code, 200)
+        self.assertEqual(reference_z.json()["referencia_z"]["z_mm"], 0)
 
     def test_compensation_preview_detects_points_outside_domain(self) -> None:
         gcode = "G21\nG90\nG1 X5 Y5 Z-0.1 F100\nG1 X75 Y45 Z-0.1 F100\n"
@@ -190,7 +209,7 @@ class HeightMapBackendTest(unittest.TestCase):
         self.client.post(f"/api/projects/{self.project.id}/operations/{self.operation.id}/reference-session/machine-reference")
         self.client.post(
             f"/api/projects/{self.project.id}/operations/{self.operation.id}/reference-session/work-origin",
-            json={"x_mm": 0, "y_mm": 0, "z_mm": None},
+            json={"x_mm": 0, "y_mm": 0},
         )
         self.client.post(
             f"/api/projects/{self.project.id}/operations/{self.operation.id}/reference-session/z-reference",

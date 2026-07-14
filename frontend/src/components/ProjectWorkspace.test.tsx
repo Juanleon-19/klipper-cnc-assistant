@@ -1,6 +1,7 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+import { ApiError } from "../lib/api";
 import type { HeightMap, Project, ReferenceSession } from "../types";
 import { ProjectWorkspace } from "./ProjectWorkspace";
 
@@ -21,9 +22,13 @@ const apiMock = vi.hoisted(() => ({
   getCompensationPreview: vi.fn(),
 }));
 
-vi.mock("../lib/api", () => ({
-  api: apiMock,
-}));
+vi.mock("../lib/api", async () => {
+  const actual = await vi.importActual<typeof import("../lib/api")>("../lib/api");
+  return {
+    ...actual,
+    api: apiMock,
+  };
+});
 
 vi.mock("../features/viewer/ToolpathViewer", () => ({
   ToolpathViewer: () => <div>ToolpathViewer mock</div>,
@@ -46,15 +51,18 @@ const referenceSession: ReferenceSession = {
   origen_trabajo: { x_mm: 0, y_mm: 0, z_mm: null, fecha: new Date().toISOString() },
   referencia_z: { x_mm: 10, y_mm: 8, z_mm: 0, fecha: new Date().toISOString() },
   pasos: [
-    { id: "referencia_maquina", titulo: "Referencia de maquina", confirmado: true, fecha: new Date().toISOString() },
-    { id: "origen_xy", titulo: "Origen de trabajo X/Y", confirmado: true, fecha: new Date().toISOString() },
-    { id: "referencia_z", titulo: "Referencia Z", confirmado: true, fecha: new Date().toISOString() },
-    { id: "region_sondeable", titulo: "Region sondeable", confirmado: true, fecha: new Date().toISOString() },
-    { id: "mapa", titulo: "Mapa", confirmado: true, fecha: new Date().toISOString() },
-    { id: "validacion", titulo: "Validacion", confirmado: true, fecha: new Date().toISOString() },
+    { id: "referencia_maquina", titulo: "Referencia de maquina", estado: "confirmado", confirmado: true, fecha: new Date().toISOString(), detalle: "Pertenece a la sesión general de máquina." },
+    { id: "origen_xy", titulo: "Origen de trabajo X/Y", estado: "confirmado", confirmado: true, fecha: new Date().toISOString(), detalle: "Define dónde queda X0 Y0 del G-code respecto al montaje." },
+    { id: "referencia_z", titulo: "Referencia Z", estado: "confirmado", confirmado: true, fecha: new Date().toISOString(), detalle: "Referencia vertical del montaje." },
+    { id: "region_sondeable", titulo: "Region sondeable", estado: "confirmado", confirmado: true, fecha: new Date().toISOString(), detalle: "Dominio medido del mapa." },
+    { id: "mapa", titulo: "Mapa", estado: "confirmado", confirmado: true, fecha: new Date().toISOString(), detalle: "Mapa disponible y validado." },
+    { id: "validacion", titulo: "Validacion", estado: "confirmado", confirmado: true, fecha: new Date().toISOString(), detalle: "Preparación lista para compensación matemática." },
   ],
   compensacion_previsualizada_en: null,
   analysis_stale: false,
+  lista_para_compensacion: true,
+  bloqueos_compensacion: [],
+  motivo_invalidacion: null,
 };
 
 const heightMap: HeightMap = {
@@ -128,7 +136,7 @@ const project: Project = {
         analysis_version: "gcode-analysis-v2",
         current_analysis_version: "gcode-analysis-v2",
         analisis_desactualizado: false,
-        limites: null,
+        limites: { min_x_mm: 0, max_x_mm: 40, min_y_mm: 0, max_y_mm: 25, min_z_mm: -0.1, max_z_mm: 0, ancho_mm: 40, alto_mm: 25 },
         avances_mm_min: [120],
         profundidad_min_mm: -0.1,
         profundidad_max_mm: 0,
@@ -159,53 +167,141 @@ const project: Project = {
   estado_general: "valido",
 };
 
+function renderWorkspace() {
+  return render(
+    <ProjectWorkspace
+      project={project}
+      busyKey={null}
+      savingProject={false}
+      onSaveProject={vi.fn()}
+      onAddOperation={vi.fn()}
+      onDeleteOperation={vi.fn()}
+      onRemoveFile={vi.fn()}
+      onAnalyze={vi.fn()}
+      onUploadFile={vi.fn()}
+    />
+  );
+}
+
 describe("ProjectWorkspace", () => {
   beforeEach(() => {
     Object.values(apiMock).forEach((fn) => fn.mockReset());
     apiMock.getHeightMap.mockResolvedValue(heightMap);
     apiMock.getReferenceSession.mockResolvedValue(referenceSession);
-    apiMock.getCompensationPreview.mockResolvedValue({ session: referenceSession, preview: { convencion_matematica: "z_compensada = z_original + (superficie_xy - z_referencia).", z_referencia_mm: 0, paso_muestreo_virtual_mm: 1, puntos_fuera_dominio: 0, puntos_virtuales_agregados: 0, resumen_z_original: { min_mm: -0.1, max_mm: 0 }, resumen_z_compensada: { min_mm: -0.09, max_mm: 0.01 }, segmentos: [] } });
+    apiMock.confirmWorkOrigin.mockResolvedValue(referenceSession);
+    apiMock.confirmZReference.mockResolvedValue(referenceSession);
+    apiMock.getCompensationPreview.mockResolvedValue({
+      session: referenceSession,
+      preview: {
+        convencion_matematica: "z_compensada = z_original + (superficie_xy - z_referencia).",
+        z_referencia_mm: 0,
+        paso_muestreo_virtual_mm: 1,
+        puntos_fuera_dominio: 0,
+        puntos_virtuales_agregados: 0,
+        resumen_z_original: { min_mm: -0.1, max_mm: 0 },
+        resumen_z_compensada: { min_mm: -0.09, max_mm: 0.01 },
+        segmentos: [],
+      },
+    });
+    window.localStorage.clear();
   });
 
   it("navega entre vistas principales y subpestañas del mapa", async () => {
-    render(
-      <ProjectWorkspace
-        project={project}
-        busyKey={null}
-        savingProject={false}
-        onSaveProject={vi.fn()}
-        onAddOperation={vi.fn()}
-        onDeleteOperation={vi.fn()}
-        onRemoveFile={vi.fn()}
-        onAnalyze={vi.fn()}
-        onUploadFile={vi.fn()}
-      />
-    );
+    renderWorkspace();
 
     await waitFor(() => expect(apiMock.getReferenceSession).toHaveBeenCalled());
     fireEvent.click(screen.getByRole("button", { name: /Referencia/i }));
-    expect(screen.getByText(/Flujo simulado de preparación/i)).toBeInTheDocument();
+    expect(await screen.findByText(/Flujo simulado de preparación/i)).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: /Mapa de alturas/i }));
     fireEvent.click(screen.getByRole("button", { name: /Configuración/i }));
-    expect(screen.getByText(/Región sondeable y simulación/i)).toBeInTheDocument();
+    expect(screen.getAllByText(/Alturas de la superficie/i).length).toBeGreaterThan(0);
   });
 
-  it("mantiene la navegación accesible en un viewport estrecho y no muestra exportación ejecutable", async () => {
-    window.innerWidth = 360;
-    render(
-      <ProjectWorkspace
-        project={project}
-        busyKey={null}
-        savingProject={false}
-        onSaveProject={vi.fn()}
-        onAddOperation={vi.fn()}
-        onDeleteOperation={vi.fn()}
-        onRemoveFile={vi.fn()}
-        onAnalyze={vi.fn()}
-        onUploadFile={vi.fn()}
-      />
+  it("acepta 0 válido en X e Y del origen de trabajo", async () => {
+    renderWorkspace();
+    fireEvent.click(screen.getByRole("button", { name: /Referencia/i }));
+    const originHeading = await screen.findByText(/2. Origen de trabajo X\/Y/i);
+    const originPanel = originHeading.closest("article");
+    expect(originPanel).not.toBeNull();
+    const scope = within(originPanel as HTMLElement);
+
+    fireEvent.change(scope.getByLabelText(/X \(mm\)/i), { target: { value: "0" } });
+    fireEvent.change(scope.getByLabelText(/Y \(mm\)/i), { target: { value: "0" } });
+    fireEvent.click(scope.getByRole("button", { name: /Confirmar en simulación/i }));
+
+    await waitFor(() => expect(apiMock.confirmWorkOrigin).toHaveBeenCalledWith("proj_1", "op_1", { x_mm: 0, y_mm: 0 }));
+  });
+
+  it("acepta 0 válido en Z y números decimales", async () => {
+    renderWorkspace();
+    fireEvent.click(screen.getByRole("button", { name: /Referencia/i }));
+    const zHeading = await screen.findByText(/3. Referencia Z/i);
+    const zPanel = zHeading.closest("article");
+    expect(zPanel).not.toBeNull();
+    const scope = within(zPanel as HTMLElement);
+
+    const zInput = scope.getByLabelText(/Z de referencia/i);
+    fireEvent.change(zInput, { target: { value: "0" } });
+    fireEvent.click(scope.getByRole("button", { name: /Confirmar en simulación/i }));
+    await waitFor(() => expect(apiMock.confirmZReference).toHaveBeenCalledWith("proj_1", "op_1", { x_mm: 10, y_mm: 8, z_mm: 0 }));
+
+    fireEvent.change(zInput, { target: { value: "0.25" } });
+    fireEvent.click(scope.getByRole("button", { name: /Confirmar en simulación/i }));
+    await waitFor(() => expect(apiMock.confirmZReference).toHaveBeenLastCalledWith("proj_1", "op_1", { x_mm: 10, y_mm: 8, z_mm: 0.25 }));
+  });
+
+  it("muestra error en campo vacío y conserva lo escrito si la API responde con 422", async () => {
+    apiMock.confirmZReference.mockRejectedValueOnce(
+      new ApiError("Solicitud invalida. z_mm: debe ser un numero valido.", 422, { z_mm: "Solicitud invalida. z_mm: debe ser un numero valido." })
     );
+    renderWorkspace();
+    fireEvent.click(screen.getByRole("button", { name: /Referencia/i }));
+    const zHeading = await screen.findByText(/3. Referencia Z/i);
+    const zPanel = zHeading.closest("article");
+    expect(zPanel).not.toBeNull();
+    const scope = within(zPanel as HTMLElement);
+
+    const zInput = scope.getByLabelText(/Z de referencia/i) as HTMLInputElement;
+    fireEvent.change(zInput, { target: { value: "" } });
+    fireEvent.click(scope.getByRole("button", { name: /Confirmar en simulación/i }));
+    expect(scope.getByText(/Indique Z en milímetros/i)).toBeInTheDocument();
+    expect(zInput).toHaveFocus();
+
+    fireEvent.change(zInput, { target: { value: "0.75" } });
+    fireEvent.click(scope.getByRole("button", { name: /Confirmar en simulación/i }));
+    await waitFor(() => expect(apiMock.confirmZReference).toHaveBeenCalled());
+    expect(screen.getAllByText(/Solicitud invalida. z_mm: debe ser un numero valido./i).length).toBeGreaterThan(0);
+    expect(zInput.value).toBe("0.75");
+    expect(document.activeElement).toBe(zInput);
+  });
+
+  it("copia X/Y del origen de trabajo hacia la referencia Z cuando se activa la opción", async () => {
+    renderWorkspace();
+    fireEvent.click(screen.getByRole("button", { name: /Referencia/i }));
+    const originPanel = (await screen.findByText(/2. Origen de trabajo X\/Y/i)).closest("article") as HTMLElement;
+    const zPanel = (await screen.findByText(/3. Referencia Z/i)).closest("article") as HTMLElement;
+    const originScope = within(originPanel);
+    const zScope = within(zPanel);
+
+    fireEvent.change(originScope.getByLabelText(/X \(mm\)/i), { target: { value: "12.5" } });
+    fireEvent.change(originScope.getByLabelText(/Y \(mm\)/i), { target: { value: "8.5" } });
+    fireEvent.click(zScope.getByLabelText(/Usar la misma posición X\/Y/i));
+
+    const xInputs = zScope.getAllByLabelText(/X \(mm\)/i) as HTMLInputElement[];
+    const yInputs = zScope.getAllByLabelText(/Y \(mm\)/i) as HTMLInputElement[];
+    expect(xInputs[0]).toBeDisabled();
+    expect(yInputs[0]).toBeDisabled();
+
+    fireEvent.change(zScope.getByLabelText(/Z de referencia/i), { target: { value: "0" } });
+    fireEvent.click(zScope.getByRole("button", { name: /Confirmar en simulación/i }));
+
+    await waitFor(() => expect(apiMock.confirmZReference).toHaveBeenCalledWith("proj_1", "op_1", { x_mm: 12.5, y_mm: 8.5, z_mm: 0 }));
+  });
+
+  it("mantiene la navegación accesible y no muestra exportación ejecutable", async () => {
+    window.innerWidth = 360;
+    renderWorkspace();
 
     await waitFor(() => expect(screen.getAllByRole("button", { name: /^Archivo$/i }).length).toBeGreaterThan(0));
     fireEvent.click(screen.getByRole("button", { name: /Validación/i }));

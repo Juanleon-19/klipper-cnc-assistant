@@ -29,6 +29,8 @@ from .schemas import (
     ReferencePointResponse,
     ReferenceSessionResponse,
     ReferenceStepResponse,
+    ReferenceWorkOriginRequest,
+    ReferenceZRequest,
     SystemInfoResponse,
     analysis_to_response,
     machine_session_to_response,
@@ -93,6 +95,9 @@ def _reference_session_to_response(payload: dict[str, object]) -> ReferenceSessi
         pasos=[ReferenceStepResponse(**step) for step in payload["pasos"]],
         compensacion_previsualizada_en=payload.get("compensacion_previsualizada_en"),
         analysis_stale=bool(payload.get("analysis_stale", False)),
+        lista_para_compensacion=bool(payload.get("lista_para_compensacion", False)),
+        bloqueos_compensacion=list(payload.get("bloqueos_compensacion", [])),
+        motivo_invalidacion=payload.get("motivo_invalidacion"),
     )
 
 
@@ -217,7 +222,7 @@ def build_router() -> APIRouter:
         return _reference_session_to_response(service.confirm_machine_reference(project_id, operation_id))
 
     @router.post("/projects/{project_id}/operations/{operation_id}/reference-session/work-origin", response_model=ReferenceSessionResponse)
-    def confirm_work_origin(project_id: str, operation_id: str, payload: ReferencePointResponse, request: Request) -> ReferenceSessionResponse:
+    def confirm_work_origin(project_id: str, operation_id: str, payload: ReferenceWorkOriginRequest, request: Request) -> ReferenceSessionResponse:
         service = request.app.state.reference_session_service
         if payload.x_mm is None or payload.y_mm is None:
             raise ApplicationError("Debe indicar X e Y para confirmar el origen de trabajo en simulacion.")
@@ -226,7 +231,7 @@ def build_router() -> APIRouter:
         )
 
     @router.post("/projects/{project_id}/operations/{operation_id}/reference-session/z-reference", response_model=ReferenceSessionResponse)
-    def confirm_z_reference(project_id: str, operation_id: str, payload: ReferencePointResponse, request: Request) -> ReferenceSessionResponse:
+    def confirm_z_reference(project_id: str, operation_id: str, payload: ReferenceZRequest, request: Request) -> ReferenceSessionResponse:
         service = request.app.state.reference_session_service
         if payload.x_mm is None or payload.y_mm is None or payload.z_mm is None:
             raise ApplicationError("Debe indicar X, Y y Z para confirmar la referencia Z en simulacion.")

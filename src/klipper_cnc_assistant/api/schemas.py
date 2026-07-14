@@ -206,14 +206,27 @@ class MachineSessionResponse(BaseModel):
 class ReferenceStepResponse(BaseModel):
     id: str
     titulo: str
+    estado: str
     confirmado: bool
     fecha: str | None
+    detalle: str | None = None
 
 
 class ReferencePointResponse(BaseModel):
     x_mm: float | None
     y_mm: float | None
     z_mm: float | None
+
+
+class ReferenceWorkOriginRequest(BaseModel):
+    x_mm: float | None = None
+    y_mm: float | None = None
+
+
+class ReferenceZRequest(BaseModel):
+    x_mm: float | None = None
+    y_mm: float | None = None
+    z_mm: float | None = None
 
 
 class ReferenceSessionResponse(BaseModel):
@@ -227,6 +240,9 @@ class ReferenceSessionResponse(BaseModel):
     pasos: list[ReferenceStepResponse]
     compensacion_previsualizada_en: str | None
     analysis_stale: bool
+    lista_para_compensacion: bool
+    bloqueos_compensacion: list[str]
+    motivo_invalidacion: str | None
 
 
 def project_to_response(project: ProyectoPCB) -> ProjectResponse:

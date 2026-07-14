@@ -93,6 +93,22 @@ class ApiTest(unittest.TestCase):
         self.assertEqual(invalid_response.status_code, 422)
         self.assertIn("Solicitud invalida", invalid_response.json()["detalle"])
 
+    def test_reference_validation_errors_are_translated(self) -> None:
+        project_id = self._create_project()
+        operation_id = self._create_operation(project_id)
+        self.client.post(f"/api/projects/{project_id}/operations/{operation_id}/reference-session/machine-reference")
+        self.client.post(
+            f"/api/projects/{project_id}/operations/{operation_id}/reference-session/work-origin",
+            json={"x_mm": 0, "y_mm": 0},
+        )
+        response = self.client.post(
+            f"/api/projects/{project_id}/operations/{operation_id}/reference-session/z-reference",
+            json={"x_mm": 0, "y_mm": 0, "z_mm": "abc"},
+        )
+        self.assertEqual(response.status_code, 422)
+        self.assertIn("z_mm", response.json()["detalle"])
+        self.assertIn("numero valido", response.json()["detalle"])
+
     def test_machine_session_is_simulated_and_home_is_unknown_until_confirmed(self) -> None:
         response = self.client.get("/api/machine/session")
         self.assertEqual(response.status_code, 200)

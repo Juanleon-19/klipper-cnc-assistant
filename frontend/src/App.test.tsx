@@ -48,9 +48,11 @@ describe("App", () => {
   beforeEach(() => {
     mockFetch.mockReset();
     vi.stubGlobal("fetch", mockFetch);
+    document.body.style.overflow = "";
   });
 
   it("muestra el modo simulado y el dashboard inicial", async () => {
+    window.innerWidth = 1440;
     seedInitialFetch();
 
     render(<App />);
@@ -61,16 +63,30 @@ describe("App", () => {
     expect(screen.getByText(/Sin proyectos/i)).toBeInTheDocument();
   });
 
-  it("abre la navegación compacta desde el topbar", async () => {
+  it("permite colapsar la sidebar en escritorio sin dejar el drawer abierto", async () => {
+    window.innerWidth = 1440;
     seedInitialFetch();
 
     const { container } = render(<App />);
     await waitFor(() => expect(screen.getByText(/Panel de trabajo/i)).toBeInTheDocument());
 
-    fireEvent.click(screen.getByRole("button", { name: /Abrir navegación/i }));
-    expect(container.querySelector(".app-shell--sidebar-open")).not.toBeNull();
+    fireEvent.click(screen.getAllByRole("button", { name: /Cerrar menú/i })[0]);
+    expect(container.querySelector(".app-shell--collapsed")).not.toBeNull();
+    expect(container.querySelector(".app-shell--sidebar-open")).toBeNull();
+  });
 
-    fireEvent.click(screen.getByRole("button", { name: /Cerrar navegación/i }));
+  it("abre y cierra el drawer móvil y bloquea el scroll de fondo", async () => {
+    window.innerWidth = 390;
+    seedInitialFetch();
+
+    const { container } = render(<App />);
+    await waitFor(() => expect(screen.getByText(/Panel de trabajo/i)).toBeInTheDocument());
+
+    fireEvent.click(screen.getByRole("button", { name: /Abrir menú/i }));
+    expect(container.querySelector(".app-shell--sidebar-open")).not.toBeNull();
+    expect(document.body.style.overflow).toBe("hidden");
+
+    fireEvent.click(screen.getAllByRole("button", { name: /Cerrar menú/i })[0]);
     expect(container.querySelector(".app-shell--sidebar-open")).toBeNull();
   });
 });

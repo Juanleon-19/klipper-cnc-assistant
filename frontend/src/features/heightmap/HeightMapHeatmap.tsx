@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Circle, Layer, Rect, Stage, Text } from "react-konva";
 
 import { formatCoordinate, formatMillimeters } from "../../lib/format";
-import type { HeightMap, HeightMapSample, HeightMapSurfacePoint, Material } from "../../types";
+import type { Bounds, HeightMap, HeightMapSample, HeightMapSurfacePoint, Material } from "../../types";
 import { useMeasuredViewport } from "../viewer/useMeasuredViewport";
 import {
   buildGridTicks,
@@ -21,6 +21,7 @@ type HeightMapHeatmapProps = {
   material: Material;
   heightMap: HeightMap;
   mode: "bruto" | "plano" | "residuo";
+  toolpathBounds?: Bounds | null;
 };
 
 type DragState = {
@@ -28,6 +29,14 @@ type DragState = {
   y: number;
   panX: number;
   panY: number;
+};
+
+type LayerVisibility = {
+  material: boolean;
+  probeRegion: boolean;
+  exclusions: boolean;
+  samples: boolean;
+  surface: boolean;
 };
 
 function buildTransform(material: Material, width: number, height: number): ViewTransform {
@@ -50,7 +59,7 @@ function findExtreme(samples: HeightMapSample[], direction: "min" | "max") {
     .sort((left, right) => (direction === "min" ? (left.z_mm ?? 0) - (right.z_mm ?? 0) : (right.z_mm ?? 0) - (left.z_mm ?? 0)))[0] ?? null;
 }
 
-export function HeightMapHeatmap({ material, heightMap, mode }: HeightMapHeatmapProps) {
+export function HeightMapHeatmap({ material, heightMap, mode, toolpathBounds = null }: HeightMapHeatmapProps) {
   const fullscreenRef = useRef<HTMLDivElement | null>(null);
   const dragRef = useRef<DragState | null>(null);
   const [stageNode, setStageNode] = useState<HTMLDivElement | null>(null);
@@ -58,10 +67,26 @@ export function HeightMapHeatmap({ material, heightMap, mode }: HeightMapHeatmap
   const [transform, setTransform] = useState<ViewTransform>({ scale: 8, panX: VIEWER_MARGIN, panY: 480 });
   const [cursor, setCursor] = useState<{ x: number; y: number } | null>(null);
   const [hoverPoint, setHoverPoint] = useState<HeightMapSurfacePoint | HeightMapSample | null>(null);
+  const [isFullscreen, setIsFullscreen] = useState(false);
+  const [layers, setLayers] = useState<LayerVisibility>({
+    material: true,
+    probeRegion: true,
+    exclusions: true,
+    samples: true,
+    surface: true,
+  });
 
   useEffect(() => {
     setTransform(buildTransform(material, viewport.width, viewport.height));
   }, [material, viewport.height, viewport.width]);
+
+  useEffect(() => {
+    const handleChange = () => {
+      setIsFullscreen(document.fullscreenElement === fullscreenRef.current);
+    };
+    document.addEventListener("fullscreenchange", handleChange);
+    return () => document.removeEventListener("fullscreenchange", handleChange);
+  }, []);
 
   const surface = heightMap.superficies[mode];
   const values = surface.puntos.map((point) => point.z_mm).filter((value): value is number => value != null);
@@ -90,17 +115,73 @@ export function HeightMapHeatmap({ material, heightMap, mode }: HeightMapHeatmap
     await node.requestFullscreen?.();
   };
 
+  const focusMaterial = () => setTransform(buildTransform(material, viewport.width, viewport.height));
+  const focusProbeRegion = () => setTransform(fitRectWithinViewport({
+    minX: heightMap.probe_region.min_x_mm,
+    maxX: heightMap.probe_region.max_x_mm,
+    minY: heightMap.probe_region.min_y_mm,
+    maxY: heightMap.probe_region.max_y_mm,
+  }, { width: viewport.width, height: viewport.height }));
+  const focusToolpath = () => {
+    if (!toolpathBounds) {
+      focusProbeRegion();
+      return;
+    }
+    setTransform(fitRectWithinViewport({
+      minX: toolpathBounds.min_x_mm,
+      maxX: toolpathBounds.max_x_mm,
+      minY: toolpathBounds.min_y_mm,
+      maxY: toolpathBounds.max_y_mm,
+    }, { width: viewport.width, height: viewport.height }));
+  };
+
   return (
     <section className="heightmap-viewer" ref={fullscreenRef}>
-      <div className="viewer-header">
+      <div className="viewer-header viewer-header--heatmap">
         <div>
           <h3>Mapa de alturas 2D</h3>
           <p className="muted">Muestra simultáneamente material bruto, región sondeable, zonas excluidas, muestras y superficie interpolada.</p>
         </div>
-        <div className="toolbar-inline">
-          <button className="button button--ghost" type="button" onClick={() => setTransform(buildTransform(material, viewport.width, viewport.height))}>Encuadrar material</button>
-          <button className="button button--ghost" type="button" onClick={() => void toggleFullscreen()}>Pantalla completa</button>
+        <div className="heightmap-toolbar">
+          <div className="heightmap-toolbar__group">
+            <button className="button button--ghost" type="button" onClick={focusMaterial}>Encuadrar material</button>
+            <button className="button button--ghost" type="button" onClick={focusProbeRegion}>Encuadrar región</button>
+            <button className="button button--ghost" type="button" onClick={focusToolpath}>Encuadrar trayectoria</button>
+          </div>
+          <div className="heightmap-toolbar__group">
+            <button className="button button--ghost" type="button" onClick={() => void toggleFullscreen()}>
+              {isFullscreen ? "Salir de pantalla completa" : "Pantalla completa"}
+            </button>
+          </div>
         </div>
+      </div>
+
+      <div className="heightmap-legend-row" aria-label="Capas del mapa de alturas">
+        <label className="heightmap-legend-item">
+          <input type="checkbox" checked={layers.material} onChange={() => setLayers((current) => ({ ...current, material: !current.material }))} />
+          <span className="legend-swatch legend-swatch--material" />
+          <span>Contorno material</span>
+        </label>
+        <label className="heightmap-legend-item">
+          <input type="checkbox" checked={layers.probeRegion} onChange={() => setLayers((current) => ({ ...current, probeRegion: !current.probeRegion }))} />
+          <span className="legend-swatch legend-swatch--probe" />
+          <span>Región sondeable</span>
+        </label>
+        <label className="heightmap-legend-item">
+          <input type="checkbox" checked={layers.exclusions} onChange={() => setLayers((current) => ({ ...current, exclusions: !current.exclusions }))} />
+          <span className="legend-swatch legend-swatch--excluded" />
+          <span>Zona excluida</span>
+        </label>
+        <label className="heightmap-legend-item">
+          <input type="checkbox" checked={layers.samples} onChange={() => setLayers((current) => ({ ...current, samples: !current.samples }))} />
+          <span className="legend-point" />
+          <span>Muestra</span>
+        </label>
+        <label className="heightmap-legend-item">
+          <input type="checkbox" checked={layers.surface} onChange={() => setLayers((current) => ({ ...current, surface: !current.surface }))} />
+          <span className="legend-gradient" />
+          <span>Superficie</span>
+        </label>
       </div>
 
       <div className="viewer-stage-shell">
@@ -147,7 +228,7 @@ export function HeightMapHeatmap({ material, heightMap, mode }: HeightMapHeatmap
             onMouseLeave={() => {
               dragRef.current = null;
             }}
-            onDblClick={() => setTransform(buildTransform(material, viewport.width, viewport.height))}
+            onDblClick={focusMaterial}
           >
             <Layer>
               <Rect x={0} y={0} width={viewport.width} height={viewport.height} fill="#091015" />
@@ -160,97 +241,107 @@ export function HeightMapHeatmap({ material, heightMap, mode }: HeightMapHeatmap
                 return <Rect key={`hy-${value}`} x={0} y={screen.y} width={viewport.width} height={1} fill="rgba(111,144,168,0.12)" />;
               })}
 
-              {surface.puntos.map((point) => {
-                const topLeft = worldToScreen({ x: point.x_mm, y: Math.min(heightMap.probe_region.max_y_mm, point.y_mm + denseCellHeight) }, transform);
-                const bottomRight = worldToScreen({ x: Math.min(heightMap.probe_region.max_x_mm, point.x_mm + denseCellWidth), y: point.y_mm }, transform);
-                return (
-                  <Rect
-                    key={`${point.fila}-${point.columna}`}
-                    x={topLeft.x}
-                    y={topLeft.y}
-                    width={Math.max(1, bottomRight.x - topLeft.x)}
-                    height={Math.max(1, bottomRight.y - topLeft.y)}
-                    fill={colorScale(point.z_mm, minValue, maxValue)}
-                    opacity={point.estado === "ok" ? 0.88 : 0.22}
-                    onMouseEnter={() => setHoverPoint(point)}
-                    onMouseLeave={() => setHoverPoint((current) => (current === point ? null : current))}
-                  />
-                );
-              })}
+              {layers.surface
+                ? surface.puntos.map((point) => {
+                    const topLeft = worldToScreen({ x: point.x_mm, y: Math.min(heightMap.probe_region.max_y_mm, point.y_mm + denseCellHeight) }, transform);
+                    const bottomRight = worldToScreen({ x: Math.min(heightMap.probe_region.max_x_mm, point.x_mm + denseCellWidth), y: point.y_mm }, transform);
+                    return (
+                      <Rect
+                        key={`${point.fila}-${point.columna}`}
+                        x={topLeft.x}
+                        y={topLeft.y}
+                        width={Math.max(1, bottomRight.x - topLeft.x)}
+                        height={Math.max(1, bottomRight.y - topLeft.y)}
+                        fill={colorScale(point.z_mm, minValue, maxValue)}
+                        opacity={point.estado === "ok" ? 0.88 : 0.22}
+                        onMouseEnter={() => setHoverPoint(point)}
+                        onMouseLeave={() => setHoverPoint((current) => (current === point ? null : current))}
+                      />
+                    );
+                  })
+                : null}
 
-              {(() => {
-                const bottomLeft = worldToScreen({ x: 0, y: 0 }, transform);
-                const topRight = worldToScreen({ x: material.ancho_mm, y: material.alto_mm }, transform);
-                return (
-                  <Rect
-                    x={bottomLeft.x}
-                    y={topRight.y}
-                    width={Math.max(1, topRight.x - bottomLeft.x)}
-                    height={Math.max(1, bottomLeft.y - topRight.y)}
-                    stroke="#8fb5c8"
-                    strokeWidth={2}
-                    dash={[8, 4]}
-                  />
-                );
-              })()}
+              {layers.material
+                ? (() => {
+                    const bottomLeft = worldToScreen({ x: 0, y: 0 }, transform);
+                    const topRight = worldToScreen({ x: material.ancho_mm, y: material.alto_mm }, transform);
+                    return (
+                      <Rect
+                        x={bottomLeft.x}
+                        y={topRight.y}
+                        width={Math.max(1, topRight.x - bottomLeft.x)}
+                        height={Math.max(1, bottomLeft.y - topRight.y)}
+                        stroke="#8fb5c8"
+                        strokeWidth={2}
+                        dash={[8, 4]}
+                      />
+                    );
+                  })()
+                : null}
 
-              {(() => {
-                const bottomLeft = worldToScreen({ x: heightMap.probe_region.min_x_mm, y: heightMap.probe_region.min_y_mm }, transform);
-                const topRight = worldToScreen({ x: heightMap.probe_region.max_x_mm, y: heightMap.probe_region.max_y_mm }, transform);
-                return (
-                  <Rect
-                    x={bottomLeft.x}
-                    y={topRight.y}
-                    width={Math.max(1, topRight.x - bottomLeft.x)}
-                    height={Math.max(1, bottomLeft.y - topRight.y)}
-                    stroke="#f6cf73"
-                    strokeWidth={2}
-                  />
-                );
-              })()}
+              {layers.probeRegion
+                ? (() => {
+                    const bottomLeft = worldToScreen({ x: heightMap.probe_region.min_x_mm, y: heightMap.probe_region.min_y_mm }, transform);
+                    const topRight = worldToScreen({ x: heightMap.probe_region.max_x_mm, y: heightMap.probe_region.max_y_mm }, transform);
+                    return (
+                      <Rect
+                        x={bottomLeft.x}
+                        y={topRight.y}
+                        width={Math.max(1, topRight.x - bottomLeft.x)}
+                        height={Math.max(1, bottomLeft.y - topRight.y)}
+                        stroke="#f6cf73"
+                        strokeWidth={2}
+                      />
+                    );
+                  })()
+                : null}
 
-              {heightMap.exclusion_zones.map((zone) => {
-                const bottomLeft = worldToScreen({ x: zone.min_x_mm, y: zone.min_y_mm }, transform);
-                const topRight = worldToScreen({ x: zone.max_x_mm, y: zone.max_y_mm }, transform);
-                return (
-                  <Rect
-                    key={zone.id}
-                    x={bottomLeft.x}
-                    y={topRight.y}
-                    width={Math.max(1, topRight.x - bottomLeft.x)}
-                    height={Math.max(1, bottomLeft.y - topRight.y)}
-                    fill="rgba(255, 122, 122, 0.12)"
-                    stroke="#ff7a7a"
-                    strokeWidth={1.5}
-                  />
-                );
-              })}
+              {layers.exclusions
+                ? heightMap.exclusion_zones.map((zone) => {
+                    const bottomLeft = worldToScreen({ x: zone.min_x_mm, y: zone.min_y_mm }, transform);
+                    const topRight = worldToScreen({ x: zone.max_x_mm, y: zone.max_y_mm }, transform);
+                    return (
+                      <Rect
+                        key={zone.id}
+                        x={bottomLeft.x}
+                        y={topRight.y}
+                        width={Math.max(1, topRight.x - bottomLeft.x)}
+                        height={Math.max(1, bottomLeft.y - topRight.y)}
+                        fill="rgba(255, 122, 122, 0.12)"
+                        stroke="#ff7a7a"
+                        strokeWidth={1.5}
+                      />
+                    );
+                  })
+                : null}
 
-              {heightMap.muestras.map((sample) => {
-                const screen = worldToScreen({ x: sample.x_mm, y: sample.y_mm }, transform);
-                const isProblem = sample.estado_calidad === "atipica" || sample.estado_calidad === "faltante" || !sample.incluida;
-                return (
-                  <Circle
-                    key={sample.id}
-                    x={screen.x}
-                    y={screen.y}
-                    radius={isProblem ? 4.8 : 3.5}
-                    fill={
-                      sample.estado_calidad === "faltante"
-                        ? "#f6cf73"
-                        : sample.estado_calidad === "atipica"
-                          ? "#ff7a7a"
-                          : !sample.incluida
-                            ? "#6c8496"
-                            : "#f3f8fd"
-                    }
-                    stroke="rgba(7,12,15,0.9)"
-                    strokeWidth={1}
-                    onMouseEnter={() => setHoverPoint(sample)}
-                    onMouseLeave={() => setHoverPoint((current) => (current === sample ? null : current))}
-                  />
-                );
-              })}
+              {layers.samples
+                ? heightMap.muestras.map((sample) => {
+                    const screen = worldToScreen({ x: sample.x_mm, y: sample.y_mm }, transform);
+                    const isProblem = sample.estado_calidad === "atipica" || sample.estado_calidad === "faltante" || !sample.incluida;
+                    return (
+                      <Circle
+                        key={sample.id}
+                        x={screen.x}
+                        y={screen.y}
+                        radius={isProblem ? 4.8 : 3.5}
+                        fill={
+                          sample.estado_calidad === "faltante"
+                            ? "#f6cf73"
+                            : sample.estado_calidad === "atipica"
+                              ? "#ff7a7a"
+                              : !sample.incluida
+                                ? "#6c8496"
+                                : "#f3f8fd"
+                        }
+                        stroke="rgba(7,12,15,0.9)"
+                        strokeWidth={1}
+                        onMouseEnter={() => setHoverPoint(sample)}
+                        onMouseLeave={() => setHoverPoint((current) => (current === sample ? null : current))}
+                      />
+                    );
+                  })
+                : null}
 
               {[minSample, maxSample, ...outliers].filter(Boolean).map((sample, index) => {
                 const safeSample = sample as HeightMapSample;
@@ -296,14 +387,6 @@ export function HeightMapHeatmap({ material, heightMap, mode }: HeightMapHeatmap
             ? `X ${formatMillimeters(hoverPoint.x_mm, 3)} · Y ${formatMillimeters(hoverPoint.y_mm, 3)} · Z ${formatMillimeters(hoverPoint.z_mm, 4)}`
             : "Tooltip X/Y/Z disponible sobre muestras y superficie"}
         </div>
-      </div>
-
-      <div className="chip-list">
-        <li className="chip">Contorno material</li>
-        <li className="chip">Región sondeable</li>
-        <li className="chip">Zonas excluidas</li>
-        <li className="chip">Muestras reales/simuladas</li>
-        <li className="chip">Superficie interpolada</li>
       </div>
     </section>
   );

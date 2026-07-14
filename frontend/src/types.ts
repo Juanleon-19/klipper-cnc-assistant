@@ -222,8 +222,10 @@ export type ReferenceConfirmation = {
 export type ReferenceStep = {
   id: string;
   titulo: string;
+  estado: string;
   confirmado: boolean;
   fecha: string | null;
+  detalle: string | null;
 };
 
 export type ReferenceSession = {
@@ -240,6 +242,9 @@ export type ReferenceSession = {
   pasos: ReferenceStep[];
   compensacion_previsualizada_en: string | null;
   analysis_stale: boolean;
+  lista_para_compensacion: boolean;
+  bloqueos_compensacion: string[];
+  motivo_invalidacion: string | null;
 };
 
 export type CompensationPreviewPoint = {

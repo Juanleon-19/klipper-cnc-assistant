@@ -170,6 +170,7 @@ class OperationPreparation:
     mapa_disponible_en: datetime | None = None
     mapa_validado_en: datetime | None = None
     compensacion_previsualizada_en: datetime | None = None
+    motivo_invalidacion: str | None = None
 
 
 @dataclass(frozen=True)

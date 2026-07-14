@@ -46,6 +46,10 @@ class ReferenceSessionService:
             raise ApplicationError("Primero confirme la referencia de maquina en simulacion.")
         self._validate_xy_against_material(project.material.ancho_mm, project.material.alto_mm, x_mm, y_mm, "origen de trabajo")
         timestamp = utc_now()
+        invalidation = self._build_invalidation_reason(
+            operation.preparacion,
+            "Se invalidó la preparación porque cambió el origen de trabajo X/Y.",
+        )
         updated = replace(
             operation,
             preparacion=replace(
@@ -54,6 +58,7 @@ class ReferenceSessionService:
                 referencia_z=None,
                 mapa_validado_en=None,
                 compensacion_previsualizada_en=None,
+                motivo_invalidacion=invalidation,
             ),
         )
         self.repository.save_project(project.replace_operation(updated))
@@ -77,6 +82,10 @@ class ReferenceSessionService:
             raise ApplicationError("Primero confirme el origen de trabajo X/Y en simulacion.")
         self._validate_xy_against_material(project.material.ancho_mm, project.material.alto_mm, x_mm, y_mm, "referencia Z")
         timestamp = utc_now()
+        invalidation = self._build_invalidation_reason(
+            operation.preparacion,
+            "Se invalidó la preparación porque cambió la referencia Z.",
+        )
         updated = replace(
             operation,
             preparacion=replace(
@@ -84,6 +93,7 @@ class ReferenceSessionService:
                 referencia_z=CoordinateReference(x_mm=x_mm, y_mm=y_mm, z_mm=z_mm, confirmado_en=timestamp),
                 mapa_validado_en=None,
                 compensacion_previsualizada_en=None,
+                motivo_invalidacion=invalidation,
             ),
         )
         self.repository.save_project(project.replace_operation(updated))
@@ -97,21 +107,20 @@ class ReferenceSessionService:
         project = self._load_project(project_id)
         operation = project.get_operation(operation_id)
         machine = self.machine_session_service.get_status()
-        if not machine.home_realizado or operation.preparacion.origen_trabajo is None or operation.preparacion.referencia_z is None:
-            raise ApplicationError("La previsualizacion requiere referencia de maquina, origen X/Y y referencia Z confirmados en simulacion.")
-        if operation.preparacion.mapa_validado_en is None:
-            raise ApplicationError("La previsualizacion requiere un mapa validado.")
+        blocks = self._build_compensation_blocks(operation.preparacion, machine.home_realizado)
+        if blocks:
+            raise ApplicationError("La previsualizacion sigue bloqueada. " + " ".join(blocks))
         if operation.analisis is None:
             raise ApplicationError("La operacion requiere un analisis G-code antes de previsualizar la compensacion.")
         height_map = self.height_map_service.get_map(project_id, operation_id)
         preview = build_compensation_preview(
             analysis=operation.analisis,
             height_map=height_map,
-            reference_z_mm=operation.preparacion.referencia_z.z_mm or 0.0,
+            reference_z_mm=operation.preparacion.referencia_z.z_mm if operation.preparacion.referencia_z and operation.preparacion.referencia_z.z_mm is not None else 0.0,
         )
         updated = replace(
             operation,
-            preparacion=replace(operation.preparacion, compensacion_previsualizada_en=utc_now()),
+            preparacion=replace(operation.preparacion, compensacion_previsualizada_en=utc_now(), motivo_invalidacion=None),
         )
         self.repository.save_project(project.replace_operation(updated))
         session = self.get_session(project_id, operation_id)
@@ -121,42 +130,57 @@ class ReferenceSessionService:
         prep = operation.preparacion
         state = self._derive_state(operation.preparacion, machine.home_realizado)
         gcode_origin = self._build_gcode_origin(operation.analisis)
+        ready_for_compensation = not self._build_compensation_blocks(prep, machine.home_realizado)
+        map_step_state, map_step_detail = self._map_step_status(prep, machine.home_realizado)
+        validation_step_state, validation_step_detail = self._validation_step_status(prep, machine.home_realizado)
         steps = [
             {
                 "id": "referencia_maquina",
                 "titulo": "Referencia de maquina",
+                "estado": "confirmado" if machine.home_realizado else "pendiente",
                 "confirmado": machine.home_realizado,
                 "fecha": None if machine.referencia_maquina_confirmada_en is None else machine.referencia_maquina_confirmada_en.isoformat(),
+                "detalle": "Pertenece a la sesión general de máquina." if machine.home_realizado else "Falta confirmar la referencia de máquina en simulación.",
             },
             {
                 "id": "origen_xy",
                 "titulo": "Origen de trabajo X/Y",
+                "estado": "confirmado" if prep.origen_trabajo is not None else "pendiente",
                 "confirmado": prep.origen_trabajo is not None,
                 "fecha": None if prep.origen_trabajo is None or prep.origen_trabajo.confirmado_en is None else prep.origen_trabajo.confirmado_en.isoformat(),
+                "detalle": "Define dónde queda X0 Y0 del G-code respecto al montaje." if prep.origen_trabajo is not None else "Pendiente de confirmación en simulación.",
             },
             {
                 "id": "referencia_z",
                 "titulo": "Referencia Z",
+                "estado": "confirmado" if prep.referencia_z is not None else "pendiente",
                 "confirmado": prep.referencia_z is not None,
                 "fecha": None if prep.referencia_z is None or prep.referencia_z.confirmado_en is None else prep.referencia_z.confirmado_en.isoformat(),
+                "detalle": "Referencia vertical del montaje." if prep.referencia_z is not None else "Pendiente de confirmación en simulación.",
             },
             {
                 "id": "region_sondeable",
                 "titulo": "Region sondeable",
+                "estado": "confirmado" if prep.region_sondeable_configurada_en is not None else "pendiente",
                 "confirmado": prep.region_sondeable_configurada_en is not None,
                 "fecha": None if prep.region_sondeable_configurada_en is None else prep.region_sondeable_configurada_en.isoformat(),
+                "detalle": "Dominio medido del mapa." if prep.region_sondeable_configurada_en is not None else "Configure una región sondeable para definir el dominio interpolable.",
             },
             {
                 "id": "mapa",
                 "titulo": "Mapa",
+                "estado": map_step_state,
                 "confirmado": prep.mapa_disponible_en is not None,
                 "fecha": None if prep.mapa_disponible_en is None else prep.mapa_disponible_en.isoformat(),
+                "detalle": map_step_detail,
             },
             {
                 "id": "validacion",
                 "titulo": "Validacion",
+                "estado": validation_step_state,
                 "confirmado": prep.mapa_validado_en is not None,
                 "fecha": None if prep.mapa_validado_en is None else prep.mapa_validado_en.isoformat(),
+                "detalle": validation_step_detail,
             },
         ]
         return {
@@ -173,6 +197,9 @@ class ReferenceSessionService:
             "pasos": steps,
             "compensacion_previsualizada_en": None if prep.compensacion_previsualizada_en is None else prep.compensacion_previsualizada_en.isoformat(),
             "analysis_stale": bool(operation.analisis and operation.analisis.analisis_desactualizado),
+            "lista_para_compensacion": ready_for_compensation,
+            "bloqueos_compensacion": self._build_compensation_blocks(prep, machine.home_realizado),
+            "motivo_invalidacion": prep.motivo_invalidacion,
         }
 
     def _derive_state(self, preparation, machine_reference_confirmed: bool) -> str:
@@ -213,6 +240,51 @@ class ReferenceSessionService:
     def _validate_xy_against_material(self, material_x: float, material_y: float, x_mm: float, y_mm: float, label: str) -> None:
         if x_mm < 0 or y_mm < 0 or x_mm > material_x or y_mm > material_y:
             raise ApplicationError(f"La coordenada de {label} debe quedar dentro del material.")
+
+    def _build_compensation_blocks(self, preparation, machine_reference_confirmed: bool) -> list[str]:
+        blocks: list[str] = []
+        if not machine_reference_confirmed:
+            blocks.append("Falta confirmar la referencia de maquina.")
+        if preparation.origen_trabajo is None:
+            blocks.append("Falta confirmar el origen de trabajo X/Y.")
+        if preparation.referencia_z is None:
+            blocks.append("Falta confirmar la referencia Z.")
+        if preparation.region_sondeable_configurada_en is None:
+            blocks.append("Falta configurar la region sondeable.")
+        if preparation.mapa_disponible_en is None:
+            blocks.append("Falta disponer de un mapa de alturas.")
+        if preparation.mapa_validado_en is None:
+            blocks.append("Falta validar el mapa de alturas.")
+        return blocks
+
+    def _map_step_status(self, preparation, machine_reference_confirmed: bool) -> tuple[str, str]:
+        if preparation.mapa_disponible_en is None:
+            return "pendiente", "Todavía no hay un mapa disponible."
+        if not machine_reference_confirmed or preparation.origen_trabajo is None or preparation.referencia_z is None:
+            return "disponible", "Mapa disponible, pendiente de referencias."
+        if preparation.mapa_validado_en is None:
+            return "disponible", "Mapa disponible, pendiente de validación."
+        return "confirmado", "Mapa disponible y validado."
+
+    def _validation_step_status(self, preparation, machine_reference_confirmed: bool) -> tuple[str, str]:
+        if preparation.mapa_validado_en is None:
+            if preparation.mapa_disponible_en is None:
+                return "pendiente", "La validación requiere un mapa disponible."
+            if preparation.motivo_invalidacion:
+                return "invalidado", preparation.motivo_invalidacion
+            return "pendiente", "La validación del mapa sigue pendiente."
+        if not machine_reference_confirmed or preparation.origen_trabajo is None or preparation.referencia_z is None:
+            return "disponible", "Validación registrada, pero la compensación sigue bloqueada por referencias pendientes."
+        return "confirmado", "Preparación lista para compensación matemática."
+
+    def _build_invalidation_reason(self, preparation, message: str) -> str | None:
+        if (
+            preparation.mapa_disponible_en is not None
+            or preparation.mapa_validado_en is not None
+            or preparation.compensacion_previsualizada_en is not None
+        ):
+            return message
+        return preparation.motivo_invalidacion
 
     def _load_project(self, project_id: str):
         try:

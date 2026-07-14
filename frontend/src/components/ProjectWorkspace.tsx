@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import { HeightMapControlPanel } from "../features/heightmap/HeightMapControlPanel";
 import { HeightMapHeatmap } from "../features/heightmap/HeightMapHeatmap";
@@ -6,7 +6,8 @@ import { HeightMapPointTable } from "../features/heightmap/HeightMapPointTable";
 import { HeightMapSurface3D } from "../features/heightmap/HeightMapSurface3D";
 import { ToolpathViewer } from "../features/viewer/ToolpathViewer";
 import { formatDate, formatFileSize, formatMillimeters } from "../lib/format";
-import { api } from "../lib/api";
+import { ApiError, api } from "../lib/api";
+import { parseFiniteNumber } from "../lib/numbers";
 import { operationPresets } from "../lib/presets";
 import { toneForStatus, translateFace, translateOperationType, translateStatus } from "../lib/ui";
 import type {
@@ -16,6 +17,7 @@ import type {
   Project,
   ProjectPayload,
   ReferenceSession,
+  ReferenceStep,
 } from "../types";
 import { ProjectForm } from "./ProjectForm";
 import { StatusBadge } from "./StatusBadge";
@@ -36,6 +38,10 @@ type WorkspaceView = "archivo" | "trayectoria" | "referencia" | "mapa" | "valida
 type MapTab = "mapa2d" | "superficie3d" | "puntos" | "configuracion";
 type HeightMode = "bruto" | "plano" | "residuo";
 
+type ReferenceFieldErrors = Partial<Record<"x_mm" | "y_mm" | "z_mm", string>>;
+type InputState = { x_mm: string; y_mm: string };
+type ZInputState = { x_mm: string; y_mm: string; z_mm: string };
+
 function findPresetOperation(project: Project, presetKey: string): Operation | undefined {
   const preset = operationPresets.find((item) => item.clave === presetKey);
   if (!preset) {
@@ -53,7 +59,33 @@ function pickDefaultOperation(project: Project | null): string | null {
 
 function referenceValue(record: Record<string, string | number | null> | null, key: "x_mm" | "y_mm" | "z_mm") {
   const value = record?.[key];
-  return typeof value === "number" ? value : 0;
+  return typeof value === "number" ? String(value) : "";
+}
+
+function workspaceViewStorageKey(projectId: string, operationId: string) {
+  return `kca:workspace-view:${projectId}:${operationId}`;
+}
+
+function nextFieldError(message: string, fallbackField: "x_mm" | "y_mm" | "z_mm"): ReferenceFieldErrors {
+  for (const field of ["x_mm", "y_mm", "z_mm"] as const) {
+    if (message.includes(`${field}:`)) {
+      return { [field]: message };
+    }
+  }
+  return { [fallbackField]: message };
+}
+
+function toneForReferenceStep(step: ReferenceStep): "success" | "warning" | "danger" | "info" | "neutral" {
+  if (step.estado === "confirmado") {
+    return "success";
+  }
+  if (step.estado === "disponible") {
+    return "info";
+  }
+  if (step.estado === "invalidado") {
+    return "warning";
+  }
+  return "neutral";
 }
 
 export function ProjectWorkspace({
@@ -78,8 +110,13 @@ export function ProjectWorkspace({
   const [heightMapBusy, setHeightMapBusy] = useState(false);
   const [referenceBusy, setReferenceBusy] = useState(false);
   const [workspaceError, setWorkspaceError] = useState("");
-  const [workOrigin, setWorkOrigin] = useState({ x_mm: 0, y_mm: 0 });
-  const [zReference, setZReference] = useState({ x_mm: 0, y_mm: 0, z_mm: 0 });
+  const [workOrigin, setWorkOrigin] = useState<InputState>({ x_mm: "0", y_mm: "0" });
+  const [zReference, setZReference] = useState<ZInputState>({ x_mm: "0", y_mm: "0", z_mm: "0" });
+  const [useWorkOriginXYForZ, setUseWorkOriginXYForZ] = useState(false);
+  const [workOriginErrors, setWorkOriginErrors] = useState<ReferenceFieldErrors>({});
+  const [zReferenceErrors, setZReferenceErrors] = useState<ReferenceFieldErrors>({});
+  const workOriginRefs = useRef<Record<"x_mm" | "y_mm", HTMLInputElement | null>>({ x_mm: null, y_mm: null });
+  const zReferenceRefs = useRef<Record<"x_mm" | "y_mm" | "z_mm", HTMLInputElement | null>>({ x_mm: null, y_mm: null, z_mm: null });
 
   useEffect(() => {
     setSelectedOperationId((current) => {
@@ -132,16 +169,46 @@ export function ProjectWorkspace({
     if (!referenceSession) {
       return;
     }
-    setWorkOrigin({
-      x_mm: referenceValue(referenceSession.origen_trabajo, "x_mm"),
-      y_mm: referenceValue(referenceSession.origen_trabajo, "y_mm"),
-    });
-    setZReference({
-      x_mm: referenceValue(referenceSession.referencia_z, "x_mm"),
-      y_mm: referenceValue(referenceSession.referencia_z, "y_mm"),
-      z_mm: referenceValue(referenceSession.referencia_z, "z_mm"),
-    });
+    const nextWorkOrigin = {
+      x_mm: referenceValue(referenceSession.origen_trabajo, "x_mm") || "0",
+      y_mm: referenceValue(referenceSession.origen_trabajo, "y_mm") || "0",
+    };
+    const nextZReference = {
+      x_mm: referenceValue(referenceSession.referencia_z, "x_mm") || nextWorkOrigin.x_mm,
+      y_mm: referenceValue(referenceSession.referencia_z, "y_mm") || nextWorkOrigin.y_mm,
+      z_mm: referenceValue(referenceSession.referencia_z, "z_mm") || "0",
+    };
+    setWorkOrigin(nextWorkOrigin);
+    setZReference(nextZReference);
+    setUseWorkOriginXYForZ(
+      nextZReference.x_mm === nextWorkOrigin.x_mm && nextZReference.y_mm === nextWorkOrigin.y_mm
+    );
   }, [referenceSession]);
+
+  useEffect(() => {
+    if (!project || !selectedOperation) {
+      return;
+    }
+    const stored = window.localStorage.getItem(workspaceViewStorageKey(project.id, selectedOperation.id));
+    if (stored === "archivo" || stored === "trayectoria" || stored === "referencia" || stored === "mapa" || stored === "validacion") {
+      setActiveView(stored);
+      return;
+    }
+    setActiveView("archivo");
+  }, [project, selectedOperation]);
+
+  useEffect(() => {
+    if (!project || !selectedOperation) {
+      return;
+    }
+    window.localStorage.setItem(workspaceViewStorageKey(project.id, selectedOperation.id), activeView);
+  }, [activeView, project, selectedOperation]);
+
+  useEffect(() => {
+    if (useWorkOriginXYForZ) {
+      setZReference((current) => ({ ...current, x_mm: workOrigin.x_mm, y_mm: workOrigin.y_mm }));
+    }
+  }, [useWorkOriginXYForZ, workOrigin]);
 
   if (!project) {
     return (
@@ -165,6 +232,14 @@ export function ProjectWorkspace({
   const fileBusy = selectedOperation ? busyKey === `file:${selectedOperation.id}` : false;
   const deleteBusy = selectedOperation ? busyKey === `delete:${selectedOperation.id}` : false;
 
+  const focusWorkOriginField = (field: "x_mm" | "y_mm") => {
+    workOriginRefs.current[field]?.focus();
+  };
+
+  const focusZReferenceField = (field: "x_mm" | "y_mm" | "z_mm") => {
+    zReferenceRefs.current[field]?.focus();
+  };
+
   const withHeightMapAction = async (action: () => Promise<HeightMap | void>) => {
     setHeightMapBusy(true);
     setWorkspaceError("");
@@ -184,7 +259,7 @@ export function ProjectWorkspace({
     }
   };
 
-  const withReferenceAction = async (action: () => Promise<ReferenceSession>) => {
+  const withReferenceAction = async (action: () => Promise<ReferenceSession>, options?: { onApiFieldError?: (error: ApiError) => void }) => {
     setReferenceBusy(true);
     setWorkspaceError("");
     try {
@@ -192,10 +267,113 @@ export function ProjectWorkspace({
       setReferenceSession(nextSession);
       setCompensationPreview(null);
     } catch (error) {
+      if (error instanceof ApiError && options?.onApiFieldError) {
+        options.onApiFieldError(error);
+      }
       setWorkspaceError(error instanceof Error ? error.message : "No fue posible actualizar la referencia simulada.");
     } finally {
       setReferenceBusy(false);
     }
+  };
+
+  const submitWorkOrigin = async () => {
+    const xParsed = parseFiniteNumber(workOrigin.x_mm);
+    const yParsed = parseFiniteNumber(workOrigin.y_mm);
+    const nextErrors: ReferenceFieldErrors = {};
+    if (xParsed.error === "empty") {
+      nextErrors.x_mm = "Indique X en milímetros.";
+    } else if (xParsed.error === "invalid") {
+      nextErrors.x_mm = "X debe ser un número válido.";
+    }
+    if (yParsed.error === "empty") {
+      nextErrors.y_mm = "Indique Y en milímetros.";
+    } else if (yParsed.error === "invalid") {
+      nextErrors.y_mm = "Y debe ser un número válido.";
+    }
+    setWorkOriginErrors(nextErrors);
+    if (nextErrors.x_mm) {
+      focusWorkOriginField("x_mm");
+      return;
+    }
+    if (nextErrors.y_mm) {
+      focusWorkOriginField("y_mm");
+      return;
+    }
+    await withReferenceAction(
+      () => api.confirmWorkOrigin(project.id, selectedOperation!.id, { x_mm: xParsed.value as number, y_mm: yParsed.value as number }),
+      {
+        onApiFieldError: (error) => {
+          const fieldErrors = error.fieldErrors.x_mm
+            ? { x_mm: error.fieldErrors.x_mm }
+            : error.fieldErrors.y_mm
+              ? { y_mm: error.fieldErrors.y_mm }
+              : nextFieldError(error.message, "x_mm");
+          setWorkOriginErrors(fieldErrors);
+          if (fieldErrors.x_mm) {
+            focusWorkOriginField("x_mm");
+          } else if (fieldErrors.y_mm) {
+            focusWorkOriginField("y_mm");
+          }
+        },
+      }
+    );
+  };
+
+  const submitZReference = async () => {
+    const xSource = useWorkOriginXYForZ ? workOrigin.x_mm : zReference.x_mm;
+    const ySource = useWorkOriginXYForZ ? workOrigin.y_mm : zReference.y_mm;
+    const xParsed = parseFiniteNumber(xSource);
+    const yParsed = parseFiniteNumber(ySource);
+    const zParsed = parseFiniteNumber(zReference.z_mm);
+    const nextErrors: ReferenceFieldErrors = {};
+    if (xParsed.error === "empty") {
+      nextErrors.x_mm = "Indique X en milímetros.";
+    } else if (xParsed.error === "invalid") {
+      nextErrors.x_mm = "X debe ser un número válido.";
+    }
+    if (yParsed.error === "empty") {
+      nextErrors.y_mm = "Indique Y en milímetros.";
+    } else if (yParsed.error === "invalid") {
+      nextErrors.y_mm = "Y debe ser un número válido.";
+    }
+    if (zParsed.error === "empty") {
+      nextErrors.z_mm = "Indique Z en milímetros.";
+    } else if (zParsed.error === "invalid") {
+      nextErrors.z_mm = "Z debe ser un número válido.";
+    }
+    setZReferenceErrors(nextErrors);
+    if (nextErrors.x_mm) {
+      focusZReferenceField("x_mm");
+      return;
+    }
+    if (nextErrors.y_mm) {
+      focusZReferenceField("y_mm");
+      return;
+    }
+    if (nextErrors.z_mm) {
+      focusZReferenceField("z_mm");
+      return;
+    }
+    await withReferenceAction(
+      () => api.confirmZReference(project.id, selectedOperation!.id, {
+        x_mm: xParsed.value as number,
+        y_mm: yParsed.value as number,
+        z_mm: zParsed.value as number,
+      }),
+      {
+        onApiFieldError: (error) => {
+          const fieldErrors = nextFieldError(error.message, "z_mm");
+          setZReferenceErrors(fieldErrors);
+          if (fieldErrors.x_mm) {
+            focusZReferenceField("x_mm");
+          } else if (fieldErrors.y_mm) {
+            focusZReferenceField("y_mm");
+          } else {
+            focusZReferenceField("z_mm");
+          }
+        },
+      }
+    );
   };
 
   const renderArchivo = () => (
@@ -263,7 +441,7 @@ export function ProjectWorkspace({
               </div>
             ) : null}
 
-            <div className="action-grid">
+            <div className="action-grid action-grid--inline">
               <label className="button file-button">
                 {selectedOperation.archivo_gcode ? "Reemplazar archivo" : "Cargar archivo"}
                 <input
@@ -318,8 +496,11 @@ export function ProjectWorkspace({
   );
 
   const renderTrayectoria = () => {
-    if (!selectedOperation?.analisis) {
-      return <div className="panel empty-state"><p>Suba un archivo y ejecute el análisis para ver la trayectoria.</p></div>;
+    if (!selectedOperation) {
+      return <div className="panel empty-state"><p>Seleccione una operación para ver su trayectoria.</p></div>;
+    }
+    if (!selectedOperation.analisis) {
+      return <div className="panel empty-state"><p>Esta operación todavía no tiene análisis de trayectoria.</p></div>;
     }
     return (
       <div className="stack gap-md">
@@ -345,6 +526,20 @@ export function ProjectWorkspace({
     );
   };
 
+  const renderReferenceStep = (step: ReferenceStep, index: number) => (
+    <div className="workflow-step-card" key={step.id}>
+      <div className="workflow-step-card__header">
+        <span className="workflow-step">{index + 1}</span>
+        <div>
+          <strong>{step.titulo}</strong>
+          <p className="muted">{step.detalle ?? "Pendiente"}</p>
+        </div>
+        <StatusBadge tone={toneForReferenceStep(step)}>{step.estado}</StatusBadge>
+      </div>
+      <div className="workflow-step-card__meta mono-text">{step.fecha ? formatDate(step.fecha) : "Pendiente"}</div>
+    </div>
+  );
+
   const renderReferencia = () => (
     <div className="stack gap-md">
       <article className="panel">
@@ -355,20 +550,19 @@ export function ProjectWorkspace({
           </div>
           <p className="muted">Todos los botones confirman estados en simulación. No existe home real, sondeo físico ni comandos hacia Moonraker.</p>
         </div>
-        <div className="workflow-steps-list">
-          {(referenceSession?.pasos ?? []).map((step, index) => (
-            <div className={`workflow-step-row${step.confirmado ? " workflow-step-row--complete" : ""}`} key={step.id}>
-              <span className="workflow-step">{index + 1}</span>
-              <span>{step.titulo}</span>
-              <span className="muted">{step.fecha ? formatDate(step.fecha) : "Pendiente"}</span>
-            </div>
-          ))}
+        <div className="machine-banner machine-banner--large" role="status">
+          <span className="machine-banner__dot" aria-hidden="true" />
+          <span>MODO SIMULADO — no se enviará movimiento a la máquina</span>
+        </div>
+        {referenceSession?.motivo_invalidacion ? <div className="alert alert--warning">{referenceSession.motivo_invalidacion}</div> : null}
+        <div className="workflow-steps-grid">
+          {(referenceSession?.pasos ?? []).map(renderReferenceStep)}
         </div>
       </article>
 
       <article className="panel">
         <div className="section-heading"><h3>1. Referencia de máquina</h3></div>
-        <p className="muted">Pertenece a la sesión de máquina y solo se confirma una vez por sesión.</p>
+        <p className="muted">Ubica el sistema de coordenadas de la máquina. En esta versión solo se confirma en simulación y una vez por sesión.</p>
         <button className="button" type="button" disabled={referenceBusy || referenceSession?.machine_reference.confirmada || !selectedOperation} onClick={() => void withReferenceAction(() => api.confirmMachineReference(project.id, selectedOperation!.id))}>
           {referenceSession?.machine_reference.confirmada ? "Ya confirmada en simulación" : "Confirmar en simulación"}
         </button>
@@ -376,38 +570,96 @@ export function ProjectWorkspace({
 
       <article className="panel">
         <div className="section-heading"><h3>2. Origen de trabajo X/Y</h3></div>
+        <p className="muted">Define dónde queda X0 Y0 del G-code respecto al montaje de la placa.</p>
         <div className="form-grid">
           <label>
             X (mm)
-            <input type="number" value={workOrigin.x_mm} onChange={(event) => setWorkOrigin((current) => ({ ...current, x_mm: Number(event.target.value) }))} />
+            <input
+              ref={(node) => { workOriginRefs.current.x_mm = node; }}
+              type="number"
+              inputMode="decimal"
+              value={workOrigin.x_mm}
+              onChange={(event) => {
+                setWorkOrigin((current) => ({ ...current, x_mm: event.target.value }));
+                setWorkOriginErrors((current) => ({ ...current, x_mm: undefined }));
+              }}
+            />
+            {workOriginErrors.x_mm ? <span className="form-error">{workOriginErrors.x_mm}</span> : null}
           </label>
           <label>
             Y (mm)
-            <input type="number" value={workOrigin.y_mm} onChange={(event) => setWorkOrigin((current) => ({ ...current, y_mm: Number(event.target.value) }))} />
+            <input
+              ref={(node) => { workOriginRefs.current.y_mm = node; }}
+              type="number"
+              inputMode="decimal"
+              value={workOrigin.y_mm}
+              onChange={(event) => {
+                setWorkOrigin((current) => ({ ...current, y_mm: event.target.value }));
+                setWorkOriginErrors((current) => ({ ...current, y_mm: undefined }));
+              }}
+            />
+            {workOriginErrors.y_mm ? <span className="form-error">{workOriginErrors.y_mm}</span> : null}
           </label>
         </div>
-        <button className="button" type="button" disabled={referenceBusy || !selectedOperation} onClick={() => void withReferenceAction(() => api.confirmWorkOrigin(project.id, selectedOperation!.id, workOrigin))}>
+        <button className="button" type="button" disabled={referenceBusy || !selectedOperation} onClick={() => void submitWorkOrigin()}>
           Confirmar en simulación
         </button>
       </article>
 
       <article className="panel">
         <div className="section-heading"><h3>3. Referencia Z</h3></div>
+        <p className="muted">Define la altura que se considera Z0 para este montaje. Puede usar la misma posición X/Y del origen de trabajo, pero es una referencia vertical diferente.</p>
+        <label className="toggle-field">
+          <input type="checkbox" checked={useWorkOriginXYForZ} onChange={(event) => setUseWorkOriginXYForZ(event.target.checked)} />
+          <span>Usar la misma posición X/Y del origen de trabajo</span>
+        </label>
         <div className="form-grid">
           <label>
             X (mm)
-            <input type="number" value={zReference.x_mm} onChange={(event) => setZReference((current) => ({ ...current, x_mm: Number(event.target.value) }))} />
+            <input
+              ref={(node) => { zReferenceRefs.current.x_mm = node; }}
+              type="number"
+              inputMode="decimal"
+              value={useWorkOriginXYForZ ? workOrigin.x_mm : zReference.x_mm}
+              disabled={useWorkOriginXYForZ}
+              onChange={(event) => {
+                setZReference((current) => ({ ...current, x_mm: event.target.value }));
+                setZReferenceErrors((current) => ({ ...current, x_mm: undefined }));
+              }}
+            />
+            {zReferenceErrors.x_mm ? <span className="form-error">{zReferenceErrors.x_mm}</span> : null}
           </label>
           <label>
             Y (mm)
-            <input type="number" value={zReference.y_mm} onChange={(event) => setZReference((current) => ({ ...current, y_mm: Number(event.target.value) }))} />
+            <input
+              ref={(node) => { zReferenceRefs.current.y_mm = node; }}
+              type="number"
+              inputMode="decimal"
+              value={useWorkOriginXYForZ ? workOrigin.y_mm : zReference.y_mm}
+              disabled={useWorkOriginXYForZ}
+              onChange={(event) => {
+                setZReference((current) => ({ ...current, y_mm: event.target.value }));
+                setZReferenceErrors((current) => ({ ...current, y_mm: undefined }));
+              }}
+            />
+            {zReferenceErrors.y_mm ? <span className="form-error">{zReferenceErrors.y_mm}</span> : null}
           </label>
           <label>
             Z de referencia (mm)
-            <input type="number" value={zReference.z_mm} onChange={(event) => setZReference((current) => ({ ...current, z_mm: Number(event.target.value) }))} />
+            <input
+              ref={(node) => { zReferenceRefs.current.z_mm = node; }}
+              type="number"
+              inputMode="decimal"
+              value={zReference.z_mm}
+              onChange={(event) => {
+                setZReference((current) => ({ ...current, z_mm: event.target.value }));
+                setZReferenceErrors((current) => ({ ...current, z_mm: undefined }));
+              }}
+            />
+            {zReferenceErrors.z_mm ? <span className="form-error">{zReferenceErrors.z_mm}</span> : null}
           </label>
         </div>
-        <button className="button" type="button" disabled={referenceBusy || !selectedOperation} onClick={() => void withReferenceAction(() => api.confirmZReference(project.id, selectedOperation!.id, zReference))}>
+        <button className="button" type="button" disabled={referenceBusy || !selectedOperation} onClick={() => void submitZReference()}>
           Confirmar en simulación
         </button>
       </article>
@@ -420,11 +672,13 @@ export function ProjectWorkspace({
 
       <article className="panel">
         <div className="section-heading"><h3>5. Mapa</h3></div>
-        <p className="muted">Mapa actual: {heightMap ? `${heightMap.fuente_datos} · v${heightMap.version}` : "no disponible"}</p>
+        <p className="muted">{referenceSession?.pasos.find((step) => step.id === "mapa")?.detalle ?? "Aún no hay mapa disponible."}</p>
+        <p className="mono-text">Mapa actual: {heightMap ? `${heightMap.fuente_datos} · v${heightMap.version}` : "no disponible"}</p>
       </article>
 
       <article className="panel">
         <div className="section-heading"><h3>6. Validación</h3></div>
+        <p className="muted">{referenceSession?.pasos.find((step) => step.id === "validacion")?.detalle ?? "La validación del mapa sigue pendiente."}</p>
         <button className="button" type="button" disabled={referenceBusy || !selectedOperation || !heightMap} onClick={() => void withReferenceAction(() => api.validateHeightMap(project.id, selectedOperation!.id))}>
           Confirmar en simulación
         </button>
@@ -440,14 +694,14 @@ export function ProjectWorkspace({
             <p className="eyebrow">Mapa de alturas</p>
             <h3>Alturas de la superficie</h3>
           </div>
-          <div className="toolbar-inline">
+          <div className="toolbar-inline toolbar-inline--scrollable" role="tablist" aria-label="Vistas del mapa de alturas">
             <button className={`toolbar-pill${activeMapTab === "mapa2d" ? " toolbar-pill--active" : ""}`} type="button" onClick={() => setActiveMapTab("mapa2d")}>Mapa 2D</button>
             <button className={`toolbar-pill${activeMapTab === "superficie3d" ? " toolbar-pill--active" : ""}`} type="button" onClick={() => setActiveMapTab("superficie3d")}>Superficie 3D</button>
             <button className={`toolbar-pill${activeMapTab === "puntos" ? " toolbar-pill--active" : ""}`} type="button" onClick={() => setActiveMapTab("puntos")}>Puntos</button>
             <button className={`toolbar-pill${activeMapTab === "configuracion" ? " toolbar-pill--active" : ""}`} type="button" onClick={() => setActiveMapTab("configuracion")}>Configuración</button>
           </div>
         </div>
-        <div className="toolbar-inline">
+        <div className="toolbar-inline toolbar-inline--scrollable">
           <button className={`toolbar-pill${heightMode === "bruto" ? " toolbar-pill--active" : ""}`} type="button" onClick={() => setHeightMode("bruto")}>Superficie bruta</button>
           <button className={`toolbar-pill${heightMode === "plano" ? " toolbar-pill--active" : ""}`} type="button" onClick={() => setHeightMode("plano")}>Plano</button>
           <button className={`toolbar-pill${heightMode === "residuo" ? " toolbar-pill--active" : ""}`} type="button" onClick={() => setHeightMode("residuo")}>Residuo</button>
@@ -456,6 +710,12 @@ export function ProjectWorkspace({
 
       {heightMap ? (
         <article className="panel">
+          <div className="section-heading section-heading--stacked">
+            <div>
+              <p className="eyebrow">Métricas</p>
+              <h3>Alturas de la superficie</h3>
+            </div>
+          </div>
           <div className="info-grid info-grid--double compact-grid">
             <div className="metric-box"><span>Z mínima</span><strong>{formatMillimeters(heightMap.estadisticas.altura_min_mm, 4)}</strong></div>
             <div className="metric-box"><span>Z máxima</span><strong>{formatMillimeters(heightMap.estadisticas.altura_max_mm, 4)}</strong></div>
@@ -473,7 +733,7 @@ export function ProjectWorkspace({
         </article>
       ) : null}
 
-      {activeMapTab === "mapa2d" && heightMap ? <HeightMapHeatmap material={project.material} heightMap={heightMap} mode={heightMode} /> : null}
+      {activeMapTab === "mapa2d" && heightMap ? <HeightMapHeatmap material={project.material} heightMap={heightMap} mode={heightMode} toolpathBounds={selectedOperation?.analisis?.limites ?? null} /> : null}
       {activeMapTab === "superficie3d" && heightMap ? <HeightMapSurface3D heightMap={heightMap} mode={heightMode} /> : null}
       {activeMapTab === "puntos" && heightMap ? (
         <HeightMapPointTable
@@ -487,12 +747,12 @@ export function ProjectWorkspace({
             if (prompted == null) {
               return;
             }
-            const nextValue = prompted.trim() === "" ? null : Number(prompted);
-            if (nextValue !== null && Number.isNaN(nextValue)) {
+            const parsed = parseFiniteNumber(prompted);
+            if (prompted.trim() !== "" && parsed.error) {
               setWorkspaceError("El valor Z debe ser numérico.");
               return;
             }
-            await withHeightMapAction(() => api.updateHeightMapSample(project.id, selectedOperation!.id, sampleId, { z_mm: nextValue }));
+            await withHeightMapAction(() => api.updateHeightMapSample(project.id, selectedOperation!.id, sampleId, { z_mm: prompted.trim() === "" ? null : parsed.value }));
           }}
         />
       ) : null}
@@ -501,8 +761,8 @@ export function ProjectWorkspace({
           material={project.material}
           heightMap={heightMap}
           busy={heightMapBusy}
-          onConfigure={(payload) => withHeightMapAction(() => api.configureHeightMap(project.id, selectedOperation!.id, payload))}
-          onSimulate={(payload) => withHeightMapAction(() => api.simulateHeightMap(project.id, selectedOperation!.id, payload))}
+          onConfigure={(nextPayload) => withHeightMapAction(() => api.configureHeightMap(project.id, selectedOperation!.id, nextPayload))}
+          onSimulate={(nextPayload) => withHeightMapAction(() => api.simulateHeightMap(project.id, selectedOperation!.id, nextPayload))}
           onImportJson={(content) => withHeightMapAction(() => api.importHeightMapJson(project.id, selectedOperation!.id, content))}
           onImportCsv={(content) => withHeightMapAction(() => api.importHeightMapCsv(project.id, selectedOperation!.id, content))}
           onRecalculate={() => withHeightMapAction(() => api.recalculateHeightMap(project.id, selectedOperation!.id))}
@@ -527,10 +787,15 @@ export function ProjectWorkspace({
           </div>
           <p className="muted">Bloqueada si faltan referencias o el mapa no está validado. No genera ni descarga G-code ejecutable.</p>
         </div>
+        {!referenceSession?.lista_para_compensacion ? (
+          <div className="alert alert--warning">
+            {(referenceSession?.bloqueos_compensacion ?? []).join(" ") || "La preparación aún no está lista para compensación."}
+          </div>
+        ) : null}
         <button
           className="button"
           type="button"
-          disabled={referenceBusy || !selectedOperation}
+          disabled={referenceBusy || !selectedOperation || !referenceSession?.lista_para_compensacion}
           onClick={async () => {
             if (!selectedOperation) {
               return;
@@ -609,49 +874,45 @@ export function ProjectWorkspace({
 
       {editingProject ? <ProjectForm initialValue={payload} mode="edit" onSubmit={onSaveProject} submitting={savingProject} /> : null}
 
-      <div className="workspace-layout">
-        <aside className="workspace-side workspace-side--sticky">
-          <article className="panel">
-            <div className="section-heading">
-              <div>
-                <p className="eyebrow">Resumen</p>
-                <h3>{selectedOperation?.nombre ?? "Sin operación"}</h3>
-              </div>
-              {selectedOperation ? <StatusBadge tone={toneForStatus(selectedOperation.estado)}>{translateStatus(selectedOperation.estado)}</StatusBadge> : null}
-            </div>
-            {selectedOperation ? (
-              <dl className="definition-grid definition-grid--compact">
-                <div><dt>Tipo</dt><dd>{translateOperationType(selectedOperation.tipo)}</dd></div>
-                <div><dt>Cara</dt><dd>{translateFace(selectedOperation.cara)}</dd></div>
-                <div><dt>Archivo</dt><dd>{selectedOperation.nombre_archivo_original ?? "Sin archivo"}</dd></div>
-                <div><dt>Mapa</dt><dd>{heightMap ? `${heightMap.fuente_datos} v${heightMap.version}` : "No disponible"}</dd></div>
-                <div><dt>Home simulado</dt><dd>{referenceSession?.machine_reference.confirmada ? "Confirmado" : "Pendiente"}</dd></div>
-                <div><dt>Validación mapa</dt><dd>{referenceSession?.pasos.find((step) => step.id === "validacion")?.confirmado ? "Confirmada" : "Pendiente"}</dd></div>
-              </dl>
-            ) : <p className="muted">Seleccione una operación para abrir el workspace.</p>}
-          </article>
-        </aside>
+      <article className="panel workspace-summary-panel">
+        <div className="section-heading section-heading--stacked">
+          <div>
+            <p className="eyebrow">Resumen operativo</p>
+            <h3>{selectedOperation?.nombre ?? "Sin operación"}</h3>
+          </div>
+          {selectedOperation ? <StatusBadge tone={toneForStatus(selectedOperation.estado)}>{translateStatus(selectedOperation.estado)}</StatusBadge> : null}
+        </div>
+        {selectedOperation ? (
+          <div className="info-grid info-grid--double compact-grid">
+            <div className="metric-box"><span>Tipo</span><strong>{translateOperationType(selectedOperation.tipo)}</strong></div>
+            <div className="metric-box"><span>Cara</span><strong>{translateFace(selectedOperation.cara)}</strong></div>
+            <div className="metric-box"><span>Archivo</span><strong>{selectedOperation.nombre_archivo_original ?? "Sin archivo"}</strong></div>
+            <div className="metric-box"><span>Mapa</span><strong>{heightMap ? `${heightMap.fuente_datos} v${heightMap.version}` : "No disponible"}</strong></div>
+            <div className="metric-box"><span>Referencia de máquina</span><strong>{referenceSession?.machine_reference.confirmada ? "Confirmada" : "Pendiente"}</strong></div>
+            <div className="metric-box"><span>Compensación</span><strong>{referenceSession?.lista_para_compensacion ? "Lista" : "Bloqueada"}</strong></div>
+          </div>
+        ) : <p className="muted">Seleccione una operación para abrir el workspace.</p>}
+      </article>
 
-        <section className="workspace-main">
-          <article className="panel">
-            <div className="toolbar-inline toolbar-inline--wrap">
-              <button className={`toolbar-pill${activeView === "archivo" ? " toolbar-pill--active" : ""}`} type="button" onClick={() => setActiveView("archivo")}>Archivo</button>
-              <button className={`toolbar-pill${activeView === "trayectoria" ? " toolbar-pill--active" : ""}`} type="button" onClick={() => setActiveView("trayectoria")}>Trayectoria</button>
-              <button className={`toolbar-pill${activeView === "referencia" ? " toolbar-pill--active" : ""}`} type="button" onClick={() => setActiveView("referencia")}>Referencia</button>
-              <button className={`toolbar-pill${activeView === "mapa" ? " toolbar-pill--active" : ""}`} type="button" onClick={() => setActiveView("mapa")}>Mapa de alturas</button>
-              <button className={`toolbar-pill${activeView === "validacion" ? " toolbar-pill--active" : ""}`} type="button" onClick={() => setActiveView("validacion")}>Validación</button>
-            </div>
-          </article>
+      <article className="panel workspace-navigation-panel">
+        <div className="toolbar-inline toolbar-inline--scrollable workspace-tabs" role="tablist" aria-label="Navegación del workspace">
+          <button className={`toolbar-pill${activeView === "archivo" ? " toolbar-pill--active" : ""}`} type="button" onClick={() => setActiveView("archivo")}>Archivo</button>
+          <button className={`toolbar-pill${activeView === "trayectoria" ? " toolbar-pill--active" : ""}`} type="button" onClick={() => setActiveView("trayectoria")}>Trayectoria</button>
+          <button className={`toolbar-pill${activeView === "referencia" ? " toolbar-pill--active" : ""}`} type="button" onClick={() => setActiveView("referencia")}>Referencia</button>
+          <button className={`toolbar-pill${activeView === "mapa" ? " toolbar-pill--active" : ""}`} type="button" onClick={() => setActiveView("mapa")}>Mapa de alturas</button>
+          <button className={`toolbar-pill${activeView === "validacion" ? " toolbar-pill--active" : ""}`} type="button" onClick={() => setActiveView("validacion")}>Validación</button>
+        </div>
+      </article>
 
-          {workspaceError ? <div className="panel alert alert--error">{workspaceError}</div> : null}
+      {workspaceError ? <div className="panel alert alert--error">{workspaceError}</div> : null}
 
-          {activeView === "archivo" ? renderArchivo() : null}
-          {activeView === "trayectoria" ? renderTrayectoria() : null}
-          {activeView === "referencia" ? renderReferencia() : null}
-          {activeView === "mapa" ? renderMapa() : null}
-          {activeView === "validacion" ? renderValidacion() : null}
-        </section>
-      </div>
+      <section className="workspace-view-panel">
+        {activeView === "archivo" ? renderArchivo() : null}
+        {activeView === "trayectoria" ? renderTrayectoria() : null}
+        {activeView === "referencia" ? renderReferencia() : null}
+        {activeView === "mapa" ? renderMapa() : null}
+        {activeView === "validacion" ? renderValidacion() : null}
+      </section>
     </div>
   );
 }
