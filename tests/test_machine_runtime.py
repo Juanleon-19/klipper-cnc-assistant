@@ -17,8 +17,11 @@ def config(mode: MachineMode = MachineMode.SIMULATED) -> MachineRuntimeConfig:
         serial_port=None,
         serial_baudrate=115200,
         safe_z_mm=10.0,
+        moonraker_request_timeout_s=0.1,
+        home_timeout_s=1.0,
         telemetry_fresh_timeout_s=2.0,
         serial_fresh_timeout_s=2.0,
+        serial_startup_delay_s=0.0,
         settle_tolerance_mm=0.02,
         velocity_tolerance_mm_s=0.05,
         move_timeout_s=1.0,
@@ -38,7 +41,7 @@ class MachineRuntimeTest(unittest.TestCase):
         runtime.start()
         snapshot = runtime.snapshot()
         self.assertEqual(snapshot["mode"], "SIMULATED")
-        self.assertEqual(snapshot["state"], "READY")
+        self.assertEqual(snapshot["state"], "READY_FOR_HOME")
         with self.assertRaises(MachineRuntimeError):
             runtime.initialize(0.0)
 

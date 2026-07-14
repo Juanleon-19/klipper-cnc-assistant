@@ -15,22 +15,36 @@ from klipper_cnc_assistant.jog.controller import JogController, JogError
 from klipper_cnc_assistant.jog.manual import ManualJogController
 from klipper_cnc_assistant.jog.profiles import JogMode, get_jog_profile
 from klipper_cnc_assistant.machine.discovery import discover_machine
-from klipper_cnc_assistant.moonraker.client import MoonrakerClient, MoonrakerError
+from klipper_cnc_assistant.moonraker.client import MoonrakerClient, MoonrakerError, MoonrakerTimeout
 from klipper_cnc_assistant.moonraker.telemetry import MoonrakerTelemetry
 
 from .config import MachineMode, MachineRuntimeConfig
 
 
 class MachineRuntimeState(StrEnum):
-    STOPPED = "STOPPED"
-    STARTING = "STARTING"
+    DISCONNECTED = "DISCONNECTED"
+    CONNECTING = "CONNECTING"
     DIAGNOSTIC = "DIAGNOSTIC"
-    READY = "READY"
-    INITIALIZING = "INITIALIZING"
-    MANUAL_CONTROL = "MANUAL_CONTROL"
-    PROBING = "PROBING"
+    READY_FOR_HOME = "READY_FOR_HOME"
+    HOMING = "HOMING"
+    HOMED = "HOMED"
+    WAITING_SAFE_Z = "WAITING_SAFE_Z"
+    MOVING_TO_SAFE_Z = "MOVING_TO_SAFE_Z"
+    MOVING_TO_CENTER = "MOVING_TO_CENTER"
+    WAITING_FOR_XY_REFERENCE = "WAITING_FOR_XY_REFERENCE"
+    REFERENCE_ARMED = "REFERENCE_ARMED"
+    PROBING_REFERENCE = "PROBING_REFERENCE"
+    REFERENCE_CAPTURED = "REFERENCE_CAPTURED"
+    MESH_PLANNED = "MESH_PLANNED"
+    MESH_READY = "MESH_READY"
+    MESH_PROBING = "MESH_PROBING"
+    MESH_PAUSED = "MESH_PAUSED"
+    MESH_COMPLETE = "MESH_COMPLETE"
+    MAP_VALIDATING = "MAP_VALIDATING"
+    MAP_READY = "MAP_READY"
     DEGRADED = "DEGRADED"
     ERROR = "ERROR"
+    CANCELLED = "CANCELLED"
     STOPPING = "STOPPING"
 
 
@@ -120,7 +134,7 @@ class MachineRuntime:
         self._movement_lock = threading.Lock()
         self._serial_stop = threading.Event()
         self._started_at = utc_now()
-        self._state = MachineRuntimeState.STOPPED
+        self._state = MachineRuntimeState.DISCONNECTED
         self._client: MoonrakerClient | None = None
         self._machine = None
         self._telemetry: MoonrakerTelemetry | None = None
@@ -151,10 +165,10 @@ class MachineRuntime:
     def start(self) -> None:
         with self._lock:
             if self.config.mode is MachineMode.SIMULATED:
-                self._state = MachineRuntimeState.READY
+                self._state = MachineRuntimeState.READY_FOR_HOME
                 self._event("info", "Runtime iniciado en modo SIMULADO.")
                 return
-            self._state = MachineRuntimeState.STOPPED
+            self._state = MachineRuntimeState.DISCONNECTED
         if self.config.auto_connect:
             self.connect()
 
@@ -180,31 +194,31 @@ class MachineRuntime:
             self._driver = None
             self._jog = None
             self._manual = None
-            self._state = MachineRuntimeState.STOPPED
+            self._state = MachineRuntimeState.DISCONNECTED
             self._event("info", "Runtime detenido.")
 
     def connect(self) -> dict[str, Any]:
         with self._lock:
             if self.config.mode is MachineMode.SIMULATED:
-                self._state = MachineRuntimeState.READY
+                self._state = MachineRuntimeState.READY_FOR_HOME
                 self._event("info", "Conexión simulada confirmada.")
                 return self.snapshot()
             self._require_physical_config()
             if self._client is not None:
                 return self.snapshot()
-            self._state = MachineRuntimeState.STARTING
+            self._state = MachineRuntimeState.CONNECTING
         try:
             assert self.config.moonraker_url is not None
             assert self.config.moonraker_ws is not None
             assert self.config.serial_port is not None
-            client = self._client_factory(self.config.moonraker_url)
+            client = self._client_factory(self.config.moonraker_url, timeout=self.config.moonraker_request_timeout_s)
             server_info = client.get_server_info()
             if server_info.get("klippy_state") != "ready":
                 raise MachineRuntimeError("Klipper no está ready.")
             machine = self._discovery(client)
             self._attach_telemetry_tracking(machine)
             telemetry = self._telemetry_factory(self.config.moonraker_ws, machine)
-            driver = self._serial_factory(port=self.config.serial_port, baudrate=self.config.serial_baudrate)
+            driver = self._serial_factory(port=self.config.serial_port, baudrate=self.config.serial_baudrate, startup_delay=self.config.serial_startup_delay_s)
             driver.open()
             telemetry_thread = threading.Thread(target=_run_telemetry, args=(telemetry, self._telemetry_failures), daemon=True)
             serial_thread = threading.Thread(target=self._serial_loop, daemon=True)
@@ -254,11 +268,11 @@ class MachineRuntime:
                 self._assert_safety_for_motion()
                 self._manual_enabled = True
                 self._diagnostic_input_only = False
-                self._state = MachineRuntimeState.MANUAL_CONTROL
+                self._state = MachineRuntimeState.WAITING_FOR_XY_REFERENCE
                 self._event("info", "Control manual habilitado.")
             else:
                 self._manual_enabled = False
-                self._state = MachineRuntimeState.READY
+                self._state = MachineRuntimeState.READY_FOR_HOME
                 self._event("info", "Control manual deshabilitado.")
         return self.snapshot()
 
@@ -278,37 +292,52 @@ class MachineRuntime:
             raise MachineRuntimeError("Ya hay un movimiento u operación física activa.")
         try:
             with self._lock:
-                self._state = MachineRuntimeState.INITIALIZING
+                self._state = MachineRuntimeState.HOMING
                 self._manual_enabled = False
                 self._diagnostic_input_only = True
                 self._initialization_steps = []
             self._step("verificar_modo_fisico", "ok", "Modo físico confirmado.")
             self._assert_safety_for_connection()
             self._step("verificar_conexion", "ok", "Moonraker y Klipper están conectados.")
+            self._assert_serial_thread_visible()
+            self._wait_for_serial_recent()
+            self._step("verificar_arduino", "ok", "Arduino con paquetes válidos recientes.")
+
             self._send_script("G28", label="homing")
-            self._step("homing", "ok", "Homing solicitado a Klipper.")
+            self._step("homing_solicitado", "ok", "G28 enviado; la finalización se confirma por toolhead.homed_axes y velocidad cero.")
+            self._wait_for_homing({"x", "y", "z"})
             self._refresh_machine()
             machine = self._machine
             if machine is None:
                 raise MachineRuntimeError("No hay estado de máquina descubierto.")
-            if not machine.is_homed:
-                raise MachineRuntimeError("Klipper no reporta todos los ejes con homing después de G28.")
-            center_x = (machine.x_limits.minimum + machine.x_limits.maximum) / 2.0
-            center_y = (machine.y_limits.minimum + machine.y_limits.maximum) / 2.0
-            safe_z = self._safe_z(machine)
+            missing = sorted(axis for axis in ("x", "y", "z") if not machine.axis_is_homed(axis))
+            if missing:
+                raise MachineRuntimeError("Homing incompleto; faltan ejes: " + ", ".join(axis.upper() for axis in missing) + ".")
+            with self._lock:
+                self._state = MachineRuntimeState.HOMED
+            self._step("homing_confirmado", "ok", f"Klipper reporta homed_axes={machine.homed_axes}.")
+
             if target_z_mm < machine.z_limits.minimum or target_z_mm > machine.z_limits.maximum:
                 raise MachineRuntimeError(
-                    f"Z objetivo fuera de límites: recibido {target_z_mm:.3f} mm, esperado {machine.z_limits.minimum:.3f}..{machine.z_limits.maximum:.3f} mm."
+                    f"Z segura de traslado fuera de límites: recibido {target_z_mm:.3f} mm, esperado {machine.z_limits.minimum:.3f}..{machine.z_limits.maximum:.3f} mm."
                 )
-            self._step("calcular_centro", "ok", f"Centro calculado X={center_x:.3f} Y={center_y:.3f}.")
-            self._move_absolute(z=safe_z, label="z_segura")
-            self._move_absolute(x=center_x, y=center_y, label="xy_centro")
-            self._move_absolute(z=target_z_mm, label="z_objetivo")
-            self._refresh_machine()
-            self._step("posicion_final", "ok", f"Posición final confirmada hacia Z={target_z_mm:.3f} mm.")
+            center_x = (machine.x_limits.minimum + machine.x_limits.maximum) / 2.0
+            center_y = (machine.y_limits.minimum + machine.y_limits.maximum) / 2.0
+            self._step("calcular_centro", "ok", f"Centro real calculado X={center_x:.3f} Y={center_y:.3f}.")
+
             with self._lock:
-                self._state = MachineRuntimeState.READY
-                self._event("info", "Inicialización física completada.")
+                self._state = MachineRuntimeState.MOVING_TO_SAFE_Z
+            self._move_absolute(z=target_z_mm, label="z_segura_traslado")
+            self._step("z_segura_confirmada", "ok", f"Z de traslado segura alcanzada: {target_z_mm:.3f} mm.")
+
+            with self._lock:
+                self._state = MachineRuntimeState.MOVING_TO_CENTER
+            self._move_absolute(x=center_x, y=center_y, label="xy_centro")
+            self._refresh_machine()
+            self._step("centro_confirmado", "ok", f"Herramienta posicionada en centro X={center_x:.3f} Y={center_y:.3f} con Z segura.")
+            with self._lock:
+                self._state = MachineRuntimeState.WAITING_FOR_XY_REFERENCE
+                self._event("info", "Inicialización física completada; posicione X/Y del origen 0,0 y arme la referencia.")
             return self.snapshot()
         except Exception as error:
             with self._lock:
@@ -323,8 +352,13 @@ class MachineRuntime:
     def request_probe(self) -> dict[str, Any]:
         self._require_physical_ready()
         with self._lock:
+            if self._state not in {MachineRuntimeState.WAITING_FOR_XY_REFERENCE, MachineRuntimeState.REFERENCE_ARMED}:
+                raise MachineRuntimeError("La referencia solo puede armarse después de homing, Z segura y movimiento al centro.")
             self._probe_requested = True
-            self._event("warning", "PROBE_REQUESTED: esperando confirmación del operador.")
+            self._manual_enabled = False
+            self._diagnostic_input_only = True
+            self._state = MachineRuntimeState.REFERENCE_ARMED
+            self._event("warning", "REFERENCE_ARMED: pulse el botón externo para sondear la referencia.")
         return self.snapshot()
 
     def confirm_probe(self) -> dict[str, Any]:
@@ -333,13 +367,15 @@ class MachineRuntime:
             raise MachineRuntimeError("Ya hay un movimiento u operación física activa.")
         try:
             with self._lock:
+                if self._state != MachineRuntimeState.REFERENCE_ARMED:
+                    raise MachineRuntimeError("La referencia debe estar armada antes de sondear.")
                 if not self._probe_requested:
-                    raise MachineRuntimeError("No existe PROBE_REQUESTED pendiente de confirmación.")
+                    raise MachineRuntimeError("No existe REFERENCE_ARMED pendiente de botón externo.")
                 if self._last_command.probe_triggered:
                     raise MachineRuntimeError("La sonda está activa antes de iniciar el descenso.")
                 self._manual_enabled = False
                 self._diagnostic_input_only = True
-                self._state = MachineRuntimeState.PROBING
+                self._state = MachineRuntimeState.PROBING_REFERENCE
             self._assert_safety_for_motion()
             self._refresh_machine()
             machine = self._machine
@@ -381,8 +417,8 @@ class MachineRuntime:
             with self._lock:
                 self._last_probe_result = probe
                 self._probe_requested = False
-                self._state = MachineRuntimeState.READY
-                self._event("info", f"Sonda de un punto capturada X={start_x:.3f} Y={start_y:.3f} Z={contact_z:.3f}.")
+                self._state = MachineRuntimeState.REFERENCE_CAPTURED
+                self._event("info", f"Sonda de referencia capturada X={start_x:.3f} Y={start_y:.3f} Z={contact_z:.3f}.")
             return self.snapshot()
         except Exception as error:
             with self._lock:
@@ -393,11 +429,90 @@ class MachineRuntime:
         finally:
             self._movement_lock.release()
 
+    def probe_mesh_point(self, point: dict[str, Any]) -> dict[str, Any]:
+        self._require_physical_ready()
+        if not self._movement_lock.acquire(blocking=False):
+            raise MachineRuntimeError("Ya hay un movimiento u operación física activa.")
+        started = time.monotonic()
+        try:
+            with self._lock:
+                self._state = MachineRuntimeState.MESH_PROBING
+                self._manual_enabled = False
+                self._diagnostic_input_only = True
+            self._assert_safety_for_motion()
+            self._refresh_machine()
+            machine = self._machine
+            if machine is None:
+                raise MachineRuntimeError("No hay estado de máquina descubierto.")
+            safe_z = self._safe_z(machine)
+            self._move_absolute(z=safe_z, label="mesh_z_segura")
+            self._move_absolute(x=float(point["x_machine"]), y=float(point["y_machine"]), label=f"mesh_xy_{point['index']}")
+            probe = self._probe_current_position(label=f"mesh_probe_{point['index']}")
+            with self._lock:
+                self._state = MachineRuntimeState.MESH_READY
+            return {
+                "index": point["index"],
+                "z_measured": probe.z_mm,
+                "duration_s": time.monotonic() - started,
+                "probe": probe.__dict__,
+            }
+        except Exception as error:
+            with self._lock:
+                self._state = MachineRuntimeState.ERROR
+                self._last_error = str(error)
+                self._event("error", str(error))
+            raise
+        finally:
+            self._movement_lock.release()
+
+    def _probe_current_position(self, *, label: str) -> ProbeResult:
+        self._assert_safety_for_motion()
+        self._refresh_machine()
+        machine = self._machine
+        jog = self._jog
+        if machine is None or jog is None:
+            raise MachineRuntimeError("No hay control físico inicializado.")
+        if not machine.axis_is_homed("z"):
+            raise MachineRuntimeError("Z debe tener homing antes de sondear.")
+        with self._lock:
+            if self._last_command.probe_triggered:
+                raise MachineRuntimeError("La sonda está activa antes de iniciar el descenso.")
+        start = machine.get_motion_snapshot()
+        start_x = float(start["x"])
+        start_y = float(start["y"])
+        while True:
+            with self._lock:
+                if self._last_command.probe_triggered:
+                    break
+            snapshot = machine.get_motion_snapshot()
+            current_z = float(snapshot["z"])
+            remaining = current_z - machine.z_limits.minimum
+            if remaining <= self.config.settle_tolerance_mm:
+                raise MachineRuntimeError("Se alcanzó el límite mínimo Z sin contacto de sonda.")
+            step = min(self.config.probe_step_mm, remaining)
+            result = jog.move_relative("z", -step, self.config.probe_lower_speed_mm_s)
+            with self._lock:
+                self._last_movement = result
+                self._last_command_text = f"{label}_lower_step"
+            self._wait_for_axis("z", float(result["target"]), "paso de sonda")
+        snapshot = machine.get_motion_snapshot()
+        contact_z = float(snapshot["z"])
+        retract_available = machine.z_limits.maximum - contact_z
+        if retract_available <= self.config.settle_tolerance_mm:
+            raise MachineRuntimeError("No hay margen Z para retraer después del contacto.")
+        retract = min(self.config.probe_retract_mm, retract_available)
+        result = jog.move_relative("z", retract, self.config.probe_retract_speed_mm_s)
+        with self._lock:
+            self._last_movement = result
+            self._last_command_text = f"{label}_retract"
+        self._wait_for_axis("z", float(result["target"]), "retracto de sonda")
+        return ProbeResult(x_mm=start_x, y_mm=start_y, z_mm=contact_z, captured_at=_iso_now())
+
     def cancel_operation(self) -> dict[str, Any]:
         with self._lock:
             self._probe_requested = False
             self._manual_enabled = False
-            self._state = MachineRuntimeState.READY if self._client is not None else MachineRuntimeState.STOPPED
+            self._state = MachineRuntimeState.READY_FOR_HOME if self._client is not None else MachineRuntimeState.DISCONNECTED
             self._event("warning", "Operación física cancelada por el operador.")
         return self.snapshot()
 
@@ -456,7 +571,7 @@ class MachineRuntime:
                     "last_error": self._last_error,
                 },
                 "klipper": {
-                    "ready": self._client is not None and self._state not in {MachineRuntimeState.ERROR, MachineRuntimeState.STOPPED},
+                    "ready": self._client is not None and self._state not in {MachineRuntimeState.ERROR, MachineRuntimeState.DISCONNECTED},
                     "position": machine_snapshot,
                     "homed_axes": None if self._machine is None else self._machine.homed_axes,
                     "limits": None if self._machine is None else {
@@ -467,17 +582,7 @@ class MachineRuntime:
                     "max_velocity": None if self._machine is None else self._machine.max_velocity,
                     "max_accel": None if self._machine is None else self._machine.max_accel,
                 },
-                "arduino": {
-                    "port": self.config.serial_port,
-                    "baudrate": self.config.serial_baudrate,
-                    "open": self._driver is not None,
-                    "valid_packets": self._counters.valid_packets,
-                    "invalid_packets": self._counters.invalid_packets,
-                    "checksum_errors": self._counters.checksum_errors,
-                    "packet_frequency_hz": None if serial_age in (None, 0) else 1.0 / max(serial_age, 1e-6),
-                    "last_packet": None if self._last_packet is None else self._last_packet.__dict__,
-                    "last_error": self._last_error,
-                },
+                "arduino": self._arduino_snapshot(now=now, serial_age=serial_age),
                 "controller": {
                     "direction": self._last_packet.direction if self._last_packet else "CENTER",
                     "x": self._last_packet.x if self._last_packet else None,
@@ -503,6 +608,8 @@ class MachineRuntime:
             }
 
     def _serial_loop(self) -> None:
+        if self._driver is not None:
+            self._driver.diagnostics.thread_active = True
         while not self._serial_stop.is_set():
             try:
                 if self._driver is None:
@@ -517,11 +624,15 @@ class MachineRuntime:
                     self._counters.checksum_errors += 1
                     self._last_error = str(error)
             except Exception as error:
+                if self._driver is not None:
+                    self._driver.diagnostics.last_exception = str(error)
                 with self._lock:
                     self._counters.disconnects += 1
                     self._last_error = str(error)
                     self._state = MachineRuntimeState.DEGRADED
                 time.sleep(0.25)
+        if self._driver is not None:
+            self._driver.diagnostics.thread_active = False
 
     def _handle_controller_packet(self, packet: ControllerPacket, command: ControllerCommand) -> None:
         with self._lock:
@@ -536,9 +647,15 @@ class MachineRuntime:
         if command.joystick_pressed and not previous.joystick_pressed and manual is not None and not diagnostic_only:
             manual.set_mode(_cycle_mode(manual.mode))
         if command.probe_request and not previous.probe_request:
+            start_probe = False
             with self._lock:
-                self._probe_requested = True
-                self._event("warning", "PROBE_REQUESTED desde botón externo.")
+                if self._state == MachineRuntimeState.REFERENCE_ARMED and self._probe_requested:
+                    start_probe = True
+                    self._event("warning", "Botón externo: inicio de sondeo de referencia.")
+                else:
+                    self._event("warning", "Botón externo ignorado: la referencia no está armada.")
+            if start_probe:
+                threading.Thread(target=self._confirm_probe_from_button, daemon=True).start()
         if not diagnostic_only and manual_enabled and _is_cardinal(command):
             with self._lock:
                 can_jog = self._ready_for_jog
@@ -596,12 +713,48 @@ class MachineRuntime:
         if self._client is None:
             raise MachineRuntimeError("Conecte Moonraker/Klipper/Arduino antes de usar controles físicos.")
 
+    def _assert_serial_thread_visible(self) -> None:
+        if self._driver is None or self._serial_thread is None:
+            raise MachineRuntimeError("Arduino no inicializado.")
+        if not self._serial_thread.is_alive():
+            raise MachineRuntimeError("Hilo serial inactivo; revise puerto, permisos y excepciones.")
+
+    def _assert_serial_recent(self) -> None:
+        with self._lock:
+            last_packet_at = self._last_packet_at
+        if last_packet_at is None:
+            raise MachineRuntimeError("Arduino sin paquetes válidos; puerto abierto no es suficiente para autorizar movimiento.")
+        age = time.monotonic() - last_packet_at
+        if age > self.config.serial_fresh_timeout_s:
+            raise MachineRuntimeError(f"Arduino obsoleto; último paquete válido hace {age:.2f} s.")
+
+    def _wait_for_serial_recent(self) -> None:
+        start = time.monotonic()
+        timeout = max(self.config.serial_fresh_timeout_s, self.config.serial_startup_delay_s + 1.0)
+        while time.monotonic() - start <= timeout:
+            try:
+                self._assert_serial_recent()
+                return
+            except MachineRuntimeError:
+                time.sleep(0.05)
+        self._assert_serial_recent()
+
+    def _confirm_probe_from_button(self) -> None:
+        try:
+            self.confirm_probe()
+        except Exception as error:
+            with self._lock:
+                self._state = MachineRuntimeState.ERROR
+                self._last_error = str(error)
+                self._event("error", str(error))
+
     def _assert_safety_for_connection(self) -> None:
         if self._telemetry_failures:
             raise MachineRuntimeError(f"Telemetría Moonraker detenida: {self._telemetry_failures[-1]}")
 
     def _assert_safety_for_motion(self) -> None:
         self._assert_safety_for_connection()
+        self._assert_serial_recent()
         if self._machine is None:
             raise MachineRuntimeError("No hay estado de máquina.")
         if not self._machine.is_homed:
@@ -611,28 +764,53 @@ class MachineRuntime:
         if self._client is None:
             raise MachineRuntimeError("Moonraker no está conectado.")
         refreshed = self._discovery(self._client)
-        self._attach_telemetry_tracking(refreshed)
         with self._lock:
-            self._machine = refreshed
-            if self._jog is not None:
-                self._jog.machine = refreshed
+            if self._machine is None:
+                self._attach_telemetry_tracking(refreshed)
+                self._machine = refreshed
+                if self._jog is not None:
+                    self._jog.machine = refreshed
+            else:
+                self._machine.update_toolhead(
+                    position=(refreshed.position.x, refreshed.position.y, refreshed.position.z),
+                    homed_axes=refreshed.homed_axes,
+                    axis_minimum=(refreshed.x_limits.minimum, refreshed.y_limits.minimum, refreshed.z_limits.minimum),
+                    axis_maximum=(refreshed.x_limits.maximum, refreshed.y_limits.maximum, refreshed.z_limits.maximum),
+                    max_velocity=refreshed.max_velocity,
+                    max_accel=refreshed.max_accel,
+                )
             self._last_telemetry_at = time.monotonic()
 
     def _attach_telemetry_tracking(self, machine) -> None:
-        original_update = machine.update_motion
+        original_update_motion = machine.update_motion
+        original_update_toolhead = machine.update_toolhead
 
-        def update_motion_with_timestamp(*args, **kwargs):
-            result = original_update(*args, **kwargs)
+        def mark_telemetry() -> None:
             with self._lock:
                 self._last_telemetry_at = time.monotonic()
+
+        def update_motion_with_timestamp(*args, **kwargs):
+            result = original_update_motion(*args, **kwargs)
+            mark_telemetry()
+            return result
+
+        def update_toolhead_with_timestamp(*args, **kwargs):
+            result = original_update_toolhead(*args, **kwargs)
+            mark_telemetry()
             return result
 
         machine.update_motion = update_motion_with_timestamp
+        machine.update_toolhead = update_toolhead_with_timestamp
 
     def _send_script(self, script: str, *, label: str) -> None:
         if self._client is None:
             raise MachineRuntimeError("Moonraker no está conectado.")
-        self._client.send_gcode(script)
+        try:
+            self._client.send_gcode(script, timeout=self.config.moonraker_request_timeout_s)
+        except MoonrakerTimeout as error:
+            with self._lock:
+                self._last_error = str(error)
+                self._event("warning", f"Timeout HTTP enviando {label}; se comprobará el estado real de Klipper.")
         with self._lock:
             self._last_command_text = script
             self._event("info", f"Comando físico enviado: {label}.")
@@ -648,7 +826,52 @@ class MachineRuntime:
         script = "G90\nG1 " + " ".join(axes) + " F600.000"
         self._send_script(script, label=label)
         self._last_movement = {"label": label, "x": x, "y": y, "z": z}
+        targets = {axis: target for axis, target in (("x", x), ("y", y), ("z", z)) if target is not None}
+        self._wait_for_targets(targets, label)
         self._step(label, "ok", script.replace("\n", " "))
+
+    def _wait_for_targets(self, targets: dict[str, float], label: str) -> None:
+        if self._machine is None:
+            raise MachineRuntimeError("No hay telemetría de máquina.")
+        start = time.monotonic()
+        while time.monotonic() - start <= self.config.move_timeout_s:
+            self._assert_safety_for_connection()
+            snapshot = self._machine.get_motion_snapshot()
+            velocity = abs(float(snapshot["velocity"]))
+            positions_ok = all(
+                abs(float(snapshot[axis]) - target) <= self.config.settle_tolerance_mm
+                for axis, target in targets.items()
+            )
+            if positions_ok and velocity <= self.config.velocity_tolerance_mm_s:
+                return
+            time.sleep(0.05)
+        detail = ", ".join(f"{axis.upper()}={target:.3f}" for axis, target in targets.items())
+        raise MachineRuntimeError(f"Timeout esperando confirmación de {label} ({detail}).")
+
+    def _wait_for_homing(self, required_axes: set[str]) -> None:
+        if self._machine is None:
+            raise MachineRuntimeError("No hay telemetría de máquina.")
+        start = time.monotonic()
+        while time.monotonic() - start <= self.config.home_timeout_s:
+            self._assert_safety_for_connection()
+            self._refresh_machine_best_effort()
+            snapshot = self._machine.get_motion_snapshot()
+            homed = set(str(self._machine.homed_axes))
+            missing = required_axes - homed
+            velocity = abs(float(snapshot["velocity"]))
+            if not missing and velocity <= self.config.velocity_tolerance_mm_s:
+                return
+            time.sleep(0.2)
+        homed = set(str(self._machine.homed_axes))
+        missing = sorted(required_axes - homed)
+        raise MachineRuntimeError("Timeout de homing; faltan ejes: " + ", ".join(axis.upper() for axis in missing) + ".")
+
+    def _refresh_machine_best_effort(self) -> None:
+        try:
+            self._refresh_machine()
+        except Exception as error:
+            with self._lock:
+                self._last_error = str(error)
 
     def _wait_for_axis(self, axis: str, target: float, label: str) -> None:
         if self._machine is None:
@@ -670,12 +893,60 @@ class MachineRuntime:
             raise MachineRuntimeError("Z segura fuera de límites descubiertos.")
         return safe_z
 
+    def _arduino_snapshot(self, *, now: float, serial_age: float | None) -> dict[str, Any]:
+        driver_diagnostics = (
+            self._driver.diagnostics.snapshot(now=now)
+            if self._driver is not None
+            else {
+                "port": self.config.serial_port,
+                "baudrate": self.config.serial_baudrate,
+                "open": False,
+                "thread_active": False,
+                "bytes_received": 0,
+                "packets_complete": 0,
+                "valid_packets": 0,
+                "invalid_packets": 0,
+                "checksum_errors": 0,
+                "sync_drops": 0,
+                "partial_packets": 0,
+                "reconnects": 0,
+                "last_byte_age_s": None,
+                "last_valid_packet_age_s": None,
+                "last_invalid_packet_age_s": None,
+                "last_exception": None,
+            }
+        )
+        frequency = None
+        if serial_age not in (None, 0):
+            frequency = 1.0 / max(serial_age, 1e-6)
+        reason = None
+        if self._driver is None:
+            reason = "Puerto serie no abierto."
+        elif self._serial_thread is None or not self._serial_thread.is_alive():
+            reason = "Hilo serial inactivo."
+        elif self._last_packet_at is None:
+            reason = "Puerto abierto sin paquetes válidos; revise puerto, baudrate, permisos, reinicio Arduino o protocolo."
+        elif serial_age is not None and serial_age > self.config.serial_fresh_timeout_s:
+            reason = f"Último paquete válido obsoleto ({serial_age:.2f} s)."
+        return {
+            **driver_diagnostics,
+            "recent": serial_age is not None and serial_age <= self.config.serial_fresh_timeout_s,
+            "valid_packets": self._counters.valid_packets,
+            "runtime_invalid_packets": self._counters.invalid_packets,
+            "runtime_checksum_errors": self._counters.checksum_errors,
+            "runtime_disconnects": self._counters.disconnects,
+            "packet_frequency_hz": frequency,
+            "last_packet": None if self._last_packet is None else self._last_packet.__dict__,
+            "last_error": self._last_error,
+            "blocked_reason": reason,
+        }
+
     def _safety_snapshot(self, *, serial_age: float | None, telemetry_age: float | None) -> dict[str, Any]:
         telemetry_recent = self.config.mode is MachineMode.SIMULATED or (telemetry_age is not None and telemetry_age <= self.config.telemetry_fresh_timeout_s)
         serial_recent = self.config.mode is MachineMode.SIMULATED or (serial_age is not None and serial_age <= self.config.serial_fresh_timeout_s)
         klipper_ready = self.config.mode is MachineMode.SIMULATED or self._client is not None
         homed = self.config.mode is MachineMode.SIMULATED or (self._machine is not None and self._machine.is_homed)
-        movement_authorized = self._manual_enabled and telemetry_recent and serial_recent and klipper_ready and homed and self._state == MachineRuntimeState.MANUAL_CONTROL
+        movement_authorized = self._manual_enabled and telemetry_recent and serial_recent and klipper_ready and homed and self._state == MachineRuntimeState.WAITING_FOR_XY_REFERENCE
         reasons = []
         if not klipper_ready:
             reasons.append("Klipper/Moonraker no conectado.")
@@ -685,7 +956,7 @@ class MachineRuntime:
             reasons.append("Arduino obsoleto.")
         if not homed:
             reasons.append("Falta homing.")
-        if self._state in {MachineRuntimeState.ERROR, MachineRuntimeState.PROBING, MachineRuntimeState.INITIALIZING}:
+        if self._state in {MachineRuntimeState.ERROR, MachineRuntimeState.PROBING_REFERENCE, MachineRuntimeState.HOMING}:
             reasons.append(f"Estado incompatible: {self._state.value}.")
         if not self._manual_enabled:
             reasons.append("Control manual no habilitado.")
@@ -695,7 +966,7 @@ class MachineRuntime:
             "klipper_ready": klipper_ready,
             "homed_axes_required": homed,
             "no_active_error": self._state is not MachineRuntimeState.ERROR,
-            "no_incompatible_operation": self._state not in {MachineRuntimeState.PROBING, MachineRuntimeState.INITIALIZING},
+            "no_incompatible_operation": self._state not in {MachineRuntimeState.PROBING_REFERENCE, MachineRuntimeState.HOMING},
             "movement_authorized": movement_authorized,
             "blocked_reason": " ".join(reasons) if reasons else None,
         }

@@ -53,6 +53,39 @@ class MachineState:
     ):
         return axis.lower() in self.homed_axes
 
+    def update_toolhead(
+        self,
+        *,
+        position=None,
+        homed_axes=None,
+        axis_minimum=None,
+        axis_maximum=None,
+        max_velocity=None,
+        max_accel=None,
+    ):
+        with self._lock:
+            if position is not None:
+                self.position.x = float(position[0])
+                self.position.y = float(position[1])
+                self.position.z = float(position[2])
+
+            if homed_axes is not None:
+                self.homed_axes = str(homed_axes)
+
+            if axis_minimum is not None and axis_maximum is not None:
+                self.x_limits.minimum = float(axis_minimum[0])
+                self.y_limits.minimum = float(axis_minimum[1])
+                self.z_limits.minimum = float(axis_minimum[2])
+                self.x_limits.maximum = float(axis_maximum[0])
+                self.y_limits.maximum = float(axis_maximum[1])
+                self.z_limits.maximum = float(axis_maximum[2])
+
+            if max_velocity is not None:
+                self.max_velocity = float(max_velocity)
+
+            if max_accel is not None:
+                self.max_accel = float(max_accel)
+
     def update_motion(
         self,
         live_position=None,

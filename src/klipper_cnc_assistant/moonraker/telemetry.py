@@ -28,6 +28,14 @@ class MoonrakerTelemetry:
                     "motion_report": [
                         "live_position",
                         "live_velocity",
+                    ],
+                    "toolhead": [
+                        "position",
+                        "homed_axes",
+                        "axis_minimum",
+                        "axis_maximum",
+                        "max_velocity",
+                        "max_accel",
                     ]
                 }
             },
@@ -53,6 +61,19 @@ class MoonrakerTelemetry:
         self.machine_state.update_motion(
             live_position=live_position,
             live_velocity=live_velocity,
+        )
+
+    def _process_toolhead(
+        self,
+        toolhead,
+    ):
+        self.machine_state.update_toolhead(
+            position=toolhead.get("position"),
+            homed_axes=toolhead.get("homed_axes"),
+            axis_minimum=toolhead.get("axis_minimum"),
+            axis_maximum=toolhead.get("axis_maximum"),
+            max_velocity=toolhead.get("max_velocity"),
+            max_accel=toolhead.get("max_accel"),
         )
 
     def _process_message(
@@ -81,6 +102,11 @@ class MoonrakerTelemetry:
                 self._process_motion_report(
                     motion_report
                 )
+
+            toolhead = status.get("toolhead")
+
+            if isinstance(toolhead, dict):
+                self._process_toolhead(toolhead)
 
             return
 
@@ -111,6 +137,11 @@ class MoonrakerTelemetry:
             self._process_motion_report(
                 motion_report
             )
+
+        toolhead = status.get("toolhead")
+
+        if isinstance(toolhead, dict):
+            self._process_toolhead(toolhead)
 
     async def run(self):
         self._running = True

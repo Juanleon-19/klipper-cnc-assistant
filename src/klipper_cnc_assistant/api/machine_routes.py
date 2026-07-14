@@ -24,6 +24,10 @@ def build_machine_router() -> APIRouter:
     def get_runtime(request: Request) -> MachineRuntimeResponse:
         return MachineRuntimeResponse(**runtime(request).snapshot())
 
+    @router.get("/status", response_model=MachineRuntimeResponse)
+    def get_status(request: Request) -> MachineRuntimeResponse:
+        return MachineRuntimeResponse(**runtime(request).snapshot())
+
     @router.post("/connect", response_model=MachineRuntimeResponse)
     def connect(request: Request) -> MachineRuntimeResponse:
         return MachineRuntimeResponse(**runtime(request).connect())

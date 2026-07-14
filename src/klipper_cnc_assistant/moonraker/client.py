@@ -5,6 +5,10 @@ class MoonrakerError(Exception):
     pass
 
 
+class MoonrakerTimeout(MoonrakerError):
+    pass
+
+
 class MoonrakerClient:
     def __init__(
         self,
@@ -31,6 +35,11 @@ class MoonrakerClient:
             )
 
             response.raise_for_status()
+
+        except requests.Timeout as error:
+            raise MoonrakerTimeout(
+                f"Moonraker request timed out: {error}"
+            ) from error
 
         except requests.RequestException as error:
             raise MoonrakerError(
@@ -93,6 +102,7 @@ class MoonrakerClient:
     def send_gcode(
         self,
         script,
+        timeout=None,
     ):
         url = (
             f"{self.base_url}"
@@ -105,10 +115,15 @@ class MoonrakerClient:
                 json={
                     "script": script,
                 },
-                timeout=self.timeout,
+                timeout=self.timeout if timeout is None else timeout,
             )
 
             response.raise_for_status()
+
+        except requests.Timeout as error:
+            raise MoonrakerTimeout(
+                f"G-code request timed out: {error}"
+            ) from error
 
         except requests.RequestException as error:
             raise MoonrakerError(

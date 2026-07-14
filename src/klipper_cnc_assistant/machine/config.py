@@ -19,8 +19,11 @@ class MachineRuntimeConfig:
     serial_port: str | None
     serial_baudrate: int
     safe_z_mm: float
+    moonraker_request_timeout_s: float
+    home_timeout_s: float
     telemetry_fresh_timeout_s: float
     serial_fresh_timeout_s: float
+    serial_startup_delay_s: float
     settle_tolerance_mm: float
     velocity_tolerance_mm_s: float
     move_timeout_s: float
@@ -66,8 +69,11 @@ def load_machine_runtime_config() -> MachineRuntimeConfig:
         serial_port=os.getenv("SERIAL_PORT") or None,
         serial_baudrate=_env_int("SERIAL_BAUDRATE", 115200),
         safe_z_mm=_env_float("MACHINE_SAFE_Z", 10.0),
-        telemetry_fresh_timeout_s=_env_float("MACHINE_TELEMETRY_FRESH_TIMEOUT", 2.0),
+        moonraker_request_timeout_s=_env_float("MOONRAKER_REQUEST_TIMEOUT", 2.0),
+        home_timeout_s=_env_float("MACHINE_HOME_TIMEOUT", 90.0),
+        telemetry_fresh_timeout_s=_env_float("TELEMETRY_STALE_TIMEOUT", _env_float("MACHINE_TELEMETRY_FRESH_TIMEOUT", 2.0)),
         serial_fresh_timeout_s=_env_float("MACHINE_SERIAL_FRESH_TIMEOUT", 2.0),
+        serial_startup_delay_s=_env_float("SERIAL_STARTUP_DELAY", 2.0),
         settle_tolerance_mm=_env_float("MACHINE_SETTLE_TOLERANCE", 0.02),
         velocity_tolerance_mm_s=_env_float("MACHINE_VELOCITY_TOLERANCE", 0.05),
         move_timeout_s=_env_float("MACHINE_MOVE_TIMEOUT", 8.0),
