@@ -27,12 +27,34 @@ export type AgujeroAlineacion = {
   diametro_mm: number | null;
 };
 
+export type PreviewPoint = {
+  x_mm: number;
+  y_mm: number;
+};
+
 export type PreviewSegment = {
   tipo: string;
+  tipo_movimiento: string;
+  numero_linea: number | null;
   inicio_x_mm: number;
   inicio_y_mm: number;
   fin_x_mm: number;
   fin_y_mm: number;
+  z_mm: number | null;
+  avance_mm_min: number | null;
+  distancia_mm: number;
+  advertencias: string[];
+  puntos: PreviewPoint[];
+  desde: PreviewPoint;
+  hasta: PreviewPoint;
+};
+
+export type MaterialOverflow = {
+  eje: string;
+  direccion: string;
+  limite_mm: number;
+  valor_mm: number;
+  exceso_mm: number;
 };
 
 export type Bounds = {
@@ -74,6 +96,9 @@ export type OperationAnalysis = {
   mensaje_material: string | null;
   tiene_errores_criticos: boolean;
   segmentos_lineales: PreviewSegment[];
+  segmentos_vista_previa: PreviewSegment[];
+  desbordes_material: MaterialOverflow[];
+  tolerancia_arco_mm: number | null;
 };
 
 export type Operation = {

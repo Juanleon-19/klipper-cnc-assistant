@@ -16,10 +16,12 @@ from klipper_cnc_assistant.domain import (
     FlipAxis,
     IssueSeverity,
     MaterialBruto,
+    MaterialOverflow,
     OperationAnalysis,
     OperationStatus,
     OperationType,
     OperacionPCB,
+    PreviewPoint,
     PreviewSegment,
     ProyectoPCB,
 )
@@ -48,16 +50,10 @@ class JsonProjectRepository:
 
     def list_projects(self) -> list[ProyectoPCB]:
         projects: list[ProyectoPCB] = []
-        for project_file in sorted(
-            self.projects_dir.glob("*/project.json")
-        ):
+        for project_file in sorted(self.projects_dir.glob("*/project.json")):
             projects.append(
                 self._deserialize_project(
-                    json.loads(
-                        project_file.read_text(
-                            encoding="utf-8"
-                        )
-                    )
+                    json.loads(project_file.read_text(encoding="utf-8"))
                 )
             )
         return projects
@@ -90,11 +86,7 @@ class JsonProjectRepository:
                 f"El proyecto '{project_id}' no existe."
             )
         return self._deserialize_project(
-            json.loads(
-                project_file.read_text(
-                    encoding="utf-8"
-                )
-            )
+            json.loads(project_file.read_text(encoding="utf-8"))
         )
 
     def project_dir(
@@ -133,9 +125,7 @@ class JsonProjectRepository:
         absolute_path = project_dir / relative_path
 
         if absolute_path.exists():
-            existing_sha = hashlib.sha256(
-                absolute_path.read_bytes()
-            ).hexdigest()
+            existing_sha = hashlib.sha256(absolute_path.read_bytes()).hexdigest()
             if existing_sha != sha256:
                 raise RuntimeError(
                     "Se detecto un conflicto al preservar el archivo original."
@@ -172,13 +162,7 @@ class JsonProjectRepository:
         self,
         project_dir: Path,
     ) -> None:
-        for relative in (
-            "",
-            "originals",
-            "maps",
-            "generated",
-            "reports",
-        ):
+        for relative in ("", "originals", "maps", "generated", "reports"):
             (project_dir / relative).mkdir(
                 parents=True,
                 exist_ok=True,
@@ -208,10 +192,7 @@ class JsonProjectRepository:
                     for hole in project.configuracion_alineacion.agujeros_alineacion
                 ],
             },
-            "operaciones": [
-                self._serialize_operation(operation)
-                for operation in project.operaciones
-            ],
+            "operaciones": [self._serialize_operation(operation) for operation in project.operaciones],
             "creado_en": project.creado_en.isoformat(),
             "actualizado_en": project.actualizado_en.isoformat(),
             "version_esquema": project.version_esquema,
@@ -243,9 +224,7 @@ class JsonProjectRepository:
         if analysis is None:
             return None
         return {
-            "limites": None
-            if analysis.limites is None
-            else {
+            "limites": None if analysis.limites is None else {
                 "min_x_mm": analysis.limites.min_x_mm,
                 "max_x_mm": analysis.limites.max_x_mm,
                 "min_y_mm": analysis.limites.min_y_mm,
@@ -267,20 +246,33 @@ class JsonProjectRepository:
             "analisis_incompleto": analysis.analisis_incompleto,
             "cabe_en_material": analysis.cabe_en_material,
             "mensaje_material": analysis.mensaje_material,
-            "segmentos_lineales": [
-                asdict(segment)
-                for segment in analysis.segmentos_lineales
-            ],
+            "segmentos_lineales": [self._serialize_segment(segment) for segment in analysis.segmentos_lineales],
+            "segmentos_vista_previa": [self._serialize_segment(segment) for segment in analysis.segmentos_vista_previa],
+            "desbordes_material": [asdict(item) for item in analysis.desbordes_material],
+            "tolerancia_arco_mm": analysis.tolerancia_arco_mm,
+        }
+
+    def _serialize_segment(self, segment: PreviewSegment) -> dict:
+        return {
+            "tipo": segment.tipo,
+            "tipo_movimiento": segment.tipo_movimiento,
+            "numero_linea": segment.numero_linea,
+            "inicio_x_mm": segment.inicio_x_mm,
+            "inicio_y_mm": segment.inicio_y_mm,
+            "fin_x_mm": segment.fin_x_mm,
+            "fin_y_mm": segment.fin_y_mm,
+            "z_mm": segment.z_mm,
+            "avance_mm_min": segment.avance_mm_min,
+            "distancia_mm": segment.distancia_mm,
+            "advertencias": list(segment.advertencias),
+            "puntos": [asdict(point) for point in segment.puntos],
         }
 
     def _deserialize_project(
         self,
         payload: dict,
     ) -> ProyectoPCB:
-        alignment_data = payload.get(
-            "configuracion_alineacion",
-            {},
-        )
+        alignment_data = payload.get("configuracion_alineacion", {})
         return ProyectoPCB(
             id=payload["id"],
             nombre=payload["nombre"],
@@ -301,10 +293,7 @@ class JsonProjectRepository:
                 ),
                 agujeros_alineacion=tuple(
                     AgujeroAlineacion(**hole)
-                    for hole in alignment_data.get(
-                        "agujeros_alineacion",
-                        [],
-                    )
+                    for hole in alignment_data.get("agujeros_alineacion", [])
                 ),
             ),
         )
@@ -336,6 +325,10 @@ class JsonProjectRepository:
             return None
         bounds_payload = payload.get("limites")
         limits = None if bounds_payload is None else Bounds3D(**bounds_payload)
+        preview_payload = payload.get("segmentos_vista_previa")
+        linear_payload = payload.get("segmentos_lineales", [])
+        if preview_payload is None:
+            preview_payload = linear_payload
         return OperationAnalysis(
             limites=limits,
             avances_mm_min=tuple(payload.get("avances_mm_min", [])),
@@ -361,8 +354,40 @@ class JsonProjectRepository:
             analisis_incompleto=payload.get("analisis_incompleto", False),
             cabe_en_material=payload.get("cabe_en_material"),
             mensaje_material=payload.get("mensaje_material"),
-            segmentos_lineales=tuple(
-                PreviewSegment(**segment)
-                for segment in payload.get("segmentos_lineales", [])
+            segmentos_lineales=tuple(self._deserialize_segment(segment) for segment in linear_payload),
+            segmentos_vista_previa=tuple(self._deserialize_segment(segment) for segment in preview_payload),
+            desbordes_material=tuple(
+                MaterialOverflow(**overflow)
+                for overflow in payload.get("desbordes_material", [])
             ),
+            tolerancia_arco_mm=payload.get("tolerancia_arco_mm"),
+        )
+
+    def _deserialize_segment(
+        self,
+        payload: dict,
+    ) -> PreviewSegment:
+        points_payload = payload.get("puntos") or [
+            {
+                "x_mm": payload["inicio_x_mm"],
+                "y_mm": payload["inicio_y_mm"],
+            },
+            {
+                "x_mm": payload["fin_x_mm"],
+                "y_mm": payload["fin_y_mm"],
+            },
+        ]
+        return PreviewSegment(
+            tipo=payload["tipo"],
+            tipo_movimiento=payload.get("tipo_movimiento", payload["tipo"]),
+            numero_linea=payload.get("numero_linea"),
+            inicio_x_mm=payload["inicio_x_mm"],
+            inicio_y_mm=payload["inicio_y_mm"],
+            fin_x_mm=payload["fin_x_mm"],
+            fin_y_mm=payload["fin_y_mm"],
+            z_mm=payload.get("z_mm"),
+            avance_mm_min=payload.get("avance_mm_min"),
+            distancia_mm=payload.get("distancia_mm", 0.0),
+            advertencias=tuple(payload.get("advertencias", [])),
+            puntos=tuple(PreviewPoint(**point) for point in points_payload),
         )

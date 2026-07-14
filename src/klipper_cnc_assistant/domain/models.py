@@ -7,7 +7,7 @@ from enum import StrEnum
 from .errors import ProjectValidationError
 
 
-PROJECT_SCHEMA_VERSION = "1.1"
+PROJECT_SCHEMA_VERSION = "1.2"
 
 
 def utc_now() -> datetime:
@@ -42,6 +42,7 @@ class OperationStatus(StrEnum):
 
 
 class IssueSeverity(StrEnum):
+    INFORMACION = "informacion"
     ADVERTENCIA = "advertencia"
     ERROR_CRITICO = "error critico"
 
@@ -125,12 +126,48 @@ class Bounds3D:
 
 
 @dataclass(frozen=True)
+class PreviewPoint:
+    x_mm: float
+    y_mm: float
+
+
+@dataclass(frozen=True)
+class MaterialOverflow:
+    eje: str
+    direccion: str
+    limite_mm: float
+    valor_mm: float
+    exceso_mm: float
+
+
+@dataclass(frozen=True)
 class PreviewSegment:
     tipo: str
+    tipo_movimiento: str
+    numero_linea: int | None
     inicio_x_mm: float
     inicio_y_mm: float
     fin_x_mm: float
     fin_y_mm: float
+    z_mm: float | None = None
+    avance_mm_min: float | None = None
+    distancia_mm: float = 0.0
+    advertencias: tuple[str, ...] = ()
+    puntos: tuple[PreviewPoint, ...] = ()
+
+    @property
+    def desde(self) -> PreviewPoint:
+        return PreviewPoint(
+            x_mm=self.inicio_x_mm,
+            y_mm=self.inicio_y_mm,
+        )
+
+    @property
+    def hasta(self) -> PreviewPoint:
+        return PreviewPoint(
+            x_mm=self.fin_x_mm,
+            y_mm=self.fin_y_mm,
+        )
 
 
 @dataclass(frozen=True)
@@ -151,6 +188,9 @@ class OperationAnalysis:
     cabe_en_material: bool | None = None
     mensaje_material: str | None = None
     segmentos_lineales: tuple[PreviewSegment, ...] = ()
+    segmentos_vista_previa: tuple[PreviewSegment, ...] = ()
+    desbordes_material: tuple[MaterialOverflow, ...] = ()
+    tolerancia_arco_mm: float | None = None
 
     @property
     def ancho_mm(self) -> float | None:

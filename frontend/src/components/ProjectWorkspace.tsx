@@ -1,6 +1,18 @@
-import { formatDate } from "../lib/format";
+import { useEffect, useMemo, useState } from "react";
+
+import { formatDate, formatFileSize, formatMillimeters } from "../lib/format";
+import { operationPresets } from "../lib/presets";
+import {
+  buildOperationWorkflow,
+  getOperationWorkflowState,
+  splitIssues,
+  toneForStatus,
+  translateFace,
+  translateOperationType,
+  translateStatus,
+} from "../lib/ui";
 import type { Operation, Project, ProjectPayload } from "../types";
-import { OperationPanel } from "./OperationPanel";
+import { ToolpathViewer } from "../features/viewer/ToolpathViewer";
 import { ProjectForm } from "./ProjectForm";
 import { StatusBadge } from "./StatusBadge";
 
@@ -16,17 +28,19 @@ type ProjectWorkspaceProps = {
   onUploadFile: (operation: Operation, file: File) => Promise<void>;
 };
 
-function toneForProjectStatus(status: string): "neutral" | "success" | "warning" | "danger" {
-  if (status === "valido") {
-    return "success";
+function findPresetOperation(project: Project, presetKey: string): Operation | undefined {
+  const preset = operationPresets.find((item) => item.clave === presetKey);
+  if (!preset) {
+    return undefined;
   }
-  if (status === "con advertencias" || status === "pendiente de analisis") {
-    return "warning";
+  return project.operaciones.find((operation) => operation.tipo === preset.tipo && operation.cara === preset.cara);
+}
+
+function pickDefaultOperation(project: Project | null): string | null {
+  if (!project || project.operaciones.length === 0) {
+    return null;
   }
-  if (status === "bloqueado por errores") {
-    return "danger";
-  }
-  return "neutral";
+  return project.operaciones.find((operation) => Boolean(operation.analisis))?.id ?? project.operaciones[0].id;
 }
 
 export function ProjectWorkspace({
@@ -40,12 +54,32 @@ export function ProjectWorkspace({
   onAnalyze,
   onUploadFile,
 }: ProjectWorkspaceProps) {
+  const [editingProject, setEditingProject] = useState(false);
+  const [selectedOperationId, setSelectedOperationId] = useState<string | null>(pickDefaultOperation(project));
+
+  useEffect(() => {
+    setSelectedOperationId((current) => {
+      if (!project) {
+        return null;
+      }
+      if (current && project.operaciones.some((operation) => operation.id === current)) {
+        return current;
+      }
+      return pickDefaultOperation(project);
+    });
+  }, [project]);
+
+  const selectedOperation = useMemo(
+    () => project?.operaciones.find((operation) => operation.id === selectedOperationId) ?? null,
+    [project, selectedOperationId]
+  );
+
   if (!project) {
     return (
       <div className="panel empty-state">
-        <p className="eyebrow">Detalle del proyecto</p>
+        <p className="eyebrow">Espacio de trabajo</p>
         <h2>Seleccione un proyecto</h2>
-        <p>Abra un proyecto existente o cree uno nuevo para gestionar operaciones y archivos G-code.</p>
+        <p>Abra un proyecto existente o cree uno nuevo para gestionar operaciones y revisar la trayectoria.</p>
       </div>
     );
   }
@@ -58,58 +92,250 @@ export function ProjectWorkspace({
     agujeros_alineacion: project.agujeros_alineacion,
   };
 
+  const issueGroups = splitIssues(selectedOperation?.analisis ?? null);
+  const workflow = buildOperationWorkflow(selectedOperation);
+  const analysisBusy = selectedOperation ? busyKey === `analyze:${selectedOperation.id}` : false;
+  const fileBusy = selectedOperation ? busyKey === `file:${selectedOperation.id}` : false;
+  const deleteBusy = selectedOperation ? busyKey === `delete:${selectedOperation.id}` : false;
+
   return (
-    <div className="workspace-column">
-      <article className="panel project-summary">
+    <div className="workspace-stack">
+      <article className="panel project-hero">
         <div className="section-heading">
           <div>
             <p className="eyebrow">Proyecto activo</p>
             <h2>{project.nombre}</h2>
           </div>
-          <StatusBadge tone={toneForProjectStatus(project.estado_general)}>{project.estado_general}</StatusBadge>
+          <div className="hero-actions">
+            <StatusBadge tone={toneForStatus(project.estado_general)}>{translateStatus(project.estado_general)}</StatusBadge>
+            <button className="button button--ghost" type="button" onClick={() => setEditingProject((current) => !current)}>
+              {editingProject ? "Cerrar edición" : "Editar proyecto"}
+            </button>
+          </div>
         </div>
-        <div className="summary-grid">
+        <div className="hero-grid hero-grid--project">
           <div>
-            <span>Material bruto</span>
+            <span className="eyebrow">Material bruto</span>
             <strong>{project.material.ancho_mm} × {project.material.alto_mm} × {project.material.espesor_mm ?? "-"} mm</strong>
           </div>
           <div>
-            <span>Configuracion</span>
+            <span className="eyebrow">Configuración</span>
             <strong>{project.doble_cara ? `Doble cara, volteo ${project.eje_volteo?.toUpperCase()}` : "Una cara"}</strong>
           </div>
           <div>
-            <span>Operaciones configuradas</span>
+            <span className="eyebrow">Operaciones</span>
             <strong>{project.operaciones.length}</strong>
           </div>
           <div>
-            <span>Ultima actualizacion</span>
+            <span className="eyebrow">Actualizado</span>
             <strong>{formatDate(project.actualizado_en)}</strong>
           </div>
         </div>
       </article>
 
-      <ProjectForm initialValue={payload} mode="edit" onSubmit={onSaveProject} submitting={savingProject} />
+      {editingProject ? <ProjectForm initialValue={payload} mode="edit" onSubmit={onSaveProject} submitting={savingProject} /> : null}
 
-      <section>
-        <div className="section-heading section-heading--stacked">
-          <div>
-            <p className="eyebrow">Operaciones del proyecto</p>
-            <h2>Seleccion y analisis</h2>
-          </div>
-          <p className="muted">
-            No se ejecuta ningun movimiento. Solo se almacenan archivos originales y se analiza su contenido.
-          </p>
-        </div>
-        <OperationPanel
-          project={project}
-          busyKey={busyKey}
-          onAddOperation={onAddOperation}
-          onDeleteOperation={onDeleteOperation}
-          onRemoveFile={onRemoveFile}
-          onAnalyze={onAnalyze}
-          onUploadFile={onUploadFile}
-        />
-      </section>
+      <div className="workspace-layout">
+        <section className="workspace-main">
+          <article className="panel workflow-panel">
+            <div className="section-heading section-heading--stacked">
+              <div>
+                <p className="eyebrow">Operaciones</p>
+                <h3>Flujo del proyecto</h3>
+              </div>
+              <p className="muted">Seleccione solo las operaciones necesarias. No se ejecuta ningún movimiento físico.</p>
+            </div>
+            <div className="workflow-grid">
+              {operationPresets.map((preset, index) => {
+                const operation = findPresetOperation(project, preset.clave);
+                const disabled = preset.cara === "inferior" && !project.doble_cara;
+                const isSelected = operation?.id === selectedOperationId;
+                return (
+                  <article key={preset.clave} className={`workflow-card${isSelected ? " workflow-card--selected" : ""}${disabled ? " workflow-card--disabled" : ""}`}>
+                    <div className="workflow-card__header">
+                      <span className="workflow-step">{index + 1}</span>
+                      <div>
+                        <h4>{preset.etiqueta}</h4>
+                        <p className="muted">{preset.descripcion}</p>
+                      </div>
+                    </div>
+                    <StatusBadge tone={disabled ? "neutral" : toneForStatus(operation?.estado ?? "sin configurar")}>
+                      {disabled ? "Solo para PCB doble cara" : operation ? translateStatus(operation.estado) : "Sin configurar"}
+                    </StatusBadge>
+                    <p className="workflow-card__state">{getOperationWorkflowState(operation)}</p>
+                    {operation ? (
+                      <button className="button button--ghost" type="button" onClick={() => setSelectedOperationId(operation.id)}>
+                        Abrir operación
+                      </button>
+                    ) : (
+                      <button className="button" type="button" disabled={disabled || busyKey === `add:${preset.clave}`} onClick={() => void onAddOperation(preset.clave)}>
+                        {busyKey === `add:${preset.clave}` ? "Configurando..." : "Configurar operación"}
+                      </button>
+                    )}
+                  </article>
+                );
+              })}
+            </div>
+          </article>
+
+          <article className="panel viewer-panel">
+            {selectedOperation?.analisis ? (
+              <ToolpathViewer material={project.material} analysis={selectedOperation.analisis} operationName={selectedOperation.nombre} />
+            ) : (
+              <div className="empty-state empty-state--viewer">
+                <h3>Visor técnico preparado</h3>
+                <p>Cargue un archivo y ejecute el análisis para habilitar la vista técnica 2D, el inspector y el recorrido visual.</p>
+              </div>
+            )}
+          </article>
+        </section>
+
+        <aside className="workspace-side">
+          <article className="panel operation-detail-panel">
+            <div className="section-heading">
+              <div>
+                <p className="eyebrow">Detalle</p>
+                <h3>{selectedOperation?.nombre ?? "Seleccione una operación"}</h3>
+              </div>
+              {selectedOperation ? <StatusBadge tone={toneForStatus(selectedOperation.estado)}>{translateStatus(selectedOperation.estado)}</StatusBadge> : null}
+            </div>
+
+            {selectedOperation ? (
+              <>
+                <dl className="definition-grid definition-grid--compact">
+                  <div><dt>Tipo</dt><dd>{translateOperationType(selectedOperation.tipo)}</dd></div>
+                  <div><dt>Cara</dt><dd>{translateFace(selectedOperation.cara)}</dd></div>
+                  <div><dt>Herramienta</dt><dd>{selectedOperation.herramienta ?? "Sin definir"}</dd></div>
+                  <div><dt>Archivo</dt><dd>{selectedOperation.nombre_archivo_original ?? "Sin archivo"}</dd></div>
+                  <div><dt>Tamaño</dt><dd>{formatFileSize(selectedOperation.tamano_archivo_bytes)}</dd></div>
+                  <div><dt>SHA-256</dt><dd className="mono-text mono-text--truncate">{selectedOperation.sha256 ?? "-"}</dd></div>
+                </dl>
+
+                <div className="workflow-steps-list">
+                  {workflow.map((step) => (
+                    <div className={`workflow-step-row${step.complete ? " workflow-step-row--complete" : ""}${step.active ? " workflow-step-row--active" : ""}`} key={step.label}>
+                      <span className="workflow-step-row__dot" aria-hidden="true" />
+                      <span>{step.label}</span>
+                    </div>
+                  ))}
+                </div>
+
+                <div className="action-grid">
+                  <label className="button button--ghost file-button">
+                    {selectedOperation.archivo_gcode ? "Reemplazar archivo" : "Cargar archivo"}
+                    <input
+                      aria-label={`Cargar archivo para ${selectedOperation.nombre}`}
+                      type="file"
+                      accept=".nc,.gcode,.tap"
+                      disabled={fileBusy}
+                      onChange={async (event) => {
+                        const file = event.target.files?.[0];
+                        if (!file) {
+                          return;
+                        }
+                        await onUploadFile(selectedOperation, file);
+                        event.target.value = "";
+                      }}
+                    />
+                  </label>
+                  <button className="button button--ghost" type="button" disabled={!selectedOperation.archivo_gcode || analysisBusy} onClick={() => void onAnalyze(selectedOperation)}>
+                    {analysisBusy ? "Analizando archivo..." : "Analizar archivo"}
+                  </button>
+                  <button
+                    className="button button--ghost"
+                    type="button"
+                    disabled={!selectedOperation.archivo_gcode || fileBusy}
+                    onClick={async () => {
+                      if (window.confirm("Se quitará la asociación del archivo actual. ¿Desea continuar?")) {
+                        await onRemoveFile(selectedOperation);
+                      }
+                    }}
+                  >
+                    Eliminar asociación
+                  </button>
+                  <button
+                    className="button button--ghost button--danger"
+                    type="button"
+                    disabled={deleteBusy}
+                    onClick={async () => {
+                      if (window.confirm("La operación seleccionada se eliminará del proyecto. ¿Desea continuar?")) {
+                        await onDeleteOperation(selectedOperation);
+                      }
+                    }}
+                  >
+                    Eliminar operación
+                  </button>
+                </div>
+              </>
+            ) : (
+              <p className="muted">Seleccione una operación configurada o añada una nueva desde el flujo.</p>
+            )}
+          </article>
+
+          <article className="panel analysis-summary-panel">
+            <div className="section-heading">
+              <div>
+                <p className="eyebrow">Análisis</p>
+                <h3>Resumen técnico</h3>
+              </div>
+            </div>
+            {selectedOperation?.analisis ? (
+              <>
+                <div className="info-grid info-grid--double compact-grid">
+                  <div className="metric-box"><span>Movimientos</span><strong>{selectedOperation.analisis.cantidad_movimientos}</strong></div>
+                  <div className="metric-box"><span>Avances</span><strong>{selectedOperation.analisis.avances_mm_min.join(", ") || "-"}</strong></div>
+                  <div className="metric-box"><span>Z mín</span><strong>{formatMillimeters(selectedOperation.analisis.profundidad_min_mm, 3)}</strong></div>
+                  <div className="metric-box"><span>Z máx</span><strong>{formatMillimeters(selectedOperation.analisis.profundidad_max_mm, 3)}</strong></div>
+                </div>
+                <div className="stack gap-sm">
+                  <section className="subpanel subpanel--soft">
+                    <h4>Información</h4>
+                    {issueGroups.info.length > 0 ? (
+                      <ul className="issue-list issue-list--info">
+                        {issueGroups.info.map((issue, index) => <li key={`${issue.codigo}-${index}`}>{issue.mensaje}</li>)}
+                      </ul>
+                    ) : <p className="muted">Sin información adicional.</p>}
+                  </section>
+                  <section className="subpanel subpanel--soft">
+                    <h4>Advertencias</h4>
+                    {issueGroups.warnings.length > 0 ? (
+                      <ul className="issue-list issue-list--warning">
+                        {issueGroups.warnings.map((issue, index) => <li key={`${issue.codigo}-${index}`}>{issue.mensaje}</li>)}
+                      </ul>
+                    ) : <p className="muted">Sin advertencias.</p>}
+                  </section>
+                  <section className="subpanel subpanel--soft">
+                    <h4>Errores críticos</h4>
+                    {issueGroups.critical.length > 0 ? (
+                      <ul className="issue-list issue-list--danger">
+                        {issueGroups.critical.map((issue, index) => <li key={`${issue.codigo}-${index}`}>{issue.mensaje}</li>)}
+                      </ul>
+                    ) : <p className="muted">Sin errores críticos.</p>}
+                  </section>
+                  <section className="subpanel subpanel--soft">
+                    <h4>Acciones manuales</h4>
+                    {selectedOperation.analisis.comandos_manuales.length > 0 ? (
+                      <ul className="chip-list">
+                        {selectedOperation.analisis.comandos_manuales.map((command) => <li className="chip chip--warning" key={command}>{command}</li>)}
+                      </ul>
+                    ) : <p className="muted">Sin acciones manuales detectadas.</p>}
+                  </section>
+                </div>
+              </>
+            ) : (
+              <p className="muted">Aún no hay resultados de análisis para esta operación.</p>
+            )}
+          </article>
+
+          <article className="panel panel--disabled">
+            <div className="section-heading">
+              <h3>Movimiento y mecanizado</h3>
+              <StatusBadge tone="neutral">Reservado</StatusBadge>
+            </div>
+            <p>Disponible en una fase posterior, después de la validación de seguridad.</p>
+          </article>
+        </aside>
+      </div>
     </div>
   );
 }

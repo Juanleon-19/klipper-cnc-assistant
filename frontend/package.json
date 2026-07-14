@@ -11,8 +11,10 @@
     "test:watch": "vitest"
   },
   "dependencies": {
+    "konva": "^10.3.0",
     "react": "18.3.1",
-    "react-dom": "18.3.1"
+    "react-dom": "18.3.1",
+    "react-konva": "^18.2.16"
   },
   "devDependencies": {
     "@eslint/js": "9.19.0",

@@ -3,11 +3,12 @@ from __future__ import annotations
 from pydantic import BaseModel, Field
 
 from klipper_cnc_assistant.domain import (
-    AgujeroAlineacion,
     AnalysisIssue,
     MachineSessionStatus,
+    MaterialOverflow,
     OperacionPCB,
     OperationAnalysis,
+    PreviewPoint,
     PreviewSegment,
     ProyectoPCB,
 )
@@ -102,12 +103,34 @@ class BoundsResponse(BaseModel):
     alto_mm: float
 
 
+class PointResponse(BaseModel):
+    x_mm: float
+    y_mm: float
+
+
+class MaterialOverflowResponse(BaseModel):
+    eje: str
+    direccion: str
+    limite_mm: float
+    valor_mm: float
+    exceso_mm: float
+
+
 class PreviewSegmentResponse(BaseModel):
     tipo: str
+    tipo_movimiento: str
+    numero_linea: int | None
     inicio_x_mm: float
     inicio_y_mm: float
     fin_x_mm: float
     fin_y_mm: float
+    z_mm: float | None
+    avance_mm_min: float | None
+    distancia_mm: float
+    advertencias: list[str]
+    puntos: list[PointResponse]
+    desde: PointResponse
+    hasta: PointResponse
 
 
 class OperationAnalysisResponse(BaseModel):
@@ -130,6 +153,9 @@ class OperationAnalysisResponse(BaseModel):
     mensaje_material: str | None
     tiene_errores_criticos: bool
     segmentos_lineales: list[PreviewSegmentResponse]
+    segmentos_vista_previa: list[PreviewSegmentResponse]
+    desbordes_material: list[MaterialOverflowResponse]
+    tolerancia_arco_mm: float | None
 
 
 class OperationResponse(BaseModel):
@@ -249,6 +275,9 @@ def analysis_to_response(analysis: OperationAnalysis) -> OperationAnalysisRespon
         mensaje_material=analysis.mensaje_material,
         tiene_errores_criticos=analysis.tiene_errores_criticos,
         segmentos_lineales=[segment_to_response(segment) for segment in analysis.segmentos_lineales],
+        segmentos_vista_previa=[segment_to_response(segment) for segment in analysis.segmentos_vista_previa],
+        desbordes_material=[overflow_to_response(item) for item in analysis.desbordes_material],
+        tolerancia_arco_mm=analysis.tolerancia_arco_mm,
     )
 
 
@@ -262,13 +291,39 @@ def issue_to_response(issue: AnalysisIssue) -> AnalysisIssueResponse:
     )
 
 
+def point_to_response(point: PreviewPoint) -> PointResponse:
+    return PointResponse(
+        x_mm=point.x_mm,
+        y_mm=point.y_mm,
+    )
+
+
+def overflow_to_response(overflow: MaterialOverflow) -> MaterialOverflowResponse:
+    return MaterialOverflowResponse(
+        eje=overflow.eje,
+        direccion=overflow.direccion,
+        limite_mm=overflow.limite_mm,
+        valor_mm=overflow.valor_mm,
+        exceso_mm=overflow.exceso_mm,
+    )
+
+
 def segment_to_response(segment: PreviewSegment) -> PreviewSegmentResponse:
     return PreviewSegmentResponse(
         tipo=segment.tipo,
+        tipo_movimiento=segment.tipo_movimiento,
+        numero_linea=segment.numero_linea,
         inicio_x_mm=segment.inicio_x_mm,
         inicio_y_mm=segment.inicio_y_mm,
         fin_x_mm=segment.fin_x_mm,
         fin_y_mm=segment.fin_y_mm,
+        z_mm=segment.z_mm,
+        avance_mm_min=segment.avance_mm_min,
+        distancia_mm=segment.distancia_mm,
+        advertencias=list(segment.advertencias),
+        puntos=[point_to_response(point) for point in segment.puntos],
+        desde=point_to_response(segment.desde),
+        hasta=point_to_response(segment.hasta),
     )
 
 

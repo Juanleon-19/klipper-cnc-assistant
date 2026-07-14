@@ -1,4 +1,5 @@
 import { formatDate } from "../lib/format";
+import { toneForStatus, translateStatus } from "../lib/ui";
 import type { Project } from "../types";
 import { StatusBadge } from "./StatusBadge";
 
@@ -6,69 +7,63 @@ type ProjectListProps = {
   projects: Project[];
   selectedProjectId: string | null;
   onSelect: (projectId: string) => void;
+  onCreateProject?: () => void;
 };
 
-function toneForStatus(status: string): "neutral" | "success" | "warning" | "danger" {
-  if (status === "valido") {
-    return "success";
-  }
-  if (status === "con advertencias" || status === "pendiente de analisis") {
-    return "warning";
-  }
-  if (status === "bloqueado por errores") {
-    return "danger";
-  }
-  return "neutral";
-}
-
-export function ProjectList({ projects, selectedProjectId, onSelect }: ProjectListProps) {
-  if (projects.length === 0) {
-    return (
-      <div className="panel empty-state">
-        <p className="eyebrow">Proyectos</p>
-        <h2>Sin proyectos todavia</h2>
-        <p>
-          Cree el primer proyecto PCB para cargar operaciones, analizar G-code y revisar la vista
-          previa 2D en modo simulado.
-        </p>
-      </div>
-    );
-  }
-
+export function ProjectList({ projects, selectedProjectId, onSelect, onCreateProject }: ProjectListProps) {
   return (
-    <div className="project-list">
-      {projects.map((project) => (
-        <button
-          key={project.id}
-          className={`panel project-card${project.id === selectedProjectId ? " project-card--selected" : ""}`}
-          onClick={() => onSelect(project.id)}
-          type="button"
-        >
-          <div className="project-card__header">
-            <div>
-              <p className="eyebrow">Proyecto</p>
-              <h3>{project.nombre}</h3>
-            </div>
-            <StatusBadge tone={toneForStatus(project.estado_general)}>{project.estado_general}</StatusBadge>
-          </div>
-          <div className="project-card__meta">
-            <span>{project.doble_cara ? "PCB doble cara" : "PCB de una cara"}</span>
-            <span>{project.operaciones.length} operaciones</span>
-          </div>
-          <dl className="project-card__stats">
-            <div>
-              <dt>Material</dt>
-              <dd>
-                {project.material.ancho_mm} × {project.material.alto_mm} mm
-              </dd>
-            </div>
-            <div>
-              <dt>Ultima actualizacion</dt>
-              <dd>{formatDate(project.actualizado_en)}</dd>
-            </div>
-          </dl>
-        </button>
-      ))}
-    </div>
+    <section className="panel panel--section">
+      <div className="section-heading">
+        <div>
+          <p className="eyebrow">Proyectos</p>
+          <h2>Gestión visual</h2>
+        </div>
+        {onCreateProject ? (
+          <button className="button button--ghost" type="button" onClick={onCreateProject}>
+            Nuevo proyecto
+          </button>
+        ) : null}
+      </div>
+
+      {projects.length === 0 ? (
+        <div className="empty-state empty-state--compact">
+          <h3>Sin proyectos todavía</h3>
+          <p>Cree el primer proyecto para cargar operaciones, analizar G-code y revisar la vista técnica 2D.</p>
+        </div>
+      ) : (
+        <div className="project-list stack gap-sm">
+          {projects.map((project) => (
+            <button
+              key={project.id}
+              className={`project-list__item${project.id === selectedProjectId ? " project-list__item--selected" : ""}`}
+              onClick={() => onSelect(project.id)}
+              type="button"
+            >
+              <div className="project-list__header">
+                <div>
+                  <h3>{project.nombre}</h3>
+                  <p className="muted">{project.doble_cara ? "PCB doble cara" : "PCB de una cara"}</p>
+                </div>
+                <StatusBadge tone={toneForStatus(project.estado_general)}>{translateStatus(project.estado_general)}</StatusBadge>
+              </div>
+              <dl className="project-list__meta">
+                <div>
+                  <dt>Material</dt>
+                  <dd>{project.material.ancho_mm} × {project.material.alto_mm} × {project.material.espesor_mm ?? "-"} mm</dd>
+                </div>
+                <div>
+                  <dt>Operaciones</dt>
+                  <dd>{project.operaciones.length}</dd>
+                </div>
+                <div>
+                  <dt>Actualizado</dt>
+                  <dd>{formatDate(project.actualizado_en)}</dd>
+                </div>
+              </dl>
+            </button>
+          ))}
+        </div>
+      )}
+    </section>
   );
 }

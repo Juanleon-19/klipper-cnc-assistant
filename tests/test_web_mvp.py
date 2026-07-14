@@ -12,9 +12,10 @@ from klipper_cnc_assistant.api import create_app
 
 SAMPLE_GCODE = """G21
 G90
+G94
 G0 X1 Y1
 G1 X5 Y3 F120
-G2 X6 Y4
+G2 X9 Y3 I2 J0
 M3
 """
 
@@ -104,11 +105,13 @@ class WebMvpApiTest(unittest.TestCase):
         analysis_payload = analysis_response.json()
         self.assertEqual(analysis_payload["cantidad_movimientos"], 3)
         self.assertEqual(len(analysis_payload["segmentos_lineales"]), 2)
-        self.assertEqual(analysis_payload["segmentos_lineales"][0]["tipo"], "G0")
-        self.assertEqual(analysis_payload["segmentos_lineales"][1]["tipo"], "G1")
+        self.assertEqual(len(analysis_payload["segmentos_vista_previa"]), 3)
+        self.assertEqual(analysis_payload["segmentos_vista_previa"][2]["tipo"], "G2")
+        self.assertEqual(analysis_payload["segmentos_vista_previa"][2]["numero_linea"], 6)
+        self.assertGreater(len(analysis_payload["segmentos_vista_previa"][2]["puntos"]), 12)
         self.assertIn("M3", analysis_payload["comandos_manuales"])
-        self.assertTrue(analysis_payload["analisis_incompleto"])
-        self.assertIn("G2", analysis_payload["comandos_no_compatibles"])
+        self.assertFalse(analysis_payload["analisis_incompleto"])
+        self.assertEqual(analysis_payload["tolerancia_arco_mm"], 0.05)
 
     def test_upload_validation_rejects_path_and_extension(self) -> None:
         project_id = self._create_project()

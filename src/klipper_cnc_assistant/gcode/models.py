@@ -36,12 +36,11 @@ class GCodeLine:
 class ModalState:
     units: str = "mm"
     positioning: str = "absolute"
+    feed_mode: str = "units_per_minute"
     x_mm: float = 0.0
     y_mm: float = 0.0
     z_mm: float = 0.0
     feed_mm_min: float | None = None
     active_motion: str | None = None
     seen_units: set[str] = field(default_factory=lambda: {"mm"})
-    seen_positioning: set[str] = field(
-        default_factory=lambda: {"absolute"}
-    )
+    seen_positioning: set[str] = field(default_factory=lambda: {"absolute"})

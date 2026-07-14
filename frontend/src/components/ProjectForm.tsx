@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 import type { AgujeroAlineacion, ProjectPayload } from "../types";
 
@@ -30,10 +30,7 @@ function createInitialState(initialValue?: ProjectPayload): FormState {
     nombre: initialValue?.nombre ?? "",
     ancho: initialValue ? String(initialValue.material.ancho_mm) : "80",
     alto: initialValue ? String(initialValue.material.alto_mm) : "50",
-    espesor:
-      initialValue?.material.espesor_mm != null
-        ? String(initialValue.material.espesor_mm)
-        : "1.6",
+    espesor: initialValue?.material.espesor_mm != null ? String(initialValue.material.espesor_mm) : "1.6",
     dobleCara: initialValue?.doble_cara ?? false,
     ejeVolteo: (initialValue?.eje_volteo as "x" | "y" | null) ?? "",
     agujeros: initialValue?.agujeros_alineacion ?? [],
@@ -42,27 +39,13 @@ function createInitialState(initialValue?: ProjectPayload): FormState {
 
 export function ProjectForm({ initialValue, mode, onSubmit, submitting }: ProjectFormProps) {
   const [state, setState] = useState<FormState>(() => createInitialState(initialValue));
-  const [error, setError] = useState<string>("");
+  const [error, setError] = useState("");
 
-  const title = useMemo(
-    () => (mode === "create" ? "Crear proyecto" : "Editar proyecto"),
-    [mode]
-  );
+  useEffect(() => {
+    setState(createInitialState(initialValue));
+  }, [initialValue]);
 
-  const updateHole = (index: number, field: keyof AgujeroAlineacion, value: string) => {
-    const numericValue = value === "" ? null : Number(value);
-    setState((current) => ({
-      ...current,
-      agujeros: current.agujeros.map((hole, holeIndex) =>
-        holeIndex === index
-          ? {
-              ...hole,
-              [field]: numericValue,
-            }
-          : hole
-      ),
-    }));
-  };
+  const title = useMemo(() => (mode === "create" ? "Nuevo proyecto" : "Editar proyecto"), [mode]);
 
   const validate = (): string | null => {
     if (!state.nombre.trim()) {
@@ -79,13 +62,23 @@ export function ProjectForm({ initialValue, mode, onSubmit, submitting }: Projec
     }
     for (const hole of state.agujeros) {
       if (hole.x_mm < 0 || hole.y_mm < 0) {
-        return "Los agujeros de alineacion no pueden tener coordenadas negativas.";
+        return "Los agujeros de alineación no pueden tener coordenadas negativas.";
       }
       if (hole.diametro_mm != null && hole.diametro_mm <= 0) {
-        return "El diametro de cada agujero debe ser positivo.";
+        return "El diámetro de cada agujero debe ser positivo.";
       }
     }
     return null;
+  };
+
+  const updateHole = (index: number, field: keyof AgujeroAlineacion, value: string) => {
+    const parsed = value === "" ? null : Number(value);
+    setState((current) => ({
+      ...current,
+      agujeros: current.agujeros.map((hole, holeIndex) =>
+        holeIndex === index ? { ...hole, [field]: parsed } : hole
+      ),
+    }));
   };
 
   const handleSubmit = async (event: React.FormEvent<HTMLFormElement>) => {
@@ -113,27 +106,29 @@ export function ProjectForm({ initialValue, mode, onSubmit, submitting }: Projec
   };
 
   return (
-    <form className="panel project-form" onSubmit={handleSubmit}>
-      <div className="panel__header">
+    <form className="panel form-panel" onSubmit={handleSubmit}>
+      <div className="section-heading section-heading--stacked">
         <div>
           <p className="eyebrow">Proyecto PCB</p>
           <h2>{title}</h2>
         </div>
+        <p className="muted">Las dimensiones corresponden al material bruto definido manualmente por el operador.</p>
       </div>
 
-      <label>
-        Nombre del proyecto
-        <input
-          value={state.nombre}
-          onChange={(event) => setState((current) => ({ ...current, nombre: event.target.value }))}
-          placeholder="PCB controlador"
-        />
-      </label>
-
-      <div className="grid grid--triple">
+      <div className="form-grid">
+        <label>
+          Nombre del proyecto
+          <input
+            aria-label="Nombre del proyecto"
+            value={state.nombre}
+            onChange={(event) => setState((current) => ({ ...current, nombre: event.target.value }))}
+            placeholder="PCB controlador"
+          />
+        </label>
         <label>
           Ancho del material (mm)
           <input
+            aria-label="Ancho del material (mm)"
             type="number"
             min="0.01"
             step="0.01"
@@ -144,6 +139,7 @@ export function ProjectForm({ initialValue, mode, onSubmit, submitting }: Projec
         <label>
           Alto del material (mm)
           <input
+            aria-label="Alto del material (mm)"
             type="number"
             min="0.01"
             step="0.01"
@@ -154,6 +150,7 @@ export function ProjectForm({ initialValue, mode, onSubmit, submitting }: Projec
         <label>
           Espesor (mm)
           <input
+            aria-label="Espesor (mm)"
             type="number"
             min="0.01"
             step="0.01"
@@ -163,8 +160,9 @@ export function ProjectForm({ initialValue, mode, onSubmit, submitting }: Projec
         </label>
       </div>
 
-      <label className="toggle-row">
+      <label className="toggle-field">
         <input
+          aria-label="PCB de doble cara"
           type="checkbox"
           checked={state.dobleCara}
           onChange={(event) =>
@@ -176,14 +174,15 @@ export function ProjectForm({ initialValue, mode, onSubmit, submitting }: Projec
             }))
           }
         />
-        PCB de doble cara
+        <span>PCB de doble cara</span>
       </label>
 
       {state.dobleCara ? (
-        <>
+        <div className="form-grid form-grid--double">
           <label>
             Eje de volteo
             <select
+              aria-label="Eje de volteo"
               value={state.ejeVolteo}
               onChange={(event) =>
                 setState((current) => ({
@@ -197,80 +196,59 @@ export function ProjectForm({ initialValue, mode, onSubmit, submitting }: Projec
               <option value="y">Eje Y</option>
             </select>
           </label>
+        </div>
+      ) : null}
 
-          <div className="holes-editor">
-            <div className="section-heading">
-              <h3>Agujeros de alineacion</h3>
-              <button
-                type="button"
-                className="button button--ghost"
-                onClick={() =>
-                  setState((current) => ({
-                    ...current,
-                    agujeros: [...current.agujeros, { ...emptyHole }],
-                  }))
-                }
-              >
-                Añadir agujero
-              </button>
+      {state.dobleCara ? (
+        <section className="subpanel subpanel--soft">
+          <div className="section-heading">
+            <div>
+              <h3>Agujeros de alineación</h3>
+              <p className="muted">Opcionales. Sirven para mantener referencia al voltear la placa.</p>
             </div>
-            {state.agujeros.length === 0 ? (
-              <p className="muted">Opcional. Puede agregarlos ahora o mas adelante.</p>
-            ) : null}
+            <button
+              className="button button--ghost"
+              type="button"
+              onClick={() => setState((current) => ({ ...current, agujeros: [...current.agujeros, { ...emptyHole }] }))}
+            >
+              Añadir agujero
+            </button>
+          </div>
+          <div className="stack gap-sm">
+            {state.agujeros.length === 0 ? <p className="muted">Sin agujeros configurados.</p> : null}
             {state.agujeros.map((hole, index) => (
-              <div className="grid grid--triple hole-row" key={`${index}-${hole.x_mm}-${hole.y_mm}`}>
+              <div className="form-grid hole-row" key={`${index}-${hole.x_mm}-${hole.y_mm}`}>
                 <label>
                   X (mm)
-                  <input
-                    type="number"
-                    min="0"
-                    step="0.01"
-                    value={hole.x_mm}
-                    onChange={(event) => updateHole(index, "x_mm", event.target.value)}
-                  />
+                  <input type="number" min="0" step="0.01" value={hole.x_mm} onChange={(event) => updateHole(index, "x_mm", event.target.value)} />
                 </label>
                 <label>
                   Y (mm)
-                  <input
-                    type="number"
-                    min="0"
-                    step="0.01"
-                    value={hole.y_mm}
-                    onChange={(event) => updateHole(index, "y_mm", event.target.value)}
-                  />
+                  <input type="number" min="0" step="0.01" value={hole.y_mm} onChange={(event) => updateHole(index, "y_mm", event.target.value)} />
                 </label>
                 <label>
-                  Diametro (mm)
-                  <input
-                    type="number"
-                    min="0.01"
-                    step="0.01"
-                    value={hole.diametro_mm ?? ""}
-                    onChange={(event) => updateHole(index, "diametro_mm", event.target.value)}
-                  />
+                  Diámetro (mm)
+                  <input type="number" min="0.01" step="0.01" value={hole.diametro_mm ?? ""} onChange={(event) => updateHole(index, "diametro_mm", event.target.value)} />
                 </label>
                 <button
-                  type="button"
                   className="button button--ghost button--danger"
-                  onClick={() =>
-                    setState((current) => ({
-                      ...current,
-                      agujeros: current.agujeros.filter((_, holeIndex) => holeIndex !== index),
-                    }))
-                  }
+                  type="button"
+                  onClick={() => setState((current) => ({ ...current, agujeros: current.agujeros.filter((_, holeIndex) => holeIndex !== index) }))}
                 >
-                  Eliminar agujero
+                  Eliminar
                 </button>
               </div>
             ))}
           </div>
-        </>
+        </section>
       ) : null}
 
       {error ? <p className="form-error">{error}</p> : null}
-      <button className="button" type="submit" disabled={submitting}>
-        {submitting ? "Guardando..." : mode === "create" ? "Crear proyecto" : "Guardar cambios"}
-      </button>
+      <div className="form-actions">
+        <button className="button" type="submit" disabled={submitting}>
+          {submitting ? "Guardando..." : mode === "create" ? "Crear proyecto" : "Guardar cambios"}
+        </button>
+      </div>
     </form>
   );
 }

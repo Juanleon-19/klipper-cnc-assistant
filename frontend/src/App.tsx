@@ -1,7 +1,14 @@
 import { useEffect, useMemo, useState } from "react";
 
+import { DashboardPage } from "./components/DashboardPage";
+import { ProjectForm } from "./components/ProjectForm";
+import { ProjectList } from "./components/ProjectList";
+import { ProjectWorkspace } from "./components/ProjectWorkspace";
+import { StatusBadge } from "./components/StatusBadge";
+import { SystemBanner } from "./components/SystemBanner";
+import { SystemPage } from "./components/SystemPage";
 import { api } from "./lib/api";
-import { operationPresets } from "./lib/presets";
+import { getRecentProject, summarizeMachineMode, toneForStatus, translateStatus } from "./lib/ui";
 import type {
   HealthResponse,
   MachineSession,
@@ -10,17 +17,12 @@ import type {
   ProjectPayload,
   SystemInfoResponse,
 } from "./types";
-import { ProjectForm } from "./components/ProjectForm";
-import { ProjectList } from "./components/ProjectList";
-import { ProjectWorkspace } from "./components/ProjectWorkspace";
-import { StatusBadge } from "./components/StatusBadge";
-import { SystemBanner } from "./components/SystemBanner";
-import { SystemPage } from "./components/SystemPage";
 
-type View = "panel" | "proyectos" | "sistema";
+type View = "inicio" | "proyectos" | "nuevo" | "sistema";
 
 export default function App() {
-  const [view, setView] = useState<View>("proyectos");
+  const [view, setView] = useState<View>("inicio");
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [projects, setProjects] = useState<Project[]>([]);
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
   const [health, setHealth] = useState<HealthResponse | null>(null);
@@ -28,7 +30,7 @@ export default function App() {
   const [machineSession, setMachineSession] = useState<MachineSession | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshingSystem, setRefreshingSystem] = useState(false);
-  const [error, setError] = useState<string>("");
+  const [error, setError] = useState("");
   const [busyKey, setBusyKey] = useState<string | null>(null);
   const [creatingProject, setCreatingProject] = useState(false);
   const [savingProject, setSavingProject] = useState(false);
@@ -37,15 +39,7 @@ export default function App() {
     () => projects.find((project) => project.id === selectedProjectId) ?? null,
     [projects, selectedProjectId]
   );
-
-  const summary = useMemo(() => {
-    const operations = projects.flatMap((project) => project.operaciones);
-    return {
-      totalProjects: projects.length,
-      totalOperations: operations.length,
-      blockedOperations: operations.filter((operation) => operation.estado === "bloqueada por errores").length,
-    };
-  }, [projects]);
+  const recentProject = useMemo(() => getRecentProject(projects), [projects]);
 
   const loadProjects = async () => {
     const payload = await api.listProjects();
@@ -77,7 +71,7 @@ export default function App() {
       try {
         await Promise.all([loadProjects(), loadSystem()]);
       } catch (requestError) {
-        setError(requestError instanceof Error ? requestError.message : "No fue posible cargar la aplicacion.");
+        setError(requestError instanceof Error ? requestError.message : "No fue posible cargar la aplicación.");
       } finally {
         setLoading(false);
       }
@@ -119,23 +113,22 @@ export default function App() {
     if (!selectedProjectId) {
       return;
     }
-    const preset = operationPresets.find((item) => item.clave === presetKey);
+    const preset = {
+      "fresado-superior": { nombre: "Fresado cara superior", tipo: "aislamiento", cara: "superior", orden: 0, herramienta: "V-bit 30" },
+      "fresado-inferior": { nombre: "Fresado cara inferior", tipo: "aislamiento", cara: "inferior", orden: 1, herramienta: "V-bit 30" },
+      perforado: { nombre: "Perforado", tipo: "taladrado", cara: "superior", orden: 2, herramienta: "Broca 0.8" },
+      "corte-contorno": { nombre: "Corte del contorno", tipo: "corte exterior", cara: "superior", orden: 3, herramienta: "Fresa 1.0" },
+    }[presetKey];
     if (!preset) {
       return;
     }
     setBusyKey(`add:${presetKey}`);
     setError("");
     try {
-      await api.addOperation(selectedProjectId, {
-        nombre: preset.etiqueta,
-        tipo: preset.tipo,
-        cara: preset.cara,
-        orden: preset.orden,
-        herramienta: preset.herramienta,
-      });
+      await api.addOperation(selectedProjectId, preset);
       await syncProject(selectedProjectId);
     } catch (requestError) {
-      setError(requestError instanceof Error ? requestError.message : "No fue posible crear la operacion.");
+      setError(requestError instanceof Error ? requestError.message : "No fue posible crear la operación.");
     } finally {
       setBusyKey(null);
     }
@@ -151,7 +144,7 @@ export default function App() {
       await api.deleteOperation(selectedProjectId, operation.id);
       await syncProject(selectedProjectId);
     } catch (requestError) {
-      setError(requestError instanceof Error ? requestError.message : "No fue posible eliminar la operacion.");
+      setError(requestError instanceof Error ? requestError.message : "No fue posible eliminar la operación.");
     } finally {
       setBusyKey(null);
     }
@@ -167,7 +160,7 @@ export default function App() {
       await api.removeOperationFile(selectedProjectId, operation.id);
       await syncProject(selectedProjectId);
     } catch (requestError) {
-      setError(requestError instanceof Error ? requestError.message : "No fue posible quitar la asociacion del archivo.");
+      setError(requestError instanceof Error ? requestError.message : "No fue posible quitar la asociación del archivo.");
     } finally {
       setBusyKey(null);
     }
@@ -211,74 +204,112 @@ export default function App() {
     try {
       await loadSystem();
     } catch (requestError) {
-      setError(requestError instanceof Error ? requestError.message : "No fue posible actualizar el diagnostico.");
+      setError(requestError instanceof Error ? requestError.message : "No fue posible actualizar el diagnóstico.");
     } finally {
       setRefreshingSystem(false);
     }
   };
 
+  const titleByView: Record<View, { eyebrow: string; title: string; description: string }> = {
+    inicio: {
+      eyebrow: "Operación remota",
+      title: "Panel principal",
+      description: "Acceso privado, análisis G-code y preparación visual de proyectos PCB.",
+    },
+    proyectos: {
+      eyebrow: "Espacio de trabajo",
+      title: selectedProject?.nombre ?? "Proyectos",
+      description: "Flujo visual de operaciones, carga de archivos y visor técnico 2D.",
+    },
+    nuevo: {
+      eyebrow: "Nuevo proyecto",
+      title: "Definición del material y la PCB",
+      description: "Configure nombre, dimensiones, doble cara, eje de volteo y agujeros de alineación.",
+    },
+    sistema: {
+      eyebrow: "Diagnóstico",
+      title: "Sistema y servicio",
+      description: "Estado seguro de la API, almacenamiento y sesión de máquina simulada.",
+    },
+  };
+
+  const header = titleByView[view];
+
   return (
-    <div className="app-shell">
+    <div className={`app-shell${sidebarCollapsed ? " app-shell--collapsed" : ""}`}>
       <aside className="sidebar">
-        <div>
-          <p className="eyebrow">Klipper CNC Assistant</p>
-          <h1>Aplicacion web remota MVP</h1>
-          <p className="muted">Gestion de proyectos PCB, analisis G-code y diagnostico seguro.</p>
+        <div className="sidebar__top">
+          <div>
+            <p className="eyebrow">Klipper CNC Assistant</p>
+            <h1>Fase 3 · UX y visor técnico</h1>
+            <p className="muted">Aplicación privada para preparación remota de PCB en modo simulado.</p>
+          </div>
+          <button className="icon-button icon-button--sidebar" type="button" aria-label="Colapsar barra lateral" onClick={() => setSidebarCollapsed((current) => !current)}>
+            {sidebarCollapsed ? ">" : "<"}
+          </button>
         </div>
+
         <SystemBanner />
-        <nav className="sidebar-nav">
-          <button className={view === "proyectos" ? "nav-link nav-link--active" : "nav-link"} onClick={() => setView("proyectos")} type="button">
-            Proyectos
-          </button>
-          <button className={view === "panel" ? "nav-link nav-link--active" : "nav-link"} onClick={() => setView("panel")} type="button">
-            Crear proyecto
-          </button>
-          <button className={view === "sistema" ? "nav-link nav-link--active" : "nav-link"} onClick={() => setView("sistema")} type="button">
-            Sistema
-          </button>
+
+        <nav className="sidebar-nav" aria-label="Navegación principal">
+          <button className={`nav-link${view === "inicio" ? " nav-link--active" : ""}`} type="button" onClick={() => setView("inicio")}>Inicio</button>
+          <button className={`nav-link${view === "proyectos" ? " nav-link--active" : ""}`} type="button" onClick={() => setView("proyectos")}>Proyectos</button>
+          <button className={`nav-link${view === "nuevo" ? " nav-link--active" : ""}`} type="button" onClick={() => setView("nuevo")}>Nuevo proyecto</button>
+          <button className={`nav-link${view === "sistema" ? " nav-link--active" : ""}`} type="button" onClick={() => setView("sistema")}>Sistema</button>
         </nav>
+
         <div className="sidebar-stats">
-          <div className="stat-card">
-            <span>Proyectos</span>
-            <strong>{summary.totalProjects}</strong>
-          </div>
-          <div className="stat-card">
-            <span>Operaciones</span>
-            <strong>{summary.totalOperations}</strong>
-          </div>
-          <div className="stat-card">
-            <span>Bloqueadas</span>
-            <strong>{summary.blockedOperations}</strong>
-          </div>
+          <div className="stat-card"><span>API</span><strong>{translateStatus(health?.estado)}</strong></div>
+          <div className="stat-card"><span>Modo</span><strong>{summarizeMachineMode(health?.modo_maquina)}</strong></div>
+          <div className="stat-card"><span>Proyectos</span><strong>{projects.length}</strong></div>
         </div>
       </aside>
 
-      <main className="main-content">
-        <header className="page-header">
+      <main className="main-area">
+        <header className="topbar">
           <div>
-            <p className="eyebrow">Estado de la aplicacion</p>
-            <h2>{health?.estado === "ok" ? "API operativa y almacenamiento disponible" : "Cargando estado"}</h2>
+            <p className="eyebrow">{header.eyebrow}</p>
+            <h2>{header.title}</h2>
+            <p className="muted">{header.description}</p>
           </div>
-          <StatusBadge tone={health?.modo_maquina === "simulado" ? "info" : "danger"}>
-            {health?.modo_maquina ?? "sin datos"}
-          </StatusBadge>
+          <div className="topbar__actions">
+            <StatusBadge tone={toneForStatus(machineSession?.estado ?? health?.modo_maquina)}>{summarizeMachineMode(machineSession?.estado ?? health?.modo_maquina)}</StatusBadge>
+            <StatusBadge tone={toneForStatus(health?.estado)}>{translateStatus(health?.estado)}</StatusBadge>
+          </div>
         </header>
 
         {error ? <div className="alert alert--error">{error}</div> : null}
-        {loading ? <div className="panel empty-state"><h2>Cargando aplicacion...</h2></div> : null}
 
-        {!loading && view === "panel" ? (
-          <div className="workspace-column">
+        <div className="content-wrap">
+          {loading ? <div className="panel empty-state"><h3>Cargando aplicación...</h3></div> : null}
+
+          {!loading && view === "inicio" ? (
+            <DashboardPage
+              projects={projects}
+              recentProject={recentProject}
+              health={health}
+              machineSession={machineSession}
+              onCreateProject={() => setView("nuevo")}
+              onOpenProject={(projectId) => {
+                setSelectedProjectId(projectId);
+                setView("proyectos");
+              }}
+              onGoToProjects={() => setView("proyectos")}
+            />
+          ) : null}
+
+          {!loading && view === "nuevo" ? (
             <ProjectForm mode="create" onSubmit={handleCreateProject} submitting={creatingProject} />
-          </div>
-        ) : null}
+          ) : null}
 
-        {!loading && view === "proyectos" ? (
-          <div className="page-grid">
-            <section className="page-grid__sidebar">
-              <ProjectList projects={projects} selectedProjectId={selectedProjectId} onSelect={setSelectedProjectId} />
-            </section>
-            <section className="page-grid__main">
+          {!loading && view === "proyectos" ? (
+            <div className="projects-layout">
+              <ProjectList
+                projects={projects}
+                selectedProjectId={selectedProjectId}
+                onSelect={setSelectedProjectId}
+                onCreateProject={() => setView("nuevo")}
+              />
               <ProjectWorkspace
                 project={selectedProject}
                 busyKey={busyKey}
@@ -290,19 +321,19 @@ export default function App() {
                 onAnalyze={handleAnalyze}
                 onUploadFile={handleUploadFile}
               />
-            </section>
-          </div>
-        ) : null}
+            </div>
+          ) : null}
 
-        {!loading && view === "sistema" ? (
-          <SystemPage
-            health={health}
-            systemInfo={systemInfo}
-            machineSession={machineSession}
-            refreshing={refreshingSystem}
-            onRefresh={refreshSystem}
-          />
-        ) : null}
+          {!loading && view === "sistema" ? (
+            <SystemPage
+              health={health}
+              systemInfo={systemInfo}
+              machineSession={machineSession}
+              refreshing={refreshingSystem}
+              onRefresh={refreshSystem}
+            />
+          ) : null}
+        </div>
       </main>
     </div>
   );
