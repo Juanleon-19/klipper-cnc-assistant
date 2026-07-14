@@ -14,6 +14,7 @@ from klipper_cnc_assistant.application import (
     MachineSessionService,
     NotFoundError,
     ProjectService,
+    ReferenceSessionService,
     SystemStatusService,
 )
 from klipper_cnc_assistant.domain import DomainError, ProjectValidationError
@@ -35,6 +36,11 @@ def create_app(
     machine_session_service = MachineSessionService()
     project_service = ProjectService(repository)
     height_map_service = HeightMapService(repository)
+    reference_session_service = ReferenceSessionService(
+        repository,
+        height_map_service,
+        machine_session_service,
+    )
     system_status_service = SystemStatusService(
         repository,
         machine_session_service,
@@ -51,6 +57,7 @@ def create_app(
     app.state.project_service = project_service
     app.state.height_map_service = height_map_service
     app.state.machine_session_service = machine_session_service
+    app.state.reference_session_service = reference_session_service
     app.state.system_status_service = system_status_service
     app.state.frontend_dist_dir = resolved_frontend_dist
     app.include_router(build_router())

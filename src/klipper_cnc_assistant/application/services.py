@@ -333,10 +333,20 @@ class ProjectService:
 class MachineSessionService:
     machine_mode = "simulado"
 
+    def __init__(self) -> None:
+        self.referencia_maquina_confirmada_en: datetime | None = None
+
+    def confirm_reference_in_simulation(self) -> MachineSessionStatus:
+        if self.referencia_maquina_confirmada_en is None:
+            self.referencia_maquina_confirmada_en = datetime.now(timezone.utc)
+        return self.get_status()
+
     def get_status(self) -> MachineSessionStatus:
+        home_realizado = self.referencia_maquina_confirmada_en is not None
         return MachineSessionStatus(
             estado="simulada_lista_para_preparacion",
-            home_realizado=True,
+            home_realizado=home_realizado,
+            referencia_maquina_confirmada_en=self.referencia_maquina_confirmada_en,
             z_en_altura_segura=True,
             herramienta_en_centro_cama=True,
             material_montado=False,
@@ -346,6 +356,7 @@ class MachineSessionService:
                 "crear proyecto",
                 "cargar gcode",
                 "analizar gcode",
+                "confirmar referencias en simulacion",
             ),
             z_puede_bajar_durante=(
                 "captura del cero",

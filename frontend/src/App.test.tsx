@@ -31,7 +31,8 @@ function seedInitialFetch(projects: unknown[] = []) {
       ok: true,
       json: async () => ({
         estado: "simulada_lista_para_preparacion",
-        home_realizado: true,
+        home_realizado: false,
+        referencia_maquina_confirmada_en: null,
         z_en_altura_segura: true,
         herramienta_en_centro_cama: true,
         material_montado: false,

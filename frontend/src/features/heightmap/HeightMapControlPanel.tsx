@@ -1,23 +1,45 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 import { formatMillimeters } from "../../lib/format";
-import { translateStatus } from "../../lib/ui";
-import type { HeightMap } from "../../types";
+import type { ExclusionZone, HeightMap, Material, ProbeRegion } from "../../types";
 
 type HeightMapControlPanelProps = {
+  material: Material;
   heightMap: HeightMap | null;
   busy: boolean;
-  onConfigure: (rows: number, columns: number) => Promise<void>;
-  onSimulate: (rows: number, columns: number, scenario: string, seed: number) => Promise<void>;
+  onConfigure: (payload: {
+    filas: number;
+    columnas: number;
+    probe_region: ProbeRegion;
+    exclusion_zones: ExclusionZone[];
+  }) => Promise<void>;
+  onSimulate: (payload: {
+    filas: number;
+    columnas: number;
+    probe_region: ProbeRegion;
+    exclusion_zones: ExclusionZone[];
+    superficie_simulada: string;
+    repeticion_simulacion: number;
+  }) => Promise<void>;
   onImportJson: (content: string) => Promise<void>;
   onImportCsv: (content: string) => Promise<void>;
   onRecalculate: () => Promise<void>;
   onDelete: () => Promise<void>;
 };
 
-const defaultScenario = "inclinacion_y_deformacion";
+const defaultSurface = "inclinacion_y_deformacion";
+
+function defaultProbeRegion(material: Material): ProbeRegion {
+  return {
+    min_x_mm: 0,
+    min_y_mm: 0,
+    max_x_mm: material.ancho_mm,
+    max_y_mm: material.alto_mm,
+  };
+}
 
 export function HeightMapControlPanel({
+  material,
   heightMap,
   busy,
   onConfigure,
@@ -29,8 +51,28 @@ export function HeightMapControlPanel({
 }: HeightMapControlPanelProps) {
   const [rows, setRows] = useState(6);
   const [columns, setColumns] = useState(8);
-  const [seed, setSeed] = useState(7);
-  const [scenario, setScenario] = useState(defaultScenario);
+  const [surface, setSurface] = useState(defaultSurface);
+  const [repeat, setRepeat] = useState(7);
+  const [probeRegion, setProbeRegion] = useState<ProbeRegion>(defaultProbeRegion(material));
+  const [zones, setZones] = useState<ExclusionZone[]>([]);
+
+  useEffect(() => {
+    if (heightMap) {
+      setRows(heightMap.grid.filas);
+      setColumns(heightMap.grid.columnas);
+      setProbeRegion(heightMap.probe_region);
+      setZones(heightMap.exclusion_zones);
+      if (heightMap.superficie_simulada) {
+        setSurface(heightMap.superficie_simulada);
+      }
+      if (heightMap.repeticion_simulacion != null) {
+        setRepeat(heightMap.repeticion_simulacion);
+      }
+      return;
+    }
+    setProbeRegion(defaultProbeRegion(material));
+    setZones([]);
+  }, [heightMap, material]);
 
   const readAndImport = async (file: File, format: "json" | "csv") => {
     const content = await file.text();
@@ -41,23 +83,23 @@ export function HeightMapControlPanel({
     await onImportCsv(content);
   };
 
+  const simulationFieldsVisible = !heightMap || heightMap.fuente_datos === "simulado" || heightMap.fuente_datos === "manual";
+
   return (
     <section className="panel heightmap-control-panel">
-      <div className="section-heading">
+      <div className="section-heading section-heading--stacked">
         <div>
-          <p className="eyebrow">Mapa de alturas</p>
-          <h3>Estado del mapa</h3>
+          <p className="eyebrow">Configuración</p>
+          <h3>Región sondeable y simulación</h3>
         </div>
-        <span className="status-badge status-badge--info">{translateStatus(heightMap?.estado ?? "sin datos")}</span>
+        <p className="muted">Todos los márgenes y exclusiones aquí definidos son parámetros de simulación configurables. No representan recomendaciones físicas.</p>
       </div>
 
       <div className="definition-grid definition-grid--compact">
-        <div><dt>Fuente</dt><dd>{translateStatus(heightMap?.fuente_datos ?? "sin datos")}</dd></div>
+        <div><dt>Fuente</dt><dd>{heightMap?.fuente_datos ?? "sin datos"}</dd></div>
         <div><dt>Versión</dt><dd>{heightMap?.version ?? "-"}</dd></div>
-        <div><dt>Puntos</dt><dd>{heightMap?.estadisticas.cantidad_puntos ?? 0}</dd></div>
-        <div><dt>RMS</dt><dd>{formatMillimeters(heightMap?.estadisticas.rms_residuos_mm, 4)}</dd></div>
-        <div><dt>Rango</dt><dd>{formatMillimeters(heightMap?.estadisticas.rango_alturas_mm, 4)}</dd></div>
-        <div><dt>Atípicos</dt><dd>{heightMap?.estadisticas.cantidad_puntos_atipicos ?? 0}</dd></div>
+        <div><dt>Región</dt><dd>{formatMillimeters(probeRegion.max_x_mm - probeRegion.min_x_mm, 2)} × {formatMillimeters(probeRegion.max_y_mm - probeRegion.min_y_mm, 2)}</dd></div>
+        <div><dt>Zonas excluidas</dt><dd>{zones.length}</dd></div>
       </div>
 
       <div className="form-grid">
@@ -70,30 +112,112 @@ export function HeightMapControlPanel({
           <input type="number" min={2} value={columns} onChange={(event) => setColumns(Number(event.target.value))} />
         </label>
         <label>
-          Escenario
-          <select value={scenario} onChange={(event) => setScenario(event.target.value)}>
-            <option value="plana">Placa plana</option>
-            <option value="inclinada">Placa inclinada</option>
-            <option value="deformacion_suave">Deformación suave</option>
-            <option value="elevacion_localizada">Elevación localizada</option>
-            <option value="ruido_pequeno">Ruido pequeño</option>
-            <option value="punto_faltante">Punto faltante</option>
-            <option value="punto_atipico">Punto atípico</option>
-            <option value="inclinacion_y_deformacion">Inclinación y deformación</option>
-          </select>
+          Región sondeable X mínima (mm)
+          <input type="number" value={probeRegion.min_x_mm} onChange={(event) => setProbeRegion((current) => ({ ...current, min_x_mm: Number(event.target.value) }))} />
         </label>
         <label>
-          Semilla
-          <input type="number" value={seed} onChange={(event) => setSeed(Number(event.target.value))} />
+          Región sondeable X máxima (mm)
+          <input type="number" value={probeRegion.max_x_mm} onChange={(event) => setProbeRegion((current) => ({ ...current, max_x_mm: Number(event.target.value) }))} />
+        </label>
+        <label>
+          Región sondeable Y mínima (mm)
+          <input type="number" value={probeRegion.min_y_mm} onChange={(event) => setProbeRegion((current) => ({ ...current, min_y_mm: Number(event.target.value) }))} />
+        </label>
+        <label>
+          Región sondeable Y máxima (mm)
+          <input type="number" value={probeRegion.max_y_mm} onChange={(event) => setProbeRegion((current) => ({ ...current, max_y_mm: Number(event.target.value) }))} />
         </label>
       </div>
 
+      <details className="subpanel subpanel--soft" open>
+        <summary>Zonas excluidas</summary>
+        <div className="stack gap-sm">
+          {zones.map((zone, index) => (
+            <div className="form-grid" key={zone.id}>
+              <label>
+                Nombre
+                <input value={zone.nombre} onChange={(event) => setZones((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, nombre: event.target.value } : item))} />
+              </label>
+              <label>
+                X mínima
+                <input type="number" value={zone.min_x_mm} onChange={(event) => setZones((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, min_x_mm: Number(event.target.value) } : item))} />
+              </label>
+              <label>
+                X máxima
+                <input type="number" value={zone.max_x_mm} onChange={(event) => setZones((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, max_x_mm: Number(event.target.value) } : item))} />
+              </label>
+              <label>
+                Y mínima
+                <input type="number" value={zone.min_y_mm} onChange={(event) => setZones((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, min_y_mm: Number(event.target.value) } : item))} />
+              </label>
+              <label>
+                Y máxima
+                <input type="number" value={zone.max_y_mm} onChange={(event) => setZones((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, max_y_mm: Number(event.target.value) } : item))} />
+              </label>
+              <button className="button button--ghost button--danger" type="button" onClick={() => setZones((current) => current.filter((_, itemIndex) => itemIndex !== index))}>
+                Eliminar zona
+              </button>
+            </div>
+          ))}
+          <button
+            className="button button--ghost"
+            type="button"
+            onClick={() => setZones((current) => [
+              ...current,
+              {
+                id: `zone_${current.length + 1}`,
+                nombre: `Zona ${current.length + 1}`,
+                min_x_mm: probeRegion.min_x_mm,
+                min_y_mm: probeRegion.min_y_mm,
+                max_x_mm: Math.min(probeRegion.max_x_mm, probeRegion.min_x_mm + 5),
+                max_y_mm: Math.min(probeRegion.max_y_mm, probeRegion.min_y_mm + 5),
+              },
+            ])}
+          >
+            Añadir zona excluida
+          </button>
+        </div>
+      </details>
+
+      {simulationFieldsVisible ? (
+        <details className="subpanel subpanel--soft" open>
+          <summary>Opciones avanzadas de simulación</summary>
+          <div className="form-grid">
+            <label>
+              Superficie simulada
+              <select value={surface} onChange={(event) => setSurface(event.target.value)}>
+                <option value="plana">Placa plana</option>
+                <option value="inclinada">Placa inclinada</option>
+                <option value="deformacion_suave">Deformación suave</option>
+                <option value="elevacion_localizada">Elevación localizada</option>
+                <option value="ruido_pequeno">Ruido pequeño</option>
+                <option value="punto_faltante">Punto faltante</option>
+                <option value="punto_atipico">Punto atípico</option>
+                <option value="inclinacion_y_deformacion">Inclinación y deformación</option>
+              </select>
+            </label>
+            <label>
+              Repetición de simulación
+              <input type="number" value={repeat} onChange={(event) => setRepeat(Number(event.target.value))} />
+            </label>
+          </div>
+          <p className="muted">Superficie simulada = patrón artificial usado para probar el sistema.</p>
+          <p className="muted">Repetición = identificador que permite reproducir los mismos datos.</p>
+          <p className="muted">Estos campos no existen en mapas de mediciones reales.</p>
+        </details>
+      ) : null}
+
       <div className="action-grid">
-        <button className="button" type="button" disabled={busy} onClick={() => void onConfigure(rows, columns)}>
-          Configurar malla
-        </button>
-        <button className="button button--ghost" type="button" disabled={busy} onClick={() => void onSimulate(rows, columns, scenario, seed)}>
+        <button
+          className="button"
+          type="button"
+          disabled={busy}
+          onClick={() => void onSimulate({ filas: rows, columnas: columns, probe_region: probeRegion, exclusion_zones: zones, superficie_simulada: surface, repeticion_simulacion: repeat })}
+        >
           Crear mapa simulado
+        </button>
+        <button className="button button--ghost" type="button" disabled={busy} onClick={() => void onConfigure({ filas: rows, columnas: columns, probe_region: probeRegion, exclusion_zones: zones })}>
+          Configurar región sin datos
         </button>
         <label className="button button--ghost file-button">
           Importar JSON
@@ -133,14 +257,6 @@ export function HeightMapControlPanel({
           Eliminar mapa
         </button>
       </div>
-
-      {heightMap?.etiqueta_simulada ? (
-        <p className="machine-banner heightmap-banner">
-          <span className="machine-banner__dot" aria-hidden="true" />
-          DATOS SIMULADOS
-        </p>
-      ) : null}
     </section>
   );
 }
-

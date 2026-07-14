@@ -7,7 +7,7 @@ from enum import StrEnum
 from .errors import ProjectValidationError
 
 
-PROJECT_SCHEMA_VERSION = "1.2"
+PROJECT_SCHEMA_VERSION = "1.3"
 
 
 def utc_now() -> datetime:
@@ -45,6 +45,20 @@ class IssueSeverity(StrEnum):
     INFORMACION = "informacion"
     ADVERTENCIA = "advertencia"
     ERROR_CRITICO = "error critico"
+
+
+class PreparationState(StrEnum):
+    SIN_INICIAR = "sin_iniciar"
+    REFERENCIA_MAQUINA_PENDIENTE = "referencia_maquina_pendiente"
+    REFERENCIA_MAQUINA_CONFIRMADA = "referencia_maquina_confirmada"
+    ORIGEN_XY_PENDIENTE = "origen_xy_pendiente"
+    ORIGEN_XY_CONFIRMADO = "origen_xy_confirmado"
+    REFERENCIA_Z_PENDIENTE = "referencia_z_pendiente"
+    REFERENCIA_Z_CONFIRMADA = "referencia_z_confirmada"
+    REGION_SONDEABLE_CONFIGURADA = "region_sondeable_configurada"
+    MAPA_DISPONIBLE = "mapa_disponible"
+    MAPA_VALIDADO = "mapa_validado"
+    COMPENSACION_PREVISUALIZADA = "compensacion_previsualizada"
 
 
 @dataclass(frozen=True)
@@ -141,6 +155,24 @@ class MaterialOverflow:
 
 
 @dataclass(frozen=True)
+class CoordinateReference:
+    x_mm: float
+    y_mm: float
+    z_mm: float | None = None
+    confirmado_en: datetime | None = None
+
+
+@dataclass(frozen=True)
+class OperationPreparation:
+    origen_trabajo: CoordinateReference | None = None
+    referencia_z: CoordinateReference | None = None
+    region_sondeable_configurada_en: datetime | None = None
+    mapa_disponible_en: datetime | None = None
+    mapa_validado_en: datetime | None = None
+    compensacion_previsualizada_en: datetime | None = None
+
+
+@dataclass(frozen=True)
 class PreviewSegment:
     tipo: str
     tipo_movimiento: str
@@ -172,6 +204,8 @@ class PreviewSegment:
 
 @dataclass(frozen=True)
 class OperationAnalysis:
+    analysis_version: str
+    current_analysis_version: str
     limites: Bounds3D | None
     avances_mm_min: tuple[float, ...] = ()
     profundidad_min_mm: float | None = None
@@ -191,6 +225,10 @@ class OperationAnalysis:
     segmentos_vista_previa: tuple[PreviewSegment, ...] = ()
     desbordes_material: tuple[MaterialOverflow, ...] = ()
     tolerancia_arco_mm: float | None = None
+
+    @property
+    def analisis_desactualizado(self) -> bool:
+        return self.analysis_version != self.current_analysis_version
 
     @property
     def ancho_mm(self) -> float | None:
@@ -243,6 +281,7 @@ class OperacionPCB:
     sha256: str | None = None
     herramienta: str | None = None
     analisis: OperationAnalysis | None = None
+    preparacion: OperationPreparation = field(default_factory=OperationPreparation)
     estado: OperationStatus = OperationStatus.ESPERANDO_ARCHIVO
 
     def __post_init__(self) -> None:
@@ -278,6 +317,10 @@ class OperacionPCB:
             tamano_archivo_bytes=tamano_archivo_bytes,
             sha256=sha256,
             analisis=None,
+            preparacion=replace(
+                self.preparacion,
+                compensacion_previsualizada_en=None,
+            ),
             estado=OperationStatus.LISTA_PARA_ANALIZAR,
         )
 
@@ -289,6 +332,10 @@ class OperacionPCB:
             tamano_archivo_bytes=None,
             sha256=None,
             analisis=None,
+            preparacion=replace(
+                self.preparacion,
+                compensacion_previsualizada_en=None,
+            ),
             estado=OperationStatus.ESPERANDO_ARCHIVO,
         )
 
@@ -492,6 +539,7 @@ class ProyectoPCB:
 class MachineSessionStatus:
     estado: str
     home_realizado: bool
+    referencia_maquina_confirmada_en: datetime | None
     z_en_altura_segura: bool
     herramienta_en_centro_cama: bool
     material_montado: bool

@@ -2,7 +2,7 @@
 
 ## Objetivo de esta fase
 
-La Fase 3 transforma el MVP web en una aplicación de trabajo más compacta, clara y preparada para crecimiento, manteniendo todo el sistema en **modo simulado**.
+La Fase 4.2 reorganiza el workspace, corrige el modelo del mapa de alturas y añade un flujo de referencia completamente simulado, manteniendo todo el sistema en **modo seguro y sin control físico**.
 
 ## Capas productivas
 
@@ -23,44 +23,98 @@ src/klipper_cnc_assistant/domain
 src/klipper_cnc_assistant/storage
 ```
 
-El análisis de G-code vive en `src/klipper_cnc_assistant/gcode/` y sigue siendo estrictamente analítico: no ejecuta movimientos.
+Módulos funcionales principales:
 
-## Flujo de datos del producto actual
+- `gcode/`: análisis sintáctico y geométrico del archivo cargado.
+- `heightmap/`: modelos, interpolación, simulación y previsualización matemática de compensación.
+- `application/heightmap_service.py`: reglas de negocio del mapa y persistencia asociada.
+- `application/reference_service.py`: sesión de preparación simulada por operación.
+- `application/services.py`: proyectos, sesión de máquina simulada y estado general.
 
-1. El usuario crea o edita un proyecto PCB desde la interfaz web.
+## Flujo de datos actual
+
+1. El usuario crea un proyecto y una operación desde la interfaz web.
 2. FastAPI valida el payload y lo entrega a `ProjectService`.
 3. `JsonProjectRepository` persiste el proyecto en `data/projects/<id>/project.json`.
-4. El usuario selecciona operaciones concretas por proyecto.
-5. El usuario carga un archivo `.nc`, `.gcode` o `.tap`.
-6. El backend valida nombre, extensión, tamaño y codificación UTF-8.
-7. El archivo original se conserva en `originals/` con SHA-256.
-8. El analizador extrae límites, movimientos, incidencias, comandos manuales y segmentos de vista previa.
-9. El frontend representa la trayectoria con `react-konva` y transforma las coordenadas solo en la capa visual.
-10. El diagnóstico del sistema expone estado de API, almacenamiento y modo de máquina simulado.
+4. El usuario carga un archivo `.nc`, `.gcode` o `.tap`.
+5. El analizador produce límites, incidencias, alturas de trayectoria, metadatos y `analysis_version`.
+6. El frontend muestra la trayectoria y detecta si el análisis guardado quedó obsoleto respecto a la versión actual.
+7. La sesión de referencia simulada confirma estado de máquina, origen X/Y y referencia Z sin mover hardware.
+8. `HeightMapService` valida `probe_region`, exclusiones, muestras y dominio interpolable.
+9. `heightmap/analysis.py` interpola solo dentro de la región medida y nunca compensa fuera del dominio.
+10. `heightmap/compensation.py` genera una vista previa matemática sobre la trayectoria, subdividiendo segmentos cuando hace falta.
 
-## Componentes backend reutilizados y ampliados
+## Modelo de mapa de alturas
 
-- `domain/`: modelo de proyecto, operaciones, material y análisis.
-- `application/ProjectService`: persistencia, carga segura, análisis y reglas de negocio.
-- `storage/JsonProjectRepository`: almacenamiento JSON y preservación de originales.
-- `gcode/analyzer.py`: análisis modal, incidencias, arcos `G2/G3`, desbordes de material y metadatos de segmento.
-- `api/`: FastAPI, respuestas en español, carga multipart y entrega del frontend estático.
+El mapa separa explícitamente:
 
-## Componentes frontend de esta fase
+- material bruto;
+- región sondeable interior;
+- región ocupada por la trayectoria;
+- zonas excluidas;
+- dominio interpolable.
 
-- `App.tsx`: shell principal, navegación, dashboard y rutas de vista.
-- `components/ProjectWorkspace.tsx`: espacio de trabajo del proyecto.
-- `features/viewer/viewerMath.ts`: matemáticas de encuadre y transformación.
-- `features/viewer/ToolpathViewer.tsx`: visor canvas V2.
-- `features/viewer/ViewerToolbar.tsx`: controles integrados.
-- `features/viewer/ViewerInspector.tsx`: metadatos del segmento actual.
-- `lib/ui.ts`: traducción centralizada de estados y reglas visuales.
+Tipos principales:
+
+- `ProbeRegion`
+- `ExclusionZone`
+- `HeightMap`
+- `HeightMapStatistics`
+
+Restricciones de negocio:
+
+- `probe_region` debe quedar dentro del material;
+- filas y columnas deben ser válidas;
+- ningún punto de muestreo puede caer en una zona excluida;
+- la interpolación y la compensación quedan bloqueadas fuera del dominio medido.
+
+## Sesión de referencia simulada
+
+`OperationPreparation` y `PreparationState` modelan el flujo:
+
+- `sin_iniciar`
+- `referencia_maquina_pendiente`
+- `referencia_maquina_confirmada`
+- `origen_xy_pendiente`
+- `origen_xy_confirmado`
+- `referencia_z_pendiente`
+- `referencia_z_confirmada`
+- `region_sondeable_configurada`
+- `mapa_disponible`
+- `mapa_validado`
+- `compensacion_previsualizada`
+
+Separación de sesión:
+
+- la referencia de máquina pertenece a la sesión de máquina;
+- origen X/Y, referencia Z, mapa y validación pertenecen a la operación;
+- si se pierde la sesión de máquina, la referencia vuelve a estado desconocido;
+- no se asume homing real en ningún punto.
+
+## Convención matemática de compensación
+
+La vista previa usa la convención:
+
+```text
+z_compensada = z_original + (superficie_xy - z_referencia)
+```
+
+Donde:
+
+- `z_original` es la Z programada en la trayectoria;
+- `superficie_xy` es la corrección interpolada en el punto X/Y;
+- `z_referencia` es el valor de referencia del plano del mapa.
+
+Detalles de implementación:
+
+- cada segmento puede subdividirse virtualmente usando medio paso mínimo de la rejilla;
+- los valores fuera del dominio se marcan y bloquean la vista previa utilizable;
+- no se genera G-code, ni archivos, ni comandos hacia la máquina.
 
 ## Seguridad actual
 
-- no se llama a Moonraker desde la nueva aplicación web para mover la máquina;
+- no se llama a Moonraker para home, jog, probe, spindle o ejecución;
 - no se envía G-code a Klipper;
-- no existe homing, jog, probe ni ejecución de trabajo;
+- no existe movimiento real desde la aplicación web;
 - la sesión de máquina reportada es simulada;
-- las acciones de husillo externo continúan marcadas como manuales;
-- el frontend no muestra controles falsos de movimiento.
+- la compensación actual es solo analítica y visual.

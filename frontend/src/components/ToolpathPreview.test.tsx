@@ -25,6 +25,9 @@ describe("ToolpathPreview", () => {
       <ToolpathPreview
         material={{ ancho_mm: 20, alto_mm: 20, espesor_mm: 1.6 }}
         analysis={{
+          analysis_version: "gcode-analysis-v2",
+          current_analysis_version: "gcode-analysis-v2",
+          analisis_desactualizado: false,
           limites: {
             min_x_mm: 0,
             max_x_mm: 24,

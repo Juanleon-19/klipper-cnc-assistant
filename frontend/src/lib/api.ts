@@ -1,4 +1,5 @@
 import type {
+  CompensationPreview,
   HealthResponse,
   HeightMap,
   MachineSession,
@@ -6,6 +7,8 @@ import type {
   OperationAnalysis,
   Project,
   ProjectPayload,
+  ReferenceConfirmation,
+  ReferenceSession,
   SystemInfoResponse,
 } from "../types";
 
@@ -76,14 +79,30 @@ export const api = {
     request<OperationAnalysis>(`/api/projects/${projectId}/operations/${operationId}/analyze`, {
       method: "POST",
     }),
+  getReferenceSession: (projectId: string, operationId: string) =>
+    request<ReferenceSession>(`/api/projects/${projectId}/operations/${operationId}/reference-session`),
+  confirmMachineReference: (projectId: string, operationId: string) =>
+    request<ReferenceSession>(`/api/projects/${projectId}/operations/${operationId}/reference-session/machine-reference`, {
+      method: "POST",
+    }),
+  confirmWorkOrigin: (projectId: string, operationId: string, payload: ReferenceConfirmation) =>
+    request<ReferenceSession>(`/api/projects/${projectId}/operations/${operationId}/reference-session/work-origin`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  confirmZReference: (projectId: string, operationId: string, payload: Required<ReferenceConfirmation>) =>
+    request<ReferenceSession>(`/api/projects/${projectId}/operations/${operationId}/reference-session/z-reference`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
   getHeightMap: (projectId: string, operationId: string) =>
     request<HeightMap>(`/api/projects/${projectId}/operations/${operationId}/height-map`),
-  configureHeightMap: (projectId: string, operationId: string, payload: { filas: number; columnas: number }) =>
+  configureHeightMap: (projectId: string, operationId: string, payload: Record<string, unknown>) =>
     request<HeightMap>(`/api/projects/${projectId}/operations/${operationId}/height-map/config`, {
       method: "PUT",
       body: JSON.stringify(payload),
     }),
-  simulateHeightMap: (projectId: string, operationId: string, payload: { filas: number; columnas: number; escenario: string; semilla: number }) =>
+  simulateHeightMap: (projectId: string, operationId: string, payload: Record<string, unknown>) =>
     request<HeightMap>(`/api/projects/${projectId}/operations/${operationId}/height-map/simulate`, {
       method: "POST",
       body: JSON.stringify(payload),
@@ -110,6 +129,14 @@ export const api = {
     }),
   recalculateHeightMap: (projectId: string, operationId: string) =>
     request<HeightMap>(`/api/projects/${projectId}/operations/${operationId}/height-map/recalculate`, {
+      method: "POST",
+    }),
+  validateHeightMap: (projectId: string, operationId: string) =>
+    request<ReferenceSession>(`/api/projects/${projectId}/operations/${operationId}/height-map/validate`, {
+      method: "POST",
+    }),
+  getCompensationPreview: (projectId: string, operationId: string) =>
+    request<{ session: ReferenceSession; preview: CompensationPreview }>(`/api/projects/${projectId}/operations/${operationId}/compensation-preview`, {
       method: "POST",
     }),
   deleteHeightMap: (projectId: string, operationId: string) =>

@@ -13,11 +13,13 @@ from klipper_cnc_assistant.domain import (
     BoardFace,
     Bounds3D,
     ConfiguracionAlineacion,
+    CoordinateReference,
     FlipAxis,
     IssueSeverity,
     MaterialBruto,
     MaterialOverflow,
     OperationAnalysis,
+    OperationPreparation,
     OperationStatus,
     OperationType,
     OperacionPCB,
@@ -25,6 +27,7 @@ from klipper_cnc_assistant.domain import (
     PreviewSegment,
     ProyectoPCB,
 )
+from klipper_cnc_assistant.gcode import CURRENT_ANALYSIS_VERSION
 
 
 def _slugify(value: str) -> str:
@@ -257,6 +260,7 @@ class JsonProjectRepository:
             "sha256": operation.sha256,
             "herramienta": operation.herramienta,
             "analisis": self._serialize_analysis(operation.analisis),
+            "preparacion": self._serialize_preparation(operation.preparacion),
             "estado": operation.estado,
         }
 
@@ -267,6 +271,8 @@ class JsonProjectRepository:
         if analysis is None:
             return None
         return {
+            "analysis_version": analysis.analysis_version,
+            "current_analysis_version": analysis.current_analysis_version,
             "limites": None if analysis.limites is None else {
                 "min_x_mm": analysis.limites.min_x_mm,
                 "max_x_mm": analysis.limites.max_x_mm,
@@ -293,6 +299,26 @@ class JsonProjectRepository:
             "segmentos_vista_previa": [self._serialize_segment(segment) for segment in analysis.segmentos_vista_previa],
             "desbordes_material": [asdict(item) for item in analysis.desbordes_material],
             "tolerancia_arco_mm": analysis.tolerancia_arco_mm,
+        }
+
+    def _serialize_preparation(self, preparation: OperationPreparation) -> dict:
+        return {
+            "origen_trabajo": self._serialize_reference(preparation.origen_trabajo),
+            "referencia_z": self._serialize_reference(preparation.referencia_z),
+            "region_sondeable_configurada_en": None if preparation.region_sondeable_configurada_en is None else preparation.region_sondeable_configurada_en.isoformat(),
+            "mapa_disponible_en": None if preparation.mapa_disponible_en is None else preparation.mapa_disponible_en.isoformat(),
+            "mapa_validado_en": None if preparation.mapa_validado_en is None else preparation.mapa_validado_en.isoformat(),
+            "compensacion_previsualizada_en": None if preparation.compensacion_previsualizada_en is None else preparation.compensacion_previsualizada_en.isoformat(),
+        }
+
+    def _serialize_reference(self, reference: CoordinateReference | None) -> dict | None:
+        if reference is None:
+            return None
+        return {
+            "x_mm": reference.x_mm,
+            "y_mm": reference.y_mm,
+            "z_mm": reference.z_mm,
+            "confirmado_en": None if reference.confirmado_en is None else reference.confirmado_en.isoformat(),
         }
 
     def _serialize_segment(self, segment: PreviewSegment) -> dict:
@@ -357,6 +383,7 @@ class JsonProjectRepository:
             sha256=payload.get("sha256"),
             herramienta=payload.get("herramienta"),
             analisis=self._deserialize_analysis(payload.get("analisis")),
+            preparacion=self._deserialize_preparation(payload.get("preparacion")),
             estado=OperationStatus(payload.get("estado", OperationStatus.ESPERANDO_ARCHIVO)),
         )
 
@@ -372,7 +399,11 @@ class JsonProjectRepository:
         linear_payload = payload.get("segmentos_lineales", [])
         if preview_payload is None:
             preview_payload = linear_payload
+        analysis_version = payload.get("analysis_version", "legacy")
+        current_analysis_version = CURRENT_ANALYSIS_VERSION
         return OperationAnalysis(
+            analysis_version=analysis_version,
+            current_analysis_version=current_analysis_version,
             limites=limits,
             avances_mm_min=tuple(payload.get("avances_mm_min", [])),
             profundidad_min_mm=payload.get("profundidad_min_mm"),
@@ -405,6 +436,31 @@ class JsonProjectRepository:
             ),
             tolerancia_arco_mm=payload.get("tolerancia_arco_mm"),
         )
+
+    def _deserialize_preparation(self, payload: dict | None) -> OperationPreparation:
+        if payload is None:
+            return OperationPreparation()
+        return OperationPreparation(
+            origen_trabajo=self._deserialize_reference(payload.get("origen_trabajo")),
+            referencia_z=self._deserialize_reference(payload.get("referencia_z")),
+            region_sondeable_configurada_en=self._parse_datetime(payload.get("region_sondeable_configurada_en")),
+            mapa_disponible_en=self._parse_datetime(payload.get("mapa_disponible_en")),
+            mapa_validado_en=self._parse_datetime(payload.get("mapa_validado_en")),
+            compensacion_previsualizada_en=self._parse_datetime(payload.get("compensacion_previsualizada_en")),
+        )
+
+    def _deserialize_reference(self, payload: dict | None) -> CoordinateReference | None:
+        if payload is None:
+            return None
+        return CoordinateReference(
+            x_mm=payload["x_mm"],
+            y_mm=payload["y_mm"],
+            z_mm=payload.get("z_mm"),
+            confirmado_en=self._parse_datetime(payload.get("confirmado_en")),
+        )
+
+    def _parse_datetime(self, value: str | None):
+        return None if value is None else datetime.fromisoformat(value)
 
     def _deserialize_segment(
         self,

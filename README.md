@@ -4,34 +4,34 @@ Klipper CNC Assistant es una aplicación para preparar trabajos PCB sobre una CN
 
 ## Estado actual
 
-La entrega actual implementa la **Fase 3: rediseño UX completo y visor técnico 2D V2**.
+La entrega actual implementa la **Fase 4.2: flujo de referencia simulado, mapa de alturas con dominio interior y previsualización matemática de compensación**.
 
 Incluye:
 
 - backend FastAPI en `src/klipper_cnc_assistant/`;
 - frontend React + TypeScript + Vite en `frontend/`;
-- persistencia JSON real de proyectos PCB;
-- gestión visual de proyectos y operaciones;
+- persistencia JSON real de proyectos PCB y operaciones;
 - carga segura de G-code por archivo;
-- análisis G-code con `G0`, `G1`, `G2`, `G3`, `G20`, `G21`, `G90`, `G91` y `G94`;
-- segmentos enriquecidos con línea, avance, Z, distancia y geometría para vista previa;
-- visor técnico 2D V2 con `react-konva`, zoom, desplazamiento, encuadres, capas, inspector y recorrido visual;
-- dashboard operativo y pantalla de sistema secundaria;
+- análisis G-code con versionado persistido y detección de análisis obsoleto;
+- soporte de `G0`, `G1`, `G2`, `G3`, `G20`, `G21`, `G90`, `G91` y `G94`;
+- visor técnico 2D de trayectoria;
+- workflow interno por vistas: Archivo, Trayectoria, Referencia, Mapa de alturas y Validación;
+- sesión de referencia completamente simulada con confirmaciones por pasos y sin control físico;
+- mapa de alturas simulado con `probe_region`, zonas excluidas, superficie interpolada y vista 3D;
+- previsualización matemática de compensación sobre la trayectoria, sin generar G-code ejecutable;
 - servicio systemd preparado;
 - acceso remoto privado documentado para Tailscale Serve.
 
 No incluye todavía:
 
 - movimiento real;
-- homing;
-- jog;
-- probe;
-- mapa de alturas real;
+- homing real;
+- jog real;
+- probe físico;
+- spindle controlado por la aplicación;
 - ejecución de G-code;
-- spindle;
-- visualización 3D;
-- Gerber;
-- comunicación nueva de mecanizado con Moonraker.
+- exportación de G-code compensado ejecutable;
+- comandos de control hacia Moonraker.
 
 ## Arquitectura
 
@@ -42,10 +42,10 @@ Frontend React/Vite
 FastAPI /api + SPA estática
         |
         v
-ProjectService / SystemStatusService
+ProjectService / HeightMapService / ReferenceSessionService
         |
         v
-Dominio + Repositorio JSON + Analizador G-code
+Dominio + Repositorio JSON + Analizador G-code + Matemática de compensación
 ```
 
 Detalles ampliados: [docs/architecture.md](docs/architecture.md)
@@ -55,10 +55,10 @@ Detalles ampliados: [docs/architecture.md](docs/architecture.md)
 Todo permanece en **modo simulado**.
 
 - No se ejecuta G-code.
-- No se envían comandos a la CNC.
-- No se llama a endpoints reales de movimiento en Moonraker.
-- El visor es informativo, no una simulación de mecanizado.
-- Las acciones de husillo externo siguen marcadas como manuales.
+- No se envían comandos de movimiento a la CNC.
+- No se llama a endpoints de control de Moonraker para home, jog, probe o spindle.
+- La referencia de máquina se confirma solo en simulación.
+- La compensación actual es una vista previa matemática, no una salida para producción.
 
 ## Instalación del backend
 
@@ -102,21 +102,15 @@ Resultado esperado:
 - `http://127.0.0.1:8000/docs`
 - `http://127.0.0.1:8000/api/health`
 
-## Servicio systemd
+## Flujo funcional actual
 
-Archivos:
-
-- `deploy/systemd/klipper-cnc-assistant.service`
-- `deploy/install_service.sh`
-- `deploy/uninstall_service.sh`
-
-Más detalles: [docs/deployment.md](docs/deployment.md)
-
-## Acceso remoto privado
-
-La aplicación debe exponerse solo mediante Tailscale Serve, manteniendo FastAPI en `127.0.0.1:8000`.
-
-Guía: [docs/remote-access.md](docs/remote-access.md)
+1. Crear un proyecto y una operación.
+2. Cargar el G-code y analizarlo.
+3. Confirmar en simulación la referencia de máquina, el origen X/Y y la referencia Z.
+4. Configurar la región sondeable interior y las zonas excluidas.
+5. Generar o importar el mapa de alturas.
+6. Validar el mapa.
+7. Abrir la previsualización matemática de compensación.
 
 ## Pruebas
 
@@ -137,11 +131,9 @@ npm run test
 npm run build
 ```
 
-## Limitaciones actuales del análisis G-code
+## Limitaciones actuales del análisis G-code y del mapa
 
-- soporta líneas `G0` y `G1`;
-- soporta representación geométrica determinista de `G2` y `G3` con `I/J`;
-- rechaza arcos ambiguos o no representables con advertencia explícita;
-- detecta `G28` y `G92` como errores críticos;
-- registra acciones manuales de husillo y cambios de herramienta;
-- no ejecuta ni simula mecanizado real.
+- el análisis sigue siendo descriptivo, no ejecuta mecanizado real;
+- la compensación no crea archivos descargables ni trayectorias ejecutables;
+- la superficie de alturas actual es simulada o importada, no capturada desde hardware;
+- el dominio interpolable queda limitado a `probe_region` menos las zonas excluidas.

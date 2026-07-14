@@ -18,6 +18,38 @@ class SampleQuality(StrEnum):
 
 
 @dataclass(frozen=True)
+class ProbeRegion:
+    min_x_mm: float
+    min_y_mm: float
+    max_x_mm: float
+    max_y_mm: float
+
+    @property
+    def ancho_mm(self) -> float:
+        return self.max_x_mm - self.min_x_mm
+
+    @property
+    def alto_mm(self) -> float:
+        return self.max_y_mm - self.min_y_mm
+
+    def contains(self, x_mm: float, y_mm: float) -> bool:
+        return self.min_x_mm <= x_mm <= self.max_x_mm and self.min_y_mm <= y_mm <= self.max_y_mm
+
+
+@dataclass(frozen=True)
+class ExclusionZone:
+    id: str
+    nombre: str
+    min_x_mm: float
+    min_y_mm: float
+    max_x_mm: float
+    max_y_mm: float
+
+    def contains(self, x_mm: float, y_mm: float) -> bool:
+        return self.min_x_mm <= x_mm <= self.max_x_mm and self.min_y_mm <= y_mm <= self.max_y_mm
+
+
+@dataclass(frozen=True)
 class HeightSample:
     id: str
     x_mm: float
@@ -63,7 +95,8 @@ class HeightMapStatistics:
     altura_min_mm: float | None
     altura_max_mm: float | None
     rango_alturas_mm: float | None
-    rms_residuos_mm: float | None
+    valor_referencia_mm: float | None
+    desviacion_rms_respecto_plano_mm: float | None
     residuo_maximo_mm: float | None
     ancho_cubierto_mm: float | None
     alto_cubierto_mm: float | None
@@ -84,13 +117,14 @@ class HeightMap:
     version_algoritmo: str
     estado: str
     fuente_datos: str
-    escenario: str | None
-    semilla: int | None
+    superficie_simulada: str | None
+    repeticion_simulacion: int | None
     etiqueta_simulada: bool
     grid: HeightGrid
+    probe_region: ProbeRegion
+    exclusion_zones: tuple[ExclusionZone, ...]
     muestras: tuple[HeightSample, ...]
     estadisticas: HeightMapStatistics
     plano: PlaneFit | None
     creado_en: datetime = field(default_factory=utc_now)
     actualizado_en: datetime = field(default_factory=utc_now)
-

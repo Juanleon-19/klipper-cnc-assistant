@@ -77,6 +77,9 @@ export type AnalysisIssue = {
 };
 
 export type OperationAnalysis = {
+  analysis_version: string;
+  current_analysis_version: string;
+  analisis_desactualizado: boolean;
   limites: Bounds | null;
   avances_mm_min: number[];
   profundidad_min_mm: number | null;
@@ -99,6 +102,22 @@ export type OperationAnalysis = {
   segmentos_vista_previa: PreviewSegment[];
   desbordes_material: MaterialOverflow[];
   tolerancia_arco_mm: number | null;
+};
+
+export type ProbeRegion = {
+  min_x_mm: number;
+  min_y_mm: number;
+  max_x_mm: number;
+  max_y_mm: number;
+};
+
+export type ExclusionZone = {
+  id: string;
+  nombre: string;
+  min_x_mm: number;
+  min_y_mm: number;
+  max_x_mm: number;
+  max_y_mm: number;
 };
 
 export type HeightMapGrid = {
@@ -143,7 +162,8 @@ export type HeightMapStatistics = {
   altura_min_mm: number | null;
   altura_max_mm: number | null;
   rango_alturas_mm: number | null;
-  rms_residuos_mm: number | null;
+  valor_referencia_mm: number | null;
+  desviacion_rms_respecto_plano_mm: number | null;
   residuo_maximo_mm: number | null;
   ancho_cubierto_mm: number | null;
   alto_cubierto_mm: number | null;
@@ -173,16 +193,84 @@ export type HeightMap = {
   version_algoritmo: string;
   estado: string;
   fuente_datos: string;
-  escenario: string | null;
-  semilla: number | null;
+  superficie_simulada: string | null;
+  repeticion_simulacion: number | null;
   etiqueta_simulada: boolean;
   grid: HeightMapGrid;
+  probe_region: ProbeRegion;
+  exclusion_zones: ExclusionZone[];
   muestras: HeightMapSample[];
   estadisticas: HeightMapStatistics;
   plano: HeightMapPlane | null;
   superficies: Record<string, HeightMapSurface>;
   creado_en: string;
   actualizado_en: string;
+};
+
+export type ReferencePoint = {
+  x_mm: number | null;
+  y_mm: number | null;
+  z_mm: number | null;
+};
+
+export type ReferenceConfirmation = {
+  x_mm: number;
+  y_mm: number;
+  z_mm?: number;
+};
+
+export type ReferenceStep = {
+  id: string;
+  titulo: string;
+  confirmado: boolean;
+  fecha: string | null;
+};
+
+export type ReferenceSession = {
+  estado: string;
+  machine_reference: {
+    confirmada: boolean;
+    fecha: string | null;
+  };
+  origen_maquina: ReferencePoint;
+  origen_material: ReferencePoint;
+  origen_gcode: ReferencePoint;
+  origen_trabajo: Record<string, string | number | null> | null;
+  referencia_z: Record<string, string | number | null> | null;
+  pasos: ReferenceStep[];
+  compensacion_previsualizada_en: string | null;
+  analysis_stale: boolean;
+};
+
+export type CompensationPreviewPoint = {
+  x_mm: number;
+  y_mm: number;
+  z_original_mm: number | null;
+  z_superficie_mm: number | null;
+  correccion_mm: number | null;
+  z_compensada_mm: number | null;
+  estado: string;
+  observacion: string | null;
+};
+
+export type CompensationPreviewSegment = {
+  tipo: string;
+  tipo_movimiento: string;
+  numero_linea: number | null;
+  estado: string;
+  distancia_mm: number;
+  puntos: CompensationPreviewPoint[];
+};
+
+export type CompensationPreview = {
+  convencion_matematica: string;
+  z_referencia_mm: number;
+  paso_muestreo_virtual_mm: number;
+  puntos_fuera_dominio: number;
+  puntos_virtuales_agregados: number;
+  resumen_z_original: { min_mm: number | null; max_mm: number | null };
+  resumen_z_compensada: { min_mm: number | null; max_mm: number | null };
+  segmentos: CompensationPreviewSegment[];
 };
 
 export type Operation = {
@@ -217,6 +305,7 @@ export type Project = {
 export type MachineSession = {
   estado: string;
   home_realizado: boolean;
+  referencia_maquina_confirmada_en: string | null;
   z_en_altura_segura: boolean;
   herramienta_en_centro_cama: boolean;
   material_montado: boolean;

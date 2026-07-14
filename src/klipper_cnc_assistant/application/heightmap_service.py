@@ -1,12 +1,17 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from datetime import datetime, timezone
 
-from klipper_cnc_assistant.domain import ProjectValidationError
+from klipper_cnc_assistant.domain import MaterialBruto, OperationPreparation, ProjectValidationError
 from klipper_cnc_assistant.heightmap import (
+    ExclusionZone,
     HeightGrid,
     HeightMap,
+    HeightMapStatistics,
     HeightSample,
+    PlaneFit,
+    ProbeRegion,
     SampleQuality,
     build_dense_surface,
     compute_height_map,
@@ -22,6 +27,10 @@ from .errors import ApplicationError, NotFoundError
 _UNSET = object()
 
 
+def utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
 class HeightMapService:
     def __init__(self, repository: JsonProjectRepository) -> None:
         self.repository = repository
@@ -33,24 +42,41 @@ class HeightMapService:
         operation_id: str,
         filas: int,
         columnas: int,
+        probe_region: ProbeRegion,
+        exclusion_zones: tuple[ExclusionZone, ...],
     ) -> HeightMap:
         project = self._load_project(project_id)
         project.get_operation(operation_id)
-        grid = self._grid_from_project(project.material.ancho_mm, project.material.alto_mm, filas, columnas)
-        samples = self._blank_samples(grid)
+        self._validate_domain(project.material, probe_region, exclusion_zones, filas, columnas)
+        grid = self._grid_from_region(probe_region, filas, columnas)
+        self._validate_grid_points(grid, probe_region, exclusion_zones)
+        samples = self._blank_samples(grid, probe_region)
         height_map = compute_height_map(
             proyecto_id=project_id,
             operacion_id=operation_id,
             version=self._next_version(project_id, operation_id),
             fuente_datos="manual",
-            escenario=None,
-            semilla=None,
+            superficie_simulada=None,
+            repeticion_simulacion=None,
             etiqueta_simulada=False,
             grid=grid,
+            probe_region=probe_region,
+            exclusion_zones=exclusion_zones,
             muestras=samples,
-            estado="sin datos",
+            estado="region sondeable configurada",
         )
         self.repository.save_height_map_payload(project_id, operation_id, self._serialize_map(height_map))
+        self._update_preparation(
+            project_id,
+            operation_id,
+            lambda current: replace(
+                current,
+                region_sondeable_configurada_en=utc_now(),
+                mapa_disponible_en=None,
+                mapa_validado_en=None,
+                compensacion_previsualizada_en=None,
+            ),
+        )
         return height_map
 
     def generate_simulated_map(
@@ -60,23 +86,29 @@ class HeightMapService:
         operation_id: str,
         filas: int,
         columnas: int,
-        escenario: str,
-        semilla: int,
+        superficie_simulada: str,
+        repeticion_simulacion: int,
+        probe_region: ProbeRegion,
+        exclusion_zones: tuple[ExclusionZone, ...],
     ) -> HeightMap:
         project = self._load_project(project_id)
         project.get_operation(operation_id)
+        self._validate_domain(project.material, probe_region, exclusion_zones, filas, columnas)
+        grid = self._grid_from_region(probe_region, filas, columnas)
+        self._validate_grid_points(grid, probe_region, exclusion_zones)
         height_map = generate_simulated_height_map(
             proyecto_id=project_id,
             operacion_id=operation_id,
             version=self._next_version(project_id, operation_id),
-            ancho_mm=project.material.ancho_mm,
-            alto_mm=project.material.alto_mm,
+            probe_region=probe_region,
+            exclusion_zones=exclusion_zones,
             filas=filas,
             columnas=columnas,
-            escenario=escenario,
-            semilla=semilla,
+            superficie_simulada=superficie_simulada,
+            repeticion_simulacion=repeticion_simulacion,
         )
         self.repository.save_height_map_payload(project_id, operation_id, self._serialize_map(height_map))
+        self._mark_map_available(project_id, operation_id)
         return height_map
 
     def import_json_map(
@@ -88,21 +120,25 @@ class HeightMapService:
     ) -> HeightMap:
         project = self._load_project(project_id)
         project.get_operation(operation_id)
-        grid, samples = parse_json_samples(content)
-        normalized_grid = self._normalize_grid(project.material.ancho_mm, project.material.alto_mm, grid, samples)
+        grid, probe_region, exclusion_zones, samples = parse_json_samples(content)
+        normalized_grid = self._normalize_grid(project.material, probe_region, exclusion_zones, grid, samples)
+        self._validate_grid_points(normalized_grid, probe_region, exclusion_zones)
         height_map = compute_height_map(
             proyecto_id=project_id,
             operacion_id=operation_id,
             version=self._next_version(project_id, operation_id),
             fuente_datos="json",
-            escenario=None,
-            semilla=None,
+            superficie_simulada=None,
+            repeticion_simulacion=None,
             etiqueta_simulada=False,
             grid=normalized_grid,
+            probe_region=probe_region,
+            exclusion_zones=exclusion_zones,
             muestras=samples,
             estado="importado",
         )
         self.repository.save_height_map_payload(project_id, operation_id, self._serialize_map(height_map))
+        self._mark_map_available(project_id, operation_id)
         return height_map
 
     def import_csv_map(
@@ -114,28 +150,28 @@ class HeightMapService:
     ) -> HeightMap:
         project = self._load_project(project_id)
         project.get_operation(operation_id)
-        grid, samples = parse_csv_samples(content)
-        normalized_grid = self._normalize_grid(project.material.ancho_mm, project.material.alto_mm, grid, samples)
+        grid, probe_region, exclusion_zones, samples = parse_csv_samples(content)
+        normalized_grid = self._normalize_grid(project.material, probe_region, exclusion_zones, grid, samples)
+        self._validate_grid_points(normalized_grid, probe_region, exclusion_zones)
         height_map = compute_height_map(
             proyecto_id=project_id,
             operacion_id=operation_id,
             version=self._next_version(project_id, operation_id),
             fuente_datos="csv",
-            escenario=None,
-            semilla=None,
+            superficie_simulada=None,
+            repeticion_simulacion=None,
             etiqueta_simulada=False,
             grid=normalized_grid,
+            probe_region=probe_region,
+            exclusion_zones=exclusion_zones,
             muestras=samples,
             estado="importado",
         )
         self.repository.save_height_map_payload(project_id, operation_id, self._serialize_map(height_map))
+        self._mark_map_available(project_id, operation_id)
         return height_map
 
-    def get_map(
-        self,
-        project_id: str,
-        operation_id: str,
-    ) -> HeightMap:
+    def get_map(self, project_id: str, operation_id: str) -> HeightMap:
         self._load_project(project_id).get_operation(operation_id)
         try:
             payload = self.repository.load_height_map_payload(project_id, operation_id)
@@ -143,11 +179,7 @@ class HeightMapService:
             raise NotFoundError(str(error)) from error
         return self._deserialize_map(payload)
 
-    def get_statistics(
-        self,
-        project_id: str,
-        operation_id: str,
-    ):
+    def get_statistics(self, project_id: str, operation_id: str):
         return self.get_map(project_id, operation_id).estadisticas
 
     def update_sample(
@@ -170,11 +202,7 @@ class HeightMapService:
             found = True
             next_sample = sample
             if z_mm is not _UNSET:
-                next_sample = replace(
-                    next_sample,
-                    z_mm=z_mm,
-                    estado_calidad=SampleQuality.FALTANTE if z_mm is None else SampleQuality.VALIDA,
-                )
+                next_sample = replace(next_sample, z_mm=z_mm, estado_calidad=SampleQuality.FALTANTE if z_mm is None else SampleQuality.VALIDA)
             if incluida is not _UNSET:
                 next_sample = replace(
                     next_sample,
@@ -186,41 +214,29 @@ class HeightMapService:
             updated_samples.append(next_sample)
         if not found:
             raise NotFoundError(f"La muestra '{sample_id}' no existe.")
-        recalculated = compute_height_map(
-            proyecto_id=current.proyecto_id,
-            operacion_id=current.operacion_id,
-            version=current.version + 1,
-            fuente_datos=current.fuente_datos,
-            escenario=current.escenario,
-            semilla=current.semilla,
-            etiqueta_simulada=current.etiqueta_simulada,
-            grid=current.grid,
-            muestras=updated_samples,
-            estado=current.estado,
-        )
+        recalculated = self._rebuild(current, updated_samples)
         self.repository.save_height_map_payload(project_id, operation_id, self._serialize_map(recalculated))
+        self._mark_map_available(project_id, operation_id)
         return recalculated
 
-    def recalculate_map(
-        self,
-        project_id: str,
-        operation_id: str,
-    ) -> HeightMap:
+    def recalculate_map(self, project_id: str, operation_id: str) -> HeightMap:
         current = self.get_map(project_id, operation_id)
-        recalculated = compute_height_map(
-            proyecto_id=current.proyecto_id,
-            operacion_id=current.operacion_id,
-            version=current.version + 1,
-            fuente_datos=current.fuente_datos,
-            escenario=current.escenario,
-            semilla=current.semilla,
-            etiqueta_simulada=current.etiqueta_simulada,
-            grid=current.grid,
-            muestras=list(current.muestras),
-            estado=current.estado,
-        )
+        recalculated = self._rebuild(current, list(current.muestras))
         self.repository.save_height_map_payload(project_id, operation_id, self._serialize_map(recalculated))
+        self._mark_map_available(project_id, operation_id)
         return recalculated
+
+    def validate_map(self, project_id: str, operation_id: str) -> HeightMap:
+        current = self.get_map(project_id, operation_id)
+        included = [sample for sample in current.muestras if sample.incluida and sample.z_mm is not None]
+        if len(included) < 3:
+            raise ApplicationError("El mapa requiere al menos 3 muestras validas para poder validarse.")
+        self._update_preparation(
+            project_id,
+            operation_id,
+            lambda prep: replace(prep, mapa_validado_en=utc_now(), compensacion_previsualizada_en=None),
+        )
+        return current
 
     def delete_map(self, project_id: str, operation_id: str) -> None:
         self._load_project(project_id).get_operation(operation_id)
@@ -228,6 +244,7 @@ class HeightMapService:
             self.repository.delete_height_map(project_id, operation_id)
         except FileNotFoundError as error:
             raise NotFoundError(str(error)) from error
+        self._update_preparation(project_id, operation_id, lambda _: OperationPreparation())
 
     def build_surfaces(self, height_map: HeightMap) -> dict[str, dict[str, object]]:
         return {
@@ -235,6 +252,22 @@ class HeightMapService:
             "plano": build_dense_surface(height_map, mode="plano"),
             "residuo": build_dense_surface(height_map, mode="residuo"),
         }
+
+    def _rebuild(self, current: HeightMap, samples: list[HeightSample]) -> HeightMap:
+        return compute_height_map(
+            proyecto_id=current.proyecto_id,
+            operacion_id=current.operacion_id,
+            version=current.version + 1,
+            fuente_datos=current.fuente_datos,
+            superficie_simulada=current.superficie_simulada,
+            repeticion_simulacion=current.repeticion_simulacion,
+            etiqueta_simulada=current.etiqueta_simulada,
+            grid=current.grid,
+            probe_region=current.probe_region,
+            exclusion_zones=current.exclusion_zones,
+            muestras=samples,
+            estado=current.estado,
+        )
 
     def _load_project(self, project_id: str):
         try:
@@ -251,27 +284,27 @@ class HeightMapService:
             return 1
         return int(current.get("version", 0)) + 1
 
-    def _grid_from_project(self, ancho_mm: float, alto_mm: float, filas: int, columnas: int) -> HeightGrid:
+    def _grid_from_region(self, probe_region: ProbeRegion, filas: int, columnas: int) -> HeightGrid:
         if filas < 2 or columnas < 2:
             raise ApplicationError("La malla del mapa requiere al menos 2 filas y 2 columnas.")
         return HeightGrid(
             filas=filas,
             columnas=columnas,
-            ancho_mm=ancho_mm,
-            alto_mm=alto_mm,
-            paso_x_mm=ancho_mm / (columnas - 1),
-            paso_y_mm=alto_mm / (filas - 1),
+            ancho_mm=probe_region.ancho_mm,
+            alto_mm=probe_region.alto_mm,
+            paso_x_mm=probe_region.ancho_mm / (columnas - 1),
+            paso_y_mm=probe_region.alto_mm / (filas - 1),
         )
 
-    def _blank_samples(self, grid: HeightGrid) -> list[HeightSample]:
+    def _blank_samples(self, grid: HeightGrid, probe_region: ProbeRegion) -> list[HeightSample]:
         samples: list[HeightSample] = []
         for fila in range(grid.filas):
             for columna in range(grid.columnas):
                 samples.append(
                     HeightSample(
                         id=f"hm_{fila}_{columna}",
-                        x_mm=columna * grid.paso_x_mm,
-                        y_mm=fila * grid.paso_y_mm,
+                        x_mm=probe_region.min_x_mm + columna * grid.paso_x_mm,
+                        y_mm=probe_region.min_y_mm + fila * grid.paso_y_mm,
                         z_mm=None,
                         fila=fila,
                         columna=columna,
@@ -284,17 +317,17 @@ class HeightMapService:
 
     def _normalize_grid(
         self,
-        ancho_material_mm: float,
-        alto_material_mm: float,
+        material: MaterialBruto,
+        probe_region: ProbeRegion,
+        exclusion_zones: tuple[ExclusionZone, ...],
         grid: HeightGrid,
         samples: list[HeightSample],
     ) -> HeightGrid:
         rows = grid.filas or max(sample.fila for sample in samples) + 1
         columns = grid.columnas or max(sample.columna for sample in samples) + 1
-        if rows < 2 or columns < 2:
-            raise ApplicationError("El mapa importado requiere al menos 2 filas y 2 columnas.")
-        width = grid.ancho_mm or ancho_material_mm
-        height = grid.alto_mm or alto_material_mm
+        self._validate_domain(material, probe_region, exclusion_zones, rows, columns)
+        width = grid.ancho_mm or probe_region.ancho_mm
+        height = grid.alto_mm or probe_region.alto_mm
         step_x = grid.paso_x_mm or (width / (columns - 1))
         step_y = grid.paso_y_mm or (height / (rows - 1))
         return HeightGrid(
@@ -306,6 +339,59 @@ class HeightMapService:
             paso_y_mm=step_y,
         )
 
+    def _validate_domain(
+        self,
+        material: MaterialBruto,
+        probe_region: ProbeRegion,
+        exclusion_zones: tuple[ExclusionZone, ...],
+        filas: int,
+        columnas: int,
+    ) -> None:
+        if probe_region.ancho_mm <= 0 or probe_region.alto_mm <= 0:
+            raise ApplicationError("La region sondeable debe tener dimensiones validas.")
+        if probe_region.min_x_mm < 0 or probe_region.min_y_mm < 0:
+            raise ApplicationError("La region sondeable debe estar dentro del material.")
+        if probe_region.max_x_mm > material.ancho_mm or probe_region.max_y_mm > material.alto_mm:
+            raise ApplicationError("La region sondeable debe estar dentro del material.")
+        if filas < 2 or columnas < 2:
+            raise ApplicationError("La malla del mapa requiere al menos 2 filas y 2 columnas.")
+        for zone in exclusion_zones:
+            if zone.max_x_mm <= zone.min_x_mm or zone.max_y_mm <= zone.min_y_mm:
+                raise ApplicationError(f"La zona excluida '{zone.nombre}' no tiene dimensiones validas.")
+            if zone.min_x_mm < 0 or zone.min_y_mm < 0 or zone.max_x_mm > material.ancho_mm or zone.max_y_mm > material.alto_mm:
+                raise ApplicationError(f"La zona excluida '{zone.nombre}' debe estar dentro del material.")
+
+    def _validate_grid_points(self, grid: HeightGrid, probe_region: ProbeRegion, exclusion_zones: tuple[ExclusionZone, ...]) -> None:
+        for fila in range(grid.filas):
+            for columna in range(grid.columnas):
+                x_mm = probe_region.min_x_mm + columna * grid.paso_x_mm
+                y_mm = probe_region.min_y_mm + fila * grid.paso_y_mm
+                for zone in exclusion_zones:
+                    if zone.contains(x_mm, y_mm):
+                        raise ApplicationError(
+                            f"La configuracion actual ubica el punto ({x_mm:.3f}, {y_mm:.3f}) mm dentro de la zona excluida '{zone.nombre}'."
+                        )
+
+    def _mark_map_available(self, project_id: str, operation_id: str) -> None:
+        now = utc_now()
+        self._update_preparation(
+            project_id,
+            operation_id,
+            lambda current: replace(
+                current,
+                region_sondeable_configurada_en=current.region_sondeable_configurada_en or now,
+                mapa_disponible_en=now,
+                mapa_validado_en=None,
+                compensacion_previsualizada_en=None,
+            ),
+        )
+
+    def _update_preparation(self, project_id: str, operation_id: str, updater) -> None:
+        project = self._load_project(project_id)
+        operation = project.get_operation(operation_id)
+        updated_operation = replace(operation, preparacion=updater(operation.preparacion))
+        self.repository.save_project(project.replace_operation(updated_operation))
+
     def _serialize_map(self, height_map: HeightMap) -> dict[str, object]:
         return {
             "proyecto_id": height_map.proyecto_id,
@@ -314,8 +400,8 @@ class HeightMapService:
             "version_algoritmo": height_map.version_algoritmo,
             "estado": height_map.estado,
             "fuente_datos": height_map.fuente_datos,
-            "escenario": height_map.escenario,
-            "semilla": height_map.semilla,
+            "superficie_simulada": height_map.superficie_simulada,
+            "repeticion_simulacion": height_map.repeticion_simulacion,
             "etiqueta_simulada": height_map.etiqueta_simulada,
             "grid": {
                 "filas": height_map.grid.filas,
@@ -325,6 +411,23 @@ class HeightMapService:
                 "paso_x_mm": height_map.grid.paso_x_mm,
                 "paso_y_mm": height_map.grid.paso_y_mm,
             },
+            "probe_region": {
+                "min_x_mm": height_map.probe_region.min_x_mm,
+                "min_y_mm": height_map.probe_region.min_y_mm,
+                "max_x_mm": height_map.probe_region.max_x_mm,
+                "max_y_mm": height_map.probe_region.max_y_mm,
+            },
+            "exclusion_zones": [
+                {
+                    "id": zone.id,
+                    "nombre": zone.nombre,
+                    "min_x_mm": zone.min_x_mm,
+                    "min_y_mm": zone.min_y_mm,
+                    "max_x_mm": zone.max_x_mm,
+                    "max_y_mm": zone.max_y_mm,
+                }
+                for zone in height_map.exclusion_zones
+            ],
             "muestras": [
                 {
                     "id": sample.id,
@@ -349,12 +452,15 @@ class HeightMapService:
                 "altura_min_mm": height_map.estadisticas.altura_min_mm,
                 "altura_max_mm": height_map.estadisticas.altura_max_mm,
                 "rango_alturas_mm": height_map.estadisticas.rango_alturas_mm,
-                "rms_residuos_mm": height_map.estadisticas.rms_residuos_mm,
+                "valor_referencia_mm": height_map.estadisticas.valor_referencia_mm,
+                "desviacion_rms_respecto_plano_mm": height_map.estadisticas.desviacion_rms_respecto_plano_mm,
                 "residuo_maximo_mm": height_map.estadisticas.residuo_maximo_mm,
                 "ancho_cubierto_mm": height_map.estadisticas.ancho_cubierto_mm,
                 "alto_cubierto_mm": height_map.estadisticas.alto_cubierto_mm,
             },
-            "plano": None if height_map.plano is None else {
+            "plano": None
+            if height_map.plano is None
+            else {
                 "a": height_map.plano.a,
                 "b": height_map.plano.b,
                 "c": height_map.plano.c,
@@ -369,71 +475,71 @@ class HeightMapService:
         }
 
     def _deserialize_map(self, payload: dict[str, object]) -> HeightMap:
-        from datetime import datetime
-        from klipper_cnc_assistant.heightmap import HeightMapStatistics, PlaneFit
-
         grid_payload = payload["grid"]
-        stats_payload = payload["estadisticas"]
+        probe_payload = payload.get("probe_region") or {
+            "min_x_mm": 0.0,
+            "min_y_mm": 0.0,
+            "max_x_mm": grid_payload["ancho_mm"],
+            "max_y_mm": grid_payload["alto_mm"],
+        }
+        exclusion_payload = payload.get("exclusion_zones", [])
+        statistics_payload = payload["estadisticas"]
         plane_payload = payload.get("plano")
         return HeightMap(
-            proyecto_id=str(payload["proyecto_id"]),
-            operacion_id=str(payload["operacion_id"]),
-            version=int(payload["version"]),
-            version_algoritmo=str(payload["version_algoritmo"]),
-            estado=str(payload["estado"]),
-            fuente_datos=str(payload["fuente_datos"]),
-            escenario=str(payload["escenario"]) if payload.get("escenario") is not None else None,
-            semilla=int(payload["semilla"]) if payload.get("semilla") is not None else None,
-            etiqueta_simulada=bool(payload.get("etiqueta_simulada", False)),
-            grid=HeightGrid(
-                filas=int(grid_payload["filas"]),
-                columnas=int(grid_payload["columnas"]),
-                ancho_mm=float(grid_payload["ancho_mm"]),
-                alto_mm=float(grid_payload["alto_mm"]),
-                paso_x_mm=float(grid_payload["paso_x_mm"]),
-                paso_y_mm=float(grid_payload["paso_y_mm"]),
-            ),
+            proyecto_id=payload["proyecto_id"],
+            operacion_id=payload["operacion_id"],
+            version=payload["version"],
+            version_algoritmo=payload["version_algoritmo"],
+            estado=payload["estado"],
+            fuente_datos=payload["fuente_datos"],
+            superficie_simulada=payload.get("superficie_simulada", payload.get("escenario")),
+            repeticion_simulacion=payload.get("repeticion_simulacion", payload.get("semilla")),
+            etiqueta_simulada=payload["etiqueta_simulada"],
+            grid=HeightGrid(**grid_payload),
+            probe_region=ProbeRegion(**probe_payload),
+            exclusion_zones=tuple(ExclusionZone(**item) for item in exclusion_payload),
             muestras=tuple(
                 HeightSample(
-                    id=str(sample["id"]),
-                    x_mm=float(sample["x_mm"]),
-                    y_mm=float(sample["y_mm"]),
-                    z_mm=None if sample.get("z_mm") is None else float(sample["z_mm"]),
-                    fila=int(sample["fila"]),
-                    columna=int(sample["columna"]),
-                    origen_datos=str(sample["origen_datos"]),
-                    estado_calidad=SampleQuality(str(sample["estado_calidad"])),
-                    observacion=str(sample["observacion"]) if sample.get("observacion") is not None else None,
-                    incluida=bool(sample.get("incluida", True)),
-                    residuo_plano_mm=None if sample.get("residuo_plano_mm") is None else float(sample["residuo_plano_mm"]),
+                    id=item["id"],
+                    x_mm=item["x_mm"],
+                    y_mm=item["y_mm"],
+                    z_mm=item.get("z_mm"),
+                    fila=item["fila"],
+                    columna=item["columna"],
+                    origen_datos=item.get("origen_datos", "manual"),
+                    estado_calidad=SampleQuality(item.get("estado_calidad", SampleQuality.VALIDA)),
+                    observacion=item.get("observacion"),
+                    incluida=item.get("incluida", True),
+                    residuo_plano_mm=item.get("residuo_plano_mm"),
                 )
-                for sample in payload.get("muestras", [])
+                for item in payload["muestras"]
             ),
             estadisticas=HeightMapStatistics(
-                cantidad_puntos=int(stats_payload["cantidad_puntos"]),
-                cantidad_puntos_incluidos=int(stats_payload["cantidad_puntos_incluidos"]),
-                cantidad_puntos_faltantes=int(stats_payload["cantidad_puntos_faltantes"]),
-                cantidad_puntos_atipicos=int(stats_payload["cantidad_puntos_atipicos"]),
-                altura_min_mm=None if stats_payload.get("altura_min_mm") is None else float(stats_payload["altura_min_mm"]),
-                altura_max_mm=None if stats_payload.get("altura_max_mm") is None else float(stats_payload["altura_max_mm"]),
-                rango_alturas_mm=None if stats_payload.get("rango_alturas_mm") is None else float(stats_payload["rango_alturas_mm"]),
-                rms_residuos_mm=None if stats_payload.get("rms_residuos_mm") is None else float(stats_payload["rms_residuos_mm"]),
-                residuo_maximo_mm=None if stats_payload.get("residuo_maximo_mm") is None else float(stats_payload["residuo_maximo_mm"]),
-                ancho_cubierto_mm=None if stats_payload.get("ancho_cubierto_mm") is None else float(stats_payload["ancho_cubierto_mm"]),
-                alto_cubierto_mm=None if stats_payload.get("alto_cubierto_mm") is None else float(stats_payload["alto_cubierto_mm"]),
+                cantidad_puntos=statistics_payload["cantidad_puntos"],
+                cantidad_puntos_incluidos=statistics_payload["cantidad_puntos_incluidos"],
+                cantidad_puntos_faltantes=statistics_payload["cantidad_puntos_faltantes"],
+                cantidad_puntos_atipicos=statistics_payload["cantidad_puntos_atipicos"],
+                altura_min_mm=statistics_payload.get("altura_min_mm"),
+                altura_max_mm=statistics_payload.get("altura_max_mm"),
+                rango_alturas_mm=statistics_payload.get("rango_alturas_mm"),
+                valor_referencia_mm=statistics_payload.get("valor_referencia_mm"),
+                desviacion_rms_respecto_plano_mm=statistics_payload.get("desviacion_rms_respecto_plano_mm", statistics_payload.get("rms_residuos_mm")),
+                residuo_maximo_mm=statistics_payload.get("residuo_maximo_mm"),
+                ancho_cubierto_mm=statistics_payload.get("ancho_cubierto_mm"),
+                alto_cubierto_mm=statistics_payload.get("alto_cubierto_mm"),
             ),
-            plano=None if plane_payload is None else PlaneFit(
-                a=float(plane_payload["a"]),
-                b=float(plane_payload["b"]),
-                c=float(plane_payload["c"]),
-                inclinacion_x_mm_por_mm=float(plane_payload["inclinacion_x_mm_por_mm"]),
-                inclinacion_y_mm_por_mm=float(plane_payload["inclinacion_y_mm_por_mm"]),
-                rms_residuos_mm=float(plane_payload["rms_residuos_mm"]),
-                residuo_maximo_mm=float(plane_payload["residuo_maximo_mm"]),
-                residuo_minimo_mm=float(plane_payload["residuo_minimo_mm"]),
+            plano=None
+            if plane_payload is None
+            else PlaneFit(
+                a=plane_payload["a"],
+                b=plane_payload["b"],
+                c=plane_payload["c"],
+                inclinacion_x_mm_por_mm=plane_payload["inclinacion_x_mm_por_mm"],
+                inclinacion_y_mm_por_mm=plane_payload["inclinacion_y_mm_por_mm"],
+                rms_residuos_mm=plane_payload["rms_residuos_mm"],
+                residuo_maximo_mm=plane_payload["residuo_maximo_mm"],
+                residuo_minimo_mm=plane_payload["residuo_minimo_mm"],
             ),
-            creado_en=datetime.fromisoformat(str(payload["creado_en"])),
-            actualizado_en=datetime.fromisoformat(str(payload["actualizado_en"])),
+            creado_en=datetime.fromisoformat(payload["creado_en"]),
+            actualizado_en=datetime.fromisoformat(payload["actualizado_en"]),
         )
-
-

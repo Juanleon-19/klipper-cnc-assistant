@@ -22,6 +22,9 @@ describe("ui helpers", () => {
       herramienta: "Broca",
       estado: "valida",
       analisis: {
+        analysis_version: "gcode-analysis-v2",
+        current_analysis_version: "gcode-analysis-v2",
+        analisis_desactualizado: false,
         limites: null,
         avances_mm_min: [],
         profundidad_min_mm: null,

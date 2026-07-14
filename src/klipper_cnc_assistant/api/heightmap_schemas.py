@@ -5,14 +5,32 @@ from pydantic import BaseModel, Field
 from klipper_cnc_assistant.heightmap import HeightMap
 
 
+class ProbeRegionRequest(BaseModel):
+    min_x_mm: float
+    min_y_mm: float
+    max_x_mm: float
+    max_y_mm: float
+
+
+class ExclusionZoneRequest(BaseModel):
+    id: str = Field(min_length=1)
+    nombre: str = Field(min_length=1)
+    min_x_mm: float
+    min_y_mm: float
+    max_x_mm: float
+    max_y_mm: float
+
+
 class HeightMapConfigRequest(BaseModel):
     filas: int = Field(ge=2)
     columnas: int = Field(ge=2)
+    probe_region: ProbeRegionRequest
+    exclusion_zones: list[ExclusionZoneRequest] = Field(default_factory=list)
 
 
 class HeightMapSimulationRequest(HeightMapConfigRequest):
-    escenario: str
-    semilla: int = 1
+    superficie_simulada: str
+    repeticion_simulacion: int = 1
 
 
 class HeightMapImportRequest(BaseModel):
@@ -23,6 +41,22 @@ class HeightMapSampleUpdateRequest(BaseModel):
     z_mm: float | None = None
     incluida: bool | None = None
     observacion: str | None = None
+
+
+class ProbeRegionResponse(BaseModel):
+    min_x_mm: float
+    min_y_mm: float
+    max_x_mm: float
+    max_y_mm: float
+
+
+class ExclusionZoneResponse(BaseModel):
+    id: str
+    nombre: str
+    min_x_mm: float
+    min_y_mm: float
+    max_x_mm: float
+    max_y_mm: float
 
 
 class HeightGridResponse(BaseModel):
@@ -67,7 +101,8 @@ class HeightMapStatisticsResponse(BaseModel):
     altura_min_mm: float | None
     altura_max_mm: float | None
     rango_alturas_mm: float | None
-    rms_residuos_mm: float | None
+    valor_referencia_mm: float | None
+    desviacion_rms_respecto_plano_mm: float | None
     residuo_maximo_mm: float | None
     ancho_cubierto_mm: float | None
     alto_cubierto_mm: float | None
@@ -97,16 +132,49 @@ class HeightMapResponse(BaseModel):
     version_algoritmo: str
     estado: str
     fuente_datos: str
-    escenario: str | None
-    semilla: int | None
+    superficie_simulada: str | None
+    repeticion_simulacion: int | None
     etiqueta_simulada: bool
     grid: HeightGridResponse
+    probe_region: ProbeRegionResponse
+    exclusion_zones: list[ExclusionZoneResponse]
     muestras: list[HeightSampleResponse]
     estadisticas: HeightMapStatisticsResponse
     plano: PlaneFitResponse | None
     superficies: dict[str, SurfaceResponse]
     creado_en: str
     actualizado_en: str
+
+
+class CompensationPreviewPointResponse(BaseModel):
+    x_mm: float
+    y_mm: float
+    z_original_mm: float | None
+    z_superficie_mm: float | None
+    correccion_mm: float | None
+    z_compensada_mm: float | None
+    estado: str
+    observacion: str | None
+
+
+class CompensationPreviewSegmentResponse(BaseModel):
+    tipo: str
+    tipo_movimiento: str
+    numero_linea: int | None
+    estado: str
+    distancia_mm: float
+    puntos: list[CompensationPreviewPointResponse]
+
+
+class CompensationPreviewResponse(BaseModel):
+    convencion_matematica: str
+    z_referencia_mm: float
+    paso_muestreo_virtual_mm: float
+    puntos_fuera_dominio: int
+    puntos_virtuales_agregados: int
+    resumen_z_original: dict[str, float | None]
+    resumen_z_compensada: dict[str, float | None]
+    segmentos: list[CompensationPreviewSegmentResponse]
 
 
 def height_map_to_response(height_map: HeightMap, surfaces: dict[str, dict[str, object]]) -> HeightMapResponse:
@@ -117,8 +185,8 @@ def height_map_to_response(height_map: HeightMap, surfaces: dict[str, dict[str, 
         version_algoritmo=height_map.version_algoritmo,
         estado=height_map.estado,
         fuente_datos=height_map.fuente_datos,
-        escenario=height_map.escenario,
-        semilla=height_map.semilla,
+        superficie_simulada=height_map.superficie_simulada,
+        repeticion_simulacion=height_map.repeticion_simulacion,
         etiqueta_simulada=height_map.etiqueta_simulada,
         grid=HeightGridResponse(
             filas=height_map.grid.filas,
@@ -128,6 +196,23 @@ def height_map_to_response(height_map: HeightMap, surfaces: dict[str, dict[str, 
             paso_x_mm=height_map.grid.paso_x_mm,
             paso_y_mm=height_map.grid.paso_y_mm,
         ),
+        probe_region=ProbeRegionResponse(
+            min_x_mm=height_map.probe_region.min_x_mm,
+            min_y_mm=height_map.probe_region.min_y_mm,
+            max_x_mm=height_map.probe_region.max_x_mm,
+            max_y_mm=height_map.probe_region.max_y_mm,
+        ),
+        exclusion_zones=[
+            ExclusionZoneResponse(
+                id=zone.id,
+                nombre=zone.nombre,
+                min_x_mm=zone.min_x_mm,
+                min_y_mm=zone.min_y_mm,
+                max_x_mm=zone.max_x_mm,
+                max_y_mm=zone.max_y_mm,
+            )
+            for zone in height_map.exclusion_zones
+        ],
         muestras=[
             HeightSampleResponse(
                 id=sample.id,
@@ -152,12 +237,15 @@ def height_map_to_response(height_map: HeightMap, surfaces: dict[str, dict[str, 
             altura_min_mm=height_map.estadisticas.altura_min_mm,
             altura_max_mm=height_map.estadisticas.altura_max_mm,
             rango_alturas_mm=height_map.estadisticas.rango_alturas_mm,
-            rms_residuos_mm=height_map.estadisticas.rms_residuos_mm,
+            valor_referencia_mm=height_map.estadisticas.valor_referencia_mm,
+            desviacion_rms_respecto_plano_mm=height_map.estadisticas.desviacion_rms_respecto_plano_mm,
             residuo_maximo_mm=height_map.estadisticas.residuo_maximo_mm,
             ancho_cubierto_mm=height_map.estadisticas.ancho_cubierto_mm,
             alto_cubierto_mm=height_map.estadisticas.alto_cubierto_mm,
         ),
-        plano=None if height_map.plano is None else PlaneFitResponse(
+        plano=None
+        if height_map.plano is None
+        else PlaneFitResponse(
             a=height_map.plano.a,
             b=height_map.plano.b,
             c=height_map.plano.c,
@@ -190,4 +278,3 @@ def height_map_to_response(height_map: HeightMap, surfaces: dict[str, dict[str, 
         creado_en=height_map.creado_en.isoformat(),
         actualizado_en=height_map.actualizado_en.isoformat(),
     )
-

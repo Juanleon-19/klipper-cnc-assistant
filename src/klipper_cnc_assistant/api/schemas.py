@@ -134,6 +134,9 @@ class PreviewSegmentResponse(BaseModel):
 
 
 class OperationAnalysisResponse(BaseModel):
+    analysis_version: str
+    current_analysis_version: str
+    analisis_desactualizado: bool
     limites: BoundsResponse | None
     avances_mm_min: list[float]
     profundidad_min_mm: float | None
@@ -190,6 +193,7 @@ class ProjectResponse(BaseModel):
 class MachineSessionResponse(BaseModel):
     estado: str
     home_realizado: bool
+    referencia_maquina_confirmada_en: str | None
     z_en_altura_segura: bool
     herramienta_en_centro_cama: bool
     material_montado: bool
@@ -197,6 +201,32 @@ class MachineSessionResponse(BaseModel):
     cero_z_capturado: bool
     operaciones_permitidas: list[str]
     z_puede_bajar_durante: list[str]
+
+
+class ReferenceStepResponse(BaseModel):
+    id: str
+    titulo: str
+    confirmado: bool
+    fecha: str | None
+
+
+class ReferencePointResponse(BaseModel):
+    x_mm: float | None
+    y_mm: float | None
+    z_mm: float | None
+
+
+class ReferenceSessionResponse(BaseModel):
+    estado: str
+    machine_reference: dict[str, bool | str | None]
+    origen_maquina: ReferencePointResponse
+    origen_material: ReferencePointResponse
+    origen_gcode: ReferencePointResponse
+    origen_trabajo: dict[str, float | str | None] | None
+    referencia_z: dict[str, float | str | None] | None
+    pasos: list[ReferenceStepResponse]
+    compensacion_previsualizada_en: str | None
+    analysis_stale: bool
 
 
 def project_to_response(project: ProyectoPCB) -> ProjectResponse:
@@ -245,6 +275,9 @@ def operation_to_response(operation: OperacionPCB) -> OperationResponse:
 
 def analysis_to_response(analysis: OperationAnalysis) -> OperationAnalysisResponse:
     return OperationAnalysisResponse(
+        analysis_version=analysis.analysis_version,
+        current_analysis_version=analysis.current_analysis_version,
+        analisis_desactualizado=analysis.analisis_desactualizado,
         limites=None
         if analysis.limites is None
         else BoundsResponse(
@@ -331,6 +364,7 @@ def machine_session_to_response(session: MachineSessionStatus) -> MachineSession
     return MachineSessionResponse(
         estado=session.estado,
         home_realizado=session.home_realizado,
+        referencia_maquina_confirmada_en=None if session.referencia_maquina_confirmada_en is None else session.referencia_maquina_confirmada_en.isoformat(),
         z_en_altura_segura=session.z_en_altura_segura,
         herramienta_en_centro_cama=session.herramienta_en_centro_cama,
         material_montado=session.material_montado,

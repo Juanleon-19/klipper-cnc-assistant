@@ -1,5 +1,6 @@
 from .errors import ApplicationError, NotFoundError
 from .heightmap_service import HeightMapService
+from .reference_service import ReferenceSessionService
 from .services import MachineSessionService, ProjectService, SystemStatusService
 
 __all__ = [
@@ -8,5 +9,6 @@ __all__ = [
     "MachineSessionService",
     "NotFoundError",
     "ProjectService",
+    "ReferenceSessionService",
     "SystemStatusService",
 ]

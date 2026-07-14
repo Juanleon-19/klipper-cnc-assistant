@@ -2,10 +2,18 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Circle, Layer, Rect, Stage, Text } from "react-konva";
 
 import { formatCoordinate, formatMillimeters } from "../../lib/format";
-import { translateStatus } from "../../lib/ui";
-import type { HeightMap, HeightMapSurfacePoint, Material } from "../../types";
+import type { HeightMap, HeightMapSample, HeightMapSurfacePoint, Material } from "../../types";
 import { useMeasuredViewport } from "../viewer/useMeasuredViewport";
-import { buildGridTicks, chooseGridStep, fitRectWithinViewport, getVisibleWorldRect, screenToWorld, VIEWER_MARGIN, worldToScreen, zoomAtPoint } from "../viewer/viewerMath";
+import {
+  buildGridTicks,
+  chooseGridStep,
+  fitRectWithinViewport,
+  getVisibleWorldRect,
+  screenToWorld,
+  VIEWER_MARGIN,
+  worldToScreen,
+  zoomAtPoint,
+} from "../viewer/viewerMath";
 import { rectFromMaterial } from "../viewer/viewerTypes";
 import type { ViewTransform } from "../viewer/viewerTypes";
 
@@ -28,12 +36,18 @@ function buildTransform(material: Material, width: number, height: number): View
 
 function colorScale(value: number | null, min: number, max: number): string {
   if (value == null || Number.isNaN(value)) {
-    return "rgba(78, 92, 106, 0.42)";
+    return "rgba(78, 92, 106, 0.28)";
   }
   const span = Math.max(0.0001, max - min);
   const ratio = Math.max(0, Math.min(1, (value - min) / span));
   const hue = 220 - ratio * 220;
   return `hsl(${hue} 74% 58%)`;
+}
+
+function findExtreme(samples: HeightMapSample[], direction: "min" | "max") {
+  return samples
+    .filter((sample) => sample.z_mm != null && sample.incluida)
+    .sort((left, right) => (direction === "min" ? (left.z_mm ?? 0) - (right.z_mm ?? 0) : (right.z_mm ?? 0) - (left.z_mm ?? 0)))[0] ?? null;
 }
 
 export function HeightMapHeatmap({ material, heightMap, mode }: HeightMapHeatmapProps) {
@@ -43,7 +57,7 @@ export function HeightMapHeatmap({ material, heightMap, mode }: HeightMapHeatmap
   const viewport = useMeasuredViewport(stageNode);
   const [transform, setTransform] = useState<ViewTransform>({ scale: 8, panX: VIEWER_MARGIN, panY: 480 });
   const [cursor, setCursor] = useState<{ x: number; y: number } | null>(null);
-  const [hoverPoint, setHoverPoint] = useState<HeightMapSurfacePoint | null>(null);
+  const [hoverPoint, setHoverPoint] = useState<HeightMapSurfacePoint | HeightMapSample | null>(null);
 
   useEffect(() => {
     setTransform(buildTransform(material, viewport.width, viewport.height));
@@ -56,13 +70,13 @@ export function HeightMapHeatmap({ material, heightMap, mode }: HeightMapHeatmap
   const gridStep = chooseGridStep(transform.scale);
   const visibleRect = getVisibleWorldRect(transform, viewport);
   const gridTicks = buildGridTicks(visibleRect, gridStep);
-  const cellWidth = surface.columnas > 1 ? material.ancho_mm / (surface.columnas - 1) : material.ancho_mm;
-  const cellHeight = surface.filas > 1 ? material.alto_mm / (surface.filas - 1) : material.alto_mm;
-
-  const samplesById = useMemo(
-    () => Object.fromEntries(heightMap.muestras.map((sample) => [sample.id, sample])),
-    [heightMap.muestras]
-  );
+  const cellWidth = surface.columnas > 1 ? heightMap.probe_region.max_x_mm - heightMap.probe_region.min_x_mm : material.ancho_mm;
+  const cellHeight = surface.filas > 1 ? heightMap.probe_region.max_y_mm - heightMap.probe_region.min_y_mm : material.alto_mm;
+  const denseCellWidth = surface.columnas > 1 ? cellWidth / (surface.columnas - 1) : cellWidth;
+  const denseCellHeight = surface.filas > 1 ? cellHeight / (surface.filas - 1) : cellHeight;
+  const minSample = useMemo(() => findExtreme(heightMap.muestras, "min"), [heightMap.muestras]);
+  const maxSample = useMemo(() => findExtreme(heightMap.muestras, "max"), [heightMap.muestras]);
+  const outliers = heightMap.muestras.filter((sample) => sample.estado_calidad === "atipica");
 
   const toggleFullscreen = async () => {
     const node = fullscreenRef.current;
@@ -81,10 +95,10 @@ export function HeightMapHeatmap({ material, heightMap, mode }: HeightMapHeatmap
       <div className="viewer-header">
         <div>
           <h3>Mapa de alturas 2D</h3>
-          <p className="muted">DATOS {heightMap.etiqueta_simulada ? "SIMULADOS" : translateStatus(heightMap.fuente_datos)}. La escala de color muestra {translateStatus(mode)}.</p>
+          <p className="muted">Muestra simultáneamente material bruto, región sondeable, zonas excluidas, muestras y superficie interpolada.</p>
         </div>
         <div className="toolbar-inline">
-          <button className="button button--ghost" type="button" onClick={() => setTransform(buildTransform(material, viewport.width, viewport.height))}>Ajustar al material</button>
+          <button className="button button--ghost" type="button" onClick={() => setTransform(buildTransform(material, viewport.width, viewport.height))}>Encuadrar material</button>
           <button className="button button--ghost" type="button" onClick={() => void toggleFullscreen()}>Pantalla completa</button>
         </div>
       </div>
@@ -147,8 +161,8 @@ export function HeightMapHeatmap({ material, heightMap, mode }: HeightMapHeatmap
               })}
 
               {surface.puntos.map((point) => {
-                const topLeft = worldToScreen({ x: point.x_mm, y: Math.min(material.alto_mm, point.y_mm + cellHeight) }, transform);
-                const bottomRight = worldToScreen({ x: Math.min(material.ancho_mm, point.x_mm + cellWidth), y: point.y_mm }, transform);
+                const topLeft = worldToScreen({ x: point.x_mm, y: Math.min(heightMap.probe_region.max_y_mm, point.y_mm + denseCellHeight) }, transform);
+                const bottomRight = worldToScreen({ x: Math.min(heightMap.probe_region.max_x_mm, point.x_mm + denseCellWidth), y: point.y_mm }, transform);
                 return (
                   <Rect
                     key={`${point.fila}-${point.columna}`}
@@ -157,9 +171,57 @@ export function HeightMapHeatmap({ material, heightMap, mode }: HeightMapHeatmap
                     width={Math.max(1, bottomRight.x - topLeft.x)}
                     height={Math.max(1, bottomRight.y - topLeft.y)}
                     fill={colorScale(point.z_mm, minValue, maxValue)}
-                    opacity={point.estado === "ok" ? 0.86 : 0.3}
+                    opacity={point.estado === "ok" ? 0.88 : 0.22}
                     onMouseEnter={() => setHoverPoint(point)}
                     onMouseLeave={() => setHoverPoint((current) => (current === point ? null : current))}
+                  />
+                );
+              })}
+
+              {(() => {
+                const bottomLeft = worldToScreen({ x: 0, y: 0 }, transform);
+                const topRight = worldToScreen({ x: material.ancho_mm, y: material.alto_mm }, transform);
+                return (
+                  <Rect
+                    x={bottomLeft.x}
+                    y={topRight.y}
+                    width={Math.max(1, topRight.x - bottomLeft.x)}
+                    height={Math.max(1, bottomLeft.y - topRight.y)}
+                    stroke="#8fb5c8"
+                    strokeWidth={2}
+                    dash={[8, 4]}
+                  />
+                );
+              })()}
+
+              {(() => {
+                const bottomLeft = worldToScreen({ x: heightMap.probe_region.min_x_mm, y: heightMap.probe_region.min_y_mm }, transform);
+                const topRight = worldToScreen({ x: heightMap.probe_region.max_x_mm, y: heightMap.probe_region.max_y_mm }, transform);
+                return (
+                  <Rect
+                    x={bottomLeft.x}
+                    y={topRight.y}
+                    width={Math.max(1, topRight.x - bottomLeft.x)}
+                    height={Math.max(1, bottomLeft.y - topRight.y)}
+                    stroke="#f6cf73"
+                    strokeWidth={2}
+                  />
+                );
+              })()}
+
+              {heightMap.exclusion_zones.map((zone) => {
+                const bottomLeft = worldToScreen({ x: zone.min_x_mm, y: zone.min_y_mm }, transform);
+                const topRight = worldToScreen({ x: zone.max_x_mm, y: zone.max_y_mm }, transform);
+                return (
+                  <Rect
+                    key={zone.id}
+                    x={bottomLeft.x}
+                    y={topRight.y}
+                    width={Math.max(1, topRight.x - bottomLeft.x)}
+                    height={Math.max(1, bottomLeft.y - topRight.y)}
+                    fill="rgba(255, 122, 122, 0.12)"
+                    stroke="#ff7a7a"
+                    strokeWidth={1.5}
                   />
                 );
               })}
@@ -184,17 +246,40 @@ export function HeightMapHeatmap({ material, heightMap, mode }: HeightMapHeatmap
                     }
                     stroke="rgba(7,12,15,0.9)"
                     strokeWidth={1}
+                    onMouseEnter={() => setHoverPoint(sample)}
+                    onMouseLeave={() => setHoverPoint((current) => (current === sample ? null : current))}
                   />
                 );
               })}
 
-              <Text x={12} y={10} text="Y" fill="#c6d7e3" fontSize={12} />
-              <Text x={viewport.width - 22} y={viewport.height - 24} text="X" fill="#c6d7e3" fontSize={12} />
+              {[minSample, maxSample, ...outliers].filter(Boolean).map((sample, index) => {
+                const safeSample = sample as HeightMapSample;
+                const screen = worldToScreen({ x: safeSample.x_mm, y: safeSample.y_mm }, transform);
+                return <Circle key={`marker-${index}`} x={screen.x} y={screen.y} radius={7} stroke="#ffffff" strokeWidth={1.2} />;
+              })}
+
+              {cursor ? (
+                <>
+                  <Rect x={worldToScreen({ x: cursor.x, y: 0 }, transform).x} y={0} width={1} height={viewport.height} fill="rgba(255,255,255,0.28)" />
+                  <Rect x={0} y={worldToScreen({ x: 0, y: cursor.y }, transform).y} width={viewport.width} height={1} fill="rgba(255,255,255,0.28)" />
+                </>
+              ) : null}
+
+              {gridTicks.x.map((value) => {
+                const screen = worldToScreen({ x: value, y: 0 }, transform);
+                return <Text key={`tx-${value}`} x={screen.x + 4} y={viewport.height - 20} text={`${Math.round(value)} mm`} fill="#b9ceda" fontSize={11} />;
+              })}
+              {gridTicks.y.map((value) => {
+                const screen = worldToScreen({ x: 0, y: value }, transform);
+                return <Text key={`ty-${value}`} x={8} y={screen.y - 8} text={`${Math.round(value)} mm`} fill="#b9ceda" fontSize={11} />;
+              })}
+              <Text x={12} y={10} text="Y (mm)" fill="#c6d7e3" fontSize={12} />
+              <Text x={viewport.width - 60} y={viewport.height - 24} text="X (mm)" fill="#c6d7e3" fontSize={12} />
             </Layer>
           </Stage>
 
           <div className="viewer-stage__overlay viewer-stage__overlay--top mono-text">
-            {translateStatus(mode)} · rango {formatMillimeters(heightMap.estadisticas.rango_alturas_mm, 3)}
+            Material · región sondeable · interpolación · muestras
           </div>
           <div className="viewer-stage__overlay viewer-stage__overlay--bottom mono-text">
             {cursor ? `${formatCoordinate(cursor.x)}, ${formatCoordinate(cursor.y)} mm` : "Cursor -"}
@@ -204,31 +289,22 @@ export function HeightMapHeatmap({ material, heightMap, mode }: HeightMapHeatmap
 
       <div className="viewer-footer">
         <div className="viewer-footer__meta mono-text">
-          Mín {formatMillimeters(minValue, 3)} · Máx {formatMillimeters(maxValue, 3)} · RMS {formatMillimeters(heightMap.estadisticas.rms_residuos_mm, 3)}
+          Alturas de la superficie · mín {formatMillimeters(minValue, 3)} · máx {formatMillimeters(maxValue, 3)} · desviación RMS {formatMillimeters(heightMap.estadisticas.desviacion_rms_respecto_plano_mm, 3)}
         </div>
         <div className="viewer-footer__meta mono-text">
-          {hoverPoint ? `Celda ${hoverPoint.fila + 1}/${hoverPoint.columna + 1}: ${formatMillimeters(hoverPoint.z_mm, 4)} · ${translateStatus(hoverPoint.estado)}` : "Pase el cursor para inspeccionar valores"}
+          {hoverPoint && "z_mm" in hoverPoint
+            ? `X ${formatMillimeters(hoverPoint.x_mm, 3)} · Y ${formatMillimeters(hoverPoint.y_mm, 3)} · Z ${formatMillimeters(hoverPoint.z_mm, 4)}`
+            : "Tooltip X/Y/Z disponible sobre muestras y superficie"}
         </div>
-      </div>
-
-      <div className="heightmap-legend">
-        <div className="depth-legend__bar" />
-        <span className="mono-text">{formatMillimeters(minValue, 3)}</span>
-        <span className="mono-text">{formatMillimeters(maxValue, 3)}</span>
       </div>
 
       <div className="chip-list">
-        {heightMap.muestras.slice(0, 6).map((sample) => {
-          const key = `${sample.fila}-${sample.columna}`;
-          const localSample = samplesById[sample.id];
-          return (
-            <li className="chip" key={key}>
-              P{sample.fila + 1}-{sample.columna + 1}: {formatMillimeters(localSample?.z_mm, 3)}
-            </li>
-          );
-        })}
+        <li className="chip">Contorno material</li>
+        <li className="chip">Región sondeable</li>
+        <li className="chip">Zonas excluidas</li>
+        <li className="chip">Muestras reales/simuladas</li>
+        <li className="chip">Superficie interpolada</li>
       </div>
     </section>
   );
 }
-
