@@ -1,5 +1,5 @@
 [Unit]
-Description=Klipper CNC Assistant Web API (simulated mode)
+Description=Klipper CNC Assistant Web API
 After=network-online.target
 Wants=network-online.target
 
@@ -8,6 +8,7 @@ Type=simple
 User=impresora
 WorkingDirectory=/home/impresora/klipper-cnc-assistant
 Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=-/home/impresora/klipper-cnc-assistant/deploy/klipper-cnc-assistant.env
 ExecStart=/home/impresora/klipper-cnc-assistant/.venv/bin/python -m klipper_cnc_assistant serve --host 127.0.0.1 --port 8000 --data-dir /home/impresora/klipper-cnc-assistant/data
 Restart=on-failure
 RestartSec=3

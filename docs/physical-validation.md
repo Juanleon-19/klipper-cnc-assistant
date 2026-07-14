@@ -39,8 +39,8 @@ Esta guía no debe ejecutarse sin operador presente, máquina despejada y parada
 
 ## Inicialización
 
-1. Ingresar un Z objetivo absoluto seguro, en milímetros.
-2. Confirmar que el Z objetivo está dentro de límites reales de Klipper.
+1. Ingresar una Z segura de traslado, en milímetros.
+2. Confirmar que la Z segura de traslado está dentro de límites reales de Klipper.
 3. Confirmar inicialización desde la interfaz.
 4. Verificar que se ejecuta homing.
 5. Verificar que el sistema calcula:
@@ -48,7 +48,7 @@ Esta guía no debe ejecutarse sin operador presente, máquina despejada y parada
    `center_y = (y_min + y_max) / 2`
 6. Verificar movimiento primero a Z segura.
 7. Verificar movimiento XY al centro.
-8. Verificar movimiento final al Z objetivo ingresado.
+8. Verificar que X/Y se mueve al centro manteniendo la Z segura de traslado.
 9. Confirmar posición final y velocidad estable en diagnóstico.
 
 ## Joystick
@@ -92,3 +92,20 @@ Esta guía no debe ejecutarse sin operador presente, máquina despejada y parada
 - El joystick permanece discreto y cardinal.
 - La sonda guarda el punto de contacto y retrae.
 - Todas las condiciones de bloqueo muestran motivo concreto.
+
+
+## Procedimiento de validación de malla física medida
+
+1. Iniciar `klipper-cnc-assistant.service` en `MACHINE_MODE=physical` con Moonraker y serie explícitos.
+2. Abrir la web y seleccionar proyecto, montaje, operación y herramienta.
+3. Abrir `Sistema`, pulsar `Conectar` y comprobar Moonraker HTTP, WebSocket, Klipper `ready` y Arduino con paquetes válidos recientes.
+4. Observar joystick, botón externo y sonda en diagnóstico sin movimiento.
+5. Ingresar Z segura de traslado y ejecutar `Homing + Z segura + centro`.
+6. Confirmar que `homed_axes` contiene `xyz`, que la posición se estabilizó y que X/Y está en el centro real.
+7. Habilitar joystick X/Y y ubicar la herramienta en el 0,0 del G-code de FlatCAM.
+8. Armar referencia y pulsar el botón externo. Verificar descenso discreto, contacto, retracto y referencia `MEASURED`.
+9. Generar mapa físico desde referencia para la herramienta seleccionada; revisar cantidad, separación, límites locales, límites de máquina y recorrido serpentino.
+10. Confirmar ejecución física. Ejecutar un punto por vez, observar `MOVING/PROBING/MEASURED`, pausar, reanudar y cancelar conservando puntos medidos.
+11. Completar todos los puntos y revisar mapa 2D, superficie 3D, plano, residuos, rango, RMS y cobertura de operaciones.
+
+No ejecutar este procedimiento sin operador presente, máquina despejada y parada física disponible. No reiniciar Klipper automáticamente.

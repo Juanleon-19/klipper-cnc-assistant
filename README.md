@@ -4,7 +4,7 @@ Klipper CNC Assistant prepara trabajos PCB sobre una CNC adaptada a Klipper. El 
 
 ## Estado actual
 
-La entrega local implementa la **Fase 1: integración física segura inicial y correcciones de producto**.
+La entrega local implementa la **Fase 2 local: integración física corregida y sondeo de malla medido en software**.
 
 Incluye:
 
@@ -13,19 +13,18 @@ Incluye:
 - persistencia JSON con esquema `1.5`;
 - jerarquía Proyecto -> Montaje -> Operaciones ordenadas y repetibles;
 - G-code, análisis, herramienta, advertencias y trayectoria independientes por operación;
-- referencias y mapa compartidos por montaje;
+- referencias por montaje y mapas físicos medidos separados por montaje, herramienta, referencia y configuración de malla;
 - mapas simulados/importados, interpolación, plano, residuos, visor 2D y superficie 3D;
 - previsualización matemática de compensación, sin exportación ejecutable;
 - validación de dominio con detalle de puntos fuera y distancia al dominio;
 - modo `SIMULATED` predeterminado;
 - modo `PHYSICAL` explícito mediante configuración;
-- runtime físico singleton con Moonraker HTTP, WebSocket, Arduino, joystick, botones y sonda;
+- runtime físico singleton con Moonraker HTTP, WebSocket, Arduino, joystick discreto, botón externo, sonda y malla punto a punto;
 - vista “Sistema físico” con diagnóstico consolidado y acciones físicas explícitas.
 
 No incluye todavía:
 
-- sondeo físico de malla completa;
-- generación o descarga de G-code compensado ejecutable;
+- generación o descarga final de G-code compensado ejecutable;
 - ejecución completa de trabajos;
 - spindle automático;
 - jog continuo;
@@ -76,6 +75,12 @@ MOONRAKER_WS=ws://127.0.0.1:7126/websocket
 SERIAL_PORT=/dev/ttyUSB0
 SERIAL_BAUDRATE=115200
 MACHINE_SAFE_Z=10
+MOONRAKER_REQUEST_TIMEOUT=2
+MACHINE_HOME_TIMEOUT=90
+MACHINE_MOVE_TIMEOUT=8
+MACHINE_SETTLE_TIMEOUT=0.02
+TELEMETRY_STALE_TIMEOUT=2
+SERIAL_STARTUP_DELAY=2
 ```
 
 Hay dos instancias Moonraker detectadas en la máquina local; por seguridad no se elige una automáticamente. Configure URL y WebSocket de forma explícita.
@@ -136,18 +141,20 @@ No reinicie Klipper ni systemd de Klipper salvo que esté validando físicamente
 8. Validar cobertura del mapa.
 9. Previsualizar compensación matemática.
 
-## Flujo físico de Fase 1
+## Flujo físico implementado
 
-1. Abrir “Sistema”.
-2. Confirmar que la etiqueta muestra `FÍSICO`.
-3. Conectar Moonraker/Klipper/Arduino.
-4. Revisar diagnóstico y seguridad.
-5. Ingresar Z objetivo absoluto en mm.
-6. Confirmar inicialización.
-7. El backend ejecuta homing, calcula centro con límites reales, mueve Z segura, mueve XY al centro y mueve a Z objetivo.
-8. Habilitar joystick solo después de inicialización correcta.
-9. Capturar origen X/Y desde la posición actual.
-10. Solicitar sonda, confirmar sonda y guardar referencia Z desde el contacto.
+1. Seleccionar proyecto, montaje, operación y herramienta.
+2. Abrir “Sistema” y confirmar `FÍSICO`.
+3. Conectar Moonraker HTTP, WebSocket, Klipper y Arduino.
+4. Revisar hilo serie, bytes, paquetes completos, paquetes válidos, checksums, edad del último paquete y causa exacta de bloqueo.
+5. Ejecutar homing; el backend confirma `toolhead.homed_axes` y velocidad cero, no la duración de la petición HTTP.
+6. Ingresar Z segura de traslado, mover Z, calcular centro real y mover X/Y al centro con Z segura.
+7. Habilitar joystick X/Y discreto para ubicar el 0,0 del G-code de FlatCAM.
+8. Armar referencia, pulsar botón externo o confirmar desde la interfaz, sondear Z en pasos discretos y guardar X/Y/Z medidos.
+9. Generar mapa físico medido por montaje + herramienta + referencia + configuración de malla.
+10. Revisar puntos, límites, separación, recorrido serpentino y estado.
+11. Ejecutar la malla solo tras confirmación explícita: un punto por etapa, con persistencia inmediata.
+12. Pausar, reanudar o cancelar conservando puntos medidos; `M112` queda separado como emergencia real.
 
 Guía detallada: [docs/physical-validation.md](docs/physical-validation.md)
 
@@ -170,4 +177,4 @@ npm run test
 npm run build
 ```
 
-Última validación local: backend 57 pruebas, frontend 37 pruebas, `pip check`, lint y build correctos.
+Última validación local: backend 60 pruebas, frontend 37 pruebas, `pip check`, lint y build correctos.

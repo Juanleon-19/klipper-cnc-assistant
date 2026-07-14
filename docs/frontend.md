@@ -171,10 +171,17 @@ npm run build
 - la superficie 3D es una visualización del mapa, no una simulación física del mecanizado.
 
 
-## Fase 1: sistema físico
+## integración física inicial: sistema físico
 
 La vista `Sistema` muestra el modo permanente `SIMULADO` o `FÍSICO`, diagnóstico de aplicación, Moonraker, Klipper, Arduino, controlador y seguridad. En modo simulado los controles físicos quedan bloqueados.
 
-Acciones disponibles en modo físico: conectar, activar diagnóstico, inicializar con Z objetivo absoluto, habilitar joystick, solicitar sonda, confirmar sonda, cancelar operación, parada segura y emergencia `M112` con confirmación.
+Acciones disponibles en modo físico: conectar, activar diagnóstico, inicializar con Z segura de traslado, habilitar joystick, solicitar sonda, confirmar sonda, cancelar operación, parada segura y emergencia `M112` con confirmación.
 
 La UI no ofrece ejecución de trabajos, exportación de G-code compensado ni malla física completa.
+
+
+## Flujo físico guiado
+
+La vista `Sistema` queda como diagnóstico técnico: muestra estado del runtime, Moonraker, Klipper, Arduino, controlador y seguridad. Las acciones se filtran por estado; no se muestran todos los botones como acciones equivalentes. El operador ve conexión, homing, Z segura, centro, espera de referencia, referencia armada, sondeo, malla y error.
+
+El diagnóstico Arduino muestra hilo activo, bytes recibidos, paquetes completos, paquetes válidos, inválidos, checksums, edad del último paquete válido, excepción y causa exacta de bloqueo. Los endpoints de mapa físico permiten planificar desde la referencia medida, consultar mapa activo, ejecutar el siguiente punto, pausar, reanudar y cancelar.

@@ -131,7 +131,7 @@ Detalles de implementación:
 - la compensación actual es solo analítica y visual.
 
 
-## Fase 1: runtime físico
+## integración física inicial: runtime físico
 
 La aplicación añade `MachineRuntime` como singleton por proceso FastAPI. En modo `SIMULATED` no abre puerto serie, no inicia WebSocket y no envía comandos de movimiento. En modo `PHYSICAL`, la conexión es explícita y usa `MOONRAKER_URL`, `MOONRAKER_WS`, `SERIAL_PORT` y `SERIAL_BAUDRATE`.
 
@@ -140,3 +140,12 @@ La aplicación añade `MachineRuntime` como singleton por proceso FastAPI. En mo
 Los comandos físicos son operaciones `POST`; las consultas de diagnóstico no tienen efectos laterales. La inicialización física se orquesta en backend y no depende de una macro `HOME_AND_CENTER`. El centro se calcula con límites descubiertos desde Klipper.
 
 La compensación usa coordenadas locales del montaje/G-code para consultar el mapa. La posición física del montaje se guarda como referencia `MEASURED` y se usa para ubicar físicamente el montaje, no para extrapolar ni corregir fuera de dominio.
+
+
+## Integración física corregida
+
+El runtime productivo conserva el protocolo validado en los experimentos 007 y 008: `SerialDriver`, `CommandMapper`, `ManualJogController` y `JogController` son la frontera de entrada y movimiento. `MoonrakerTelemetry` suscribe `motion_report` y `toolhead` para mantener posición, velocidad, límites y `homed_axes` en el mismo `MachineState` compartido.
+
+Moonraker separa aceptación HTTP, ejecución física y confirmación de estado. `G28` puede producir timeout de transporte sin declararse fallo físico si Klipper sigue conectado; el backend consulta `toolhead.homed_axes`, velocidad y límites hasta `MACHINE_HOME_TIMEOUT`. Los movimientos automáticos esperan posición objetivo y velocidad cero hasta `MACHINE_MOVE_TIMEOUT`.
+
+El servicio `PhysicalMapService` planifica mapas `MEASURED` por montaje/herramienta/referencia/configuración, usa la unión de límites analizados de operaciones de la misma herramienta y genera recorrido serpentino. La ejecución de malla es punto a punto: Z segura, XY, sondeo discreto, retracto y persistencia inmediata.

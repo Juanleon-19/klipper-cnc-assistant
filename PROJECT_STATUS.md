@@ -2,20 +2,20 @@
 
 **Última actualización:** 2026-07-14
 **Rama local:** `fix/phase-43-stability-workflow`
-**Estado global:** Fase 1 implementada y validada en software; pendiente validación física supervisada
+**Estado global:** Integración física corregida y sondeo de malla implementado en software; pendiente validación física supervisada
 
-Este documento resume el estado local real del repositorio. La rama contiene cambios no publicados de Fase 1 sobre la base `3911214`.
+Este documento resume el estado local real del repositorio. La rama contiene cambios no publicados de integración física inicial sobre la base `3911214`.
 
 ## Resumen ejecutivo
 
-La aplicación conserva el modo simulado como predeterminado y añade una integración física segura y explícita con Moonraker, Klipper y el controlador Arduino. El producto sigue separando preparación digital, simulación y control físico.
+La aplicación conserva el modo simulado como predeterminado y ahora integra el flujo físico supervisado hasta planificar y ejecutar punto a punto una malla medida por herramienta. El producto sigue separando preparación digital, simulación y control físico.
 
 Implementado en esta fase:
 
 - runtime físico singleton por proceso FastAPI;
 - modo `SIMULATED` predeterminado y modo `PHYSICAL` mediante `MACHINE_MODE=physical`;
 - diagnóstico consolidado de aplicación, Moonraker, Klipper, Arduino, controlador y seguridad;
-- flujo físico guiado de conexión, diagnóstico, Z objetivo, homing, cálculo de centro con límites reales, Z segura, XY centro y Z objetivo;
+- flujo físico guiado de conexión, diagnóstico, homing confirmado por `toolhead.homed_axes`, Z segura indicada por usuario y XY al centro real;
 - joystick discreto cardinal usando `ManualJogController` y `JogController`;
 - solicitud y confirmación de sonda de un punto;
 - captura física de origen X/Y y referencia Z de montaje, con fuente `MEASURED`;
@@ -27,9 +27,7 @@ Implementado en esta fase:
 
 No se implementó todavía:
 
-- sondeo físico de malla completa;
-- recorrido automático de múltiples puntos;
-- generación o descarga de G-code compensado ejecutable;
+- generación final o descarga de G-code compensado ejecutable;
 - ejecución completa de trabajos;
 - control automático de spindle;
 - jog continuo;
@@ -69,11 +67,14 @@ Variables principales:
 - `SERIAL_PORT=/dev/ttyUSB0`
 - `SERIAL_BAUDRATE=115200`
 - `MACHINE_SAFE_Z=10.0`
-- `MACHINE_TELEMETRY_FRESH_TIMEOUT=2.0`
+- `MOONRAKER_REQUEST_TIMEOUT=2.0`
+- `MACHINE_HOME_TIMEOUT=90.0`
+- `MACHINE_TELEMETRY_FRESH_TIMEOUT=2.0` o `TELEMETRY_STALE_TIMEOUT=2.0`
 - `MACHINE_SERIAL_FRESH_TIMEOUT=2.0`
 - `MACHINE_SETTLE_TOLERANCE=0.02`
 - `MACHINE_VELOCITY_TOLERANCE=0.05`
 - `MACHINE_MOVE_TIMEOUT=8.0`
+- `SERIAL_STARTUP_DELAY=2.0`
 - `PROBE_STEP_DISTANCE=0.05`
 - `PROBE_LOWER_SPEED=1.0`
 - `PROBE_RETRACT_DISTANCE=1.0`
@@ -88,7 +89,7 @@ Se inspeccionaron:
 - `/home/impresora/printer_kp3s1_data/config/printer.cfg`
 - `/home/impresora/printer_kp3s2_data/config/printer.cfg`
 
-No se modificó configuración Klipper, no se reinició Klipper y no se creó macro `HOME_AND_CENTER`. El cálculo de centro, Z segura y Z objetivo pertenecen al backend. Existe un riesgo preexistente: ambos `printer.cfg` incluyen `mainsail.cfg` dos veces. Queda documentado, pero no se tocó porque no era necesario para Fase 1.
+No se modificó configuración Klipper, no se reinició Klipper y no se creó macro `HOME_AND_CENTER`. El cálculo de centro, Z segura de traslado pertenece al backend. Existe un riesgo preexistente: ambos `printer.cfg` incluyen `mainsail.cfg` dos veces. Queda documentado, pero no se tocó porque no era necesario para integración física inicial.
 
 ## Modelo de coordenadas y dominio
 
@@ -123,8 +124,8 @@ Reglas implementadas:
 - joystick bloqueado hasta inicialización y habilitación manual;
 - movimiento manual discreto, cardinal y por transición `CENTER -> dirección`;
 - diagonales descartadas;
-- botón externo genera `PROBE_REQUESTED`;
-- la sonda baja solo tras confirmación explícita;
+- botón externo inicia la referencia cuando el estado está `REFERENCE_ARMED`;
+- la sonda baja solo en referencia armada o ejecución explícita de punto de malla;
 - emergencia `M112` separada de cancelar operación y requiere confirmación API;
 - no existe jog continuo de producto.
 
@@ -132,7 +133,7 @@ Reglas implementadas:
 
 | Verificación | Resultado |
 | --- | --- |
-| `PYTHONPATH=src .venv/bin/python -m unittest discover -s tests -v` | 57 pruebas correctas |
+| `PYTHONPATH=src .venv/bin/python -m unittest discover -s tests -v` | 60 pruebas correctas |
 | `.venv/bin/python -m pip check` | Sin dependencias rotas |
 | `npm run lint` | Correcto |
 | `npm run test` | 37 pruebas correctas en 10 archivos |
@@ -155,3 +156,21 @@ Reglas implementadas:
 - Implementar malla física completa solo después de validar sonda de un punto.
 - Diseñar generación revisable de G-code compensado, todavía sin ejecución automática.
 - Separar carga diferida de Plotly si afecta operación real.
+
+
+## Revisión de experimentos físicos
+
+Se revisaron los experimentos `001` a `008`. La migración productiva reutiliza la ruta validada `Arduino -> SerialDriver -> CommandMapper -> ManualJogController -> JogController -> Moonraker -> Klipper`. El experimento 007 validó joystick cardinal discreto, sin diagonales y con un movimiento por transición `CENTER -> dirección`. El experimento 008 mantuvo ese comportamiento y validó sonda por pasos discretos con captura `X/Y/Z` y retracto.
+
+La causa del timeout observado era el uso del timeout HTTP fijo de 5 s como si fuera confirmación de ejecución física. Ahora el comando se trata como aceptación de transporte y la finalización se confirma por estado Klipper. La causa del homing no reconocido era que la WebSocket solo suscribía `motion_report`, no `toolhead.homed_axes`. La causa de “puerto abierto, paquetes válidos = 0” queda diagnosticable: el runtime distingue bytes, paquetes completos, checksums, drops de sincronía, hilo serial, edad del último paquete, última excepción y espera de reinicio Arduino al abrir el puerto.
+
+## Mapas medidos por herramienta
+
+Un mapa físico medido se identifica por montaje, herramienta, referencia medida y configuración de malla. Se guarda bajo `maps/measured/<setup>/<tool>/<timestamp...>/height_map.json`, conserva `source=MEASURED`, no reemplaza mapas simulados y persiste cada punto inmediatamente. Herramientas diferentes no comparten mapa automáticamente.
+
+
+## Configuración local verificada el 2026-07-14
+
+`systemctl show klipper-cnc-assistant.service -p Environment` reporta `MACHINE_MODE=physical`, `MOONRAKER_URL=http://127.0.0.1:7126`, `MOONRAKER_WS=ws://127.0.0.1:7126/websocket`, `SERIAL_PORT=/dev/ttyUSB0`, `SERIAL_BAUDRATE=115200` y `MACHINE_SAFE_Z=10`.
+
+Se leyeron `printer_kp3s1_data/config/printer.cfg` y `printer_kp3s2_data/config/printer.cfg`. No se modificaron límites, pasos, dirección de motores, macros ni firmware. Ambos archivos mantienen doble `[include mainsail.cfg]`, observado como condición preexistente.

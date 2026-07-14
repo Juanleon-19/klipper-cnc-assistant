@@ -82,3 +82,19 @@ MACHINE_SAFE_Z=10
 ```
 
 Después de `npm run build` debe reiniciarse el servicio de la aplicación para servir el nuevo frontend. No se requiere modificar systemd ni reiniciar Klipper para esta fase.
+
+
+## Timeouts físicos
+
+El servicio acepta variables separadas para transporte y operación física:
+
+```bash
+MOONRAKER_REQUEST_TIMEOUT=2
+MACHINE_HOME_TIMEOUT=90
+MACHINE_MOVE_TIMEOUT=8
+MACHINE_SETTLE_TIMEOUT=0.02
+TELEMETRY_STALE_TIMEOUT=2
+SERIAL_STARTUP_DELAY=2
+```
+
+`MOONRAKER_REQUEST_TIMEOUT` no significa que el movimiento terminó; solo limita la llamada HTTP. Homing y movimientos se confirman por estado de Klipper. `SERIAL_STARTUP_DELAY` contempla el reinicio del Arduino al abrir `/dev/ttyUSB0`.
