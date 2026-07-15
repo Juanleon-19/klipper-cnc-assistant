@@ -488,9 +488,20 @@ describe("ProjectWorkspace", () => {
 
     expect(await screen.findByText(/Mapa medido físicamente/i)).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /^SIMULADO$/i })).toBeNull();
-    expect(screen.getByRole("button", { name: /Generar vista previa de malla/i })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /Armar sondeo/i })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /INICIAR SONDEO AUTOMÁTICO/i })).toBeInTheDocument();
+    const previewButton = screen.getByRole("button", { name: /^1\. Generar vista previa de malla$/i });
+    const validateButton = screen.getByRole("button", { name: /^2\. Validar límites$/i });
+    const armButton = screen.getByRole("button", { name: /^3\. Armar sondeo$/i });
+    const startButton = screen.getByRole("button", { name: /^4\. Iniciar sondeo automático$/i });
+    expect(previewButton).toBeInTheDocument();
+    expect(validateButton).toBeInTheDocument();
+    expect(armButton).toBeInTheDocument();
+    expect(startButton).toBeInTheDocument();
+    expect(previewButton).not.toHaveClass("button--ghost");
+    expect(validateButton).not.toHaveClass("button--ghost");
+    expect(armButton).not.toHaveClass("button--ghost");
+    expect(startButton).not.toHaveClass("button--ghost");
+    expect(screen.getByRole("button", { name: /^Pausar$/i })).toHaveClass("button--ghost");
+    expect(screen.getByRole("button", { name: /^Cancelar$/i })).toHaveClass("button--ghost");
   });
 
 

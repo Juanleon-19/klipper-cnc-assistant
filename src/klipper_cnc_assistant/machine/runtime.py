@@ -577,7 +577,7 @@ class MachineRuntime:
         finally:
             self._movement_lock.release()
 
-    def probe_mesh_point(self, point: dict[str, Any]) -> dict[str, Any]:
+    def probe_mesh_point(self, point: dict[str, Any], probe_config: dict[str, Any] | None = None) -> dict[str, Any]:
         self._require_physical_ready()
         if not self._movement_lock.acquire(blocking=False):
             raise MachineRuntimeError("Ya hay un movimiento u operación física activa.")
@@ -592,10 +592,16 @@ class MachineRuntime:
             machine = self._machine
             if machine is None:
                 raise MachineRuntimeError("No hay estado de máquina descubierto.")
-            safe_z = self._safe_z(machine)
+            safe_z = self._safe_z(machine, safe_z_mm=self._probe_config_float(probe_config, "safe_z_mm"))
             self._move_absolute(z=safe_z, label="mesh_z_segura")
             self._move_absolute(x=float(point["x_machine"]), y=float(point["y_machine"]), label=f"mesh_xy_{point['index']}")
-            probe = self._probe_current_position(label=f"mesh_probe_{point['index']}")
+            probe_feed_mm_min = self._probe_config_float(probe_config, "probe_feed_mm_min")
+            probe = self._probe_current_position(
+                label=f"mesh_probe_{point['index']}",
+                probe_step_mm=self._probe_config_float(probe_config, "probe_step_mm"),
+                probe_speed_mm_s=None if probe_feed_mm_min is None else probe_feed_mm_min / 60.0,
+                retract_mm=self._probe_config_float(probe_config, "retract_mm"),
+            )
             with self._lock:
                 self._state = MachineRuntimeState.MESH_READY
             return {
@@ -613,7 +619,14 @@ class MachineRuntime:
         finally:
             self._movement_lock.release()
 
-    def _probe_current_position(self, *, label: str) -> ProbeResult:
+    def _probe_current_position(
+        self,
+        *,
+        label: str,
+        probe_step_mm: float | None = None,
+        probe_speed_mm_s: float | None = None,
+        retract_mm: float | None = None,
+    ) -> ProbeResult:
         self._assert_safety_for_motion()
         self._refresh_machine()
         machine = self._machine
@@ -622,6 +635,9 @@ class MachineRuntime:
             raise MachineRuntimeError("No hay control físico inicializado.")
         if not machine.axis_is_homed("z"):
             raise MachineRuntimeError("Z debe tener homing antes de sondear.")
+        step_size = probe_step_mm if probe_step_mm and probe_step_mm > 0 else self.config.probe_step_mm
+        probe_speed = probe_speed_mm_s if probe_speed_mm_s and probe_speed_mm_s > 0 else self.config.probe_lower_speed_mm_s
+        retract_distance = retract_mm if retract_mm and retract_mm > 0 else self.config.probe_retract_mm
         with self._lock:
             if self._last_command.probe_triggered:
                 raise MachineRuntimeError("La sonda está activa antes de iniciar el descenso.")
@@ -637,23 +653,23 @@ class MachineRuntime:
             remaining = current_z - machine.z_limits.minimum
             if remaining <= self.config.settle_tolerance_mm:
                 raise MachineRuntimeError("Se alcanzó el límite mínimo Z sin contacto de sonda.")
-            step = min(self.config.probe_step_mm, remaining)
-            result = jog.move_relative("z", -step, self.config.probe_lower_speed_mm_s)
+            step = min(step_size, remaining)
+            result = jog.move_relative("z", -step, probe_speed)
             with self._lock:
                 self._last_movement = result
                 self._last_command_text = f"{label}_lower_step"
-            self._wait_for_axis("z", float(result["target"]), "paso de sonda", start_position=float(result["current_position"]))
+            self._wait_for_axis("z", float(result["target"]), "paso de sonda", start_position=current_z)
         snapshot = machine.get_motion_snapshot()
         contact_z = float(snapshot["z"])
         retract_available = machine.z_limits.maximum - contact_z
         if retract_available <= self.config.settle_tolerance_mm:
             raise MachineRuntimeError("No hay margen Z para retraer después del contacto.")
-        retract = min(self.config.probe_retract_mm, retract_available)
-        result = jog.move_relative("z", retract, self.config.probe_lower_speed_mm_s)
+        retract = min(retract_distance, retract_available)
+        result = jog.move_relative("z", retract, probe_speed)
         with self._lock:
             self._last_movement = result
             self._last_command_text = f"{label}_retract"
-        self._wait_for_axis("z", float(result["target"]), "retracto de sonda")
+        self._wait_for_axis("z", float(result["target"]), "retracto de sonda", start_position=contact_z)
         return ProbeResult(x_mm=start_x, y_mm=start_y, z_mm=contact_z, captured_at=_iso_now())
 
     def cancel_operation(self) -> dict[str, Any]:
@@ -1374,11 +1390,24 @@ class MachineRuntime:
                 return
         raise MachineRuntimeError(f"Timeout esperando confirmación de {label}.")
 
-    def _safe_z(self, machine) -> float:
-        safe_z = min(max(self.config.safe_z_mm, machine.z_limits.minimum), machine.z_limits.maximum)
+    def _safe_z(self, machine, *, safe_z_mm: float | None = None) -> float:
+        requested = self.config.safe_z_mm if safe_z_mm is None else safe_z_mm
+        safe_z = min(max(requested, machine.z_limits.minimum), machine.z_limits.maximum)
         if safe_z < machine.z_limits.minimum or safe_z > machine.z_limits.maximum:
             raise MachineRuntimeError("Z segura fuera de límites descubiertos.")
         return safe_z
+
+    def _probe_config_float(self, probe_config: dict[str, Any] | None, key: str) -> float | None:
+        if not probe_config:
+            return None
+        value = probe_config.get(key)
+        if value is None:
+            return None
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            return None
+        return numeric if numeric > 0 else None
 
     def _arduino_snapshot(self, *, now: float, serial_age: float | None) -> dict[str, Any]:
         driver_diagnostics = (

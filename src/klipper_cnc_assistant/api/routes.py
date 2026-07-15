@@ -496,7 +496,7 @@ def build_router() -> APIRouter:
         if payload.get("status") in {"CANCELLED", "MESH_COMPLETE"}:
             raise ApplicationError("La malla no está en un estado ejecutable.")
         point = service.next_pending_point(project_id, map_id)
-        result = runtime.probe_mesh_point(point)
+        result = runtime.probe_mesh_point(point, probe_config=payload.get("probe_config"))
         updated = service.record_point(
             project_id=project_id,
             map_id=map_id,

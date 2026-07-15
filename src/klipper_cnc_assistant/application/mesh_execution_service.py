@@ -117,14 +117,14 @@ class MeshExecutionService:
                         last_event="No quedan puntos pendientes ejecutables.",
                     )
                     return
-                self._probe_one_point(project_id, map_id, runtime, point)
+                self._probe_one_point(project_id, map_id, runtime, point, probe_config=payload.get("probe_config"))
         finally:
             with self._lock:
                 thread = self._threads.get(key)
                 if thread is threading.current_thread():
                     self._threads.pop(key, None)
 
-    def _probe_one_point(self, project_id: str, map_id: str, runtime: Any, point: dict[str, Any]) -> None:
+    def _probe_one_point(self, project_id: str, map_id: str, runtime: Any, point: dict[str, Any], *, probe_config: dict[str, Any] | None = None) -> None:
         point_index = int(point["index"])
         attempts = int(point.get("attempts", 0))
         target = {"x_mm": point.get("x_machine"), "y_mm": point.get("y_machine"), "point_index": point_index}
@@ -153,7 +153,7 @@ class MeshExecutionService:
                     target=target,
                     last_event=f"Punto {point_index + 1}: operación física exclusiva iniciada.",
                 )
-                result = runtime.probe_mesh_point(point)
+                result = runtime.probe_mesh_point(point, probe_config=probe_config)
                 observed = self._observed_from_runtime(runtime)
                 self.physical_map_service.update_execution_state(
                     project_id=project_id,

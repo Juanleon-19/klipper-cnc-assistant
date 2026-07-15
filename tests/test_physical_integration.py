@@ -58,11 +58,13 @@ class FakeSerial:
 class FakeMeshRuntime:
     def __init__(self, *, fail_first: bool = False) -> None:
         self.calls: list[int] = []
+        self.probe_configs: list[dict | None] = []
         self.fail_first = fail_first
         self.failed_once = False
 
-    def probe_mesh_point(self, point: dict) -> dict:
+    def probe_mesh_point(self, point: dict, probe_config: dict | None = None) -> dict:
         self.calls.append(int(point["index"]))
+        self.probe_configs.append(probe_config)
         if self.fail_first and not self.failed_once:
             self.failed_once = True
             raise RuntimeError("timeout HTTP reconciliable")
@@ -394,7 +396,7 @@ class PhysicalIntegrationTest(unittest.TestCase):
                 homed_axes="xyz",
                 machine_label="test",
                 session_id="session",
-                config=PhysicalMeshConfig(grid_mode="manual", rows=2, columns=2, edge_margin_left_mm=0.0, edge_margin_right_mm=0.0, edge_margin_bottom_mm=0.0, edge_margin_top_mm=0.0),
+                config=PhysicalMeshConfig(grid_mode="manual", rows=2, columns=2, edge_margin_left_mm=0.0, edge_margin_right_mm=0.0, edge_margin_bottom_mm=0.0, edge_margin_top_mm=0.0, safe_z_mm=12.0, probe_step_mm=0.05, probe_feed_mm_min=30.0, retract_mm=0.8),
             )
             for point in plan["points"]:
                 plan = service.record_point(project_id=project.id, map_id=plan["map_id"], point_index=int(point["index"]), z_measured=1.0)
@@ -432,7 +434,7 @@ class PhysicalIntegrationTest(unittest.TestCase):
                 homed_axes="xyz",
                 machine_label="test",
                 session_id="session",
-                config=PhysicalMeshConfig(grid_mode="manual", rows=2, columns=2, edge_margin_left_mm=0.0, edge_margin_right_mm=0.0, edge_margin_bottom_mm=0.0, edge_margin_top_mm=0.0),
+                config=PhysicalMeshConfig(grid_mode="manual", rows=2, columns=2, edge_margin_left_mm=0.0, edge_margin_right_mm=0.0, edge_margin_bottom_mm=0.0, edge_margin_top_mm=0.0, safe_z_mm=12.0, probe_step_mm=0.05, probe_feed_mm_min=30.0, retract_mm=0.8),
             )
             worker = MeshExecutionService(service, max_point_retries=2)
             runtime = FakeMeshRuntime(fail_first=True)
@@ -449,6 +451,9 @@ class PhysicalIntegrationTest(unittest.TestCase):
             self.assertEqual(sum(1 for point in completed["points"] if point["status"] == "MEASURED"), 4)
             self.assertEqual(sorted(set(runtime.calls)), [0, 1, 2, 3])
             self.assertEqual(runtime.calls.count(0), 2)
+            self.assertTrue(runtime.probe_configs)
+            self.assertTrue(all(config and float(config["probe_feed_mm_min"]) == 30.0 for config in runtime.probe_configs))
+            self.assertTrue(all(config and float(config["safe_z_mm"]) == 12.0 for config in runtime.probe_configs))
             log = service.execution_log(project_id=project.id, map_id=plan["map_id"])
             self.assertEqual(log["execution"]["worker_active"], False)
             self.assertIn("POINT_RETRY", {event.get("next_state") for event in log["events"]})

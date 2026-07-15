@@ -965,6 +965,40 @@ class MachineRuntimeTest(unittest.TestCase):
         self.assertEqual(runtime._jog.calls[1]["speed"], 1.25)
         self.assertGreater(float(runtime._jog.calls[1]["distance"]), 0.0)
 
+    def test_mesh_probe_uses_saved_probe_recipe(self) -> None:
+        machine = MachineState(
+            position=MachinePosition(10, 8, 5),
+            x_limits=AxisLimits(0, 100),
+            y_limits=AxisLimits(0, 100),
+            z_limits=AxisLimits(0, 200),
+            homed_axes="xyz",
+            max_velocity=100,
+            max_accel=500,
+            live_velocity=0,
+        )
+        runtime, client = physical_runtime_with_machine(
+            machine,
+            cfg=config(MachineMode.PHYSICAL, safe_z_mm=9.0, probe_step_mm=0.25, probe_lower_speed_mm_s=4.0, probe_retract_mm=0.4),
+        )
+        runtime._jog = ProbeJogSpy(runtime, machine)
+        runtime._last_command = ControllerCommand()
+        runtime._wait_for_axis = lambda *args, **kwargs: None
+
+        result = runtime.probe_mesh_point(
+            {"index": 3, "x_machine": 25.0, "y_machine": 35.0},
+            probe_config={"safe_z_mm": 12.0, "probe_step_mm": 0.05, "probe_feed_mm_min": 30.0, "retract_mm": 0.8},
+        )
+
+        self.assertEqual(result["index"], 3)
+        self.assertIn("Z12.000000", client.scripts[0])
+        self.assertIn("X25.000000", client.scripts[1])
+        self.assertIn("Y35.000000", client.scripts[1])
+        self.assertEqual(len(runtime._jog.calls), 2)
+        self.assertEqual(runtime._jog.calls[0]["speed"], 0.5)
+        self.assertEqual(runtime._jog.calls[1]["speed"], 0.5)
+        self.assertAlmostEqual(float(runtime._jog.calls[0]["distance"]), -0.05)
+        self.assertAlmostEqual(float(runtime._jog.calls[1]["distance"]), 0.8)
+
     def test_tool_change_position_moves_z_before_xy(self) -> None:
         machine = MachineState(
             position=MachinePosition(40, 30, 10),
