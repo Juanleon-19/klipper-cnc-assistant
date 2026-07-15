@@ -26,7 +26,7 @@ def config(mode: MachineMode = MachineMode.SIMULATED, **overrides) -> MachineRun
         serial_baudrate=115200,
         safe_z_mm=10.0,
         reference_prep_z_mm=115.0,
-        reference_prep_z_feed_mm_min=120.0,
+        reference_prep_z_feed_mm_min=180.0,
         tool_change_z_mm=115.0,
         tool_change_z_feed_mm_min=180.0,
         tool_change_x_mm=0.0,
@@ -406,9 +406,9 @@ class MachineRuntimeTest(unittest.TestCase):
         self.assertEqual(snapshot["state"], "WAITING_FOR_XY_REFERENCE")
         self.assertEqual(client.scripts[0], "G28")
         self.assertIn("Z115.000000", client.scripts[1])
-        self.assertIn("F120.000", client.scripts[1])
+        self.assertIn("F180.000", client.scripts[1])
         self.assertIn("X50.000000", client.scripts[2])
-        self.assertIn("F600.000", client.scripts[2])
+        self.assertIn("F1800.000", client.scripts[2])
         self.assertIn("Y30.000000", client.scripts[2])
         self.assertLess(client.scripts[1].find("Z115.000000"), len(client.scripts[1]))
         self.assertEqual(machine.get_motion_snapshot()["z"], 115.0)
@@ -433,9 +433,9 @@ class MachineRuntimeTest(unittest.TestCase):
 
         z_step = next(step for step in snapshot["initialization_steps"] if step["name"] == "z_preparacion_referencia")
         self.assertIn("distancia 115.000 mm", z_step["detail"])
-        self.assertIn("velocidad configurada 120.000 mm/min", z_step["detail"])
-        self.assertIn("velocidad efectiva 2.000 mm/s", z_step["detail"])
-        self.assertIn("estimado 57.500 s", z_step["detail"])
+        self.assertIn("velocidad configurada 180.000 mm/min", z_step["detail"])
+        self.assertIn("velocidad efectiva 3.000 mm/s", z_step["detail"])
+        self.assertIn("estimado 38.333 s", z_step["detail"])
         self.assertIn("timeout 180.000 s", z_step["detail"])
         self.assertIn("X50.000000", client.scripts[2])
         self.assertEqual(snapshot["state"], "WAITING_FOR_XY_REFERENCE")
@@ -464,12 +464,12 @@ class MachineRuntimeTest(unittest.TestCase):
             runtime_module.time = original_time
 
         self.assertEqual(snapshot["state"], "WAITING_FOR_XY_REFERENCE")
-        self.assertGreaterEqual(fake_clock.now, 57.0)
+        self.assertGreaterEqual(fake_clock.now, 38.0)
         z_step = next(step for step in snapshot["initialization_steps"] if step["name"] == "z_preparacion_referencia")
-        self.assertIn("estimado 57.500 s", z_step["detail"])
+        self.assertIn("estimado 38.333 s", z_step["detail"])
         self.assertIn("timeout 180.000 s", z_step["detail"])
         self.assertIn("Z115.000000", client.scripts[1])
-        self.assertIn("F120.000", client.scripts[1])
+        self.assertIn("F180.000", client.scripts[1])
         self.assertIn("X50.000000", client.scripts[2])
         self.assertEqual(len(client.scripts), 3)
 
@@ -651,7 +651,7 @@ class MachineRuntimeTest(unittest.TestCase):
         original_time = runtime_module.time
         runtime_module.time = fake_clock
         try:
-            runtime._move_absolute(z=0.0, label="z_descenso_prueba", feed_mm_min=120.0)
+            runtime._move_absolute(z=0.0, label="z_descenso_prueba", feed_mm_min=180.0)
         finally:
             runtime_module.time = original_time
 
@@ -678,7 +678,7 @@ class MachineRuntimeTest(unittest.TestCase):
         original_time = runtime_module.time
         runtime_module.time = fake_clock
         try:
-            runtime._move_absolute(z=115.0, label="z_ruido_prueba", feed_mm_min=120.0)
+            runtime._move_absolute(z=115.0, label="z_ruido_prueba", feed_mm_min=180.0)
         finally:
             runtime_module.time = original_time
 
@@ -704,7 +704,7 @@ class MachineRuntimeTest(unittest.TestCase):
         original_time = runtime_module.time
         runtime_module.time = fake_clock
         try:
-            runtime._move_absolute(z=115.0, label="z_away_aislado", feed_mm_min=120.0)
+            runtime._move_absolute(z=115.0, label="z_away_aislado", feed_mm_min=180.0)
         finally:
             runtime_module.time = original_time
 
@@ -731,7 +731,7 @@ class MachineRuntimeTest(unittest.TestCase):
         runtime_module.time = fake_clock
         try:
             with self.assertRaisesRegex(MachineRuntimeError, "se aleja del objetivo"):
-                runtime._move_absolute(z=115.0, label="z_away_cinco", feed_mm_min=120.0)
+                runtime._move_absolute(z=115.0, label="z_away_cinco", feed_mm_min=180.0)
         finally:
             runtime_module.time = original_time
 
@@ -886,6 +886,29 @@ class MachineRuntimeTest(unittest.TestCase):
             runtime.initialize()
 
         self.assertEqual(client.scripts, ["G28"])
+
+    def test_confirm_probe_auto_arms_from_waiting_state(self) -> None:
+        machine = MachineState(
+            position=MachinePosition(10, 8, 5),
+            x_limits=AxisLimits(0, 100),
+            y_limits=AxisLimits(0, 100),
+            z_limits=AxisLimits(0, 200),
+            homed_axes="xyz",
+            max_velocity=100,
+            max_accel=500,
+            live_velocity=0,
+        )
+        runtime, _client = physical_runtime_with_machine(machine, cfg=config(MachineMode.PHYSICAL, probe_lower_speed_mm_s=1.25, probe_retract_speed_mm_s=1.25))
+        runtime._state = runtime_module.MachineRuntimeState.WAITING_FOR_XY_REFERENCE
+        runtime._jog = ProbeJogSpy(runtime, machine)
+        runtime._last_command = ControllerCommand()
+        runtime._wait_for_axis = lambda *args, **kwargs: None
+
+        snapshot = runtime.confirm_probe()
+
+        self.assertEqual(snapshot["state"], "REFERENCE_CAPTURED")
+        self.assertEqual(len(runtime._jog.calls), 2)
+        self.assertTrue(any("sondeo iniciado desde la pantalla" in event["message"] for event in snapshot["events"]))
 
     def test_reference_probe_retract_uses_same_speed_as_lowering(self) -> None:
         machine = MachineState(

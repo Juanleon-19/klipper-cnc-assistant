@@ -82,7 +82,7 @@ def load_machine_runtime_config() -> MachineRuntimeConfig:
         serial_baudrate=_env_int("SERIAL_BAUDRATE", 115200),
         safe_z_mm=_env_float("MACHINE_SAFE_Z", 10.0),
         reference_prep_z_mm=_env_float("REFERENCE_PREP_Z_MM", 115.0),
-        reference_prep_z_feed_mm_min=_env_float("REFERENCE_PREP_Z_FEED_MM_MIN", 120.0),
+        reference_prep_z_feed_mm_min=_env_float("REFERENCE_PREP_Z_FEED_MM_MIN", 180.0),
         tool_change_z_mm=_env_float("TOOL_CHANGE_Z_MM", 115.0),
         tool_change_z_feed_mm_min=_env_float("TOOL_CHANGE_Z_FEED_MM_MIN", 180.0),
         tool_change_x_mm=_env_float("TOOL_CHANGE_X_MM", 0.0),

@@ -401,6 +401,8 @@ export type MachineRuntime = {
     reference_prep_z_mm?: number;
     reference_prep_z_feed_mm_min?: number;
     reference_prep_z_speed_mm_s?: number;
+    reference_prep_xy_feed_mm_min?: number;
+    reference_prep_xy_speed_mm_s?: number;
     center_x_mm?: number | null;
     center_y_mm?: number | null;
     target?: { x_mm?: number | null; y_mm?: number | null; z_mm?: number | null } | null;

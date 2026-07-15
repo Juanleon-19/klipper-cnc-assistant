@@ -239,7 +239,7 @@ const physicalMachine: MachineContextValue = {
   refreshRuntime: vi.fn(),
 };
 
-function renderWorkspace(machine?: MachineContextValue) {
+function renderWorkspace(machine?: MachineContextValue, options?: { onRefreshProject?: () => Promise<void> }) {
   const workspace = (
     <ProjectWorkspace
       project={project}
@@ -255,6 +255,7 @@ function renderWorkspace(machine?: MachineContextValue) {
       onRemoveFile={vi.fn()}
       onAnalyze={vi.fn()}
       onUploadFile={vi.fn()}
+      onRefreshProject={options?.onRefreshProject}
     />
   );
   return render(machine ? <MachineContext.Provider value={machine}>{workspace}</MachineContext.Provider> : workspace);
@@ -263,8 +264,8 @@ function renderWorkspace(machine?: MachineContextValue) {
 describe("ProjectWorkspace", () => {
   beforeEach(() => {
     Object.values(apiMock).forEach((fn) => fn.mockReset());
-    apiMock.getMachineSettings.mockResolvedValue({ reference_prep_z_mm: 115, reference_prep_z_feed_mm_min: 120, move_total_timeout_s: 180, no_progress_timeout_s: 60, position_tolerance_mm: 0.05, velocity_tolerance_mm_s: 0.02 });
-    apiMock.updateMachineSettings.mockResolvedValue({ reference_prep_z_mm: 115, reference_prep_z_feed_mm_min: 120, move_total_timeout_s: 180, no_progress_timeout_s: 60, position_tolerance_mm: 0.05, velocity_tolerance_mm_s: 0.02 });
+    apiMock.getMachineSettings.mockResolvedValue({ reference_prep_z_mm: 115, reference_prep_z_feed_mm_min: 180, move_total_timeout_s: 180, no_progress_timeout_s: 60, position_tolerance_mm: 0.05, velocity_tolerance_mm_s: 0.02 });
+    apiMock.updateMachineSettings.mockResolvedValue({ reference_prep_z_mm: 115, reference_prep_z_feed_mm_min: 180, move_total_timeout_s: 180, no_progress_timeout_s: 60, position_tolerance_mm: 0.05, velocity_tolerance_mm_s: 0.02 });
     apiMock.getHeightMap.mockResolvedValue(heightMap);
     apiMock.getReferenceSession.mockResolvedValue(referenceSession);
     apiMock.getPhysicalMap.mockRejectedValue(new Error("No existe mapa físico medido para este montaje y cara."));
@@ -386,7 +387,8 @@ describe("ProjectWorkspace", () => {
     expect(await screen.findByText(/Home, Z de preparación y centro/i)).toBeInTheDocument();
     expect(screen.getAllByText(/Z de preparación/i).length).toBeGreaterThan(0);
     expect(screen.getAllByText(/X 110.000 mm · Y 110.000 mm/i).length).toBeGreaterThan(0);
-    expect(screen.getAllByText(/120 mm\/min · 2.000 mm\/s/i).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/180 mm\/min · 3.000 mm\/s/i).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/1800 mm\/min · 30.000 mm\/s/i).length).toBeGreaterThan(0);
     expect(screen.getAllByText(/180 mm\/min · 3.000 mm\/s/i).length).toBeGreaterThan(0);
     expect(screen.getByText(/Posición segura de cambio de herramienta/i)).toBeInTheDocument();
     expect(screen.getByText(/Z primero, luego X\/Y/i)).toBeInTheDocument();
@@ -394,6 +396,35 @@ describe("ProjectWorkspace", () => {
     fireEvent.click(screen.getByRole("button", { name: /Ir a posición de cambio/i }));
 
     await waitFor(() => expect(physicalMachine.runMachineAction).toHaveBeenCalledWith("tool-change-position"));
+  });
+
+  it("permite sondear referencia ahora directamente desde pantalla", async () => {
+    vi.mocked(physicalMachine.runMachineAction).mockClear();
+    renderWorkspace(physicalMachine);
+
+    fireEvent.click(screen.getByRole("button", { name: /Referencia/i }));
+    const probeButton = await screen.findByRole("button", { name: /Sondear referencia ahora/i });
+    expect(probeButton).toBeEnabled();
+
+    fireEvent.click(probeButton);
+
+    await waitFor(() => expect(physicalMachine.runMachineAction).toHaveBeenCalledWith("probe-confirm"));
+    await waitFor(() => expect(apiMock.capturePhysicalWorkOrigin).toHaveBeenCalledWith(project.id, project.operaciones[0].id));
+    await waitFor(() => expect(apiMock.capturePhysicalZReferenceFromProbe).toHaveBeenCalledWith(project.id, project.operaciones[0].id));
+  });
+
+  it("reiniciar proceso refresca el proyecto activo y el runtime", async () => {
+    const onRefreshProject = vi.fn().mockResolvedValue(undefined);
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    vi.mocked(physicalMachine.refreshRuntime).mockClear();
+    renderWorkspace(physicalMachine, { onRefreshProject });
+
+    fireEvent.click(screen.getByText(/Más acciones/i));
+    fireEvent.click(await screen.findByRole("button", { name: /Reiniciar proceso/i }));
+
+    await waitFor(() => expect(apiMock.resetSetupPreparation).toHaveBeenCalledWith(project.id, project.montajes[0].id));
+    await waitFor(() => expect(onRefreshProject).toHaveBeenCalled());
+    await waitFor(() => expect(physicalMachine.refreshRuntime).toHaveBeenCalled());
   });
 
   it("permite guardar parámetros avanzados de preparación física", async () => {

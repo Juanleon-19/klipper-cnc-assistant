@@ -44,6 +44,7 @@ type ProjectWorkspaceProps = {
   onRemoveFile: (operation: Operation) => Promise<void>;
   onAnalyze: (operation: Operation) => Promise<void>;
   onUploadFile: (operation: Operation, file: File) => Promise<void>;
+  onRefreshProject?: () => Promise<void>;
   initialView?: WorkspaceView;
 };
 
@@ -149,6 +150,7 @@ export function ProjectWorkspace({
   onRemoveFile,
   onAnalyze,
   onUploadFile,
+  onRefreshProject,
   initialView,
 }: ProjectWorkspaceProps) {
   const [editingProject, setEditingProject] = useState(false);
@@ -205,7 +207,7 @@ export function ProjectWorkspace({
   const [executionEvent, setExecutionEvent] = useState("Sin acciones de ejecución todavía.");
   const [machineSettingsInput, setMachineSettingsInput] = useState({
     reference_prep_z_mm: "115",
-    reference_prep_z_feed_mm_min: "120",
+    reference_prep_z_feed_mm_min: "180",
     move_total_timeout_s: "180",
     no_progress_timeout_s: "60",
     position_tolerance_mm: "0.05",
@@ -220,7 +222,7 @@ export function ProjectWorkspace({
     void api.getMachineSettings().then((settings) => {
       setMachineSettingsInput({
         reference_prep_z_mm: String(settings.reference_prep_z_mm ?? 115),
-        reference_prep_z_feed_mm_min: String(settings.reference_prep_z_feed_mm_min ?? 120),
+        reference_prep_z_feed_mm_min: String(settings.reference_prep_z_feed_mm_min ?? 180),
         move_total_timeout_s: String(settings.move_total_timeout_s ?? 180),
         no_progress_timeout_s: String(settings.no_progress_timeout_s ?? 60),
         position_tolerance_mm: String(settings.position_tolerance_mm ?? 0.05),
@@ -906,7 +908,8 @@ export function ProjectWorkspace({
     const preparation = runtime?.preparation ?? {};
     const toolChange = runtime?.tool_change ?? {};
     const referencePrepZ = typeof preparation.reference_prep_z_mm === "number" ? preparation.reference_prep_z_mm : 115;
-    const referencePrepZFeed = typeof preparation.reference_prep_z_feed_mm_min === "number" ? preparation.reference_prep_z_feed_mm_min : 120;
+    const referencePrepZFeed = typeof preparation.reference_prep_z_feed_mm_min === "number" ? preparation.reference_prep_z_feed_mm_min : 180;
+    const referencePrepXyFeed = typeof preparation.reference_prep_xy_feed_mm_min === "number" ? preparation.reference_prep_xy_feed_mm_min : 1800;
     const centerX = typeof preparation.center_x_mm === "number" ? preparation.center_x_mm : null;
     const centerY = typeof preparation.center_y_mm === "number" ? preparation.center_y_mm : null;
     const toolChangeX = typeof toolChange.x_mm === "number" ? toolChange.x_mm : 0;
@@ -917,7 +920,7 @@ export function ProjectWorkspace({
     const canInitialize = machine.isPhysical && ["DIAGNOSTIC", "READY_FOR_HOME", "HOMED", "ERROR", "CANCELLED"].includes(machine.runtimeState);
     const canEnableJog = machine.isPhysical && machine.runtimeState === "WAITING_FOR_XY_REFERENCE";
     const canArm = machine.isPhysical && machine.runtimeState === "WAITING_FOR_XY_REFERENCE";
-    const canProbe = machine.isPhysical && machine.runtimeState === "REFERENCE_ARMED";
+    const canProbe = machine.isPhysical && ["WAITING_FOR_XY_REFERENCE", "REFERENCE_ARMED"].includes(machine.runtimeState);
     return (
       <div className="stack gap-md">
         <article className="panel">
@@ -963,6 +966,7 @@ export function ProjectWorkspace({
             <div className="metric-box"><span>Z de preparación</span><strong>{formatMillimeters(referencePrepZ, 3)}</strong></div>
             <div className="metric-box"><span>Velocidad Z</span><strong>{referencePrepZFeed.toFixed(0)} mm/min · {(referencePrepZFeed / 60).toFixed(3)} mm/s</strong></div>
             <div className="metric-box"><span>Centro calculado</span><strong>X {formatMillimeters(centerX, 3)} · Y {formatMillimeters(centerY, 3)}</strong></div>
+            <div className="metric-box"><span>Velocidad centro X/Y</span><strong>{referencePrepXyFeed.toFixed(0)} mm/min · {(referencePrepXyFeed / 60).toFixed(3)} mm/s</strong></div>
             <div className="metric-box"><span>Posición actual</span><strong>X {formatMillimeters(typeof position?.x === "number" ? position.x : null, 3)} · Y {formatMillimeters(typeof position?.y === "number" ? position.y : null, 3)} · Z {formatMillimeters(typeof position?.z === "number" ? position.z : null, 3)}</strong></div>
             <div className="metric-box"><span>Z en vivo</span><strong>{formatMillimeters(typeof livePosition?.z === "number" ? livePosition.z : null, 3)}</strong></div>
             <div className="metric-box"><span>Z comandada</span><strong>{formatMillimeters(typeof commandedPosition?.z === "number" ? commandedPosition.z : null, 3)}</strong></div>
@@ -1031,8 +1035,8 @@ export function ProjectWorkspace({
         </article>
 
         <article className="panel">
-          <div className="section-heading"><h3>4. Medir referencia con botón externo</h3></div>
-          <p className="muted">Arme la referencia y pulse el botón externo. La aplicación captura X/Y actuales, baja Z por pasos discretos, detecta contacto, retrae y guarda origen X/Y más referencia Z `MEASURED`.</p>
+          <div className="section-heading"><h3>4. Medir referencia</h3></div>
+          <p className="muted">Puede armar la referencia para usar el botón externo o lanzar el sondeo directamente desde pantalla. La aplicación captura X/Y actuales, baja Z por pasos discretos, detecta contacto, retrae y guarda origen X/Y más referencia Z `MEASURED`.</p>
           <div className="action-grid action-grid--inline">
             <button className="button button--ghost" type="button" disabled={!canArm || referenceBusy || machine.refreshing} onClick={() => void machine.runMachineAction("probe-request")}>Armar referencia</button>
             <button className="button" type="button" disabled={!canProbe || referenceBusy || machine.refreshing || !selectedOperation} onClick={() => void withPhysicalReferenceAction(async () => {
@@ -1433,6 +1437,9 @@ export function ProjectWorkspace({
         await api.resetSetupReference(project.id, selectedSetup.id);
       } else {
         await api.resetSetupPreparation(project.id, selectedSetup.id);
+      }
+      if (onRefreshProject) {
+        await onRefreshProject();
       }
       setPhysicalMap(null);
       setHeightMap(null);

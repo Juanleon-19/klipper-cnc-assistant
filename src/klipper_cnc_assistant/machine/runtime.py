@@ -118,6 +118,9 @@ def _is_cardinal(command: ControllerCommand) -> bool:
     return (command.jog_x != 0 and command.jog_y == 0) or (command.jog_y != 0 and command.jog_x == 0)
 
 
+REFERENCE_PREP_XY_FEED_MM_MIN = 1800.0
+
+
 class MachineRuntime:
     def __init__(
         self,
@@ -437,7 +440,7 @@ class MachineRuntime:
 
             with self._lock:
                 self._state = MachineRuntimeState.MOVING_TO_CENTER
-            self._move_absolute(x=center_x, y=center_y, label="xy_centro")
+            self._move_absolute(x=center_x, y=center_y, label="xy_centro", feed_mm_min=REFERENCE_PREP_XY_FEED_MM_MIN)
             self._refresh_machine()
             self._step("centro_confirmado", "ok", f"Máquina preparada en X={center_x:.3f} Y={center_y:.3f} Z={target_z_mm:.3f} mm.")
             with self._lock:
@@ -508,10 +511,14 @@ class MachineRuntime:
             raise MachineRuntimeError("Ya hay un movimiento u operación física activa.")
         try:
             with self._lock:
-                if self._state != MachineRuntimeState.REFERENCE_ARMED:
+                if self._state == MachineRuntimeState.WAITING_FOR_XY_REFERENCE:
+                    self._probe_requested = True
+                    self._state = MachineRuntimeState.REFERENCE_ARMED
+                    self._event("info", "REFERENCE_ARMED: sondeo iniciado desde la pantalla.")
+                elif self._state != MachineRuntimeState.REFERENCE_ARMED:
                     raise MachineRuntimeError("La referencia debe estar armada antes de sondear.")
                 if not self._probe_requested:
-                    raise MachineRuntimeError("No existe REFERENCE_ARMED pendiente de botón externo.")
+                    self._probe_requested = True
                 if self._last_command.probe_triggered:
                     raise MachineRuntimeError("La sonda está activa antes de iniciar el descenso.")
                 self._manual_enabled = False
@@ -728,6 +735,8 @@ class MachineRuntime:
                     "reference_prep_z_mm": self.config.reference_prep_z_mm,
                     "reference_prep_z_feed_mm_min": self.config.reference_prep_z_feed_mm_min,
                     "reference_prep_z_speed_mm_s": self.config.reference_prep_z_feed_mm_min / 60.0,
+                    "reference_prep_xy_feed_mm_min": REFERENCE_PREP_XY_FEED_MM_MIN,
+                    "reference_prep_xy_speed_mm_s": REFERENCE_PREP_XY_FEED_MM_MIN / 60.0,
                     "center_x_mm": None if self._machine is None else (self._machine.x_limits.minimum + self._machine.x_limits.maximum) / 2.0,
                     "center_y_mm": None if self._machine is None else (self._machine.y_limits.minimum + self._machine.y_limits.maximum) / 2.0,
                     "target": None if self._machine is None else {

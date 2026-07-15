@@ -649,6 +649,7 @@ Después deberá volver a conectar el Arduino, hacer homing, posicionar X0/Y0 y 
                 onRemoveFile={handleRemoveFile}
                 onAnalyze={handleAnalyze}
                 onUploadFile={handleUploadFile}
+                onRefreshProject={selectedProjectId ? async () => { await syncProject(selectedProjectId); } : undefined}
                 initialView={workspaceViewOverride}
               />
             </div>
