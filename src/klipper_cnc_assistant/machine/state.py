@@ -31,6 +31,7 @@ class MachineState:
 
     max_velocity: float
     max_accel: float
+    max_z_velocity: float | None = None
 
     live_velocity: float = 0.0
 
@@ -62,6 +63,7 @@ class MachineState:
         axis_maximum=None,
         max_velocity=None,
         max_accel=None,
+        max_z_velocity=None,
     ):
         with self._lock:
             if position is not None:
@@ -85,6 +87,9 @@ class MachineState:
 
             if max_accel is not None:
                 self.max_accel = float(max_accel)
+
+            if max_z_velocity is not None:
+                self.max_z_velocity = float(max_z_velocity)
 
     def update_motion(
         self,

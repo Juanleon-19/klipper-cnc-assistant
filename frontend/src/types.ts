@@ -399,12 +399,14 @@ export type MachineRuntime = {
   klipper: Record<string, unknown>;
   preparation?: {
     reference_prep_z_mm?: number;
+    reference_prep_z_feed_mm_min?: number;
+    reference_prep_z_speed_mm_s?: number;
     center_x_mm?: number | null;
     center_y_mm?: number | null;
     target?: { x_mm?: number | null; y_mm?: number | null; z_mm?: number | null } | null;
     sequence?: string[];
   };
-  tool_change?: { x_mm?: number; y_mm?: number; z_mm?: number };
+  tool_change?: { x_mm?: number; y_mm?: number; z_mm?: number; z_feed_mm_min?: number; z_speed_mm_s?: number };
   arduino: Record<string, unknown>;
   controller: Record<string, unknown>;
   safety: Record<string, unknown>;

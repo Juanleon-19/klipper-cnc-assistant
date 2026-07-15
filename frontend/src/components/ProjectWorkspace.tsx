@@ -837,11 +837,13 @@ export function ProjectWorkspace({
     const preparation = runtime?.preparation ?? {};
     const toolChange = runtime?.tool_change ?? {};
     const referencePrepZ = typeof preparation.reference_prep_z_mm === "number" ? preparation.reference_prep_z_mm : 115;
+    const referencePrepZFeed = typeof preparation.reference_prep_z_feed_mm_min === "number" ? preparation.reference_prep_z_feed_mm_min : 180;
     const centerX = typeof preparation.center_x_mm === "number" ? preparation.center_x_mm : null;
     const centerY = typeof preparation.center_y_mm === "number" ? preparation.center_y_mm : null;
     const toolChangeX = typeof toolChange.x_mm === "number" ? toolChange.x_mm : 0;
     const toolChangeY = typeof toolChange.y_mm === "number" ? toolChange.y_mm : 0;
     const toolChangeZ = typeof toolChange.z_mm === "number" ? toolChange.z_mm : 115;
+    const toolChangeZFeed = typeof toolChange.z_feed_mm_min === "number" ? toolChange.z_feed_mm_min : 180;
     const canConnect = machine.isPhysical && machine.runtimeState === "DISCONNECTED";
     const canInitialize = machine.isPhysical && ["DIAGNOSTIC", "READY_FOR_HOME", "HOMED", "ERROR", "CANCELLED"].includes(machine.runtimeState);
     const canEnableJog = machine.isPhysical && machine.runtimeState === "WAITING_FOR_XY_REFERENCE";
@@ -890,6 +892,7 @@ export function ProjectWorkspace({
           <p className="muted">El backend envía G28, confirma `toolhead.homed_axes`, mueve primero Z a la altura de preparación configurada y después mueve X/Y al centro real calculado desde límites Klipper.</p>
           <div className="info-grid info-grid--double compact-grid">
             <div className="metric-box"><span>Z de preparación</span><strong>{formatMillimeters(referencePrepZ, 3)}</strong></div>
+            <div className="metric-box"><span>Velocidad Z</span><strong>{referencePrepZFeed.toFixed(0)} mm/min · {(referencePrepZFeed / 60).toFixed(3)} mm/s</strong></div>
             <div className="metric-box"><span>Centro calculado</span><strong>X {formatMillimeters(centerX, 3)} · Y {formatMillimeters(centerY, 3)}</strong></div>
             <div className="metric-box"><span>Posición actual</span><strong>X {formatMillimeters(typeof position?.x === "number" ? position.x : null, 3)} · Y {formatMillimeters(typeof position?.y === "number" ? position.y : null, 3)} · Z {formatMillimeters(typeof position?.z === "number" ? position.z : null, 3)}</strong></div>
             <div className="metric-box"><span>Objetivo</span><strong>X {formatMillimeters(centerX, 3)} · Y {formatMillimeters(centerY, 3)} · Z {formatMillimeters(referencePrepZ, 3)}</strong></div>
@@ -923,6 +926,7 @@ export function ProjectWorkspace({
             <div className="metric-box"><span>X cambio</span><strong>{formatMillimeters(toolChangeX, 3)}</strong></div>
             <div className="metric-box"><span>Y cambio</span><strong>{formatMillimeters(toolChangeY, 3)}</strong></div>
             <div className="metric-box"><span>Z cambio</span><strong>{formatMillimeters(toolChangeZ, 3)}</strong></div>
+            <div className="metric-box"><span>Velocidad Z cambio</span><strong>{toolChangeZFeed.toFixed(0)} mm/min · {(toolChangeZFeed / 60).toFixed(3)} mm/s</strong></div>
             <div className="metric-box"><span>Orden</span><strong>Z primero, luego X/Y</strong></div>
           </div>
           <div className="action-grid action-grid--inline">

@@ -11,6 +11,7 @@ from klipper_cnc_assistant.application import ApplicationError, HeightMapService
 from klipper_cnc_assistant.application.compensated_gcode_service import CompensatedGCodeService
 from klipper_cnc_assistant.application.physical_map_service import PhysicalExclusion, PhysicalMapService, PhysicalMeshConfig
 from klipper_cnc_assistant.input.serial_driver import HEADER, SerialDriver
+from klipper_cnc_assistant.machine.discovery import discover_machine
 from klipper_cnc_assistant.machine.state import AxisLimits, MachinePosition, MachineState
 from klipper_cnc_assistant.moonraker.telemetry import MoonrakerTelemetry
 from klipper_cnc_assistant.storage import JsonProjectRepository
@@ -90,6 +91,32 @@ class PhysicalIntegrationTest(unittest.TestCase):
         self.assertEqual(diagnostics["checksum_errors"], 1)
         self.assertEqual(diagnostics["valid_packets"], 1)
         self.assertEqual(diagnostics["packets_complete"], 2)
+
+    def test_discovery_reads_max_z_velocity_from_klipper_config(self) -> None:
+        class Client:
+            def query_objects(self, objects):
+                self.objects = objects
+                return {
+                    "toolhead": {
+                        "position": [0, 0, 0],
+                        "homed_axes": "xyz",
+                        "axis_minimum": [0, 0, 0],
+                        "axis_maximum": [100, 100, 200],
+                        "max_velocity": 100,
+                        "max_accel": 500,
+                    },
+                    "configfile": {
+                        "settings": {
+                            "printer": {"max_z_velocity": 2.5}
+                        }
+                    },
+                }
+
+        client = Client()
+        machine = discover_machine(client)
+
+        self.assertEqual(machine.max_z_velocity, 2.5)
+        self.assertIn("configfile", client.objects)
 
     def test_telemetry_updates_toolhead_homed_axes(self) -> None:
         machine = MachineState(

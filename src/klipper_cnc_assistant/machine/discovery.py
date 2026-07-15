@@ -17,7 +17,10 @@ def discover_machine(
                 "axis_maximum",
                 "max_velocity",
                 "max_accel",
-            ]
+            ],
+            "configfile": [
+                "settings",
+            ],
         }
     )
 
@@ -32,6 +35,12 @@ def discover_machine(
 
     axis_minimum = toolhead["axis_minimum"]
     axis_maximum = toolhead["axis_maximum"]
+
+    configfile = status.get("configfile")
+    settings = configfile.get("settings") if isinstance(configfile, dict) else {}
+    printer_settings = settings.get("printer") if isinstance(settings, dict) else {}
+    raw_max_z_velocity = printer_settings.get("max_z_velocity") if isinstance(printer_settings, dict) else None
+    max_z_velocity = None if raw_max_z_velocity is None else float(raw_max_z_velocity)
 
     return MachineState(
         position=MachinePosition(
@@ -60,4 +69,5 @@ def discover_machine(
         max_accel=float(
             toolhead["max_accel"]
         ),
+        max_z_velocity=max_z_velocity,
     )

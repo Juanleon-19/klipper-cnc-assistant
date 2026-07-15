@@ -20,7 +20,9 @@ class MachineRuntimeConfig:
     serial_baudrate: int
     safe_z_mm: float
     reference_prep_z_mm: float
+    reference_prep_z_feed_mm_min: float
     tool_change_z_mm: float
+    tool_change_z_feed_mm_min: float
     tool_change_x_mm: float
     tool_change_y_mm: float
     moonraker_request_timeout_s: float
@@ -34,6 +36,8 @@ class MachineRuntimeConfig:
     move_minimum_timeout_s: float
     move_timeout_factor: float
     move_settle_margin_s: float
+    no_progress_timeout_s: float
+    settle_timeout_s: float
     stable_samples: int
     probe_step_mm: float
     probe_lower_speed_mm_s: float
@@ -78,20 +82,24 @@ def load_machine_runtime_config() -> MachineRuntimeConfig:
         serial_baudrate=_env_int("SERIAL_BAUDRATE", 115200),
         safe_z_mm=_env_float("MACHINE_SAFE_Z", 10.0),
         reference_prep_z_mm=_env_float("REFERENCE_PREP_Z_MM", 115.0),
+        reference_prep_z_feed_mm_min=_env_float("REFERENCE_PREP_Z_FEED_MM_MIN", 180.0),
         tool_change_z_mm=_env_float("TOOL_CHANGE_Z_MM", 115.0),
+        tool_change_z_feed_mm_min=_env_float("TOOL_CHANGE_Z_FEED_MM_MIN", 180.0),
         tool_change_x_mm=_env_float("TOOL_CHANGE_X_MM", 0.0),
         tool_change_y_mm=_env_float("TOOL_CHANGE_Y_MM", 0.0),
         moonraker_request_timeout_s=_env_float("MOONRAKER_REQUEST_TIMEOUT", 2.0),
-        home_timeout_s=_env_float("MACHINE_HOME_TIMEOUT", 90.0),
+        home_timeout_s=_env_float("MACHINE_HOME_TIMEOUT", 120.0),
         telemetry_fresh_timeout_s=_env_float("TELEMETRY_STALE_TIMEOUT", _env_float("MACHINE_TELEMETRY_FRESH_TIMEOUT", 2.0)),
         serial_fresh_timeout_s=_env_float("MACHINE_SERIAL_FRESH_TIMEOUT", 2.0),
         serial_startup_delay_s=_env_float("SERIAL_STARTUP_DELAY", 2.0),
         settle_tolerance_mm=_env_float("MACHINE_POSITION_TOLERANCE_MM", _env_float("MACHINE_SETTLE_TOLERANCE", 0.05)),
         velocity_tolerance_mm_s=_env_float("MACHINE_VELOCITY_TOLERANCE_MM_S", _env_float("MACHINE_VELOCITY_TOLERANCE", 0.01)),
-        move_timeout_s=_env_float("MACHINE_MOVE_TIMEOUT", 20.0),
-        move_minimum_timeout_s=_env_float("MACHINE_MOVE_MINIMUM_TIMEOUT", 20.0),
+        move_timeout_s=_env_float("MACHINE_MOVE_TIMEOUT", 90.0),
+        move_minimum_timeout_s=_env_float("MACHINE_MOVE_MINIMUM_TIMEOUT", 90.0),
         move_timeout_factor=_env_float("MACHINE_MOVE_TIMEOUT_FACTOR", 1.5),
-        move_settle_margin_s=_env_float("MACHINE_MOVE_SETTLE_MARGIN", 5.0),
+        move_settle_margin_s=_env_float("MACHINE_MOVE_SETTLE_MARGIN", 10.0),
+        no_progress_timeout_s=_env_float("MACHINE_NO_PROGRESS_TIMEOUT", 15.0),
+        settle_timeout_s=_env_float("MACHINE_SETTLE_TIMEOUT", 5.0),
         stable_samples=_env_int("MACHINE_STABLE_SAMPLES", 3),
         probe_step_mm=_env_float("PROBE_STEP_DISTANCE", 0.05),
         probe_lower_speed_mm_s=_env_float("PROBE_LOWER_SPEED", 1.0),

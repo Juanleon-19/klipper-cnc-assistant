@@ -201,12 +201,14 @@ const physicalMachine: MachineContextValue = {
     klipper: { ready: true, homed_axes: "xyz", position: { x: 60, y: 88.75, z: 10.05 } },
     preparation: {
       reference_prep_z_mm: 115,
+      reference_prep_z_feed_mm_min: 180,
+      reference_prep_z_speed_mm_s: 3,
       center_x_mm: 110,
       center_y_mm: 110,
       target: { x_mm: 110, y_mm: 110, z_mm: 115 },
       sequence: ["HOME", "MOVE_Z_PREP", "MOVE_XY_CENTER", "WAITING_FOR_REFERENCE"],
     },
-    tool_change: { x_mm: 0, y_mm: 0, z_mm: 115 },
+    tool_change: { x_mm: 0, y_mm: 0, z_mm: 115, z_feed_mm_min: 180, z_speed_mm_s: 3 },
     arduino: { port: "/dev/ttyUSB0", valid_packets: 12 },
     controller: { direction: "CENTER", jog_mode: "FINE", external_button: false, probe: false },
     safety: { serial_recent: true, telemetry_recent: true, movement_authorized: false },
@@ -380,6 +382,7 @@ describe("ProjectWorkspace", () => {
     expect(await screen.findByText(/Home, Z de preparación y centro/i)).toBeInTheDocument();
     expect(screen.getAllByText(/Z de preparación/i).length).toBeGreaterThan(0);
     expect(screen.getAllByText(/X 110.000 mm · Y 110.000 mm/i).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/180 mm\/min · 3.000 mm\/s/i).length).toBeGreaterThan(0);
     expect(screen.getByText(/Posición segura de cambio de herramienta/i)).toBeInTheDocument();
     expect(screen.getByText(/Z primero, luego X\/Y/i)).toBeInTheDocument();
 
