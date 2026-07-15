@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import math
 import re
+import threading
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import Any
 
 from klipper_cnc_assistant.application.errors import ApplicationError, NotFoundError
-from klipper_cnc_assistant.domain import OperationPreparation, OperacionPCB, PreparationState, ProjectValidationError
+from klipper_cnc_assistant.domain import CapturedPosition, CoordinateReference, OperationPreparation, OperacionPCB, PreparationState, ProjectValidationError
 from klipper_cnc_assistant.heightmap import (
     ExclusionZone,
     HeightGrid,
@@ -17,6 +18,7 @@ from klipper_cnc_assistant.heightmap import (
     SampleQuality,
     compute_height_map,
 )
+from klipper_cnc_assistant.heightmap.coverage import DOMAIN_TOLERANCE_MM, build_coverage_report
 from klipper_cnc_assistant.storage import JsonProjectRepository
 
 
@@ -155,6 +157,7 @@ class PhysicalMapService:
 
     def __init__(self, repository: JsonProjectRepository) -> None:
         self.repository = repository
+        self._io_lock = threading.RLock()
 
     def suggest_mesh_config(
         self,
@@ -283,9 +286,17 @@ class PhysicalMapService:
     def get_active(self, project_id: str, operation_id: str) -> dict[str, Any]:
         project = self._load_project(project_id)
         operation = project.get_operation(operation_id)
+        setup = project.get_setup(operation.setup_id)
+        if setup.active_map_id:
+            try:
+                active = self.get_by_id(project_id, setup.active_map_id)
+                if active.get("setup_id") == operation.setup_id and active.get("face") == operation.cara and active.get("archived_at") is None:
+                    return self._ensure_completed_map_finalized(project_id, active)
+            except Exception:
+                pass
         payload = self._latest_surface_map(project_id, operation)
         if payload is not None:
-            return payload
+            return self._ensure_completed_map_finalized(project_id, payload)
         legacy = self._latest_legacy_tool_map(project_id, operation)
         if legacy is not None:
             return self._migrate_legacy_payload(legacy, operation)
@@ -298,7 +309,7 @@ class PhysicalMapService:
             operation_id = str((payload.get("operation_ids") or [""])[0])
             if operation_id:
                 payload = self._migrate_legacy_payload(payload, project.get_operation(operation_id))
-        return payload
+        return self._ensure_completed_map_finalized(project_id, payload)
 
     def next_pending_point(self, project_id: str, map_id: str) -> dict[str, Any]:
         payload = self.get_by_id(project_id, map_id)
@@ -344,8 +355,24 @@ class PhysicalMapService:
         payload["status"] = "MESH_COMPLETE" if all(item.get("status") in {"MEASURED", "EXCLUDED", "SKIPPED"} for item in points) else "MESH_PROBING"
         if payload["status"] == "MESH_COMPLETE":
             payload["completed_at"] = measured_at
+            payload = self._set_execution_state(
+                payload,
+                worker_active=False,
+                point_state="POINT_COMPLETE",
+                point_index=point_index,
+                last_event=f"Punto {point_index + 1}/{len(points)} persistido; malla completa.",
+            )
+        else:
+            payload = self._set_execution_state(
+                payload,
+                point_state="POINT_PERSIST",
+                point_index=point_index,
+                last_event=f"Punto {point_index + 1}/{len(points)} persistido; buscando siguiente punto.",
+            )
         payload["updated_at"] = measured_at
         payload["height_map"] = self._height_map_payload_from_points(payload)
+        if payload["status"] == "MESH_COMPLETE":
+            payload = self._finalize_completed_map(project_id, payload)
         self._save(project_id, map_id, payload)
         return payload
 
@@ -353,6 +380,18 @@ class PhysicalMapService:
         payload = self.get_by_id(project_id, map_id)
         payload["status"] = status
         payload["updated_at"] = _iso_now()
+        payload = self._set_execution_state(
+            payload,
+            worker_active=status == "MESH_PROBING",
+            point_state="MESH_PAUSED" if status == "MESH_PAUSED" else status,
+            last_event=f"Estado de malla actualizado a {status}.",
+        )
+        execution = dict(payload.get("execution") or {})
+        if status == "MESH_PAUSED":
+            execution["pause_requested"] = True
+        elif status in {"MESH_READY", "MESH_PROBING", "CANCELLED"}:
+            execution["pause_requested"] = False
+        payload["execution"] = execution
         self._save(project_id, map_id, payload)
         return payload
 
@@ -370,8 +409,128 @@ class PhysicalMapService:
         payload["points"] = points
         payload["status"] = "MESH_PAUSED"
         payload["updated_at"] = _iso_now()
+        payload = self._set_execution_state(
+            payload,
+            worker_active=False,
+            point_state="POINT_FAILED",
+            point_index=point_index,
+            retry_count=int(point.get("attempts", 0)),
+            error=error,
+            last_event=f"Punto {point_index + 1}/{len(points)} falló y la malla quedó pausada.",
+        )
         payload["height_map"] = self._height_map_payload_from_points(payload)
         self._save(project_id, map_id, payload)
+        return payload
+
+    def update_execution_state(
+        self,
+        *,
+        project_id: str,
+        map_id: str,
+        worker_active: bool | None = None,
+        point_state: str | None = None,
+        point_index: int | None = None,
+        retry_count: int | None = None,
+        error: str | None = None,
+        last_event: str | None = None,
+        command: str | None = None,
+        target: dict[str, Any] | None = None,
+        observed: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        payload = self.get_by_id(project_id, map_id)
+        payload = self._set_execution_state(
+            payload,
+            worker_active=worker_active,
+            point_state=point_state,
+            point_index=point_index,
+            retry_count=retry_count,
+            error=error,
+            last_event=last_event,
+            command=command,
+            target=target,
+            observed=observed,
+        )
+        payload["updated_at"] = _iso_now()
+        self._save(project_id, map_id, payload)
+        return payload
+
+    def execution_log(self, *, project_id: str, map_id: str) -> dict[str, Any]:
+        payload = self.get_by_id(project_id, map_id)
+        return {
+            "map_id": map_id,
+            "status": payload.get("status"),
+            "execution": payload.get("execution", {}),
+            "events": list(payload.get("events", [])),
+        }
+
+    def _set_execution_state(
+        self,
+        payload: dict[str, Any],
+        *,
+        worker_active: bool | None = None,
+        point_state: str | None = None,
+        point_index: int | None = None,
+        retry_count: int | None = None,
+        error: str | None = None,
+        last_event: str | None = None,
+        command: str | None = None,
+        target: dict[str, Any] | None = None,
+        observed: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        now = _iso_now()
+        points = list(payload.get("points", []))
+        execution = dict(payload.get("execution") or {})
+        previous_state = execution.get("point_state")
+        if worker_active is not None:
+            execution["worker_active"] = worker_active
+        if point_state is not None:
+            execution["point_state"] = point_state
+            if point_state != previous_state:
+                execution["state_entered_at"] = now
+        if point_index is not None:
+            execution["point_index"] = point_index
+        if retry_count is not None:
+            execution["retry_count"] = retry_count
+        if error is not None or point_state == "POINT_FAILED":
+            execution["error"] = error
+        elif point_state not in {None, "POINT_FAILED"}:
+            execution["error"] = None
+        if last_event is not None:
+            execution["last_event"] = last_event
+        if command is not None:
+            execution["last_command"] = command
+        if target is not None or observed is not None:
+            execution["last_result"] = {"target": target, "observed": observed, "at": now}
+        execution["last_transition_at"] = now
+        execution["measured_count"] = sum(1 for point in points if point.get("status") == "MEASURED")
+        execution["pending_count"] = sum(1 for point in points if point.get("status") in {"PENDING", "RETRY_REQUIRED"})
+        execution["excluded_count"] = sum(1 for point in points if point.get("status") == "EXCLUDED")
+        execution["failed_count"] = sum(1 for point in points if point.get("status") == "FAILED")
+        execution["progress_total"] = sum(1 for point in points if point.get("status") != "EXCLUDED")
+        payload["execution"] = execution
+        event = {
+            "timestamp": now,
+            "mesh_id": payload.get("map_id"),
+            "point_index": point_index if point_index is not None else execution.get("point_index"),
+            "previous_state": previous_state,
+            "next_state": execution.get("point_state"),
+            "command": command,
+            "target": target,
+            "observed": observed,
+            "result": last_event,
+            "retry_count": execution.get("retry_count", 0),
+            "error": error,
+            "progress": {
+                "measured": execution["measured_count"],
+                "pending": execution["pending_count"],
+                "failed": execution["failed_count"],
+                "total": execution["progress_total"],
+            },
+        }
+        events = list(payload.get("events") or [])
+        if last_event is not None or point_state is not None:
+            events.append(event)
+        payload["events"] = events[-500:]
         return payload
 
     def _operations_for_setup_face(self, project, operation: OperacionPCB) -> tuple[OperacionPCB, ...]:
@@ -611,6 +770,24 @@ class PhysicalMapService:
             "estimated_distance_mm": total_distance,
             "estimated_time_s": self._estimate_time_s(points, total_distance, config),
             "invalid_points": [],
+            "execution": {
+                "worker_active": False,
+                "point_state": "MESH_PLANNED",
+                "point_index": None,
+                "state_entered_at": _iso_now(),
+                "last_transition_at": _iso_now(),
+                "last_event": "Malla planificada; ejecución física pendiente.",
+                "last_command": None,
+                "last_result": None,
+                "retry_count": 0,
+                "error": None,
+                "measured_count": 0,
+                "pending_count": sum(1 for point in points if point.get("status") in {"PENDING", "RETRY_REQUIRED", "FAILED"}),
+                "excluded_count": sum(1 for point in points if point.get("status") == "EXCLUDED"),
+                "failed_count": 0,
+                "progress_total": sum(1 for point in points if point.get("status") != "EXCLUDED"),
+            },
+            "events": [],
             "points": points,
             "height_map": self._serialize_height_map(height_map),
         }
@@ -658,6 +835,164 @@ class PhysicalMapService:
             estado="medido relativo" if payload["status"] == "MESH_COMPLETE" else "medicion parcial",
         )
         return self._serialize_height_map(height_map)
+
+    def _ensure_completed_map_finalized(self, project_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        if payload.get("source") != "MEASURED" or payload.get("status") != "MESH_COMPLETE":
+            return payload
+        validation = payload.get("validation") or {}
+        if payload.get("map_ready_state") == "MAP_READY" and validation.get("status") in {"VALID", "INVALID"}:
+            return payload
+        finalized = self._finalize_completed_map(project_id, payload)
+        finalized["updated_at"] = _iso_now()
+        self._save(project_id, str(finalized["map_id"]), finalized)
+        return finalized
+
+    def _height_map_from_payload(self, payload: dict[str, Any]) -> HeightMap:
+        grid = HeightGrid(**payload["grid"])
+        region = ProbeRegion(**payload["probe_region"])
+        samples = tuple(
+            HeightSample(
+                id=str(item["id"]),
+                x_mm=float(item["x_mm"]),
+                y_mm=float(item["y_mm"]),
+                z_mm=None if item.get("z_mm") is None else float(item["z_mm"]),
+                fila=int(item["fila"]),
+                columna=int(item["columna"]),
+                origen_datos=str(item.get("origen_datos", "measured")),
+                estado_calidad=SampleQuality(str(item.get("estado_calidad", "valida"))),
+                observacion=item.get("observacion"),
+                incluida=bool(item.get("incluida", True)),
+                residuo_plano_mm=item.get("residuo_plano_mm"),
+            )
+            for item in payload["muestras"]
+        )
+        return compute_height_map(
+            proyecto_id=str(payload["proyecto_id"]),
+            operacion_id=str(payload["operacion_id"]),
+            version=int(payload.get("version", 1)),
+            fuente_datos=str(payload.get("fuente_datos", "measured")),
+            superficie_simulada=payload.get("superficie_simulada"),
+            repeticion_simulacion=payload.get("repeticion_simulacion"),
+            etiqueta_simulada=bool(payload.get("etiqueta_simulada", False)),
+            grid=grid,
+            probe_region=region,
+            exclusion_zones=tuple(
+                ExclusionZone(
+                    id=str(zone.get("id") or "exclusion"),
+                    nombre=str(zone.get("nombre") or zone.get("name") or "Exclusión"),
+                    min_x_mm=float(zone.get("min_x_mm")),
+                    min_y_mm=float(zone.get("min_y_mm")),
+                    max_x_mm=float(zone.get("max_x_mm")),
+                    max_y_mm=float(zone.get("max_y_mm")),
+                )
+                for zone in payload.get("exclusion_zones") or []
+            ),
+            muestras=list(samples),
+            estado=str(payload.get("estado", "medido relativo")),
+        )
+
+    def _coverage_payload(self, project_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        project = self._load_project(project_id)
+        height_map = self._height_map_from_payload(payload["height_map"])
+        operation_ids = set(payload.get("operation_ids") or [])
+        operations = tuple(
+            (operation.id, operation.nombre, operation.analisis)
+            for operation in project.operaciones
+            if operation.id in operation_ids and operation.analisis is not None
+        )
+        coverage = build_coverage_report(height_map=height_map, operations=operations, tolerance_mm=DOMAIN_TOLERANCE_MM)
+        return {
+            "validated_at": _iso_now(),
+            "status": "VALID" if coverage.sufficient else "INVALID",
+            "sufficient": coverage.sufficient,
+            "points_inside": coverage.points_inside,
+            "points_outside": coverage.points_outside,
+            "points_numerically_outside": coverage.points_numerically_outside,
+            "blocking_outside_points": coverage.blocking_outside_points,
+            "max_distance_outside_mm": coverage.max_distance_outside_mm,
+            "tolerance_mm": coverage.tolerance_mm,
+            "issues": [issue.__dict__ for issue in coverage.issues],
+        }
+
+    def _parse_datetime(self, value: Any) -> datetime | None:
+        if not value:
+            return None
+        try:
+            return datetime.fromisoformat(str(value))
+        except ValueError:
+            return None
+
+    def _first_valid_tool_reference(self, payload: dict[str, Any]) -> dict[str, Any] | None:
+        for reference in (payload.get("tool_references") or {}).values():
+            if isinstance(reference, dict) and reference.get("valid"):
+                return reference
+        return None
+
+    def _finalize_completed_map(self, project_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        finalized = dict(payload)
+        finalized["source"] = "MEASURED"
+        finalized["map_ready_state"] = "MAP_READY"
+        finalized["validation"] = self._coverage_payload(project_id, finalized)
+        self._sync_setup_preparation_from_completed_map(project_id, finalized)
+        return finalized
+
+    def _sync_setup_preparation_from_completed_map(self, project_id: str, payload: dict[str, Any]) -> None:
+        project = self._load_project(project_id)
+        setup = project.get_setup(str(payload["setup_id"]))
+        timestamp = self._parse_datetime(payload.get("completed_at")) or self._parse_datetime(payload.get("updated_at")) or utc_now()
+        reference = self._first_valid_tool_reference(payload)
+        origin = CoordinateReference(
+            x_mm=float(payload.get("machine_origin_x", 0.0)),
+            y_mm=float(payload.get("machine_origin_y", 0.0)),
+            z_mm=None,
+            confirmado_en=timestamp,
+            fuente="MEASURED",
+            maquina=payload.get("machine_label"),
+            homed_axes=payload.get("homed_axes"),
+            posicion_captura=CapturedPosition(
+                x_mm=float(payload.get("machine_origin_x", 0.0)),
+                y_mm=float(payload.get("machine_origin_y", 0.0)),
+                z_mm=None,
+            ),
+            sesion=payload.get("session_id"),
+        )
+        z_reference = None
+        if reference is not None:
+            z_reference = CoordinateReference(
+                x_mm=float(reference.get("reference_x", payload.get("machine_origin_x", 0.0))),
+                y_mm=float(reference.get("reference_y", payload.get("machine_origin_y", 0.0))),
+                z_mm=float(reference.get("reference_z", payload.get("reference_z", 0.0))),
+                confirmado_en=self._parse_datetime(reference.get("measured_at")) or timestamp,
+                fuente=str(reference.get("source") or "MEASURED"),
+                maquina=reference.get("machine_label") or payload.get("machine_label"),
+                homed_axes=reference.get("homed_axes") or payload.get("homed_axes"),
+                posicion_captura=CapturedPosition(
+                    x_mm=float(reference.get("reference_x", payload.get("machine_origin_x", 0.0))),
+                    y_mm=float(reference.get("reference_y", payload.get("machine_origin_y", 0.0))),
+                    z_mm=float(reference.get("reference_z", payload.get("reference_z", 0.0))),
+                ),
+                sesion=reference.get("session_id") or payload.get("session_id"),
+            )
+        validation = payload.get("validation") or {}
+        validation_ok = bool(validation.get("sufficient")) and validation.get("status") == "VALID"
+        updated_setup = replace(
+            setup,
+            active_reference_id=None if reference is None else str(reference.get("installation_id") or reference.get("tool_id") or "measured"),
+            active_map_id=str(payload["map_id"]),
+            preparation_status=PreparationState.MAPA_VALIDADO if validation_ok else PreparationState.MAPA_DISPONIBLE,
+            last_prepared_at=timestamp,
+            preparacion=replace(
+                setup.preparacion,
+                origen_trabajo=origin,
+                referencia_z=z_reference or setup.preparacion.referencia_z,
+                region_sondeable_configurada_en=timestamp,
+                mapa_disponible_en=timestamp,
+                mapa_validado_en=timestamp if validation_ok else None,
+                compensacion_previsualizada_en=None,
+                motivo_invalidacion=None if validation_ok else "La cobertura del mapa físico medido no cubre todas las trayectorias.",
+            ),
+        )
+        self.repository.save_project(project.replace_setup(updated_setup))
 
     def _serialize_height_map(self, height_map: HeightMap) -> dict[str, Any]:
         return {
@@ -908,11 +1243,13 @@ class PhysicalMapService:
         self.repository.save_project(project.replace_setup(updated_setup))
 
     def _save(self, project_id: str, map_id: str, payload: dict[str, Any]) -> None:
-        self.repository.save_height_map_payload(project_id, map_id, payload)
+        with self._io_lock:
+            self.repository.save_height_map_payload(project_id, map_id, payload)
 
     def _load(self, project_id: str, map_id: str) -> dict[str, Any]:
         try:
-            return self.repository.load_height_map_payload(project_id, map_id)
+            with self._io_lock:
+                return self.repository.load_height_map_payload(project_id, map_id)
         except FileNotFoundError as error:
             raise NotFoundError(str(error)) from error
 

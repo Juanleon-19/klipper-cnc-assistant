@@ -13,6 +13,7 @@ from klipper_cnc_assistant.application import (
     CompensatedGCodeService,
     HeightMapService,
     MachineSessionService,
+    MeshExecutionService,
     NotFoundError,
     PhysicalMapService,
     ProjectService,
@@ -44,11 +45,13 @@ def create_app(
     project_service = ProjectService(repository)
     height_map_service = HeightMapService(repository)
     physical_map_service = PhysicalMapService(repository)
+    mesh_execution_service = MeshExecutionService(physical_map_service)
     compensated_gcode_service = CompensatedGCodeService(repository, physical_map_service)
     reference_session_service = ReferenceSessionService(
         repository,
         height_map_service,
         machine_session_service,
+        physical_map_service,
     )
     system_status_service = SystemStatusService(
         repository,
@@ -66,6 +69,7 @@ def create_app(
     app.state.project_service = project_service
     app.state.height_map_service = height_map_service
     app.state.physical_map_service = physical_map_service
+    app.state.mesh_execution_service = mesh_execution_service
     app.state.compensated_gcode_service = compensated_gcode_service
     app.state.machine_session_service = machine_session_service
     app.state.machine_runtime = machine_runtime

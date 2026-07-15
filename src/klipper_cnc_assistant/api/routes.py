@@ -466,34 +466,16 @@ def build_router() -> APIRouter:
 
     @router.post("/projects/{project_id}/physical-maps/{map_id:path}/execute-all", response_model=PhysicalMapResponse)
     def execute_all_physical_map_points(project_id: str, map_id: str, request: Request) -> PhysicalMapResponse:
-        service = request.app.state.physical_map_service
-        runtime = request.app.state.machine_runtime
-        payload = service.get_by_id(project_id, map_id)
-        if payload.get("status") in {"CANCELLED", "MESH_COMPLETE"}:
-            raise ApplicationError("La malla no está en un estado ejecutable.")
-        service.mark_status(project_id=project_id, map_id=map_id, status="MESH_PROBING")
-        while True:
-            payload = service.get_by_id(project_id, map_id)
-            if payload.get("status") in {"MESH_PAUSED", "CANCELLED", "MESH_COMPLETE"}:
-                return PhysicalMapResponse(payload=payload)
-            try:
-                point = service.next_pending_point(project_id, map_id)
-            except ApplicationError:
-                return PhysicalMapResponse(payload=service.get_by_id(project_id, map_id))
-            try:
-                result = runtime.probe_mesh_point(point)
-            except Exception as error:
-                updated = service.mark_point_failed(project_id=project_id, map_id=map_id, point_index=int(point["index"]), error=str(error))
-                return PhysicalMapResponse(payload=updated)
-            service.record_point(
-                project_id=project_id,
-                map_id=map_id,
-                point_index=int(point["index"]),
-                z_measured=float(result["z_measured"]),
-                status="MEASURED",
-                duration_s=float(result.get("duration_s", 0.0)),
-                error=None,
-            )
+        updated = request.app.state.mesh_execution_service.start_all(
+            project_id=project_id,
+            map_id=map_id,
+            runtime=request.app.state.machine_runtime,
+        )
+        return PhysicalMapResponse(payload=updated)
+
+    @router.get("/projects/{project_id}/physical-maps/{map_id:path}/log", response_model=dict[str, object])
+    def get_physical_map_log(project_id: str, map_id: str, request: Request) -> dict[str, object]:
+        return request.app.state.physical_map_service.execution_log(project_id=project_id, map_id=map_id)
 
     @router.post("/projects/{project_id}/physical-maps/{map_id:path}/points/{point_index}", response_model=PhysicalMapResponse)
     def update_physical_map_point(project_id: str, map_id: str, point_index: int, payload: PhysicalMapPointUpdateRequest, request: Request) -> PhysicalMapResponse:
@@ -516,7 +498,12 @@ def build_router() -> APIRouter:
 
     @router.post("/projects/{project_id}/physical-maps/{map_id:path}/resume", response_model=PhysicalMapResponse)
     def resume_physical_map(project_id: str, map_id: str, request: Request) -> PhysicalMapResponse:
-        return PhysicalMapResponse(payload=request.app.state.physical_map_service.mark_status(project_id=project_id, map_id=map_id, status="MESH_READY"))
+        updated = request.app.state.mesh_execution_service.resume(
+            project_id=project_id,
+            map_id=map_id,
+            runtime=request.app.state.machine_runtime,
+        )
+        return PhysicalMapResponse(payload=updated)
 
     @router.post("/projects/{project_id}/physical-maps/{map_id:path}/cancel", response_model=PhysicalMapResponse)
     def cancel_physical_map(project_id: str, map_id: str, request: Request) -> PhysicalMapResponse:
