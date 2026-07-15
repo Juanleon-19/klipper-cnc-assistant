@@ -217,6 +217,24 @@ export type ReferencePoint = {
   z_mm: number | null;
 };
 
+export type CapturedPosition = {
+  x_mm: number;
+  y_mm: number;
+  z_mm: number | null;
+};
+
+export type CoordinateReference = {
+  x_mm: number;
+  y_mm: number;
+  z_mm: number | null;
+  fecha: string | null;
+  fuente: string;
+  maquina: string | null;
+  homed_axes: string | null;
+  posicion_captura: CapturedPosition | null;
+  sesion: string | null;
+};
+
 export type ReferenceConfirmation = {
   x_mm: number;
   y_mm: number;
@@ -241,8 +259,8 @@ export type ReferenceSession = {
   origen_maquina: ReferencePoint;
   origen_material: ReferencePoint;
   origen_gcode: ReferencePoint;
-  origen_trabajo: Record<string, string | number | null> | null;
-  referencia_z: Record<string, string | number | null> | null;
+  origen_trabajo: CoordinateReference | null;
+  referencia_z: CoordinateReference | null;
   pasos: ReferenceStep[];
   compensacion_previsualizada_en: string | null;
   analysis_stale: boolean;

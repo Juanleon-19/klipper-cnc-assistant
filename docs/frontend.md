@@ -114,3 +114,12 @@ npm run build
 ```
 
 El build final verificado generó `frontend/dist/index.html`, `assets/index-DiGQGU_B.js`, `assets/index-C_RZSt3A.css` y `assets/plotly.min-CofRTlwV.js`.
+
+
+## Verificación de integración visible 2026-07-14
+
+El frontend consume `CoordinateReference.posicion_captura` como `CapturedPosition` estructurado y lo muestra en Referencia física. En modo físico, Mapa de alturas no presenta `SIMULADO` como acción principal; muestra directamente `Mapa medido físicamente` con controles compactos, configuración física, armado e inicio de sondeo.
+
+El visor 2D incorpora ejes X/Y, ticks en mm, rejilla mayor/menor, selector Local/Máquina, región, trayectoria, malla, recorrido serpentino, punto activo e inspector colapsable. Pantalla completa usa barra inferior e inspector flotante.
+
+Build servido verificado por `curl`: `/assets/index-DNVlB1UT.js` y `/assets/index-yhqof53C.css`.

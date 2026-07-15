@@ -170,3 +170,15 @@ curl -s http://127.0.0.1:8000/api/machine/runtime
 ```
 
 Si el navegador conserva assets anteriores, usar recarga forzada (`Ctrl+Shift+R`) o limpiar caché del sitio. No hay Service Worker registrado por la aplicación.
+
+
+## Build servido verificado 2026-07-14
+
+FastAPI sirve `frontend/dist` salvo que `KCA_FRONTEND_DIST` indique otra ruta. El build final verificado por `curl http://127.0.0.1:8000/` referencia:
+
+```text
+/assets/index-DNVlB1UT.js
+/assets/index-yhqof53C.css
+```
+
+El backend real se recargó reiniciando solo el proceso de `klipper-cnc-assistant.service`; no se reiniciaron Klipper ni Moonraker y el runtime quedó en `DISCONNECTED` tras el reinicio.

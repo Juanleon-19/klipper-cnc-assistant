@@ -48,12 +48,24 @@ def _tool_diameter(operation: OperacionPCB) -> float | None:
 class PhysicalMeshConfig:
     max_spacing_mm: float = 10.0
     margin_mm: float = 1.0
+    safe_z_mm: float | None = None
+    probe_step_mm: float | None = None
+    probe_feed_mm_min: float | None = None
+    retract_mm: float | None = None
 
     def __post_init__(self) -> None:
         if self.max_spacing_mm <= 0:
             raise ApplicationError("La separación máxima de malla debe ser positiva.")
         if self.margin_mm < 0:
             raise ApplicationError("El margen de malla no puede ser negativo.")
+        for field, value in (
+            ("Z segura", self.safe_z_mm),
+            ("paso de sonda", self.probe_step_mm),
+            ("velocidad de sonda", self.probe_feed_mm_min),
+            ("retracto", self.retract_mm),
+        ):
+            if value is not None and value <= 0:
+                raise ApplicationError(f"{field} debe ser positivo.")
 
 
 class PhysicalMapService:
@@ -335,7 +347,12 @@ class PhysicalMapService:
             "machine_label": kwargs["machine_label"],
             "session_id": kwargs["session_id"],
             "mesh_config": {"max_spacing_mm": config.max_spacing_mm, "margin_mm": config.margin_mm},
-            "probe_config": {},
+            "probe_config": {
+                "safe_z_mm": config.safe_z_mm,
+                "probe_step_mm": config.probe_step_mm,
+                "probe_feed_mm_min": config.probe_feed_mm_min,
+                "retract_mm": config.retract_mm,
+            },
             "local_region": {
                 "min_x_mm": height_map.probe_region.min_x_mm,
                 "min_y_mm": height_map.probe_region.min_y_mm,

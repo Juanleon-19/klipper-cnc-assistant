@@ -1,6 +1,7 @@
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+import { MachineContext, type MachineContextValue } from "../context/MachineContext";
 import { ApiError } from "../lib/api";
 import type { HeightMap, Project, ReferenceSession } from "../types";
 import { ProjectWorkspace } from "./ProjectWorkspace";
@@ -61,8 +62,8 @@ const referenceSession: ReferenceSession = {
   origen_maquina: { x_mm: 0, y_mm: 0, z_mm: 0 },
   origen_material: { x_mm: 0, y_mm: 0, z_mm: 0 },
   origen_gcode: { x_mm: 0, y_mm: 0, z_mm: 0 },
-  origen_trabajo: { x_mm: 0, y_mm: 0, z_mm: null, fecha: new Date().toISOString() },
-  referencia_z: { x_mm: 10, y_mm: 8, z_mm: 0, fecha: new Date().toISOString() },
+  origen_trabajo: { x_mm: 0, y_mm: 0, z_mm: null, fecha: new Date().toISOString(), fuente: "MEASURED", maquina: "klipper", homed_axes: "xyz", posicion_captura: { x_mm: 0, y_mm: 0, z_mm: null }, sesion: "test" },
+  referencia_z: { x_mm: 10, y_mm: 8, z_mm: 0, fecha: new Date().toISOString(), fuente: "MEASURED", maquina: "klipper", homed_axes: "xyz", posicion_captura: { x_mm: 10, y_mm: 8, z_mm: 0 }, sesion: "test" },
   pasos: [
     { id: "referencia_maquina", titulo: "Referencia de maquina", estado: "confirmado", confirmado: true, fecha: new Date().toISOString(), detalle: "Pertenece a la sesión general de máquina." },
     { id: "origen_xy", titulo: "Origen de trabajo X/Y", estado: "confirmado", confirmado: true, fecha: new Date().toISOString(), detalle: "Define dónde queda X0 Y0 del G-code respecto al montaje." },
@@ -183,8 +184,43 @@ const project: Project = {
   estado_general: "valido",
 };
 
-function renderWorkspace() {
-  return render(
+const physicalMachine: MachineContextValue = {
+  runtime: {
+    state: "WAITING_FOR_XY_REFERENCE",
+    mode: "PHYSICAL",
+    mode_label: "FÍSICO",
+    moonraker: { http_connected: true, websocket_connected: true },
+    klipper: { ready: true, homed_axes: "xyz", position: { x: 60, y: 88.75, z: 10.05 } },
+    arduino: { port: "/dev/ttyUSB0", valid_packets: 12 },
+    controller: { direction: "CENTER", jog_mode: "FINE", external_button: false, probe: false },
+    safety: { serial_recent: true, telemetry_recent: true, movement_authorized: false },
+    health: "ok",
+    started_at: new Date().toISOString(),
+    application: {},
+    last_command: null,
+    last_movement: null,
+    last_error: null,
+    last_probe_result: null,
+    initialization_steps: [],
+    events: [],
+  },
+  refreshing: false,
+  isPhysical: true,
+  modeLabel: "FÍSICO",
+  runtimeState: "WAITING_FOR_XY_REFERENCE",
+  connected: true,
+  homedAxes: "xyz",
+  klipperReady: true,
+  serialRecent: true,
+  telemetryRecent: true,
+  movementAuthorized: false,
+  lastError: null,
+  runMachineAction: vi.fn(),
+  refreshRuntime: vi.fn(),
+};
+
+function renderWorkspace(machine?: MachineContextValue) {
+  const workspace = (
     <ProjectWorkspace
       project={project}
       busyKey={null}
@@ -201,6 +237,7 @@ function renderWorkspace() {
       onUploadFile={vi.fn()}
     />
   );
+  return render(machine ? <MachineContext.Provider value={machine}>{workspace}</MachineContext.Provider> : workspace);
 }
 
 describe("ProjectWorkspace", () => {
@@ -241,8 +278,46 @@ describe("ProjectWorkspace", () => {
     expect(await screen.findByText(/Flujo simulado de preparación/i)).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: /Mapa de alturas/i }));
-    fireEvent.click(screen.getByRole("button", { name: /Configuración/i }));
+    fireEvent.click(screen.getByRole("tab", { name: /Configuración/i }));
     expect(screen.getAllByText(/Alturas de la superficie/i).length).toBeGreaterThan(0);
+  });
+
+  it("lee y muestra la posición capturada estructurada de la referencia física", async () => {
+    renderWorkspace(physicalMachine);
+
+    fireEvent.click(screen.getByRole("button", { name: /Referencia/i }));
+
+    expect(await screen.findByText(/Referencia X\/Y\/Z medida/i)).toBeInTheDocument();
+    expect(screen.queryByText(/Flujo simulado de preparación/i)).toBeNull();
+    expect(screen.getByText(/Captura referencia/i)).toBeInTheDocument();
+    expect(screen.getByText(/X 10.000 mm · Y 8.000 mm · Z 0.000 mm/i)).toBeInTheDocument();
+  });
+
+  it("muestra mapa físico como flujo principal sin botón operativo SIMULADO", async () => {
+    apiMock.getPhysicalMap.mockResolvedValueOnce({
+      payload: {
+        map_id: "measured/test",
+        status: "MESH_PLANNED",
+        source: "MEASURED",
+        point_count: 2,
+        grid: { rows: 1, columns: 2, dx_mm: 5, dy_mm: 0 },
+        local_region: { min_x_mm: 0, min_y_mm: 0, max_x_mm: 5, max_y_mm: 0 },
+        machine_region: { min_x_mm: 60, min_y_mm: 88.75, max_x_mm: 65, max_y_mm: 88.75 },
+        points: [
+          { index: 0, row: 0, column: 0, x_local: 0, y_local: 0, x_machine: 60, y_machine: 88.75, status: "PENDING" },
+          { index: 1, row: 0, column: 1, x_local: 5, y_local: 0, x_machine: 65, y_machine: 88.75, status: "PENDING" },
+        ],
+      },
+    });
+    renderWorkspace(physicalMachine);
+
+    fireEvent.click(screen.getByRole("button", { name: /Mapa de alturas/i }));
+
+    expect(await screen.findByText(/Mapa medido físicamente/i)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /^SIMULADO$/i })).toBeNull();
+    expect(screen.getByRole("button", { name: /Usar área de las operaciones y generar malla/i })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Armar sondeo/i })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Iniciar sondeo físico/i })).toBeInTheDocument();
   });
 
   it("acepta 0 válido en X e Y del origen de trabajo", async () => {

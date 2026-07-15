@@ -139,15 +139,20 @@ describe("HeightMap views", () => {
     render(<HeightMapHeatmap material={{ ancho_mm: 80, alto_mm: 60, espesor_mm: 1.6 }} heightMap={heightMap} mode="bruto" toolpathBounds={{ min_x_mm: 5, max_x_mm: 50, min_y_mm: 4, max_y_mm: 40, min_z_mm: -0.1, max_z_mm: 0.02, ancho_mm: 45, alto_mm: 36 }} />);
 
     expect(screen.getByText(/Mapa de alturas 2D/i)).toBeInTheDocument();
-    expect(screen.getByLabelText(/Contorno material/i)).toBeInTheDocument();
-    expect(screen.getByLabelText(/Región sondeable/i)).toBeInTheDocument();
-    expect(screen.getByLabelText(/Zona excluida/i)).toBeInTheDocument();
-    expect(screen.getByLabelText(/Muestra/i)).toBeInTheDocument();
+    expect(screen.getByText(/X \(mm\)/i)).toBeInTheDocument();
+    expect(screen.getByText(/Y \(mm\)/i)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /Capas/i }));
+    expect(screen.getByLabelText(/Material/i)).toBeInTheDocument();
+    expect(screen.getByLabelText(/Trayectoria/i)).toBeInTheDocument();
+    expect(screen.getByLabelText(/Región/i)).toBeInTheDocument();
+    expect(screen.getByLabelText(/Exclusiones/i)).toBeInTheDocument();
+    expect(screen.getByLabelText(/Muestras/i)).toBeInTheDocument();
     expect(screen.getByLabelText(/Superficie/i)).toBeInTheDocument();
+    expect(screen.getByLabelText(/Malla/i)).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: /Pantalla completa/i }));
     await waitFor(() => expect(HTMLElement.prototype.requestFullscreen).toHaveBeenCalled());
-    expect(screen.getByRole("button", { name: /Salir de pantalla completa/i })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Cerrar/i })).toBeInTheDocument();
   });
 
   it("permite excluir y editar puntos desde la tabla", async () => {

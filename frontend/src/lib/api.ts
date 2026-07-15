@@ -227,7 +227,7 @@ export const api = {
     request<ReferenceSession>(`/api/projects/${projectId}/operations/${operationId}/reference-session/physical-z-reference-from-probe`, {
       method: "POST",
     }),
-  planPhysicalMapFromReference: (projectId: string, operationId: string, payload: { max_spacing_mm?: number; margin_mm?: number }) =>
+  planPhysicalMapFromReference: (projectId: string, operationId: string, payload: { max_spacing_mm?: number; margin_mm?: number; safe_z_mm?: number; probe_step_mm?: number; probe_feed_mm_min?: number; retract_mm?: number }) =>
     request<PhysicalMapResponse>(`/api/projects/${projectId}/operations/${operationId}/physical-map/plan-from-reference`, {
       method: "POST",
       body: JSON.stringify(payload),

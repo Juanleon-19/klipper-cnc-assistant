@@ -3,7 +3,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { DashboardPage } from "./components/DashboardPage";
 import { ProjectForm } from "./components/ProjectForm";
 import { ProjectList } from "./components/ProjectList";
-import { ProjectWorkspace } from "./components/ProjectWorkspace";
+import { ProjectWorkspace, type WorkspaceView } from "./components/ProjectWorkspace";
 import { StatusBadge } from "./components/StatusBadge";
 import { SystemBanner } from "./components/SystemBanner";
 import { MachineContext, buildMachineContextValue, type MachineAction } from "./context/MachineContext";
@@ -39,6 +39,21 @@ const navItems: NavItem[] = [
   { id: "sistema", label: "Sistema", shortLabel: "Sistema", icon: "⚙" },
 ];
 
+
+function getQueryValue(name: string): string | null {
+  return new URLSearchParams(window.location.search).get(name);
+}
+
+function getInitialView(): View {
+  const value = getQueryValue("view");
+  return value === "inicio" || value === "proyectos" || value === "nuevo" || value === "sistema" ? value : "inicio";
+}
+
+function getInitialWorkspaceView(): WorkspaceView | undefined {
+  const value = getQueryValue("workspace");
+  return value === "archivo" || value === "trayectoria" || value === "referencia" || value === "mapa" || value === "validacion" || value === "ejecucion" ? value : undefined;
+}
+
 function useViewportWidth() {
   const [width, setWidth] = useState(() => window.innerWidth);
   useEffect(() => {
@@ -50,11 +65,11 @@ function useViewportWidth() {
 }
 
 export default function App() {
-  const [view, setView] = useState<View>("inicio");
+  const [view, setView] = useState<View>(getInitialView);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [projects, setProjects] = useState<Project[]>([]);
-  const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
+  const [selectedProjectId, setSelectedProjectId] = useState<string | null>(() => getQueryValue("project"));
   const [health, setHealth] = useState<HealthResponse | null>(null);
   const [systemInfo, setSystemInfo] = useState<SystemInfoResponse | null>(null);
   const [machineSession, setMachineSession] = useState<MachineSession | null>(null);
@@ -75,6 +90,7 @@ export default function App() {
   );
   const recentProject = useMemo(() => getRecentProject(projects), [projects]);
   const appIncompatible = Boolean(systemInfo && systemInfo.schema_version !== FRONTEND_SCHEMA_VERSION);
+  const initialWorkspaceView = useMemo(() => getInitialWorkspaceView(), []);
 
   useEffect(() => {
     if (isDesktop) {
@@ -523,6 +539,7 @@ export default function App() {
                 onRemoveFile={handleRemoveFile}
                 onAnalyze={handleAnalyze}
                 onUploadFile={handleUploadFile}
+                initialView={initialWorkspaceView}
               />
             </div>
           ) : null}

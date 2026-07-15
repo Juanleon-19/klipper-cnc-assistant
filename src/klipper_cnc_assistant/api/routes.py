@@ -346,7 +346,14 @@ def build_router() -> APIRouter:
             homed_axes=homed_axes,
             machine_label=machine_label,
             session_id=session_id,
-            config=PhysicalMeshConfig(max_spacing_mm=payload.max_spacing_mm, margin_mm=payload.margin_mm),
+            config=PhysicalMeshConfig(
+                max_spacing_mm=payload.max_spacing_mm,
+                margin_mm=payload.margin_mm,
+                safe_z_mm=payload.safe_z_mm,
+                probe_step_mm=payload.probe_step_mm,
+                probe_feed_mm_min=payload.probe_feed_mm_min,
+                retract_mm=payload.retract_mm,
+            ),
         )
         return PhysicalMapResponse(payload=plan)
 

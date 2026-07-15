@@ -40,6 +40,12 @@ class ApiTest(unittest.TestCase):
             },
         ).json()["id"]
 
+    def _write_setup_preparation(self, project_id: str, preparation: dict) -> None:
+        project_file = self.data_dir / "projects" / project_id / "project.json"
+        payload = json.loads(project_file.read_text(encoding="utf-8"))
+        payload["montajes"][0]["preparacion"] = preparation
+        project_file.write_text(json.dumps(payload, ensure_ascii=True, indent=2), encoding="utf-8")
+
     def test_health_endpoint(self) -> None:
         response = self.client.get("/api/health")
         self.assertEqual(response.status_code, 200)
@@ -124,6 +130,90 @@ class ApiTest(unittest.TestCase):
         self.assertEqual(response.status_code, 422)
         self.assertIn("z_mm", response.json()["detalle"])
         self.assertIn("numero valido", response.json()["detalle"])
+
+    def test_reference_session_returns_structured_captured_position_xy(self) -> None:
+        project_id = self._create_project()
+        operation_id = self._create_operation(project_id)
+        self._write_setup_preparation(project_id, {
+            "origen_trabajo": {
+                "x_mm": 60.0, "y_mm": 88.75, "z_mm": None,
+                "fuente": "MEASURED", "fecha": "2026-07-14T10:00:00+00:00",
+                "posicion_captura": {"x_mm": 60.0, "y_mm": 88.75},
+            }
+        })
+
+        response = self.client.get(f"/api/projects/{project_id}/operations/{operation_id}/reference-session")
+
+        self.assertEqual(response.status_code, 200)
+        captured = response.json()["origen_trabajo"]["posicion_captura"]
+        self.assertEqual(captured, {"x_mm": 60.0, "y_mm": 88.75, "z_mm": None})
+
+    def test_reference_session_returns_structured_captured_position_xyz(self) -> None:
+        project_id = self._create_project()
+        operation_id = self._create_operation(project_id)
+        self._write_setup_preparation(project_id, {
+            "referencia_z": {
+                "x_mm": 60.0, "y_mm": 88.75, "z_mm": 10.05,
+                "fuente": "MEASURED", "fecha": "2026-07-14T10:00:00+00:00",
+                "posicion_captura": {"x_mm": 60.0, "y_mm": 88.75, "z_mm": 10.05},
+            }
+        })
+
+        response = self.client.get(f"/api/projects/{project_id}/operations/{operation_id}/reference-session")
+
+        self.assertEqual(response.status_code, 200)
+        captured = response.json()["referencia_z"]["posicion_captura"]
+        self.assertEqual(captured, {"x_mm": 60.0, "y_mm": 88.75, "z_mm": 10.05})
+
+    def test_reference_session_accepts_absent_and_legacy_captured_position(self) -> None:
+        project_id = self._create_project()
+        operation_id = self._create_operation(project_id)
+        self._write_setup_preparation(project_id, {
+            "origen_trabajo": {
+                "x_mm": 12.0, "y_mm": -3.5, "z_mm": None,
+                "fuente": "MEASURED", "fecha": "2026-07-14T10:00:00+00:00",
+            },
+            "referencia_z": {
+                "x_mm": 60.0, "y_mm": 88.75, "z_mm": 10.05,
+                "fuente": "MEASURED", "fecha": "2026-07-14T10:00:00+00:00",
+                "posicion_captura": "60.0,88.75,10.05",
+            },
+        })
+
+        response = self.client.get(f"/api/projects/{project_id}/operations/{operation_id}/reference-session")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertIsNone(payload["origen_trabajo"]["posicion_captura"])
+        self.assertEqual(payload["referencia_z"]["posicion_captura"], {"x_mm": 60.0, "y_mm": 88.75, "z_mm": 10.05})
+        self.assertEqual(payload["referencia_z"]["z_mm"], 10.05)
+
+    def test_reference_session_response_keeps_captured_reference_without_new_probe(self) -> None:
+        project_id = self._create_project()
+        operation_id = self._create_operation(project_id)
+        self._write_setup_preparation(project_id, {
+            "origen_trabajo": {
+                "x_mm": 60.0, "y_mm": 88.75, "z_mm": None,
+                "fuente": "MEASURED", "fecha": "2026-07-14T10:00:00+00:00",
+                "maquina": "klipper", "homed_axes": "xyz", "sesion": "physical-session",
+                "posicion_captura": {"x_mm": 60.0, "y_mm": 88.75, "z_mm": 10.05},
+            },
+            "referencia_z": {
+                "x_mm": 60.0, "y_mm": 88.75, "z_mm": 10.05,
+                "fuente": "MEASURED", "fecha": "2026-07-14T10:00:00+00:00",
+                "maquina": "klipper", "homed_axes": "xyz", "sesion": "physical-session",
+                "posicion_captura": {"x_mm": 60.0, "y_mm": 88.75, "z_mm": 10.05},
+            },
+        })
+
+        response = self.client.get(f"/api/projects/{project_id}/operations/{operation_id}/reference-session")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["origen_trabajo"]["posicion_captura"]["x_mm"], 60.0)
+        self.assertEqual(payload["origen_trabajo"]["posicion_captura"]["z_mm"], 10.05)
+        self.assertEqual(payload["referencia_z"]["fuente"], "MEASURED")
+        self.assertEqual(payload["referencia_z"]["sesion"], "physical-session")
 
     def test_machine_session_is_simulated_and_home_is_unknown_until_confirmed(self) -> None:
         response = self.client.get("/api/machine/session")

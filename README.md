@@ -181,3 +181,10 @@ npm run build
 ```
 
 Última validación local: backend 64 pruebas, frontend 37 pruebas, `pip check`, lint y build correctos. `npm run build` generó `frontend/dist/index.html` con `assets/index-DiGQGU_B.js` y conserva la advertencia no bloqueante de tamaño de Plotly.
+
+
+### Corrección servida 2026-07-14
+
+- `ReferenceSessionResponse` usa ahora `CapturedPosition { x_mm, y_mm, z_mm? }` para `posicion_captura`; las referencias físicas existentes se migran sin repetir sondeo.
+- En `MACHINE_MODE=physical`, la pestaña Mapa de alturas abre directamente el flujo `MEASURED`: área desde operaciones, configuración de malla/sonda, armado, inicio, pausa, reanudación, cancelación y progreso. Los mapas simulados quedan como consulta secundaria.
+- Build servido verificado: `frontend/dist/index.html` referencia `/assets/index-DNVlB1UT.js` y `/assets/index-yhqof53C.css`.

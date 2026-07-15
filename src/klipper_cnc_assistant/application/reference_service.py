@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import replace
 from datetime import datetime, timezone
 
-from klipper_cnc_assistant.domain import CoordinateReference, PreparationState, ProjectValidationError
+from klipper_cnc_assistant.domain import CapturedPosition, CoordinateReference, PreparationState, ProjectValidationError
 from klipper_cnc_assistant.heightmap.compensation import build_compensation_preview
 from klipper_cnc_assistant.heightmap.coverage import DOMAIN_TOLERANCE_MM, build_coverage_report
 from klipper_cnc_assistant.storage import JsonProjectRepository
@@ -131,7 +131,7 @@ class ReferenceSessionService:
             fuente="MEASURED",
             maquina=machine_label,
             homed_axes=homed_axes,
-            posicion_captura=dict(position),
+            posicion_captura=self._captured_position_from_dict(position),
             sesion=session_id,
         )
         updated = replace(
@@ -173,7 +173,7 @@ class ReferenceSessionService:
             fuente="MEASURED",
             maquina=machine_label,
             homed_axes=homed_axes,
-            posicion_captura=dict(position),
+            posicion_captura=self._captured_position_from_dict(position),
             sesion=session_id,
         )
         updated = replace(
@@ -349,9 +349,14 @@ class ReferenceSessionService:
         first = analysis.segmentos_vista_previa[0]
         return {"x_mm": first.inicio_x_mm, "y_mm": first.inicio_y_mm, "z_mm": first.z_mm}
 
-    def _serialize_reference(self, reference: CoordinateReference | None) -> dict[str, float | str | None] | None:
+    def _serialize_reference(self, reference: CoordinateReference | None) -> dict[str, object] | None:
         if reference is None:
             return None
+        position = None if reference.posicion_captura is None else {
+            "x_mm": reference.posicion_captura.x_mm,
+            "y_mm": reference.posicion_captura.y_mm,
+            "z_mm": reference.posicion_captura.z_mm,
+        }
         return {
             "x_mm": reference.x_mm,
             "y_mm": reference.y_mm,
@@ -360,9 +365,16 @@ class ReferenceSessionService:
             "fuente": reference.fuente,
             "maquina": reference.maquina,
             "homed_axes": reference.homed_axes,
-            "posicion_captura": reference.posicion_captura,
+            "posicion_captura": position,
             "sesion": reference.sesion,
         }
+
+    def _captured_position_from_dict(self, position: dict[str, float]) -> CapturedPosition:
+        return CapturedPosition(
+            x_mm=float(position["x_mm"]),
+            y_mm=float(position["y_mm"]),
+            z_mm=None if position.get("z_mm") is None else float(position["z_mm"]),
+        )
 
     def _reject_simulated_overwrite_of_measured(self, reference: CoordinateReference | None, label: str) -> None:
         if reference is not None and reference.fuente == "MEASURED":

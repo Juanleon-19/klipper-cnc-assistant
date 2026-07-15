@@ -159,6 +159,13 @@ class MaterialOverflow:
 
 
 @dataclass(frozen=True)
+class CapturedPosition:
+    x_mm: float
+    y_mm: float
+    z_mm: float | None = None
+
+
+@dataclass(frozen=True)
 class CoordinateReference:
     x_mm: float
     y_mm: float
@@ -167,7 +174,7 @@ class CoordinateReference:
     fuente: str = "SIMULATED"
     maquina: str | None = None
     homed_axes: str | None = None
-    posicion_captura: dict[str, float] | None = None
+    posicion_captura: CapturedPosition | None = None
     sesion: str | None = None
 
 

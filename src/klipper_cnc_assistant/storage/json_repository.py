@@ -13,6 +13,7 @@ from klipper_cnc_assistant.domain import (
     BoardFace,
     Bounds3D,
     ConfiguracionAlineacion,
+    CapturedPosition,
     CoordinateReference,
     FlipAxis,
     IssueSeverity,
@@ -347,9 +348,51 @@ class JsonProjectRepository:
             "fuente": reference.fuente,
             "maquina": reference.maquina,
             "homed_axes": reference.homed_axes,
-            "posicion_captura": reference.posicion_captura,
+            "posicion_captura": self._serialize_captured_position(reference.posicion_captura),
             "sesion": reference.sesion,
         }
+
+    def _serialize_captured_position(self, position: CapturedPosition | None) -> dict[str, float | None] | None:
+        if position is None:
+            return None
+        return {"x_mm": position.x_mm, "y_mm": position.y_mm, "z_mm": position.z_mm}
+
+    def _deserialize_captured_position(self, value) -> CapturedPosition | None:
+        if value is None:
+            return None
+        if isinstance(value, CapturedPosition):
+            return value
+        if isinstance(value, dict):
+            try:
+                x_mm = float(value["x_mm"])
+                y_mm = float(value["y_mm"])
+                raw_z = value.get("z_mm")
+                z_mm = None if raw_z is None else float(raw_z)
+                return CapturedPosition(x_mm=x_mm, y_mm=y_mm, z_mm=z_mm)
+            except (KeyError, TypeError, ValueError):
+                return None
+        if isinstance(value, str):
+            stripped = value.strip()
+            if not stripped:
+                return None
+            try:
+                import json
+                parsed = json.loads(stripped)
+            except Exception:
+                parsed = None
+            if isinstance(parsed, dict):
+                return self._deserialize_captured_position(parsed)
+            parts = [part.strip() for part in stripped.replace(";", ",").split(",")]
+            if len(parts) in {2, 3}:
+                try:
+                    return CapturedPosition(
+                        x_mm=float(parts[0]),
+                        y_mm=float(parts[1]),
+                        z_mm=None if len(parts) == 2 or parts[2] == "" else float(parts[2]),
+                    )
+                except ValueError:
+                    return None
+        return None
 
     def _serialize_segment(self, segment: PreviewSegment) -> dict:
         return {
@@ -531,15 +574,27 @@ class JsonProjectRepository:
     def _deserialize_reference(self, payload: dict | None) -> CoordinateReference | None:
         if payload is None:
             return None
+        captured = self._deserialize_captured_position(payload.get("posicion_captura"))
+        if "x_mm" not in payload or "y_mm" not in payload:
+            if captured is None:
+                return None
+            x_mm = captured.x_mm
+            y_mm = captured.y_mm
+            z_mm = captured.z_mm
+        else:
+            x_mm = float(payload["x_mm"])
+            y_mm = float(payload["y_mm"])
+            raw_z = payload.get("z_mm")
+            z_mm = None if raw_z is None else float(raw_z)
         return CoordinateReference(
-            x_mm=payload["x_mm"],
-            y_mm=payload["y_mm"],
-            z_mm=payload.get("z_mm"),
-            confirmado_en=self._parse_datetime(payload.get("confirmado_en")),
+            x_mm=x_mm,
+            y_mm=y_mm,
+            z_mm=z_mm,
+            confirmado_en=self._parse_datetime(payload.get("confirmado_en") or payload.get("fecha")),
             fuente=payload.get("fuente", "SIMULATED"),
             maquina=payload.get("maquina"),
             homed_axes=payload.get("homed_axes"),
-            posicion_captura=payload.get("posicion_captura"),
+            posicion_captura=captured,
             sesion=payload.get("sesion"),
         )
 

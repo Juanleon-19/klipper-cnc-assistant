@@ -263,14 +263,32 @@ class ReferenceZRequest(BaseModel):
     z_mm: float | None = None
 
 
+class CapturedPositionResponse(BaseModel):
+    x_mm: float
+    y_mm: float
+    z_mm: float | None = None
+
+
+class CoordinateReferenceResponse(BaseModel):
+    x_mm: float
+    y_mm: float
+    z_mm: float | None = None
+    fecha: str | None = None
+    fuente: str = "SIMULATED"
+    maquina: str | None = None
+    homed_axes: str | None = None
+    posicion_captura: CapturedPositionResponse | None = None
+    sesion: str | None = None
+
+
 class ReferenceSessionResponse(BaseModel):
     estado: str
     machine_reference: dict[str, bool | str | None]
     origen_maquina: ReferencePointResponse
     origen_material: ReferencePointResponse
     origen_gcode: ReferencePointResponse
-    origen_trabajo: dict[str, float | str | None] | None
-    referencia_z: dict[str, float | str | None] | None
+    origen_trabajo: CoordinateReferenceResponse | None
+    referencia_z: CoordinateReferenceResponse | None
     pasos: list[ReferenceStepResponse]
     compensacion_previsualizada_en: str | None
     analysis_stale: bool

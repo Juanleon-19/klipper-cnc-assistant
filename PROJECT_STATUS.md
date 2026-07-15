@@ -224,3 +224,12 @@ Implementado y verificado sobre la app servida por FastAPI:
 - Capturas visuales de la app servida guardadas en `docs/artifacts/visual-verification/`.
 
 No se ejecutaron movimientos físicos, no se reinició Klipper/Moonraker y no se hizo push.
+
+
+## Estado 2026-07-14 - corrección de referencia y flujo físico visible
+
+- Corregido `ReferenceSessionResponse`: `posicion_captura` ya no es `float | str`, ahora es `CapturedPosition` estructurado con migración de formatos anteriores.
+- Verificado en servicio real: `origen_trabajo.posicion_captura` responde `{x_mm, y_mm, z_mm}` para la captura física existente.
+- En modo físico, Mapa de alturas muestra el flujo medido como principal y deja mapas simulados solo en consulta secundaria.
+- Rediseñado encabezado de mapa con pestañas compactas y visor 2D con ejes/ticks/rejilla/recorrido/inspector.
+- Pruebas backend, frontend, lint, `pip check` y build pasan.

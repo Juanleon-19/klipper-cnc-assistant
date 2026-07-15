@@ -35,10 +35,12 @@ type DragState = {
 
 type LayerVisibility = {
   material: boolean;
+  toolpath: boolean;
   probeRegion: boolean;
   exclusions: boolean;
   samples: boolean;
   surface: boolean;
+  mesh: boolean;
 };
 
 function buildTransform(material: Material, width: number, height: number): ViewTransform {
@@ -70,12 +72,16 @@ export function HeightMapHeatmap({ material, heightMap, mode, toolpathBounds = n
   const [cursor, setCursor] = useState<{ x: number; y: number } | null>(null);
   const [hoverPoint, setHoverPoint] = useState<HeightMapSurfacePoint | HeightMapSample | null>(null);
   const [isFullscreen, setIsFullscreen] = useState(false);
+  const [inspectorOpen, setInspectorOpen] = useState(true);
+  const [layerPanelOpen, setLayerPanelOpen] = useState(false);
   const [layers, setLayers] = useState<LayerVisibility>({
     material: true,
+    toolpath: true,
     probeRegion: true,
     exclusions: true,
     samples: true,
     surface: true,
+    mesh: true,
   });
 
   useEffect(() => {
@@ -97,6 +103,7 @@ export function HeightMapHeatmap({ material, heightMap, mode, toolpathBounds = n
   const gridStep = chooseGridStep(transform.scale);
   const visibleRect = getVisibleWorldRect(transform, viewport);
   const gridTicks = buildGridTicks(visibleRect, gridStep);
+  const minorGridTicks = buildGridTicks(visibleRect, Math.max(gridStep / 5, 0.1));
   const cellWidth = surface.columnas > 1 ? heightMap.probe_region.max_x_mm - heightMap.probe_region.min_x_mm : material.ancho_mm;
   const cellHeight = surface.filas > 1 ? heightMap.probe_region.max_y_mm - heightMap.probe_region.min_y_mm : material.alto_mm;
   const denseCellWidth = surface.columnas > 1 ? cellWidth / (surface.columnas - 1) : cellWidth;
@@ -111,6 +118,9 @@ export function HeightMapHeatmap({ material, heightMap, mode, toolpathBounds = n
     index: Number(point.index ?? 0),
   })).filter((point) => Number.isFinite(point.x) && Number.isFinite(point.y));
   const meshLinePoints = visibleMeshPoints.flatMap((point) => { const screen = worldToScreen({ x: point.x, y: point.y }, transform); return [screen.x, screen.y]; });
+  const activeMeshPoint = visibleMeshPoints.find((point) => point.status === "MOVING" || point.status === "PROBING")
+    ?? visibleMeshPoints.find((point) => point.status !== "MEASURED" && point.status !== "SKIPPED")
+    ?? null;
 
   const toggleFullscreen = async () => {
     const node = fullscreenRef.current;
@@ -143,55 +153,85 @@ export function HeightMapHeatmap({ material, heightMap, mode, toolpathBounds = n
       maxY: toolpathBounds.max_y_mm,
     }, { width: viewport.width, height: viewport.height }));
   };
+  const focusAll = () => {
+    const rects = [
+      rectFromMaterial(material),
+      { minX: heightMap.probe_region.min_x_mm, maxX: heightMap.probe_region.max_x_mm, minY: heightMap.probe_region.min_y_mm, maxY: heightMap.probe_region.max_y_mm },
+      toolpathBounds ? { minX: toolpathBounds.min_x_mm, maxX: toolpathBounds.max_x_mm, minY: toolpathBounds.min_y_mm, maxY: toolpathBounds.max_y_mm } : null,
+    ].filter((item): item is { minX: number; maxX: number; minY: number; maxY: number } => Boolean(item));
+    setTransform(fitRectWithinViewport({
+      minX: Math.min(...rects.map((item) => item.minX)),
+      maxX: Math.max(...rects.map((item) => item.maxX)),
+      minY: Math.min(...rects.map((item) => item.minY)),
+      maxY: Math.max(...rects.map((item) => item.maxY)),
+    }, { width: viewport.width, height: viewport.height }));
+  };
+  const focusOneToOne = () => setTransform({ scale: 1, panX: VIEWER_MARGIN, panY: viewport.height - VIEWER_MARGIN });
 
   return (
     <section className="heightmap-viewer" ref={fullscreenRef}>
       <div className="viewer-header viewer-header--heatmap">
         <div>
           <h3>Mapa de alturas 2D</h3>
-          <p className="muted">Muestra simultáneamente material bruto, región sondeable, zonas excluidas, muestras y superficie interpolada.</p>
+          <p className="muted">Ejes, escala en milímetros, región, trayectoria y recorrido de sondeo.</p>
         </div>
-        <div className="heightmap-toolbar">
+        <div className="heightmap-toolbar" role="toolbar" aria-label="Controles del visor 2D">
           <div className="heightmap-toolbar__group">
-            <button className="button button--ghost" type="button" onClick={focusMaterial}>Encuadrar material</button>
-            <button className="button button--ghost" type="button" onClick={focusProbeRegion}>Encuadrar región</button>
-            <button className="button button--ghost" type="button" onClick={focusToolpath}>Encuadrar trayectoria</button>
+            <button className="button button--ghost" type="button" onClick={focusMaterial}>Material</button>
+            <button className="button button--ghost" type="button" onClick={focusProbeRegion}>Malla</button>
+            <button className="button button--ghost" type="button" onClick={focusToolpath}>Trayectoria</button>
+            <button className="button button--ghost" type="button" onClick={focusAll}>Todo</button>
+            <button className="button button--ghost" type="button" onClick={focusOneToOne}>1:1</button>
           </div>
           <div className="heightmap-toolbar__group">
+            <button className={`button button--ghost${layerPanelOpen ? " toolbar-pill--active" : ""}`} type="button" onClick={() => setLayerPanelOpen((current) => !current)}>Capas</button>
+            <button className={`button button--ghost${inspectorOpen ? " toolbar-pill--active" : ""}`} type="button" onClick={() => setInspectorOpen((current) => !current)}>Inspector</button>
             <button className="button button--ghost" type="button" onClick={() => void toggleFullscreen()}>
-              {isFullscreen ? "Salir de pantalla completa" : "Pantalla completa"}
+              {isFullscreen ? "Cerrar" : "Pantalla completa"}
             </button>
           </div>
         </div>
       </div>
 
-      <div className="heightmap-legend-row" aria-label="Capas del mapa de alturas">
-        <label className="heightmap-legend-item">
-          <input type="checkbox" checked={layers.material} onChange={() => setLayers((current) => ({ ...current, material: !current.material }))} />
-          <span className="legend-swatch legend-swatch--material" />
-          <span>Contorno material</span>
-        </label>
-        <label className="heightmap-legend-item">
-          <input type="checkbox" checked={layers.probeRegion} onChange={() => setLayers((current) => ({ ...current, probeRegion: !current.probeRegion }))} />
-          <span className="legend-swatch legend-swatch--probe" />
-          <span>Región sondeable</span>
-        </label>
-        <label className="heightmap-legend-item">
-          <input type="checkbox" checked={layers.exclusions} onChange={() => setLayers((current) => ({ ...current, exclusions: !current.exclusions }))} />
-          <span className="legend-swatch legend-swatch--excluded" />
-          <span>Zona excluida</span>
-        </label>
-        <label className="heightmap-legend-item">
-          <input type="checkbox" checked={layers.samples} onChange={() => setLayers((current) => ({ ...current, samples: !current.samples }))} />
-          <span className="legend-point" />
-          <span>Muestra</span>
-        </label>
-        <label className="heightmap-legend-item">
-          <input type="checkbox" checked={layers.surface} onChange={() => setLayers((current) => ({ ...current, surface: !current.surface }))} />
-          <span className="legend-gradient" />
-          <span>Superficie</span>
-        </label>
-      </div>
+      {layerPanelOpen ? (
+        <div className="heightmap-legend-row" aria-label="Capas del mapa de alturas">
+          <label className="heightmap-legend-item">
+            <input type="checkbox" checked={layers.material} onChange={() => setLayers((current) => ({ ...current, material: !current.material }))} />
+            <span className="legend-swatch legend-swatch--material" />
+            <span>Material</span>
+          </label>
+          <label className="heightmap-legend-item">
+            <input type="checkbox" checked={layers.toolpath} onChange={() => setLayers((current) => ({ ...current, toolpath: !current.toolpath }))} />
+            <span className="legend-swatch legend-swatch--toolpath" />
+            <span>Trayectoria</span>
+          </label>
+          <label className="heightmap-legend-item">
+            <input type="checkbox" checked={layers.probeRegion} onChange={() => setLayers((current) => ({ ...current, probeRegion: !current.probeRegion }))} />
+            <span className="legend-swatch legend-swatch--probe" />
+            <span>Región</span>
+          </label>
+          <label className="heightmap-legend-item">
+            <input type="checkbox" checked={layers.exclusions} onChange={() => setLayers((current) => ({ ...current, exclusions: !current.exclusions }))} />
+            <span className="legend-swatch legend-swatch--excluded" />
+            <span>Exclusiones</span>
+          </label>
+          <label className="heightmap-legend-item">
+            <input type="checkbox" checked={layers.samples} onChange={() => setLayers((current) => ({ ...current, samples: !current.samples }))} />
+            <span className="legend-point" />
+            <span>Muestras</span>
+          </label>
+          <label className="heightmap-legend-item">
+            <input type="checkbox" checked={layers.surface} onChange={() => setLayers((current) => ({ ...current, surface: !current.surface }))} />
+            <span className="legend-gradient" />
+            <span>Superficie</span>
+          </label>
+          <label className="heightmap-legend-item">
+            <input type="checkbox" checked={layers.mesh} onChange={() => setLayers((current) => ({ ...current, mesh: !current.mesh }))} />
+            <span className="legend-point legend-point--mesh" />
+            <span>Malla</span>
+          </label>
+        </div>
+      ) : null}
 
       <div className="viewer-stage-shell">
         <div className="viewer-stage viewer-stage--heatmap" ref={setStageNode}>
@@ -241,14 +281,24 @@ export function HeightMapHeatmap({ material, heightMap, mode, toolpathBounds = n
           >
             <Layer>
               <Rect x={0} y={0} width={viewport.width} height={viewport.height} fill="#091015" />
+              {minorGridTicks.x.map((value) => {
+                const screen = worldToScreen({ x: value, y: 0 }, transform);
+                return <Rect key={`mhx-${value}`} x={screen.x} y={0} width={1} height={viewport.height} fill="rgba(111,144,168,0.045)" />;
+              })}
+              {minorGridTicks.y.map((value) => {
+                const screen = worldToScreen({ x: 0, y: value }, transform);
+                return <Rect key={`mhy-${value}`} x={0} y={screen.y} width={viewport.width} height={1} fill="rgba(111,144,168,0.045)" />;
+              })}
               {gridTicks.x.map((value) => {
                 const screen = worldToScreen({ x: value, y: 0 }, transform);
-                return <Rect key={`hx-${value}`} x={screen.x} y={0} width={1} height={viewport.height} fill="rgba(111,144,168,0.12)" />;
+                return <Rect key={`hx-${value}`} x={screen.x} y={0} width={1} height={viewport.height} fill="rgba(111,144,168,0.16)" />;
               })}
               {gridTicks.y.map((value) => {
                 const screen = worldToScreen({ x: 0, y: value }, transform);
-                return <Rect key={`hy-${value}`} x={0} y={screen.y} width={viewport.width} height={1} fill="rgba(111,144,168,0.12)" />;
+                return <Rect key={`hy-${value}`} x={0} y={screen.y} width={viewport.width} height={1} fill="rgba(111,144,168,0.16)" />;
               })}
+              <Rect x={worldToScreen({ x: 0, y: 0 }, transform).x} y={0} width={2} height={viewport.height} fill="rgba(255,255,255,0.42)" />
+              <Rect x={0} y={worldToScreen({ x: 0, y: 0 }, transform).y} width={viewport.width} height={2} fill="rgba(255,255,255,0.42)" />
 
               {layers.surface
                 ? surface.puntos.map((point) => {
@@ -283,6 +333,24 @@ export function HeightMapHeatmap({ material, heightMap, mode, toolpathBounds = n
                         stroke="#8fb5c8"
                         strokeWidth={2}
                         dash={[8, 4]}
+                      />
+                    );
+                  })()
+                : null}
+
+              {layers.toolpath && toolpathBounds
+                ? (() => {
+                    const bottomLeft = worldToScreen({ x: toolpathBounds.min_x_mm, y: toolpathBounds.min_y_mm }, transform);
+                    const topRight = worldToScreen({ x: toolpathBounds.max_x_mm, y: toolpathBounds.max_y_mm }, transform);
+                    return (
+                      <Rect
+                        x={bottomLeft.x}
+                        y={topRight.y}
+                        width={Math.max(1, topRight.x - bottomLeft.x)}
+                        height={Math.max(1, bottomLeft.y - topRight.y)}
+                        stroke="#9be28d"
+                        strokeWidth={2}
+                        dash={[3, 3]}
                       />
                     );
                   })()
@@ -360,13 +428,24 @@ export function HeightMapHeatmap({ material, heightMap, mode, toolpathBounds = n
 
 
 
-              {visibleMeshPoints.length > 1 ? <Line points={meshLinePoints} stroke="#ffffff" strokeWidth={1.2} dash={[4, 5]} opacity={0.75} /> : null}
-              {visibleMeshPoints.map((point) => {
+              {layers.mesh && visibleMeshPoints.length > 1 ? <Line points={meshLinePoints} stroke="#ffffff" strokeWidth={1.2} dash={[4, 5]} opacity={0.75} /> : null}
+              {layers.mesh ? visibleMeshPoints.map((point) => {
                 const screen = worldToScreen({ x: point.x, y: point.y }, transform);
                 const measured = point.status === "MEASURED";
                 const failed = point.status === "FAILED" || point.status === "RETRY_REQUIRED";
-                return <Circle key={`mesh-${point.index}`} x={screen.x} y={screen.y} radius={measured ? 5 : 4} fill={measured ? "#63d471" : failed ? "#ff7a7a" : "#f6cf73"} stroke="#071015" strokeWidth={1.2} />;
-              })}
+                const active = activeMeshPoint?.index === point.index;
+                return (
+                  <Circle
+                    key={`mesh-${point.index}`}
+                    x={screen.x}
+                    y={screen.y}
+                    radius={active ? 7 : measured ? 5 : 4}
+                    fill={measured ? "#63d471" : failed ? "#ff7a7a" : "#f6cf73"}
+                    stroke={active ? "#ffffff" : "#071015"}
+                    strokeWidth={active ? 2.2 : 1.2}
+                  />
+                );
+              }) : null}
 
               {cursor ? (
                 <>
@@ -397,16 +476,24 @@ export function HeightMapHeatmap({ material, heightMap, mode, toolpathBounds = n
         </div>
       </div>
 
-      <div className="viewer-footer">
-        <div className="viewer-footer__meta mono-text">
-          Alturas de la superficie · mín {formatMillimeters(minValue, 3)} · máx {formatMillimeters(maxValue, 3)} · desviación RMS {formatMillimeters(heightMap.estadisticas.desviacion_rms_respecto_plano_mm, 3)}
-        </div>
-        <div className="viewer-footer__meta mono-text">
-          {hoverPoint && "z_mm" in hoverPoint
-            ? `X ${formatMillimeters(hoverPoint.x_mm, 3)} · Y ${formatMillimeters(hoverPoint.y_mm, 3)} · Z ${formatMillimeters(hoverPoint.z_mm, 4)}`
-            : "Tooltip X/Y/Z disponible sobre muestras y superficie"}
-        </div>
-      </div>
+      {inspectorOpen ? (
+        <aside className="heightmap-inspector" aria-label="Inspector del mapa 2D">
+          <div className="viewer-footer__meta mono-text">
+            Coordenadas: {coordinateMode === "machine" ? "Máquina" : "Local G-code"}
+          </div>
+          <div className="viewer-footer__meta mono-text">
+            Alturas · mín {formatMillimeters(minValue, 3)} · máx {formatMillimeters(maxValue, 3)} · RMS {formatMillimeters(heightMap.estadisticas.desviacion_rms_respecto_plano_mm, 3)}
+          </div>
+          <div className="viewer-footer__meta mono-text">
+            Malla · {visibleMeshPoints.length} puntos · activo {activeMeshPoint ? `#${activeMeshPoint.index}` : "-"}
+          </div>
+          <div className="viewer-footer__meta mono-text">
+            {hoverPoint && "z_mm" in hoverPoint
+              ? `X ${formatMillimeters(hoverPoint.x_mm, 3)} · Y ${formatMillimeters(hoverPoint.y_mm, 3)} · Z ${formatMillimeters(hoverPoint.z_mm, 4)}`
+              : "Mueva el cursor sobre muestras o superficie para ver X/Y/Z."}
+          </div>
+        </aside>
+      ) : null}
     </section>
   );
 }
