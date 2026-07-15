@@ -2,7 +2,7 @@
 
 ## Objetivo de esta fase
 
-La Fase 4.3 estabiliza el workspace responsive e introduce montajes y operaciones ordenadas sobre el flujo simulado de mapa y referencias, manteniendo todo el sistema en **modo seguro y sin control físico**.
+La arquitectura actual integra el flujo vertical del producto: proyecto, montaje, operaciones, preparación física, mapa medido, compensación, descarga de G-code compensado y preflight de ejecución. El modo simulado se conserva, pero el modo físico está conectado de extremo a extremo en software y requiere validación física supervisada.
 
 ## Capas productivas
 
@@ -26,10 +26,10 @@ src/klipper_cnc_assistant/storage
 Módulos funcionales principales:
 
 - `gcode/`: análisis sintáctico y geométrico del archivo cargado.
-- `heightmap/`: modelos, interpolación, simulación y previsualización matemática de compensación.
+- `heightmap/`: modelos, interpolación, simulación, mapa relativo medido y compensación matemática.
 - `application/heightmap_service.py`: reglas de negocio del mapa y persistencia asociada.
-- `application/reference_service.py`: sesión de preparación simulada compartida por montaje.
-- `application/services.py`: proyectos, sesión de máquina simulada y estado general.
+- `application/reference_service.py`: referencias de montaje, origen X/Y y referencia Z simulada o medida.
+- `application/services.py`: proyectos, sesión de máquina, estado general y compatibilidad de esquema.
 
 ## Flujo de datos actual
 
@@ -40,10 +40,10 @@ Módulos funcionales principales:
 5. El usuario carga un archivo `.nc`, `.gcode` o `.tap`.
 6. El analizador produce límites, incidencias, alturas de trayectoria, metadatos y `analysis_version`.
 7. El frontend muestra la trayectoria y detecta si el análisis guardado quedó obsoleto respecto a la versión actual.
-8. La sesión de referencia simulada confirma estado de máquina, origen X/Y y referencia Z sin mover hardware.
-9. `HeightMapService` valida `probe_region`, exclusiones, muestras y dominio interpolable.
+8. En modo simulado, la sesión confirma referencias manuales sin mover hardware. En modo físico, `MachineRuntime` captura posición y sonda, y `ReferenceSessionService` guarda origen X/Y y referencia Z medida.
+9. `PhysicalMapService` planifica mapas medidos desde operaciones activas y `HeightMapService` valida mapas simulados/importados.
 10. `heightmap/analysis.py` interpola solo dentro de la región medida y nunca compensa fuera del dominio.
-11. `heightmap/compensation.py` genera una vista previa matemática sobre la trayectoria, subdividiendo segmentos cuando hace falta.
+11. `CompensatedGCodeService` genera archivos nuevos en `generated/compensated/` con metadatos y hash, subdividiendo segmentos cuando hace falta.
 
 ## Jerarquía de preparación
 
@@ -79,7 +79,7 @@ Restricciones de negocio:
 - ningún punto de muestreo puede caer en una zona excluida;
 - la interpolación y la compensación quedan bloqueadas fuera del dominio medido.
 
-## Sesión de referencia simulada
+## Sesión de referencia
 
 `OperationPreparation` y `PreparationState` modelan el flujo:
 
@@ -100,7 +100,7 @@ Separación de sesión:
 - la referencia de máquina pertenece a la sesión de máquina;
 - origen X/Y, referencia Z, región sondeable, mapa y validación pertenecen al montaje y se comparten entre sus operaciones;
 - si se pierde la sesión de máquina, la referencia vuelve a estado desconocido;
-- no se asume homing real en ningún punto.
+- el homing real solo se asume cuando `MachineRuntime` confirma `toolhead.homed_axes` y velocidad cero.
 
 ## Convención matemática de compensación
 
@@ -124,11 +124,11 @@ Detalles de implementación:
 
 ## Seguridad actual
 
-- no se llama a Moonraker para home, jog, probe, spindle o ejecución;
-- no se envía G-code a Klipper;
-- no existe movimiento real desde la aplicación web;
-- la sesión de máquina reportada es simulada;
-- la compensación actual es solo analítica y visual.
+- en modo simulado no se llama a Moonraker ni se abre hardware;
+- en modo físico los movimientos solo se disparan por endpoints `POST` explícitos y estados autorizados;
+- Sistema queda como diagnóstico técnico y emergencia;
+- el workspace contiene las acciones productivas;
+- la ejecución real de trabajos queda bloqueada por preflight y confirmación supervisada.
 
 
 ## integración física inicial: runtime físico

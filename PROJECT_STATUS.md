@@ -2,7 +2,7 @@
 
 **Última actualización:** 2026-07-14
 **Rama local:** `fix/phase-43-stability-workflow`
-**Estado global:** Integración física corregida y sondeo de malla implementado en software; pendiente validación física supervisada
+**Estado global:** Producto integrado de extremo a extremo en software; pendiente prueba integral supervisada con PCB de descarte
 
 Este documento resume el estado local real del repositorio. La rama contiene cambios no publicados de integración física inicial sobre la base `3911214`.
 
@@ -22,13 +22,14 @@ Implementado en esta fase:
 - separación de referencias `SIMULATED` y `MEASURED`;
 - bloqueo de sobrescritura silenciosa de referencias medidas con simuladas;
 - dominio de compensación con tolerancia explícita, detalle de puntos fuera, distancia al dominio y bloqueo de validación si la cobertura es insuficiente;
-- vista web “Sistema físico” con modo permanente SIMULADO/FÍSICO y acciones físicas bloqueadas fuera de modo físico;
+- `MachineContext` como fuente única de estado visible: sidebar, Sistema y workspace muestran el mismo modo;
+- Sistema queda como diagnóstico técnico, conexión, cancelación y emergencia;
+- el flujo productivo vive dentro del proyecto/montaje;
 - documentación de variables y procedimiento manual.
 
 No se implementó todavía:
 
-- generación final o descarga de G-code compensado ejecutable;
-- ejecución completa de trabajos;
+- arranque real de mecanizado sin confirmación física supervisada;
 - control automático de spindle;
 - jog continuo;
 - rotación automática de PCB;
@@ -133,7 +134,7 @@ Reglas implementadas:
 
 | Verificación | Resultado |
 | --- | --- |
-| `PYTHONPATH=src .venv/bin/python -m unittest discover -s tests -v` | 62 pruebas correctas |
+| `PYTHONPATH=src .venv/bin/python -m unittest discover -s tests -v` | 64 pruebas correctas |
 | `.venv/bin/python -m pip check` | Sin dependencias rotas |
 | `npm run lint` | Correcto |
 | `npm run test` | 37 pruebas correctas en 10 archivos |
@@ -147,6 +148,7 @@ Reglas implementadas:
 - La persistencia JSON sigue siendo local y simple; no hay bloqueo multiusuario robusto.
 - La UI de diagnóstico usa polling moderado, no streaming dedicado.
 - El bundle de Plotly sigue siendo grande.
+- Firefox headless no tuvo WebGL para la captura 3D; validar superficie 3D en navegador normal con WebGL durante la prueba física.
 
 ## Pendiente para Fase 2
 
@@ -192,7 +194,7 @@ Implementado en software sobre los commits locales existentes, sin push y sin ej
 
 Validación local:
 
-- `PYTHONPATH=src .venv/bin/python -m unittest discover -s tests -v`: 62 pruebas OK.
+- `PYTHONPATH=src .venv/bin/python -m unittest discover -s tests -v`: 64 pruebas OK.
 - `.venv/bin/python -m pip check`: sin dependencias rotas.
 - `npm run lint`: OK.
 - `npm run test`: 37 pruebas OK.
@@ -203,3 +205,22 @@ Riesgos pendientes:
 - Falta validar físicamente el ciclo completo con PCB de descarte.
 - La subida y arranque de archivo compensado por Moonraker está preparada como preflight/UI, pero el inicio real queda para confirmación supervisada.
 - La linealización usa la geometría discretizada por el analizador actual; comandos incompatibles siguen bloqueándose por análisis/preflight.
+
+
+## Estado actualizado 2026-07-14: integración vertical visible
+
+Implementado y verificado sobre la app servida por FastAPI:
+
+- Sidebar, Sistema y workspace usan `MachineRuntime -> API -> MachineContext` como fuente única de modo; `PHYSICAL` se muestra como `FÍSICO`.
+- `SystemBanner` dejó de ser estático y ya no anuncia modo simulado cuando el runtime está físico.
+- `Sistema` quedó como diagnóstico técnico; las acciones productivas se ejecutan desde el montaje activo.
+- `Referencia` en modo físico muestra conexión, homing, Z segura, centro, joystick X/Y, armado de referencia y captura X/Y/Z por sonda.
+- `Mapa de alturas` expone `SIMULADO` y `MEDIDO FÍSICAMENTE`, área desde operaciones, configuración de margen/separación/Z segura, malla, recorrido, progreso y pausa/reanudación/cancelación.
+- El visor 2D muestra malla y recorrido serpentino sobre el mapa, con selector local/máquina.
+- `Compensación` permite previsualizar, generar y descargar G-code compensado real.
+- `Ejecución` muestra preflight y acciones de preparación Moonraker/Klipper, manteniendo bloqueado el inicio real hasta validación supervisada.
+- El timeout HTTP de G-code se reconcilia: si Klipper confirma homing/movimiento por estado, `last_error` se limpia y queda evento histórico.
+- FastAPI sirve `frontend/dist`; el build final verificado referencia `assets/index-DiGQGU_B.js` y `assets/index-C_RZSt3A.css`.
+- Capturas visuales de la app servida guardadas en `docs/artifacts/visual-verification/`.
+
+No se ejecutaron movimientos físicos, no se reinició Klipper/Moonraker y no se hizo push.

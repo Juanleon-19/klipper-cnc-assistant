@@ -6,153 +6,103 @@
 - TypeScript
 - Vite 5
 - CSS propio responsive
-- `react-konva` + `konva`
+- `react-konva` + `konva` para visor 2D
 - `plotly.js-dist-min` para superficie 3D
 - Vitest + Testing Library
 - ESLint
 
-## Estructura principal
+## Fuente única de estado de máquina
+
+La UI usa `MachineContext` (`frontend/src/context/MachineContext.tsx`) como fuente visible de estado físico. El flujo es:
 
 ```text
-frontend/
-  src/
-    components/
-    features/heightmap/
-    features/viewer/
-    lib/
-    test/
-    App.tsx
-    main.tsx
-    styles.css
+MachineRuntime -> /api/machine/runtime|status -> App -> MachineContext -> Sidebar/Sistema/Proyecto
 ```
 
-## Vista funcional
+Cuando `MachineRuntime.mode` es `PHYSICAL`, la UI normaliza el texto a `FÍSICO` aunque el backend devuelva `FISICO`. Sidebar, Sistema y workspace usan el mismo contexto y dejan de mezclar textos de sesión simulada con runtime físico.
 
-La interfaz está completamente en español e incluye:
+## Navegación del producto
 
-- barra lateral compacta y colapsable;
-- encabezado superior compacto;
-- etiqueta permanente `MÁQUINA EN MODO SIMULADO`;
-- dashboard de trabajo;
-- listado real de proyectos;
-- formulario de creación y edición;
-- gestor de montajes y operaciones ordenadas, repetibles y con herramienta propia;
-- selector de operación activa que nunca mezcla trayectorias;
-- guía “Flujo de trabajo” con progreso global, por montaje y por operación;
-- workspace por pestañas internas: Archivo, Trayectoria, Referencia, Mapa de alturas y Validación;
-- carga de G-code por archivo real;
-- análisis técnico por operación con aviso de análisis desactualizado;
-- flujo de referencia exclusivamente simulado con stepper de seis pasos;
-- mapa de alturas con subpestañas `Mapa 2D`, `Superficie 3D`, `Puntos` y `Configuración`;
-- previsualización matemática de compensación sin acciones de ejecución;
-- pantalla de sistema como diagnóstico secundario.
+El producto se recorre desde el proyecto y montaje activo:
 
-## Workspace de operación
+```text
+Proyecto -> Montaje -> Operaciones -> Referencia -> Mapa de alturas -> Compensación -> Ejecución
+```
 
-`components/ProjectWorkspace.tsx` concentra la navegación del proyecto, montaje y operación activa y muestra una sola sección principal a la vez.
+`Sistema` queda como diagnóstico técnico: aplicación, Moonraker HTTP/WebSocket, Klipper, posición, homing, límites, Arduino, joystick, botones, sonda, seguridad, eventos, cancelación técnica y emergencia `M112`. Ya no contiene el flujo productivo principal de homing, Z segura, centro, joystick, referencia y malla.
 
-Resumen fijo:
+## Referencia
 
-- proyecto activo;
-- montaje y operación activa;
-- archivo y herramienta de la operación seleccionada;
-- estado de análisis;
-- estado del mapa;
-- estado de referencia simulada.
+En modo simulado se conserva el stepper de referencia manual. En modo físico se muestra una guía real dentro del montaje:
 
-Reglas de UX principales:
+1. conexión y diagnóstico;
+2. homing, Z segura de traslado y centro;
+3. posicionamiento X/Y con joystick discreto;
+4. armado de referencia;
+5. sondeo por botón externo o confirmación supervisada;
+6. guardado de origen X/Y y referencia Z medida para la herramienta actual.
 
-- solo hay una acción principal destacada por vista;
-- las acciones secundarias se agrupan en pestañas, menús o acordeones;
-- las advertencias del G-code no se repiten dentro de la vista del mapa;
-- cuando el análisis persistido es antiguo se muestra `Este análisis está desactualizado` con `Volver a analizar`.
-
-## Referencia simulada
-
-La vista `Referencia` muestra un stepper con:
-
-1. Referencia de máquina
-2. Origen de trabajo X/Y
-3. Referencia Z
-4. Región sondeable
-5. Mapa
-6. Validación
-
-Todos los botones de avance usan el texto `Confirmar en simulación`.
-
-La UI expone visualmente:
-
-- coordenadas de máquina;
-- origen del material;
-- origen del G-code;
-- punto de referencia Z;
-- estado y fecha de cada confirmación.
-
-No hay botones de homing real, jog, probe físico ni control de Moonraker.
+La Z segura se etiqueta como traslado; no se confunde con referencia Z, profundidad ni contacto.
 
 ## Mapa de alturas
 
-La vista del mapa distingue:
+La pestaña tiene selector funcional:
 
-- límites del material bruto;
-- región sondeable interior (`probe_region`);
-- trayectoria ocupada por el G-code;
-- zonas excluidas;
-- dominio interpolable;
-- muestras simuladas o importadas;
-- superficie interpolada.
+- `SIMULADO`: configuración, simulación e importación matemática.
+- `MEDIDO FÍSICAMENTE`: mapa físico del montaje/cara/revisión de colocación, referencia Z de herramienta, grid, puntos, progreso y acciones punto a punto.
 
-### Configuración
+Acciones visibles en `MEDIDO FÍSICAMENTE`:
 
-`HeightMapControlPanel.tsx` permite definir:
+- `Usar área desde operaciones / Generar malla`;
+- `Iniciar sondeo` o `Continuar malla incompleta`;
+- `Pausar`;
+- `Reanudar`;
+- `Reintentar/continuar punto`;
+- `Cancelar`.
 
-- filas y columnas;
-- región sondeable interior;
-- zonas excluidas;
-- superficie simulada;
-- repetición de simulación.
+La región se calcula desde operaciones analizadas y conserva la convención:
 
-`Superficie simulada` y `Repetición de simulación` viven en el acordeón `Opciones avanzadas de simulación` con ayuda textual. Esos campos se ocultan cuando la fuente del mapa es importada o real.
-
-### Mapa 2D
-
-`HeightMapHeatmap.tsx` muestra:
-
-- ejes X/Y con graduación y mm;
-- cursor en cruz;
-- tooltip X/Y/Z;
-- contorno del material;
-- región sondeable;
-- zonas excluidas;
-- muestras diferenciadas de la interpolación;
-- marcadores de mínimo, máximo y valores atípicos;
-- leyenda clara y responsive.
-
-### Superficie 3D
-
-`HeightMapSurface3D.tsx` ofrece:
-
-- ejes `X (mm)`, `Y (mm)` y `Z (mm)`;
-- vista superior;
-- vista isométrica;
-- restablecer cámara;
-- escala Z exagerada como estado inicial;
-- cambio a escala Z real;
-- factor de exageración visible sin alterar los valores reales en etiquetas ni tooltips.
-
-## Compatibilidad de build
-
-La respuesta `/api/system/info` incluye `backend_version`, `frontend_build`, `git_commit` y `schema_version`. Si el esquema servido no coincide con el esperado por React, la interfaz bloquea el workspace, muestra “La aplicación necesita actualizarse” y ofrece “Recargar aplicación”.
-
-## Desarrollo local
-
-```bash
-cd frontend
-npm install
-npm run dev
+```text
+machine_x = machine_origin_x + gcode_x
+machine_y = machine_origin_y + gcode_y
 ```
 
-Durante desarrollo, Vite usa proxy a `http://127.0.0.1:8000/api`.
+## Visor 2D
+
+`HeightMapHeatmap.tsx` muestra ejes X/Y, ticks adaptativos, mm, rejilla mayor/menor, cursor, material, trayectoria, región, muestras y malla física. La malla se dibuja con recorrido serpentino, puntos pendientes/medidos/fallidos y selector de coordenadas `Local G-code` / `Máquina`.
+
+La pantalla completa usa el canvas como superficie principal y mantiene controles de encuadre. En Firefox headless el API fullscreen puede denegarse; se validó visualmente el layout con captura headless de la vista fullscreen solicitada.
+
+## Compensación
+
+La pestaña `Compensación` permite previsualizar y generar un archivo real. El archivo se guarda en `generated/compensated/`, conserva X/Y y aplica:
+
+```text
+z_compensado = z_original + delta_superficie(x,y)
+```
+
+La descarga usa `/api/projects/{project_id}/generated/{file_path}`.
+
+## Ejecución
+
+La pestaña `Ejecución` expone preflight Moonraker/Klipper con checks visibles de modo físico, runtime, Klipper, homing, mapa, referencia y archivo compensado. Las acciones visibles son subir archivo, confirmar archivo, confirmar herramienta, confirmar spindle, iniciar ejecución supervisada, pausar, reanudar, cancelar y emergencia. El inicio real queda bloqueado por software hasta prueba física supervisada.
+
+## Capturas verificadas
+
+Las capturas de la aplicación servida por FastAPI con fixture local están en `docs/artifacts/visual-verification/`:
+
+1. `01-sidebar-modo-fisico.png`
+2. `02-referencia-fisica-montaje.png`
+3. `03-malla-configurada.png`
+4. `04-malla-superpuesta-visor.png`
+5. `05-sondeo-progreso-fixture-medida.png`
+6. `06-mapa-medido-superficie-3d.png`
+7. `07-visor-ejes-ticks.png`
+8. `08-pantalla-completa.png`
+9. `09-compensacion.png`
+10. `10-ejecucion-preflight.png`
+
+Firefox headless no tuvo WebGL disponible para Plotly, por lo que la inspección final de superficie 3D debe repetirse en navegador normal con WebGL durante validación supervisada.
 
 ## Validación
 
@@ -163,49 +113,4 @@ npm run test
 npm run build
 ```
 
-## Limitaciones actuales
-
-- la referencia puede ser simulada o medida físicamente por sonda, según el modo;
-- existe generación y descarga de G-code compensado en `generated/compensated/`, con ejecución real todavía bloqueada por preflight supervisado;
-- el control seguro físico está integrado en `Sistema` y el flujo de mapa medido vive en el workspace;
-- la superficie 3D es una visualización del mapa, no una simulación física del mecanizado.
-
-
-## integración física inicial: sistema físico
-
-La vista `Sistema` muestra el modo permanente `SIMULADO` o `FÍSICO`, diagnóstico de aplicación, Moonraker, Klipper, Arduino, controlador y seguridad. En modo simulado los controles físicos quedan bloqueados.
-
-Acciones disponibles en modo físico: conectar, activar diagnóstico, inicializar con Z segura de traslado, habilitar joystick, solicitar sonda, confirmar sonda, cancelar operación, parada segura y emergencia `M112` con confirmación.
-
-La UI no ofrece ejecución de trabajos, exportación de G-code compensado ni malla física completa.
-
-
-## Flujo físico guiado
-
-La vista `Sistema` queda como diagnóstico técnico: muestra estado del runtime, Moonraker, Klipper, Arduino, controlador y seguridad. Las acciones se filtran por estado; no se muestran todos los botones como acciones equivalentes. El operador ve conexión, homing, Z segura, centro, espera de referencia, referencia armada, sondeo, malla y error.
-
-El diagnóstico Arduino muestra hilo activo, bytes recibidos, paquetes completos, paquetes válidos, inválidos, checksums, edad del último paquete válido, excepción y causa exacta de bloqueo. Los endpoints de mapa físico permiten planificar desde la referencia medida, consultar mapa activo, ejecutar el siguiente punto, pausar, reanudar y cancelar.
-
-
-## Flujo físico en el workspace
-
-El flujo de producción vive dentro del proyecto/montaje:
-
-```text
-Archivo -> Trayectoria -> Referencia -> Mapa de alturas -> Compensación -> Ejecución
-```
-
-`Sistema` queda como diagnóstico técnico de servicio, Moonraker, Klipper, Arduino, logs, errores y emergencia `M112`.
-
-En `Mapa de alturas` existe selector explícito de fuente:
-
-- `SIMULADO`: conserva configuración, simulación e importación matemática.
-- `MEDIDO FÍSICAMENTE`: muestra el mapa físico del montaje/cara, puntos medidos, grid, separación, referencia de herramienta y acciones de sondeo punto a punto.
-
-La acción `Preparar mapa físico` usa la referencia física capturada por la sonda y calcula la región desde operaciones activas analizadas. `Iniciar sondeo de malla` ejecuta solo el siguiente punto desde backend; la interfaz permite pausar, reanudar y cancelar sin borrar puntos.
-
-`Compensación` permite previsualizar y generar un archivo real. El enlace de descarga apunta a `generated/compensated/`. `Ejecución` muestra preflight, pero no inicia el trabajo real sin una validación física posterior.
-
-## Visor 2D
-
-El visor mantiene escala igual X/Y, grid adaptativa, ticks, unidad mm, cursor, material, trayectoria, región, muestras y superficie. En pantalla completa conserva barra compacta, controles de encuadre y leyenda; las pruebas de viewport siguen cubriendo zoom, pan y fullscreen.
+El build final verificado generó `frontend/dist/index.html`, `assets/index-DiGQGU_B.js`, `assets/index-C_RZSt3A.css` y `assets/plotly.min-CofRTlwV.js`.

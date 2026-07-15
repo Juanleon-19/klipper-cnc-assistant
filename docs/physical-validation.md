@@ -26,8 +26,8 @@ Esta guía no debe ejecutarse sin operador presente, máquina despejada y parada
 ## Diagnóstico sin movimiento
 
 1. Abrir la vista `Sistema`.
-2. Verificar que el modo visible sea `FÍSICO`.
-3. Pulsar `Conectar`.
+2. Verificar que sidebar, Sistema y workspace muestran `FÍSICO`.
+3. Pulsar `Conectar diagnóstico`.
 4. Comprobar Moonraker HTTP conectado.
 5. Comprobar WebSocket conectado.
 6. Comprobar Klipper `ready`.
@@ -100,11 +100,11 @@ Esta guía no debe ejecutarse sin operador presente, máquina despejada y parada
 2. Abrir la web y seleccionar proyecto, montaje, operación y herramienta.
 3. Abrir `Sistema`, pulsar `Conectar` y comprobar Moonraker HTTP, WebSocket, Klipper `ready` y Arduino con paquetes válidos recientes.
 4. Observar joystick, botón externo y sonda en diagnóstico sin movimiento.
-5. Ingresar Z segura de traslado y ejecutar `Homing + Z segura + centro`.
+5. Ir al montaje activo, pestaña `Referencia`, ingresar Z segura de traslado y ejecutar homing/Z segura/centro desde el flujo físico.
 6. Confirmar que `homed_axes` contiene `xyz`, que la posición se estabilizó y que X/Y está en el centro real.
 7. Habilitar joystick X/Y y ubicar la herramienta en el 0,0 del G-code de FlatCAM.
-8. Armar referencia y pulsar el botón externo. Verificar descenso discreto, contacto, retracto y referencia `MEASURED`.
-9. Generar mapa físico desde referencia para la herramienta seleccionada; revisar cantidad, separación, límites locales, límites de máquina y recorrido serpentino.
+8. Armar referencia dentro del montaje y pulsar el botón externo. Verificar descenso discreto, contacto, retracto y referencia `MEASURED`.
+9. Abrir `Mapa de alturas`, seleccionar `MEDIDO FÍSICAMENTE`, usar área desde operaciones/generar malla y revisar cantidad, separación, límites locales, límites de máquina y recorrido serpentino.
 10. Confirmar ejecución física. Ejecutar un punto por vez, observar `MOVING/PROBING/MEASURED`, pausar, reanudar y cancelar conservando puntos medidos.
 11. Completar todos los puntos y revisar mapa 2D, superficie 3D, plano, residuos, rango, RMS y cobertura de operaciones.
 
@@ -158,3 +158,21 @@ No ejecutar este procedimiento sin operador presente, material de descarte, reco
 41. Dejar la ejecución real final para confirmación supervisada separada.
 
 Criterio de parada: ante ruido de sonda, pérdida de paquetes Arduino, telemetría obsoleta, homing incompleto, punto fuera de límites o cualquier movimiento inesperado, cancelar la secuencia. Usar `M112` solo como emergencia real.
+
+
+## Verificación visual previa realizada
+
+Se verificó la aplicación servida por FastAPI con fixture local en modo físico sin autoconexión. Capturas guardadas en `docs/artifacts/visual-verification/`:
+
+- Sidebar en modo físico.
+- Referencia física dentro del montaje.
+- Malla configurada.
+- Malla superpuesta en visor 2D.
+- Progreso de sondeo con fixture de puntos medidos.
+- Mapa medido/superficie 3D.
+- Visor con ejes y ticks.
+- Pantalla completa.
+- Compensación.
+- Ejecución/preflight.
+
+Limitación de la verificación headless: Firefox sin pantalla no tuvo WebGL para Plotly, así que la superficie 3D debe comprobarse visualmente en navegador normal con WebGL durante la prueba con PCB de descarte.

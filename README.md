@@ -4,7 +4,7 @@ Klipper CNC Assistant prepara trabajos PCB sobre una CNC adaptada a Klipper. El 
 
 ## Estado actual
 
-La entrega local implementa la **Fase 2 local: integración física corregida y sondeo de malla medido en software**.
+La entrega local implementa la **integración vertical del flujo físico, mapa medido, compensación y preflight de ejecución visibles en la aplicación**.
 
 Incluye:
 
@@ -13,19 +13,20 @@ Incluye:
 - persistencia JSON con esquema `1.5`;
 - jerarquía Proyecto -> Montaje -> Operaciones ordenadas y repetibles;
 - G-code, análisis, herramienta, advertencias y trayectoria independientes por operación;
-- referencias por montaje y mapas físicos medidos separados por montaje, herramienta, referencia y configuración de malla;
+- referencias por montaje, referencias Z por herramienta y mapas físicos medidos por montaje/cara/revisión de colocación/configuración de malla;
 - mapas simulados/importados, interpolación, plano, residuos, visor 2D y superficie 3D;
-- previsualización matemática de compensación, sin exportación ejecutable;
+- previsualización y generación real de G-code compensado en `generated/compensated/`, con descarga desde la interfaz;
 - validación de dominio con detalle de puntos fuera y distancia al dominio;
 - modo `SIMULATED` predeterminado;
-- modo `PHYSICAL` explícito mediante configuración;
+- modo `PHYSICAL` explícito mediante configuración, mostrado como `FÍSICO` en toda la UI;
 - runtime físico singleton con Moonraker HTTP, WebSocket, Arduino, joystick discreto, botón externo, sonda y malla punto a punto;
-- vista “Sistema físico” con diagnóstico consolidado y acciones físicas explícitas.
+- `MachineContext` como fuente única de estado visible en sidebar, Sistema y workspace;
+- Sistema limitado a diagnóstico técnico, conexión, cancelación y `M112`;
+- flujo físico productivo dentro del proyecto/montaje: Referencia, Mapa de alturas, Compensación y Ejecución.
 
 No incluye todavía:
 
-- generación o descarga final de G-code compensado ejecutable;
-- ejecución completa de trabajos;
+- arranque real de mecanizado sin confirmación física supervisada;
 - spindle automático;
 - jog continuo;
 - cambios automáticos de herramienta.
@@ -144,8 +145,9 @@ No reinicie Klipper ni systemd de Klipper salvo que esté validando físicamente
 ## Flujo físico implementado
 
 1. Seleccionar proyecto, montaje, operación y herramienta.
-2. Abrir “Sistema” y confirmar `FÍSICO`.
-3. Conectar Moonraker HTTP, WebSocket, Klipper y Arduino.
+2. Confirmar que sidebar, Sistema y workspace muestran `FÍSICO`.
+3. Usar `Sistema` solo para diagnóstico técnico y conexión; la preparación productiva vive dentro del montaje.
+4. Conectar Moonraker HTTP, WebSocket, Klipper y Arduino.
 4. Revisar hilo serie, bytes, paquetes completos, paquetes válidos, checksums, edad del último paquete y causa exacta de bloqueo.
 5. Ejecutar homing; el backend confirma `toolhead.homed_axes` y velocidad cero, no la duración de la petición HTTP.
 6. Ingresar Z segura de traslado, mover Z, calcular centro real y mover X/Y al centro con Z segura.
@@ -178,4 +180,4 @@ npm run test
 npm run build
 ```
 
-Última validación local: backend 62 pruebas, frontend 37 pruebas, `pip check`, lint y build correctos. `npm run build` conserva la advertencia no bloqueante de tamaño de Plotly.
+Última validación local: backend 64 pruebas, frontend 37 pruebas, `pip check`, lint y build correctos. `npm run build` generó `frontend/dist/index.html` con `assets/index-DiGQGU_B.js` y conserva la advertencia no bloqueante de tamaño de Plotly.

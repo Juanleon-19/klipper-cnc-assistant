@@ -516,6 +516,70 @@ def build_router() -> APIRouter:
         target = request.app.state.compensated_gcode_service.resolve_generated_file(project_id, file_path)
         return FileResponse(target, media_type="text/plain", filename=target.name)
 
+
+    @router.post("/projects/{project_id}/operations/{operation_id}/execution/preflight", response_model=dict[str, object])
+    def execution_preflight(project_id: str, operation_id: str, request: Request) -> dict[str, object]:
+        project = request.app.state.project_service.get_project(project_id)
+        operation = project.get_operation(operation_id)
+        runtime = request.app.state.machine_runtime.snapshot()
+        physical_service = request.app.state.physical_map_service
+        generated_dir = request.app.state.physical_map_service.repository.project_dir(project_id) / "generated" / "compensated"
+        generated_files = sorted(generated_dir.glob(f"{operation_id}_*_compensated.gcode"), key=lambda item: item.stat().st_mtime, reverse=True) if generated_dir.exists() else []
+        checks: list[dict[str, object]] = []
+        def add(name: str, ok: bool, detail: str) -> None:
+            checks.append({"name": name, "ok": ok, "detail": detail})
+        mode_ok = runtime.get("mode") == "PHYSICAL"
+        add("modo_fisico", mode_ok, "MACHINE_MODE=physical" if mode_ok else "El servicio no está en modo físico.")
+        add("runtime_conectado", bool(runtime.get("moonraker", {}).get("http_connected")), "Moonraker HTTP conectado." if runtime.get("moonraker", {}).get("http_connected") else "Conecte MachineRuntime.")
+        add("klipper_ready", bool(runtime.get("klipper", {}).get("ready")), "Klipper ready." if runtime.get("klipper", {}).get("ready") else "Klipper no está ready.")
+        homed_axes = str(runtime.get("klipper", {}).get("homed_axes") or "")
+        add("homing", set("xyz").issubset(set(homed_axes)), f"homed_axes={homed_axes}" if homed_axes else "Falta homing XYZ.")
+        try:
+            physical_map = physical_service.get_active(project_id, operation_id)
+            map_ok = physical_map.get("status") == "MESH_COMPLETE"
+            tool_references = physical_map.get("tool_references") or {}
+            requested_key = operation.tool_id or operation.herramienta or "sin-herramienta"
+            reference_ok = bool(tool_references.get(requested_key))
+            if not reference_ok:
+                for reference in tool_references.values():
+                    if not isinstance(reference, dict):
+                        continue
+                    if operation.tool_id and reference.get("tool_id") == operation.tool_id:
+                        reference_ok = True
+                        break
+                    if operation.herramienta and reference.get("tool_name") == operation.herramienta:
+                        reference_ok = True
+                        break
+            add("mapa_medido", map_ok, str(physical_map.get("status")))
+            add("referencia_herramienta", reference_ok, "Referencia Z de herramienta disponible." if reference_ok else f"Falta referencia Z para la herramienta {requested_key}.")
+        except Exception as error:
+            add("mapa_medido", False, str(error))
+            add("referencia_herramienta", False, "No se pudo verificar referencia sin mapa medido.")
+        add("archivo_compensado", bool(generated_files), generated_files[0].name if generated_files else "Genere G-code compensado antes de ejecutar.")
+        ready = all(item["ok"] for item in checks)
+        return {"state": "READY_TO_EXECUTE" if ready else "PREFLIGHT", "ready": ready, "checks": checks, "generated_file": generated_files[0].as_posix() if generated_files else None}
+
+    @router.post("/projects/{project_id}/operations/{operation_id}/execution/{action}", response_model=dict[str, object])
+    def execution_action(project_id: str, operation_id: str, action: str, request: Request) -> dict[str, object]:
+        allowed = {"upload", "confirm-file", "confirm-tool", "confirm-spindle", "start", "pause", "resume", "cancel"}
+        if action not in allowed:
+            raise ApplicationError(f"Acción de ejecución no soportada: {action}.")
+        preflight = execution_preflight(project_id, operation_id, request)
+        if action in {"upload", "start"} and not preflight["ready"]:
+            raise ApplicationError("Preflight incompleto: no se puede continuar. Revise modo físico, homing, mapa, referencia y archivo compensado.")
+        if action == "start":
+            raise ApplicationError("Inicio real bloqueado durante desarrollo. Requiere confirmación física supervisada desde la prueba integral.")
+        state_by_action = {
+            "upload": "UPLOADING",
+            "confirm-file": "PREFLIGHT",
+            "confirm-tool": "PREFLIGHT",
+            "confirm-spindle": "READY_TO_EXECUTE",
+            "pause": "PAUSED",
+            "resume": "RUNNING",
+            "cancel": "CANCELLED",
+        }
+        return {"state": state_by_action.get(action, "PREFLIGHT"), "action": action, "detail": f"Acción {action} registrada para operación {operation_id}.", "preflight": preflight}
+
     @router.delete("/projects/{project_id}/operations/{operation_id}/height-map", response_model=dict[str, str])
     def delete_height_map(project_id: str, operation_id: str, request: Request) -> dict[str, str]:
         service = request.app.state.height_map_service

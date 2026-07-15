@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect } from "react";
 
 import { summarizeMachineMode, toneForStatus, translateStatus } from "../lib/ui";
 import type { HealthResponse, MachineRuntime, MachineSession, SystemInfoResponse } from "../types";
@@ -40,17 +40,11 @@ function DiagnosticCard({ title, status, rows }: { title: string; status?: strin
 }
 
 export function SystemPage({ health, systemInfo, machineSession, machineRuntime, refreshing, onRefresh, onRuntimeRefresh, onMachineAction }: SystemPageProps) {
-  const [targetZ, setTargetZ] = useState("10");
-  const mode = machineRuntime?.mode_label ?? summarizeMachineMode(health?.modo_maquina).toUpperCase();
   const physical = machineRuntime?.mode === "PHYSICAL";
+  const mode = physical ? "FÍSICO" : machineRuntime?.mode_label ?? summarizeMachineMode(health?.modo_maquina).toUpperCase();
   const movementAuthorized = machineRuntime?.safety?.movement_authorized === true;
-  const probeRequested = machineRuntime?.controller?.probe_requested === true;
   const runtimeState = machineRuntime?.state ?? "DISCONNECTED";
   const canConnect = physical && runtimeState === "DISCONNECTED";
-  const canHome = physical && ["DIAGNOSTIC", "READY_FOR_HOME", "ERROR", "CANCELLED"].includes(runtimeState);
-  const canEnableJoystick = physical && runtimeState === "WAITING_FOR_XY_REFERENCE" && !movementAuthorized;
-  const canArmReference = physical && runtimeState === "WAITING_FOR_XY_REFERENCE";
-  const canConfirmProbe = physical && probeRequested && runtimeState === "REFERENCE_ARMED";
 
   useEffect(() => {
     let stopped = false;
@@ -74,16 +68,13 @@ export function SystemPage({ health, systemInfo, machineSession, machineRuntime,
     };
   }, [onRuntimeRefresh]);
 
-  const parsedZ = Number(targetZ.replace(",", "."));
-  const invalidZ = !Number.isFinite(parsedZ);
-
   return (
     <div className="page-stack system-physical">
       <article className="panel hero-panel hero-panel--system">
         <div className="section-heading">
           <div>
             <p className="eyebrow">Sistema físico</p>
-            <h2>Diagnóstico, inicialización y controles seguros</h2>
+            <h2>Diagnóstico técnico y seguridad</h2>
           </div>
           <div className="toolbar-inline">
             <StatusBadge tone={physical ? "danger" : "info"}>{mode}</StatusBadge>
@@ -93,28 +84,19 @@ export function SystemPage({ health, systemInfo, machineSession, machineRuntime,
             </button>
           </div>
         </div>
-        <p className="muted">MODO {mode} — las acciones de movimiento solo se habilitan en modo físico con conexión, diagnóstico y autorización de seguridad.</p>
+        <p className="muted">MODO {mode} — esta pantalla muestra diagnóstico técnico, conexión, estado de entradas y parada de emergencia.</p>
+        <p className="muted">Las operaciones de preparación y sondeo se realizan dentro del montaje activo.</p>
         {machineRuntime?.last_error ? <div className="alert alert--error">{machineRuntime.last_error}</div> : null}
       </article>
 
       <div className="machine-action-strip">
-        <button className="button" type="button" onClick={() => void onMachineAction("connect")} disabled={!canConnect || refreshing}>Conectar</button>
+        <button className="button" type="button" onClick={() => void onMachineAction("connect")} disabled={!canConnect || refreshing}>Conectar diagnóstico</button>
         <button className="button button--ghost" type="button" onClick={() => void onMachineAction("diagnostic")} disabled={!physical || refreshing || runtimeState === "DISCONNECTED"}>Modo diagnóstico</button>
-        {canHome ? (
-          <label className="inline-field">
-            Z segura de traslado (mm)
-            <input value={targetZ} onChange={(event) => setTargetZ(event.target.value)} inputMode="decimal" disabled={!physical || refreshing} />
-          </label>
-        ) : null}
-        {canHome ? <button className="button" type="button" onClick={() => void onMachineAction("initialize", parsedZ)} disabled={!physical || refreshing || invalidZ}>Homing + Z segura + centro</button> : null}
-        {canEnableJoystick ? <button className="button button--ghost" type="button" onClick={() => void onMachineAction("manual-on")} disabled={refreshing}>Habilitar joystick X/Y</button> : null}
-        {canArmReference ? <button className="button button--ghost" type="button" onClick={() => void onMachineAction("probe-request")} disabled={refreshing}>Armar referencia</button> : null}
-        {canConfirmProbe ? <button className="button" type="button" onClick={() => void onMachineAction("probe-confirm")} disabled={refreshing}>Sondear referencia</button> : null}
-        <button className="button button--ghost" type="button" onClick={() => void onMachineAction("cancel")} disabled={!physical || refreshing || runtimeState === "DISCONNECTED"}>Cancelar</button>
+        <button className="button button--ghost" type="button" onClick={() => void onRuntimeRefresh()} disabled={refreshing}>Actualizar runtime</button>
+        <button className="button button--ghost" type="button" onClick={() => void onMachineAction("cancel")} disabled={!physical || refreshing || runtimeState === "DISCONNECTED"}>Cancelar operación técnica</button>
         <button className="button button--danger" type="button" onClick={() => { if (window.confirm("Enviar M112 a Klipper y bloquear movimientos?")) void onMachineAction("emergency"); }} disabled={!physical || refreshing || runtimeState === "DISCONNECTED"}>Emergencia M112</button>
       </div>
       {!physical ? <p className="form-error">Conectar está bloqueado porque el backend inició en modo SIMULADO. Configure MACHINE_MODE=physical en el servicio y reinicie solo la aplicación.</p> : null}
-      {invalidZ ? <p className="form-error">Z objetivo debe ser un número finito en milímetros.</p> : null}
 
       <div className="info-grid info-grid--triple">
         <DiagnosticCard title="Aplicación" status={systemInfo?.estado_api} rows={[

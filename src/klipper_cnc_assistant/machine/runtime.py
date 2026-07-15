@@ -815,6 +815,12 @@ class MachineRuntime:
             self._last_command_text = script
             self._event("info", f"Comando físico enviado: {label}.")
 
+    def _clear_resolved_transport_timeout(self, label: str) -> None:
+        with self._lock:
+            if self._last_error and "G-code request timed out" in self._last_error:
+                self._event("info", f"Timeout HTTP de {label} resuelto por confirmación de estado Klipper.")
+                self._last_error = None
+
     def _move_absolute(self, *, x: float | None = None, y: float | None = None, z: float | None = None, label: str) -> None:
         axes = []
         if x is not None:
@@ -843,6 +849,7 @@ class MachineRuntime:
                 for axis, target in targets.items()
             )
             if positions_ok and velocity <= self.config.velocity_tolerance_mm_s:
+                self._clear_resolved_transport_timeout(label)
                 return
             time.sleep(0.05)
         detail = ", ".join(f"{axis.upper()}={target:.3f}" for axis, target in targets.items())
@@ -860,6 +867,7 @@ class MachineRuntime:
             missing = required_axes - homed
             velocity = abs(float(snapshot["velocity"]))
             if not missing and velocity <= self.config.velocity_tolerance_mm_s:
+                self._clear_resolved_transport_timeout("homing")
                 return
             time.sleep(0.2)
         homed = set(str(self._machine.homed_axes))
@@ -883,6 +891,7 @@ class MachineRuntime:
             position = float(snapshot[axis])
             velocity = abs(float(snapshot["velocity"]))
             if abs(position - target) <= self.config.settle_tolerance_mm and velocity <= self.config.velocity_tolerance_mm_s:
+                self._clear_resolved_transport_timeout(label)
                 return
             time.sleep(0.05)
         raise MachineRuntimeError(f"Timeout esperando confirmación de {label}.")

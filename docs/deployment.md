@@ -44,8 +44,9 @@ El servicio:
 - usa el directorio del repositorio como `WorkingDirectory`;
 - escucha solo en `127.0.0.1:8000`;
 - reinicia ante fallos;
-- mantiene modo simulado;
-- no toca Moonraker ni hardware nuevo.
+- mantiene modo según variables de entorno;
+- no toca Moonraker ni hardware si `MACHINE_AUTO_CONNECT=false`;
+- sirve la SPA desde `frontend/dist` o `KCA_FRONTEND_DIST`.
 
 ## Instalacion del servicio
 
@@ -134,3 +135,38 @@ sudo systemctl show klipper-cnc-assistant.service -p Environment
 ```
 
 Si `/dev/ttyUSB0` está ocupado, identifique el proceso con `sudo fuser -v /dev/ttyUSB0` y detenga solo ese proceso si corresponde. No use `M112` para liberar el puerto serie.
+
+
+## Verificación del build servido
+
+FastAPI registra rutas estáticas si existe `frontend/dist/index.html`. El build final verificado contiene:
+
+```text
+frontend/dist/index.html
+frontend/dist/assets/index-DiGQGU_B.js
+frontend/dist/assets/index-C_RZSt3A.css
+frontend/dist/assets/plotly.min-CofRTlwV.js
+```
+
+Verificación local realizada con servidor temporal sin hardware:
+
+```bash
+MACHINE_MODE=simulated PYTHONPATH=src .venv/bin/python -m klipper_cnc_assistant serve --host 127.0.0.1 --port 8010 --data-dir /tmp/kca-served-check
+curl -s http://127.0.0.1:8010/
+curl -s http://127.0.0.1:8010/assets/index-DiGQGU_B.js
+```
+
+El HTML servido referenció `index-DiGQGU_B.js`. Para que el backend Python nuevo quede activo en el servicio real, reinicie solo la aplicación:
+
+```bash
+sudo systemctl restart klipper-cnc-assistant.service
+```
+
+Después de reiniciar, comprobar:
+
+```bash
+curl -s http://127.0.0.1:8000/ | grep index-DiGQGU_B
+curl -s http://127.0.0.1:8000/api/machine/runtime
+```
+
+Si el navegador conserva assets anteriores, usar recarga forzada (`Ctrl+Shift+R`) o limpiar caché del sitio. No hay Service Worker registrado por la aplicación.

@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 
+import { useMachineStatus } from "../context/MachineContext";
 import { HeightMapControlPanel } from "../features/heightmap/HeightMapControlPanel";
 import { HeightMapHeatmap } from "../features/heightmap/HeightMapHeatmap";
 import { HeightMapPointTable } from "../features/heightmap/HeightMapPointTable";
@@ -119,6 +120,7 @@ export function ProjectWorkspace({
   const [activeView, setActiveView] = useState<WorkspaceView>("archivo");
   const [activeMapTab, setActiveMapTab] = useState<MapTab>("mapa2d");
   const [heightMode, setHeightMode] = useState<HeightMode>("bruto");
+  const [coordinateMode, setCoordinateMode] = useState<"local" | "machine">("local");
   const [mapSource, setMapSource] = useState<HeightMapSource>("SIMULATED");
   const [heightMap, setHeightMap] = useState<HeightMap | null>(null);
   const [physicalMap, setPhysicalMap] = useState<PhysicalMapPayload | null>(null);
@@ -135,6 +137,12 @@ export function ProjectWorkspace({
   const [zReferenceErrors, setZReferenceErrors] = useState<ReferenceFieldErrors>({});
   const workOriginRefs = useRef<Record<"x_mm" | "y_mm", HTMLInputElement | null>>({ x_mm: null, y_mm: null });
   const zReferenceRefs = useRef<Record<"x_mm" | "y_mm" | "z_mm", HTMLInputElement | null>>({ x_mm: null, y_mm: null, z_mm: null });
+  const machine = useMachineStatus();
+  const [safeZInput, setSafeZInput] = useState("10");
+  const [meshSpacingInput, setMeshSpacingInput] = useState("10");
+  const [meshMarginInput, setMeshMarginInput] = useState("1");
+  const [executionState, setExecutionState] = useState<"PREFLIGHT" | "READY_TO_EXECUTE" | "UPLOADING" | "RUNNING" | "PAUSED" | "CANCELLED" | "COMPLETED">("PREFLIGHT");
+  const [executionEvent, setExecutionEvent] = useState("Sin acciones de ejecución todavía.");
 
   useEffect(() => {
     setSelectedOperationId((current) => {
@@ -318,6 +326,29 @@ export function ProjectWorkspace({
       setReferenceBusy(false);
     }
   };
+
+
+  const withPhysicalReferenceAction = async (action: () => Promise<ReferenceSession | void>) => {
+    setReferenceBusy(true);
+    setWorkspaceError("");
+    try {
+      const result = await action();
+      if (result) {
+        setReferenceSession(result);
+      } else if (project && selectedOperation) {
+        setReferenceSession(await api.getReferenceSession(project.id, selectedOperation.id));
+      }
+      setCompensationPreview(null);
+      setGeneratedGCode(null);
+    } catch (error) {
+      setWorkspaceError(error instanceof Error ? error.message : "No fue posible completar la acción física de referencia.");
+    } finally {
+      setReferenceBusy(false);
+    }
+  };
+
+  const parsedSafeZ = Number(safeZInput.replace(",", "."));
+  const safeZInvalid = !Number.isFinite(parsedSafeZ);
 
   const submitWorkOrigin = async () => {
     const xParsed = parseFiniteNumber(workOrigin.x_mm);
@@ -723,19 +754,118 @@ export function ProjectWorkspace({
     </div>
   );
 
-  const renderReferencia = () => (
+  const renderPhysicalReference = () => {
+    const runtime = machine.runtime;
+    const position = runtime?.klipper?.position as Record<string, unknown> | null | undefined;
+    const controller = runtime?.controller ?? {};
+    const arduino = runtime?.arduino ?? {};
+    const canConnect = machine.isPhysical && machine.runtimeState === "DISCONNECTED";
+    const canInitialize = machine.isPhysical && ["DIAGNOSTIC", "READY_FOR_HOME", "HOMED", "ERROR", "CANCELLED"].includes(machine.runtimeState) && !safeZInvalid;
+    const canEnableJog = machine.isPhysical && machine.runtimeState === "WAITING_FOR_XY_REFERENCE";
+    const canArm = machine.isPhysical && machine.runtimeState === "WAITING_FOR_XY_REFERENCE";
+    const canProbe = machine.isPhysical && machine.runtimeState === "REFERENCE_ARMED";
+    return (
+      <div className="stack gap-md">
+        <article className="panel">
+          <div className="section-heading section-heading--stacked">
+            <div>
+              <p className="eyebrow">Preparación física del montaje</p>
+              <h3>Referencia X/Y/Z medida</h3>
+            </div>
+            <StatusBadge tone={machine.isPhysical ? "success" : "warning"}>{machine.modeLabel}</StatusBadge>
+          </div>
+          <p className="muted">Coloque el origen X/Y real del G-code con joystick y mida Z con la sonda. La Z segura de traslado no es referencia Z ni profundidad de fresado.</p>
+          {machine.lastError ? <div className="alert alert--warning">{machine.lastError}</div> : null}
+          <div className="info-grid info-grid--double compact-grid">
+            <div className="metric-box"><span>Estado</span><strong>{machine.runtimeState}</strong></div>
+            <div className="metric-box"><span>Moonraker</span><strong>{machine.connected ? "conectado" : "desconectado"}</strong></div>
+            <div className="metric-box"><span>Klipper</span><strong>{machine.klipperReady ? "ready" : "no ready"}</strong></div>
+            <div className="metric-box"><span>Homing</span><strong>{machine.homedAxes || "sin ejes"}</strong></div>
+            <div className="metric-box"><span>Arduino</span><strong>{machine.serialRecent ? "paquetes recientes" : "sin paquetes recientes"}</strong></div>
+            <div className="metric-box"><span>Telemetría</span><strong>{machine.telemetryRecent ? "reciente" : "obsoleta"}</strong></div>
+          </div>
+        </article>
+
+        <article className="panel">
+          <div className="section-heading"><h3>1. Conexión y diagnóstico</h3></div>
+          <p className="muted">Conecta Moonraker HTTP, WebSocket, Klipper y Arduino. En diagnóstico puede observar joystick, botón externo y sonda sin movimiento.</p>
+          <div className="action-grid action-grid--inline">
+            <button className="button" type="button" disabled={!canConnect || machine.refreshing} onClick={() => void machine.runMachineAction("connect")}>Conectar runtime</button>
+            <button className="button button--ghost" type="button" disabled={!machine.isPhysical || machine.refreshing || machine.runtimeState === "DISCONNECTED"} onClick={() => void machine.runMachineAction("diagnostic")}>Modo diagnóstico</button>
+          </div>
+          <dl className="definition-grid definition-grid--compact">
+            <div><dt>Puerto Arduino</dt><dd>{String(arduino.port ?? "-")}</dd></div>
+            <div><dt>Paquetes válidos</dt><dd>{String(arduino.valid_packets ?? 0)}</dd></div>
+            <div><dt>Dirección joystick</dt><dd>{String(controller.direction ?? "CENTER")}</dd></div>
+            <div><dt>Botón externo</dt><dd>{controller.external_button ? "pulsado" : "reposo"}</dd></div>
+            <div><dt>Sonda</dt><dd>{controller.probe ? "contacto" : "inactiva"}</dd></div>
+          </dl>
+        </article>
+
+        <article className="panel">
+          <div className="section-heading"><h3>2. Homing, Z segura y centro</h3></div>
+          <p className="muted">El backend envía G28, confirma `toolhead.homed_axes`, mueve Z a traslado seguro y después mueve X/Y al centro real calculado desde límites Klipper.</p>
+          <label className="inline-field">Z segura de traslado (mm)<input value={safeZInput} inputMode="decimal" onChange={(event) => setSafeZInput(event.target.value)} /></label>
+          {safeZInvalid ? <p className="form-error">Z segura debe ser un número finito en milímetros.</p> : null}
+          <button className="button" type="button" disabled={!canInitialize || referenceBusy || machine.refreshing} onClick={() => void withPhysicalReferenceAction(async () => { await machine.runMachineAction("initialize", parsedSafeZ); })}>Realizar homing, mover Z segura e ir al centro</button>
+          <div className="workflow-steps-grid">
+            {(runtime?.initialization_steps ?? []).map((step, index) => (
+              <div className="workflow-step-card" key={`${String(step.name)}-${index}`}>
+                <div className="workflow-step-card__header"><span className="workflow-step">{index + 1}</span><div><strong>{String(step.name)}</strong><p className="muted">{String(step.detail ?? "")}</p></div><StatusBadge tone={String(step.status) === "ok" ? "success" : "warning"}>{String(step.status)}</StatusBadge></div>
+              </div>
+            ))}
+          </div>
+        </article>
+
+        <article className="panel">
+          <div className="section-heading"><h3>3. Posicionar X0/Y0 del G-code</h3></div>
+          <p className="muted">Habilite joystick X/Y y coloque la herramienta exactamente sobre el X0/Y0 generado por FlatCAM. El jog es cardinal discreto y no mueve Z.</p>
+          <div className="info-grid info-grid--double compact-grid">
+            <div className="metric-box"><span>X máquina</span><strong>{formatMillimeters(typeof position?.x === "number" ? position.x : null, 3)}</strong></div>
+            <div className="metric-box"><span>Y máquina</span><strong>{formatMillimeters(typeof position?.y === "number" ? position.y : null, 3)}</strong></div>
+            <div className="metric-box"><span>Z máquina</span><strong>{formatMillimeters(typeof position?.z === "number" ? position.z : null, 3)}</strong></div>
+            <div className="metric-box"><span>Modo jog</span><strong>{String(controller.jog_mode ?? "FINE")}</strong></div>
+          </div>
+          <button className="button" type="button" disabled={!canEnableJog || referenceBusy || machine.refreshing} onClick={() => void machine.runMachineAction("manual-on")}>Habilitar joystick X/Y</button>
+        </article>
+
+        <article className="panel">
+          <div className="section-heading"><h3>4. Medir referencia con botón externo</h3></div>
+          <p className="muted">Arme la referencia y pulse el botón externo. La aplicación captura X/Y actuales, baja Z por pasos discretos, detecta contacto, retrae y guarda origen X/Y más referencia Z `MEASURED`.</p>
+          <div className="action-grid action-grid--inline">
+            <button className="button button--ghost" type="button" disabled={!canArm || referenceBusy || machine.refreshing} onClick={() => void machine.runMachineAction("probe-request")}>Armar referencia</button>
+            <button className="button" type="button" disabled={!canProbe || referenceBusy || machine.refreshing || !selectedOperation} onClick={() => void withPhysicalReferenceAction(async () => {
+              await machine.runMachineAction("probe-confirm");
+              if (!selectedOperation) return;
+              await api.capturePhysicalWorkOrigin(project.id, selectedOperation.id);
+              return await api.capturePhysicalZReferenceFromProbe(project.id, selectedOperation.id);
+            })}>Sondear referencia ahora</button>
+            <button className="button button--ghost" type="button" disabled={!machine.isPhysical || machine.refreshing} onClick={() => void machine.runMachineAction("cancel")}>Cancelar</button>
+          </div>
+          <div className="info-grid info-grid--double compact-grid">
+            <div className="metric-box"><span>Origen X/Y</span><strong>{referenceSession?.origen_trabajo ? `${referenceSession.origen_trabajo.x_mm}, ${referenceSession.origen_trabajo.y_mm}` : "pendiente"}</strong></div>
+            <div className="metric-box"><span>Referencia Z</span><strong>{referenceSession?.referencia_z?.z_mm ?? "pendiente"}</strong></div>
+            <div className="metric-box"><span>Herramienta</span><strong>{selectedOperation?.herramienta ?? selectedOperation?.tool_id ?? "sin herramienta"}</strong></div>
+            <div className="metric-box"><span>Fuente</span><strong>{String(referenceSession?.referencia_z?.fuente ?? "-")}</strong></div>
+          </div>
+        </article>
+      </div>
+    );
+  };
+
+  const renderSimulatedReferencia = () => (
     <div className="stack gap-md">
       <article className="panel">
         <div className="section-heading section-heading--stacked">
           <div>
-            <p className="eyebrow">Referencia</p>
+            <p className="eyebrow">Referencia simulada</p>
             <h3>Flujo simulado de preparación</h3>
           </div>
-          <p className="muted">Todos los botones confirman estados en simulación. No existe home real, sondeo físico ni comandos hacia Moonraker.</p>
+          <p className="muted">Modo SIMULADO: confirma referencias manuales sin abrir hardware ni enviar movimientos.</p>
         </div>
         <div className="machine-banner machine-banner--large" role="status">
           <span className="machine-banner__dot" aria-hidden="true" />
-          <span>MODO SIMULADO — no se enviará movimiento a la máquina</span>
+          <span>MODO SIMULADO - no se enviará movimiento a la máquina</span>
         </div>
         {referenceSession?.motivo_invalidacion ? <div className="alert alert--warning">{referenceSession.motivo_invalidacion}</div> : null}
         <div className="workflow-steps-grid">
@@ -745,7 +875,7 @@ export function ProjectWorkspace({
 
       <article className="panel">
         <div className="section-heading"><h3>1. Referencia de máquina</h3></div>
-        <p className="muted">Ubica el sistema de coordenadas de la máquina. En esta versión solo se confirma en simulación y una vez por sesión.</p>
+        <p className="muted">Ubica el sistema de coordenadas de la máquina. En simulación se confirma una vez por sesión.</p>
         <button className="button" type="button" disabled={referenceBusy || referenceSession?.machine_reference.confirmada || !selectedOperation} onClick={() => void withReferenceAction(() => api.confirmMachineReference(project.id, selectedOperation!.id))}>
           {referenceSession?.machine_reference.confirmada ? "Ya confirmada en simulación" : "Confirmar en simulación"}
         </button>
@@ -755,120 +885,31 @@ export function ProjectWorkspace({
         <div className="section-heading"><h3>2. Origen de trabajo X/Y</h3></div>
         <p className="muted">Define dónde queda X0 Y0 del G-code respecto al montaje de la placa.</p>
         <div className="form-grid">
-          <label>
-            X (mm)
-            <input
-              ref={(node) => { workOriginRefs.current.x_mm = node; }}
-              type="number"
-              inputMode="decimal"
-              value={workOrigin.x_mm}
-              onChange={(event) => {
-                setWorkOrigin((current) => ({ ...current, x_mm: event.target.value }));
-                setWorkOriginErrors((current) => ({ ...current, x_mm: undefined }));
-              }}
-            />
-            {workOriginErrors.x_mm ? <span className="form-error">{workOriginErrors.x_mm}</span> : null}
-          </label>
-          <label>
-            Y (mm)
-            <input
-              ref={(node) => { workOriginRefs.current.y_mm = node; }}
-              type="number"
-              inputMode="decimal"
-              value={workOrigin.y_mm}
-              onChange={(event) => {
-                setWorkOrigin((current) => ({ ...current, y_mm: event.target.value }));
-                setWorkOriginErrors((current) => ({ ...current, y_mm: undefined }));
-              }}
-            />
-            {workOriginErrors.y_mm ? <span className="form-error">{workOriginErrors.y_mm}</span> : null}
-          </label>
+          <label>X (mm)<input ref={(node) => { workOriginRefs.current.x_mm = node; }} type="number" inputMode="decimal" value={workOrigin.x_mm} onChange={(event) => { setWorkOrigin((current) => ({ ...current, x_mm: event.target.value })); setWorkOriginErrors((current) => ({ ...current, x_mm: undefined })); }} />{workOriginErrors.x_mm ? <span className="form-error">{workOriginErrors.x_mm}</span> : null}</label>
+          <label>Y (mm)<input ref={(node) => { workOriginRefs.current.y_mm = node; }} type="number" inputMode="decimal" value={workOrigin.y_mm} onChange={(event) => { setWorkOrigin((current) => ({ ...current, y_mm: event.target.value })); setWorkOriginErrors((current) => ({ ...current, y_mm: undefined })); }} />{workOriginErrors.y_mm ? <span className="form-error">{workOriginErrors.y_mm}</span> : null}</label>
         </div>
-        <button className="button" type="button" disabled={referenceBusy || !selectedOperation} onClick={() => void submitWorkOrigin()}>
-          Confirmar en simulación
-        </button>
+        <button className="button" type="button" disabled={referenceBusy || !selectedOperation} onClick={() => void submitWorkOrigin()}>Confirmar en simulación</button>
       </article>
 
       <article className="panel">
         <div className="section-heading"><h3>3. Referencia Z</h3></div>
-        <p className="muted">Define la altura que se considera Z0 para este montaje. Puede usar la misma posición X/Y del origen de trabajo, pero es una referencia vertical diferente.</p>
-        <label className="toggle-field">
-          <input type="checkbox" checked={useWorkOriginXYForZ} onChange={(event) => setUseWorkOriginXYForZ(event.target.checked)} />
-          <span>Usar la misma posición X/Y del origen de trabajo</span>
-        </label>
+        <p className="muted">Define la altura que se considera Z0 para esta herramienta en simulación.</p>
+        <label className="toggle-field"><input type="checkbox" checked={useWorkOriginXYForZ} onChange={(event) => setUseWorkOriginXYForZ(event.target.checked)} /><span>Usar la misma posición X/Y del origen de trabajo</span></label>
         <div className="form-grid">
-          <label>
-            X (mm)
-            <input
-              ref={(node) => { zReferenceRefs.current.x_mm = node; }}
-              type="number"
-              inputMode="decimal"
-              value={useWorkOriginXYForZ ? workOrigin.x_mm : zReference.x_mm}
-              disabled={useWorkOriginXYForZ}
-              onChange={(event) => {
-                setZReference((current) => ({ ...current, x_mm: event.target.value }));
-                setZReferenceErrors((current) => ({ ...current, x_mm: undefined }));
-              }}
-            />
-            {zReferenceErrors.x_mm ? <span className="form-error">{zReferenceErrors.x_mm}</span> : null}
-          </label>
-          <label>
-            Y (mm)
-            <input
-              ref={(node) => { zReferenceRefs.current.y_mm = node; }}
-              type="number"
-              inputMode="decimal"
-              value={useWorkOriginXYForZ ? workOrigin.y_mm : zReference.y_mm}
-              disabled={useWorkOriginXYForZ}
-              onChange={(event) => {
-                setZReference((current) => ({ ...current, y_mm: event.target.value }));
-                setZReferenceErrors((current) => ({ ...current, y_mm: undefined }));
-              }}
-            />
-            {zReferenceErrors.y_mm ? <span className="form-error">{zReferenceErrors.y_mm}</span> : null}
-          </label>
-          <label>
-            Z de referencia (mm)
-            <input
-              ref={(node) => { zReferenceRefs.current.z_mm = node; }}
-              type="number"
-              inputMode="decimal"
-              value={zReference.z_mm}
-              onChange={(event) => {
-                setZReference((current) => ({ ...current, z_mm: event.target.value }));
-                setZReferenceErrors((current) => ({ ...current, z_mm: undefined }));
-              }}
-            />
-            {zReferenceErrors.z_mm ? <span className="form-error">{zReferenceErrors.z_mm}</span> : null}
-          </label>
+          <label>X (mm)<input ref={(node) => { zReferenceRefs.current.x_mm = node; }} type="number" inputMode="decimal" value={useWorkOriginXYForZ ? workOrigin.x_mm : zReference.x_mm} disabled={useWorkOriginXYForZ} onChange={(event) => { setZReference((current) => ({ ...current, x_mm: event.target.value })); setZReferenceErrors((current) => ({ ...current, x_mm: undefined })); }} />{zReferenceErrors.x_mm ? <span className="form-error">{zReferenceErrors.x_mm}</span> : null}</label>
+          <label>Y (mm)<input ref={(node) => { zReferenceRefs.current.y_mm = node; }} type="number" inputMode="decimal" value={useWorkOriginXYForZ ? workOrigin.y_mm : zReference.y_mm} disabled={useWorkOriginXYForZ} onChange={(event) => { setZReference((current) => ({ ...current, y_mm: event.target.value })); setZReferenceErrors((current) => ({ ...current, y_mm: undefined })); }} />{zReferenceErrors.y_mm ? <span className="form-error">{zReferenceErrors.y_mm}</span> : null}</label>
+          <label>Z de referencia (mm)<input ref={(node) => { zReferenceRefs.current.z_mm = node; }} type="number" inputMode="decimal" value={zReference.z_mm} onChange={(event) => { setZReference((current) => ({ ...current, z_mm: event.target.value })); setZReferenceErrors((current) => ({ ...current, z_mm: undefined })); }} />{zReferenceErrors.z_mm ? <span className="form-error">{zReferenceErrors.z_mm}</span> : null}</label>
         </div>
-        <button className="button" type="button" disabled={referenceBusy || !selectedOperation} onClick={() => void submitZReference()}>
-          Confirmar en simulación
-        </button>
+        <button className="button" type="button" disabled={referenceBusy || !selectedOperation} onClick={() => void submitZReference()}>Confirmar en simulación</button>
       </article>
 
-      <article className="panel">
-        <div className="section-heading"><h3>4. Región sondeable</h3></div>
-        <p className="muted">La región sondeable se configura desde la pestaña “Mapa de alturas / Configuración”.</p>
-        {heightMap ? <p className="mono-text">{JSON.stringify(heightMap.probe_region)}</p> : <p className="muted">Aún no hay región configurada.</p>}
-      </article>
-
-      <article className="panel">
-        <div className="section-heading"><h3>5. Mapa</h3></div>
-        <p className="muted">{referenceSession?.pasos.find((step) => step.id === "mapa")?.detalle ?? "Aún no hay mapa disponible."}</p>
-        <p className="mono-text">Mapa actual: {heightMap ? `${heightMap.fuente_datos} · v${heightMap.version}` : "no disponible"}</p>
-      </article>
-
-      <article className="panel">
-        <div className="section-heading"><h3>6. Validación</h3></div>
-        <p className="muted">{referenceSession?.pasos.find((step) => step.id === "validacion")?.detalle ?? "La validación del mapa sigue pendiente."}</p>
-        <button className="button" type="button" disabled={referenceBusy || !selectedOperation || !heightMap} onClick={() => void withReferenceAction(() => api.validateHeightMap(project.id, selectedOperation!.id))}>
-          Confirmar en simulación
-        </button>
-      </article>
+      <article className="panel"><div className="section-heading"><h3>4. Región sondeable</h3></div><p className="muted">La región sondeable se configura desde la pestaña Mapa de alturas.</p>{heightMap ? <p className="mono-text">{JSON.stringify(heightMap.probe_region)}</p> : <p className="muted">Aún no hay región configurada.</p>}</article>
+      <article className="panel"><div className="section-heading"><h3>5. Mapa</h3></div><p className="muted">{referenceSession?.pasos.find((step) => step.id === "mapa")?.detalle ?? "Aún no hay mapa disponible."}</p><p className="mono-text">Mapa actual: {heightMap ? `${heightMap.fuente_datos} · v${heightMap.version}` : "no disponible"}</p></article>
+      <article className="panel"><div className="section-heading"><h3>6. Validación</h3></div><p className="muted">{referenceSession?.pasos.find((step) => step.id === "validacion")?.detalle ?? "La validación del mapa sigue pendiente."}</p><button className="button" type="button" disabled={referenceBusy || !selectedOperation || !heightMap} onClick={() => void withReferenceAction(() => api.validateHeightMap(project.id, selectedOperation!.id))}>Confirmar en simulación</button></article>
     </div>
   );
 
+  const renderReferencia = () => machine.isPhysical ? renderPhysicalReference() : renderSimulatedReferencia();
 
   const withPhysicalMapAction = async (action: () => Promise<PhysicalMapPayload | null>) => {
     setHeightMapBusy(true);
@@ -931,6 +972,9 @@ export function ProjectWorkspace({
             const payload = await api.getPhysicalMap(project.id, selectedOperation.id);
             return payload.payload;
           })}>MEDIDO FÍSICAMENTE</button>
+          <span className="eyebrow">Coordenadas</span>
+          <button className={`toolbar-pill${coordinateMode === "local" ? " toolbar-pill--active" : ""}`} type="button" onClick={() => setCoordinateMode("local")}>Local G-code</button>
+          <button className={`toolbar-pill${coordinateMode === "machine" ? " toolbar-pill--active" : ""}`} type="button" onClick={() => setCoordinateMode("machine")}>Máquina</button>
         </div>
       </article>
 
@@ -943,6 +987,15 @@ export function ProjectWorkspace({
             </div>
             <StatusBadge tone={physicalMap?.status === "MESH_COMPLETE" ? "success" : physicalMap ? "info" : "neutral"}>{physicalMap?.status ?? "sin mapa medido"}</StatusBadge>
           </div>
+          {!machine.isPhysical ? <div className="alert alert--warning">Modo físico requerido: el mapa medido solo se puede preparar con `MACHINE_MODE=physical`.</div> : null}
+          {!referenceSession?.origen_trabajo ? <div className="alert alert--warning">No puede iniciar la malla: falta capturar el origen X/Y en la pestaña Referencia.</div> : null}
+          {!referenceSession?.referencia_z ? <div className="alert alert--warning">No puede iniciar la malla: falta referencia Z medida para la herramienta actual.</div> : null}
+          <div className="form-grid">
+            <label>Margen desde operaciones (mm)<input value={meshMarginInput} inputMode="decimal" onChange={(event) => setMeshMarginInput(event.target.value)} /></label>
+            <label>Separación máxima S (mm)<input value={meshSpacingInput} inputMode="decimal" onChange={(event) => setMeshSpacingInput(event.target.value)} /></label>
+            <label>Z segura de traslado (mm)<input value={safeZInput} inputMode="decimal" onChange={(event) => setSafeZInput(event.target.value)} /></label>
+            <label>Retracto / paso sonda<input value="runtime físico" disabled /></label>
+          </div>
           <div className="info-grid info-grid--double compact-grid">
             <div className="metric-box"><span>Herramienta seleccionada</span><strong>{selectedToolKey}</strong></div>
             <div className="metric-box"><span>Puntos medidos</span><strong>{physicalMeasuredPoints}/{physicalPointCount}</strong></div>
@@ -950,20 +1003,39 @@ export function ProjectWorkspace({
             <div className="metric-box"><span>Columnas</span><strong>{physicalMap?.grid?.columns ?? "-"}</strong></div>
             <div className="metric-box"><span>dx</span><strong>{formatMillimeters(physicalMap?.grid?.dx_mm, 3)}</strong></div>
             <div className="metric-box"><span>dy</span><strong>{formatMillimeters(physicalMap?.grid?.dy_mm, 3)}</strong></div>
+            <div className="metric-box"><span>Región local</span><strong>{physicalMap?.local_region ? `${physicalMap.local_region.min_x_mm}..${physicalMap.local_region.max_x_mm} / ${physicalMap.local_region.min_y_mm}..${physicalMap.local_region.max_y_mm}` : "pendiente"}</strong></div>
+            <div className="metric-box"><span>Región máquina</span><strong>{physicalMap?.machine_region ? `${physicalMap.machine_region.min_x_mm}..${physicalMap.machine_region.max_x_mm} / ${physicalMap.machine_region.min_y_mm}..${physicalMap.machine_region.max_y_mm}` : "pendiente"}</strong></div>
           </div>
-          <p className="muted">El origen X/Y pertenece al montaje. El mapa de superficie se comparte por montaje/cara; cada herramienta conserva su propia referencia Z.</p>
+          <p className="muted">Usar área desde operaciones calcula la unión real de trayectorias analizadas del montaje/cara, respeta coordenadas negativas y no recentra el G-code. La región se transforma a máquina con `machine_origin_x + gcode_x` y `machine_origin_y + gcode_y`.</p>
+          {physicalMap?.points?.length ? (
+            <div className="subpanel subpanel--soft">
+              <strong>Vista previa de recorrido serpentino</strong>
+              <p className="mono-text">Primer punto: {JSON.stringify(physicalMap.points[0])}</p>
+              <p className="mono-text">Último punto: {JSON.stringify(physicalMap.points[physicalMap.points.length - 1])}</p>
+              <progress value={physicalMeasuredPoints} max={Math.max(1, physicalPointCount)} />
+            </div>
+          ) : null}
           <div className="action-grid">
-            <button className="button" type="button" disabled={heightMapBusy || !selectedOperation} onClick={() => void withPhysicalMapAction(async () => {
+            <button className="button" type="button" disabled={heightMapBusy || !selectedOperation || !machine.isPhysical || !referenceSession?.referencia_z} onClick={() => void withPhysicalMapAction(async () => {
               if (!selectedOperation) return null;
-              const result = await api.planPhysicalMapFromReference(project.id, selectedOperation.id, { max_spacing_mm: 10, margin_mm: 1 });
+              const spacing = Number(meshSpacingInput.replace(",", "."));
+              const margin = Number(meshMarginInput.replace(",", "."));
+              const result = await api.planPhysicalMapFromReference(project.id, selectedOperation.id, { max_spacing_mm: Number.isFinite(spacing) ? spacing : 10, margin_mm: Number.isFinite(margin) ? margin : 1 });
+              setActiveMapTab("mapa2d");
               return result.payload;
-            })}>Preparar mapa físico</button>
+            })}>Usar área desde operaciones / Generar malla</button>
             <button className="button" type="button" disabled={heightMapBusy || !physicalMapId || physicalMap?.status === "MESH_COMPLETE"} onClick={() => void withPhysicalMapAction(async () => {
               const result = await api.executeNextPhysicalMapPoint(project.id, physicalMapId);
               return result.payload;
-            })}>Iniciar sondeo de malla</button>
+            })}>{physicalMeasuredPoints > 0 ? "Continuar malla incompleta" : "Iniciar sondeo"}</button>
             <button className="button button--ghost" type="button" disabled={heightMapBusy || !physicalMapId} onClick={() => void withPhysicalMapAction(async () => (await api.pausePhysicalMap(project.id, physicalMapId)).payload)}>Pausar</button>
             <button className="button button--ghost" type="button" disabled={heightMapBusy || !physicalMapId} onClick={() => void withPhysicalMapAction(async () => (await api.resumePhysicalMap(project.id, physicalMapId)).payload)}>Reanudar</button>
+            <button className="button button--ghost" type="button" disabled={heightMapBusy || !physicalMapId || physicalMeasuredPoints === 0} onClick={() => void withPhysicalMapAction(async () => {
+              const failed = physicalMap?.points?.find((point) => point.status === "FAILED" || point.status === "RETRY_REQUIRED") ?? physicalMap?.points?.find((point) => point.status !== "MEASURED");
+              if (!failed) return physicalMap;
+              const result = await api.executeNextPhysicalMapPoint(project.id, physicalMapId);
+              return result.payload;
+            })}>Reintentar/continuar punto</button>
             <button className="button button--ghost button--danger" type="button" disabled={heightMapBusy || !physicalMapId} onClick={() => void withPhysicalMapAction(async () => (await api.cancelPhysicalMap(project.id, physicalMapId)).payload)}>Cancelar</button>
           </div>
         </article>
@@ -994,7 +1066,7 @@ export function ProjectWorkspace({
         </article>
       ) : null}
 
-      {activeMapTab === "mapa2d" && heightMap ? <HeightMapHeatmap material={project.material} heightMap={heightMap} mode={heightMode} toolpathBounds={selectedOperation?.analisis?.limites ?? null} /> : null}
+      {activeMapTab === "mapa2d" && heightMap ? <HeightMapHeatmap material={project.material} heightMap={heightMap} mode={heightMode} toolpathBounds={selectedOperation?.analisis?.limites ?? null} meshPoints={physicalMap?.points as Array<{ x_local?: number; y_local?: number; x_machine?: number; y_machine?: number; status?: string; index?: number }> | undefined} coordinateMode={coordinateMode} /> : null}
       {activeMapTab === "superficie3d" && heightMap ? <HeightMapSurface3D heightMap={heightMap} mode={heightMode} /> : null}
       {activeMapTab === "puntos" && heightMap ? (
         <HeightMapPointTable
@@ -1039,6 +1111,23 @@ export function ProjectWorkspace({
   );
 
 
+  const runExecutionAction = async (action: string) => {
+    if (!selectedOperation) return;
+    setReferenceBusy(true);
+    setWorkspaceError("");
+    try {
+      const result = action === "preflight"
+        ? await api.executionPreflight(project.id, selectedOperation.id)
+        : await api.executionAction(project.id, selectedOperation.id, action);
+      setExecutionState(String(result.state ?? executionState) as typeof executionState);
+      setExecutionEvent(String(result.detail ?? `Acción ${action} completada.`));
+    } catch (error) {
+      setWorkspaceError(error instanceof Error ? error.message : "No fue posible ejecutar la acción de preflight.");
+    } finally {
+      setReferenceBusy(false);
+    }
+  };
+
   const renderEjecucion = () => (
     <div className="stack gap-md">
       <article className="panel">
@@ -1047,14 +1136,29 @@ export function ProjectWorkspace({
             <p className="eyebrow">Ejecución controlada</p>
             <h3>Preflight Moonraker/Klipper</h3>
           </div>
-          <StatusBadge tone="info">preparado en software</StatusBadge>
+          <StatusBadge tone={executionState === "READY_TO_EXECUTE" ? "success" : executionState === "CANCELLED" ? "warning" : "info"}>{executionState}</StatusBadge>
         </div>
-        <div className="checklist-list">
-          <li data-status={physicalMap?.status === "MESH_COMPLETE" ? "confirmado" : "pendiente"}><span>Mapa medido del montaje</span><strong>{physicalMap?.status ?? "pendiente"}</strong></li>
-          <li data-status={generatedGCode ? "confirmado" : "pendiente"}><span>Archivo compensado</span><strong>{generatedGCode?.relative_path ?? "pendiente"}</strong></li>
-          <li data-status={referenceSession?.referencia_z ? "confirmado" : "pendiente"}><span>Referencia Z de herramienta</span><strong>{referenceSession?.referencia_z ? "vigente" : "pendiente"}</strong></li>
+        <div className="info-grid info-grid--double compact-grid">
+          <div className="metric-box"><span>Modo</span><strong>{machine.modeLabel}</strong></div>
+          <div className="metric-box"><span>Runtime</span><strong>{machine.connected ? "conectado" : "desconectado"}</strong></div>
+          <div className="metric-box"><span>Klipper</span><strong>{machine.klipperReady ? "ready" : "no ready"}</strong></div>
+          <div className="metric-box"><span>Homing</span><strong>{machine.homedAxes || "pendiente"}</strong></div>
+          <div className="metric-box"><span>Mapa</span><strong>{physicalMap?.status ?? "pendiente"}</strong></div>
+          <div className="metric-box"><span>Archivo compensado</span><strong>{generatedGCode?.relative_path ?? "pendiente"}</strong></div>
         </div>
-        <p className="muted">La subida a Moonraker y el inicio real quedan bloqueados para validación supervisada. No se ejecuta ningún archivo desde esta pantalla durante desarrollo.</p>
+        <p className="muted">Último evento: {executionEvent}</p>
+        <div className="action-grid">
+          <button className="button" type="button" disabled={referenceBusy || !selectedOperation} onClick={() => void runExecutionAction("preflight")}>Ejecutar preflight</button>
+          <button className="button button--ghost" type="button" disabled={referenceBusy || !selectedOperation} onClick={() => void runExecutionAction("upload")}>Subir archivo a Moonraker</button>
+          <button className="button button--ghost" type="button" disabled={referenceBusy || !selectedOperation} onClick={() => void runExecutionAction("confirm-file")}>Confirmar archivo</button>
+          <button className="button button--ghost" type="button" disabled={referenceBusy || !selectedOperation} onClick={() => void runExecutionAction("confirm-tool")}>Confirmar herramienta</button>
+          <button className="button button--ghost" type="button" disabled={referenceBusy || !selectedOperation} onClick={() => void runExecutionAction("confirm-spindle")}>Confirmar spindle</button>
+          <button className="button" type="button" disabled={referenceBusy || !selectedOperation} onClick={() => void runExecutionAction("start")}>Iniciar ejecución supervisada</button>
+          <button className="button button--ghost" type="button" disabled={referenceBusy || !selectedOperation} onClick={() => void runExecutionAction("pause")}>Pausar</button>
+          <button className="button button--ghost" type="button" disabled={referenceBusy || !selectedOperation} onClick={() => void runExecutionAction("resume")}>Reanudar</button>
+          <button className="button button--ghost button--danger" type="button" disabled={referenceBusy || !selectedOperation} onClick={() => void runExecutionAction("cancel")}>Cancelar</button>
+          <button className="button button--danger" type="button" disabled={!machine.isPhysical || machine.refreshing} onClick={() => { if (window.confirm("Enviar M112 a Klipper?")) void machine.runMachineAction("emergency"); }}>Emergencia M112</button>
+        </div>
       </article>
     </div>
   );

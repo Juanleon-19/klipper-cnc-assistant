@@ -74,6 +74,22 @@ class ApiTest(unittest.TestCase):
         self.assertEqual(payload["analysis_version"], payload["current_analysis_version"])
         self.assertFalse(payload["analisis_desactualizado"])
 
+
+    def test_execution_preflight_reports_concrete_blockers_without_hardware(self) -> None:
+        project_id = self._create_project()
+        operation_id = self._create_operation(project_id)
+        response = self.client.post(f"/api/projects/{project_id}/operations/{operation_id}/execution/preflight")
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["state"], "PREFLIGHT")
+        self.assertFalse(payload["ready"])
+        checks = {item["name"]: item for item in payload["checks"]}
+        self.assertIn("modo_fisico", checks)
+        self.assertIn("mapa_medido", checks)
+        self.assertIn("archivo_compensado", checks)
+        self.assertFalse(checks["modo_fisico"]["ok"])
+        self.assertIn("modo físico", checks["modo_fisico"]["detail"])
+
     def test_delete_operation_endpoint(self) -> None:
         project_id = self._create_project()
         operation_id = self._create_operation(project_id)

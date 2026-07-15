@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Circle, Layer, Rect, Stage, Text } from "react-konva";
+import { Circle, Layer, Line, Rect, Stage, Text } from "react-konva";
 
 import { formatCoordinate, formatMillimeters } from "../../lib/format";
 import type { Bounds, HeightMap, HeightMapSample, HeightMapSurfacePoint, Material } from "../../types";
@@ -22,6 +22,8 @@ type HeightMapHeatmapProps = {
   heightMap: HeightMap;
   mode: "bruto" | "plano" | "residuo";
   toolpathBounds?: Bounds | null;
+  meshPoints?: Array<{ x_local?: number; y_local?: number; x_machine?: number; y_machine?: number; status?: string; index?: number }>;
+  coordinateMode?: "local" | "machine";
 };
 
 type DragState = {
@@ -59,7 +61,7 @@ function findExtreme(samples: HeightMapSample[], direction: "min" | "max") {
     .sort((left, right) => (direction === "min" ? (left.z_mm ?? 0) - (right.z_mm ?? 0) : (right.z_mm ?? 0) - (left.z_mm ?? 0)))[0] ?? null;
 }
 
-export function HeightMapHeatmap({ material, heightMap, mode, toolpathBounds = null }: HeightMapHeatmapProps) {
+export function HeightMapHeatmap({ material, heightMap, mode, toolpathBounds = null, meshPoints = [], coordinateMode = "local" }: HeightMapHeatmapProps) {
   const fullscreenRef = useRef<HTMLDivElement | null>(null);
   const dragRef = useRef<DragState | null>(null);
   const [stageNode, setStageNode] = useState<HTMLDivElement | null>(null);
@@ -102,6 +104,13 @@ export function HeightMapHeatmap({ material, heightMap, mode, toolpathBounds = n
   const minSample = useMemo(() => findExtreme(heightMap.muestras, "min"), [heightMap.muestras]);
   const maxSample = useMemo(() => findExtreme(heightMap.muestras, "max"), [heightMap.muestras]);
   const outliers = heightMap.muestras.filter((sample) => sample.estado_calidad === "atipica");
+  const visibleMeshPoints = meshPoints.map((point) => ({
+    x: coordinateMode === "machine" ? Number(point.x_machine) : Number(point.x_local),
+    y: coordinateMode === "machine" ? Number(point.y_machine) : Number(point.y_local),
+    status: String(point.status ?? "PENDING"),
+    index: Number(point.index ?? 0),
+  })).filter((point) => Number.isFinite(point.x) && Number.isFinite(point.y));
+  const meshLinePoints = visibleMeshPoints.flatMap((point) => { const screen = worldToScreen({ x: point.x, y: point.y }, transform); return [screen.x, screen.y]; });
 
   const toggleFullscreen = async () => {
     const node = fullscreenRef.current;
@@ -349,6 +358,16 @@ export function HeightMapHeatmap({ material, heightMap, mode, toolpathBounds = n
                 return <Circle key={`marker-${index}`} x={screen.x} y={screen.y} radius={7} stroke="#ffffff" strokeWidth={1.2} />;
               })}
 
+
+
+              {visibleMeshPoints.length > 1 ? <Line points={meshLinePoints} stroke="#ffffff" strokeWidth={1.2} dash={[4, 5]} opacity={0.75} /> : null}
+              {visibleMeshPoints.map((point) => {
+                const screen = worldToScreen({ x: point.x, y: point.y }, transform);
+                const measured = point.status === "MEASURED";
+                const failed = point.status === "FAILED" || point.status === "RETRY_REQUIRED";
+                return <Circle key={`mesh-${point.index}`} x={screen.x} y={screen.y} radius={measured ? 5 : 4} fill={measured ? "#63d471" : failed ? "#ff7a7a" : "#f6cf73"} stroke="#071015" strokeWidth={1.2} />;
+              })}
+
               {cursor ? (
                 <>
                   <Rect x={worldToScreen({ x: cursor.x, y: 0 }, transform).x} y={0} width={1} height={viewport.height} fill="rgba(255,255,255,0.28)" />
@@ -370,10 +389,10 @@ export function HeightMapHeatmap({ material, heightMap, mode, toolpathBounds = n
           </Stage>
 
           <div className="viewer-stage__overlay viewer-stage__overlay--top mono-text">
-            Material · región sondeable · interpolación · muestras
+            Material · trayectoria · región/malla · recorrido serpentino · muestras
           </div>
           <div className="viewer-stage__overlay viewer-stage__overlay--bottom mono-text">
-            {cursor ? `${formatCoordinate(cursor.x)}, ${formatCoordinate(cursor.y)} mm` : "Cursor -"}
+            {cursor ? `${coordinateMode === "machine" ? "Máquina" : "Local"} ${formatCoordinate(cursor.x)}, ${formatCoordinate(cursor.y)} mm` : "Cursor -"}
           </div>
         </div>
       </div>

@@ -18,6 +18,8 @@ const apiMock = vi.hoisted(() => ({
   confirmMachineReference: vi.fn(),
   confirmWorkOrigin: vi.fn(),
   confirmZReference: vi.fn(),
+  capturePhysicalWorkOrigin: vi.fn(),
+  capturePhysicalZReferenceFromProbe: vi.fn(),
   validateHeightMap: vi.fn(),
   getCompensationPreview: vi.fn(),
   getPhysicalMap: vi.fn(),
@@ -28,6 +30,8 @@ const apiMock = vi.hoisted(() => ({
   resumePhysicalMap: vi.fn(),
   cancelPhysicalMap: vi.fn(),
   generateCompensatedGCode: vi.fn(),
+  executionPreflight: vi.fn(),
+  executionAction: vi.fn(),
   generatedFileUrl: vi.fn(),
 }));
 
@@ -209,6 +213,10 @@ describe("ProjectWorkspace", () => {
     apiMock.generatedFileUrl.mockImplementation((_projectId: string, relativePath: string) => `/api/projects/proj_1/generated/${relativePath}`);
     apiMock.confirmWorkOrigin.mockResolvedValue(referenceSession);
     apiMock.confirmZReference.mockResolvedValue(referenceSession);
+    apiMock.capturePhysicalWorkOrigin.mockResolvedValue(referenceSession);
+    apiMock.capturePhysicalZReferenceFromProbe.mockResolvedValue(referenceSession);
+    apiMock.executionPreflight.mockResolvedValue({ state: "PREFLIGHT", ready: false, checks: [], generated_file: null, detail: "Preflight incompleto." });
+    apiMock.executionAction.mockResolvedValue({ state: "PREFLIGHT", ready: false, checks: [], generated_file: null, detail: "Acción registrada." });
     apiMock.getCompensationPreview.mockResolvedValue({
       session: referenceSession,
       preview: {

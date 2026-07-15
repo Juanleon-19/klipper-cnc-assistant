@@ -6,6 +6,8 @@ from klipper_cnc_assistant.input.command_mapper import CommandMapper
 from klipper_cnc_assistant.input.serial_driver import ControllerPacket
 from klipper_cnc_assistant.machine.config import MachineMode, MachineRuntimeConfig
 from klipper_cnc_assistant.machine.runtime import MachineRuntime, MachineRuntimeError
+from klipper_cnc_assistant.machine.state import AxisLimits, MachinePosition, MachineState
+from klipper_cnc_assistant.moonraker.client import MoonrakerTimeout
 
 
 def config(mode: MachineMode = MachineMode.SIMULATED) -> MachineRuntimeConfig:
@@ -49,6 +51,35 @@ class MachineRuntimeTest(unittest.TestCase):
         runtime = MachineRuntime(config(MachineMode.PHYSICAL))
         with self.assertRaisesRegex(MachineRuntimeError, "MOONRAKER_URL"):
             runtime.connect()
+
+
+    def test_transport_timeout_is_cleared_when_homing_is_confirmed_by_state(self) -> None:
+        class TimeoutClient:
+            def send_gcode(self, _script: str, *, timeout: float | None = None) -> dict[str, object]:
+                raise MoonrakerTimeout("G-code request timed out: prueba")
+
+        machine = MachineState(
+            position=MachinePosition(0, 0, 10),
+            x_limits=AxisLimits(0, 100),
+            y_limits=AxisLimits(0, 100),
+            z_limits=AxisLimits(0, 50),
+            homed_axes="xyz",
+            max_velocity=100,
+            max_accel=500,
+            live_velocity=0,
+        )
+        runtime = MachineRuntime(config(MachineMode.PHYSICAL), discovery=lambda _client: machine)
+        runtime._client = TimeoutClient()
+        runtime._machine = machine
+
+        runtime._send_script("G28", label="homing")
+        self.assertIn("G-code request timed out", runtime.snapshot()["last_error"])
+
+        runtime._wait_for_homing({"x", "y", "z"})
+
+        snapshot = runtime.snapshot()
+        self.assertIsNone(snapshot["last_error"])
+        self.assertTrue(any("Timeout HTTP de homing resuelto" in event["message"] for event in snapshot["events"]))
 
     def test_command_mapper_discards_diagonal_jog(self) -> None:
         mapper = CommandMapper()

@@ -97,7 +97,7 @@ function translateFastApiDetail(detail: unknown, structuredErrors?: unknown): { 
     };
   }
 
-  return { message: "La solicitud no pudo validarse.", fieldErrors: {} };
+  return { message: "Solicitud inválida: el backend no entregó detalle de campo. Revise los valores enviados y vuelva a intentar.", fieldErrors: {} };
 }
 
 async function request<T>(input: RequestInfo, init?: RequestInit): Promise<T> {
@@ -219,6 +219,14 @@ export const api = {
       method: "POST",
       body: JSON.stringify(payload),
     }),
+  capturePhysicalWorkOrigin: (projectId: string, operationId: string) =>
+    request<ReferenceSession>(`/api/projects/${projectId}/operations/${operationId}/reference-session/physical-work-origin`, {
+      method: "POST",
+    }),
+  capturePhysicalZReferenceFromProbe: (projectId: string, operationId: string) =>
+    request<ReferenceSession>(`/api/projects/${projectId}/operations/${operationId}/reference-session/physical-z-reference-from-probe`, {
+      method: "POST",
+    }),
   planPhysicalMapFromReference: (projectId: string, operationId: string, payload: { max_spacing_mm?: number; margin_mm?: number }) =>
     request<PhysicalMapResponse>(`/api/projects/${projectId}/operations/${operationId}/physical-map/plan-from-reference`, {
       method: "POST",
@@ -286,6 +294,10 @@ export const api = {
     }),
   generatedFileUrl: (projectId: string, relativePath: string) =>
     `/api/projects/${projectId}/generated/${relativePath}`,
+  executionPreflight: (projectId: string, operationId: string) =>
+    request<Record<string, unknown>>(`/api/projects/${projectId}/operations/${operationId}/execution/preflight`, { method: "POST" }),
+  executionAction: (projectId: string, operationId: string, action: string) =>
+    request<Record<string, unknown>>(`/api/projects/${projectId}/operations/${operationId}/execution/${action}`, { method: "POST" }),
   deleteHeightMap: (projectId: string, operationId: string) =>
     request<{ detalle: string }>(`/api/projects/${projectId}/operations/${operationId}/height-map`, {
       method: "DELETE",

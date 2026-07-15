@@ -6,9 +6,10 @@ import { ProjectList } from "./components/ProjectList";
 import { ProjectWorkspace } from "./components/ProjectWorkspace";
 import { StatusBadge } from "./components/StatusBadge";
 import { SystemBanner } from "./components/SystemBanner";
+import { MachineContext, buildMachineContextValue, type MachineAction } from "./context/MachineContext";
 import { SystemPage } from "./components/SystemPage";
 import { api, type OperationInput, type OperationUpdateInput } from "./lib/api";
-import { getRecentProject, summarizeMachineMode, toneForStatus, translateStatus } from "./lib/ui";
+import { getRecentProject, toneForStatus, translateStatus } from "./lib/ui";
 import type {
   HealthResponse,
   MachineRuntime,
@@ -330,7 +331,7 @@ export default function App() {
     }
   }, [loadSystem]);
 
-  const handleMachineAction = async (action: string, targetZ?: number) => {
+  const handleMachineAction = async (action: MachineAction | string, targetZ?: number) => {
     setRefreshingSystem(true);
     setError("");
     try {
@@ -356,16 +357,19 @@ export default function App() {
     }
   };
 
+  const machineContext = buildMachineContextValue(machineRuntime, refreshingSystem, handleMachineAction, refreshMachineRuntime);
+  const effectiveMode = machineContext.modeLabel;
+
   const titleByView: Record<View, { eyebrow: string; title: string; description: string }> = {
     inicio: {
       eyebrow: "Operación remota",
       title: "Panel principal",
-      description: "Acceso privado, análisis G-code, visor técnico y mapa de alturas completamente simulado.",
+      description: `Acceso privado, análisis G-code, visor técnico y flujo ${effectiveMode.toLowerCase()} de preparación PCB.`,
     },
     proyectos: {
       eyebrow: "Espacio de trabajo",
       title: selectedProject?.nombre ?? "Proyectos",
-      description: "Flujo visual de operaciones, visor 2D/3D y análisis del material sin movimientos físicos.",
+      description: machineContext.isPhysical ? "Flujo físico de montaje, referencia, malla, compensación y ejecución controlada." : "Flujo visual simulado, visor 2D/3D y análisis del material sin movimientos físicos.",
     },
     nuevo: {
       eyebrow: "Nuevo proyecto",
@@ -375,7 +379,7 @@ export default function App() {
     sistema: {
       eyebrow: "Diagnóstico",
       title: "Sistema y servicio",
-      description: "Estado seguro de la API, almacenamiento y sesión de máquina simulada.",
+      description: "Diagnóstico técnico de API, almacenamiento, Moonraker, Klipper, Arduino y seguridad.",
     },
   };
 
@@ -385,6 +389,7 @@ export default function App() {
   const sidebarVisible = isDesktop || sidebarOpen;
 
   return (
+    <MachineContext.Provider value={machineContext}>
     <div className={`app-shell${isDesktop ? " app-shell--desktop" : " app-shell--drawer"}${sidebarCollapsed && isDesktop ? " app-shell--collapsed" : ""}${sidebarOpen && !isDesktop ? " app-shell--sidebar-open" : ""}`}>
       {!isDesktop ? (
         <button className={`shell-backdrop${sidebarOpen ? " shell-backdrop--visible" : ""}`} type="button" aria-label="Cerrar menú" onClick={() => setSidebarOpen(false)} />
@@ -395,7 +400,7 @@ export default function App() {
           <div className="sidebar__brand">
             <p className="eyebrow">Klipper CNC Assistant</p>
             <h1>{sidebarExpanded ? "Visor técnico y mapa de alturas" : "KCA"}</h1>
-            {sidebarExpanded ? <p className="muted">Aplicación privada para preparación remota de PCB en modo simulado.</p> : null}
+            {sidebarExpanded ? <p className="muted">Aplicación privada para preparación remota de PCB en modo {effectiveMode}.</p> : null}
           </div>
           {isDesktop ? (
             <button
@@ -431,7 +436,7 @@ export default function App() {
 
         <div className={`sidebar-stats${sidebarCollapsed && isDesktop ? " sidebar-stats--compact" : ""}`}>
           <div className="stat-card"><span>API</span><strong>{translateStatus(health?.estado)}</strong></div>
-          <div className="stat-card"><span>Modo</span><strong>{summarizeMachineMode(health?.modo_maquina)}</strong></div>
+          <div className="stat-card"><span>Modo</span><strong>{effectiveMode}</strong></div>
           <div className="stat-card"><span>Proyectos</span><strong>{projects.length}</strong></div>
         </div>
       </aside>
@@ -458,7 +463,7 @@ export default function App() {
             </div>
           </div>
           <div className="topbar__actions">
-            <StatusBadge tone={toneForStatus(machineSession?.estado ?? health?.modo_maquina)}>{summarizeMachineMode(machineSession?.estado ?? health?.modo_maquina)}</StatusBadge>
+            <StatusBadge tone={toneForStatus(machineRuntime?.health ?? health?.modo_maquina)}>{effectiveMode}</StatusBadge>
             <StatusBadge tone={toneForStatus(health?.estado)}>{translateStatus(health?.estado)}</StatusBadge>
           </div>
         </header>
@@ -537,5 +542,6 @@ export default function App() {
         </div>
       </main>
     </div>
+    </MachineContext.Provider>
   );
 }
