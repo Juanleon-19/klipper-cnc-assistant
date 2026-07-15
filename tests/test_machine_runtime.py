@@ -986,11 +986,11 @@ class MachineRuntimeTest(unittest.TestCase):
 
         result = runtime.probe_mesh_point(
             {"index": 3, "x_machine": 25.0, "y_machine": 35.0},
-            probe_config={"safe_z_mm": 12.0, "probe_step_mm": 0.05, "probe_feed_mm_min": 30.0, "retract_mm": 0.8},
+            probe_config={"safe_z_mm": 10.0, "reference_z_mm": 1.23, "probe_step_mm": 0.05, "probe_feed_mm_min": 30.0, "retract_mm": 0.8},
         )
 
         self.assertEqual(result["index"], 3)
-        self.assertIn("Z12.000000", client.scripts[0])
+        self.assertIn("Z11.230000", client.scripts[0])
         self.assertIn("X25.000000", client.scripts[1])
         self.assertIn("Y35.000000", client.scripts[1])
         self.assertEqual(len(runtime._jog.calls), 2)

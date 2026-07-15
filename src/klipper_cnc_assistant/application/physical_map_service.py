@@ -811,6 +811,7 @@ class PhysicalMapService:
             "exclusions": [exclusion.to_payload() for exclusion in config.exclusions],
             "probe_config": {
                 "safe_z_mm": config.safe_z_mm,
+                "reference_z_mm": float(kwargs["reference_z"]),
                 "probe_step_mm": config.probe_step_mm,
                 "probe_feed_mm_min": config.probe_feed_mm_min,
                 "retract_mm": config.retract_mm,

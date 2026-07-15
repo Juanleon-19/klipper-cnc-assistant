@@ -592,7 +592,7 @@ class MachineRuntime:
             machine = self._machine
             if machine is None:
                 raise MachineRuntimeError("No hay estado de máquina descubierto.")
-            safe_z = self._safe_z(machine, safe_z_mm=self._probe_config_float(probe_config, "safe_z_mm"))
+            safe_z = self._mesh_safe_z(machine, probe_config=probe_config)
             self._move_absolute(z=safe_z, label="mesh_z_segura")
             self._move_absolute(x=float(point["x_machine"]), y=float(point["y_machine"]), label=f"mesh_xy_{point['index']}")
             probe_feed_mm_min = self._probe_config_float(probe_config, "probe_feed_mm_min")
@@ -1396,6 +1396,13 @@ class MachineRuntime:
         if safe_z < machine.z_limits.minimum or safe_z > machine.z_limits.maximum:
             raise MachineRuntimeError("Z segura fuera de límites descubiertos.")
         return safe_z
+
+    def _mesh_safe_z(self, machine, *, probe_config: dict[str, Any] | None = None) -> float:
+        clearance_z = self._probe_config_float(probe_config, "safe_z_mm")
+        reference_z = self._probe_config_float(probe_config, "reference_z_mm")
+        if clearance_z is not None and reference_z is not None:
+            return self._safe_z(machine, safe_z_mm=reference_z + clearance_z)
+        return self._safe_z(machine, safe_z_mm=clearance_z)
 
     def _probe_config_float(self, probe_config: dict[str, Any] | None, key: str) -> float | None:
         if not probe_config:
