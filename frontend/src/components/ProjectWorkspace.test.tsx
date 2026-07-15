@@ -601,6 +601,7 @@ describe("ProjectWorkspace", () => {
     await waitFor(() => expect(apiMock.executeAllPhysicalMapPoints).toHaveBeenCalledWith("proj_1", "measured/manual-2x2"));
     await waitFor(() => expect(apiMock.getPhysicalMap).toHaveBeenCalledTimes(2));
     await waitFor(() => expect(apiMock.getPhysicalHeightMap).toHaveBeenCalledWith("proj_1", "op_1"));
+    await waitFor(() => expect(apiMock.getReferenceSession).toHaveBeenCalledTimes(2));
     expect(await screen.findByText(/^MESH_COMPLETE$/i)).toBeInTheDocument();
   });
 

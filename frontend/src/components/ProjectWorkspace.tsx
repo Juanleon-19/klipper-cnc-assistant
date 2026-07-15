@@ -327,11 +327,17 @@ export function ProjectWorkspace({
         setPhysicalMap(nextMap);
         setMapSource("MEASURED");
         if (nextMap.status === "MESH_COMPLETE") {
-          const measured = await api.getPhysicalHeightMap(project.id, selectedOperation.id);
+          const [measured, refreshedReference] = await Promise.all([
+            api.getPhysicalHeightMap(project.id, selectedOperation.id),
+            api.getReferenceSession(project.id, selectedOperation.id),
+          ]);
           if (cancelled) {
             return;
           }
           setHeightMap(measured);
+          setReferenceSession(refreshedReference);
+          setActiveMapTab("mapa2d");
+          setMeshValidationMessage("Malla completada. Cobertura validada automáticamente; la compensación ya puede generarse si no existen otros bloqueos.");
           void api.getPhysicalMapHistory(project.id, selectedOperation.id).then((history) => {
             if (!cancelled) {
               setPhysicalMapHistory(history);
@@ -1175,9 +1181,15 @@ export function ProjectWorkspace({
         setMapSource("MEASURED");
       }
       if (project && selectedOperation && nextMap?.status === "MESH_COMPLETE") {
-        const measured = await api.getPhysicalHeightMap(project.id, selectedOperation.id);
+        const [measured, refreshedReference] = await Promise.all([
+          api.getPhysicalHeightMap(project.id, selectedOperation.id),
+          api.getReferenceSession(project.id, selectedOperation.id),
+        ]);
         setHeightMap(measured);
+        setReferenceSession(refreshedReference);
         setMapSource("MEASURED");
+        setActiveMapTab("mapa2d");
+        setMeshValidationMessage("Malla completada. Cobertura validada automáticamente; la compensación ya puede generarse si no existen otros bloqueos.");
       } else if (result) {
         setHeightMap(null);
       }
