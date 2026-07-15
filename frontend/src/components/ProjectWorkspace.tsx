@@ -308,6 +308,51 @@ export function ProjectWorkspace({
   }, [project, selectedOperation]);
 
   useEffect(() => {
+    if (!project || !selectedOperation || !physicalMap?.map_id) {
+      return;
+    }
+    const execution = (physicalMap.execution ?? null) as { worker_active?: boolean } | null;
+    const workerActive = execution?.worker_active === true;
+    const shouldPoll = physicalMap.status === "MESH_PROBING" || workerActive;
+    if (!shouldPoll) {
+      return;
+    }
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const nextMap = (await api.getPhysicalMap(project.id, selectedOperation.id)).payload;
+        if (cancelled) {
+          return;
+        }
+        setPhysicalMap(nextMap);
+        setMapSource("MEASURED");
+        if (nextMap.status === "MESH_COMPLETE") {
+          const measured = await api.getPhysicalHeightMap(project.id, selectedOperation.id);
+          if (cancelled) {
+            return;
+          }
+          setHeightMap(measured);
+          void api.getPhysicalMapHistory(project.id, selectedOperation.id).then((history) => {
+            if (!cancelled) {
+              setPhysicalMapHistory(history);
+            }
+          }).catch(() => undefined);
+        }
+      } catch {
+        // Keep the last visible state and try again on the next tick.
+      }
+    };
+    const timer = window.setInterval(() => {
+      void poll();
+    }, 1000);
+    void poll();
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [project, selectedOperation, physicalMap?.map_id, physicalMap?.status, physicalMap?.execution]);
+
+  useEffect(() => {
     if (!referenceSession) {
       return;
     }

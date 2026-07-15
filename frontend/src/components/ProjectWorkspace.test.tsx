@@ -553,6 +553,57 @@ describe("ProjectWorkspace", () => {
     expect(screen.getByText(/Vista previa en coordenadas PCB/i)).toBeInTheDocument();
   });
 
+  it("refresca automaticamente los puntos medidos mientras el backend completa la malla", async () => {
+    const plannedMap = {
+      map_id: "measured/manual-2x2",
+      status: "MESH_PLANNED",
+      source: "MEASURED",
+      point_count: 4,
+      grid_mode: "manual",
+      rows: 2,
+      columns: 2,
+      grid: { rows: 2, columns: 2, dx_mm: 76, dy_mm: 56 },
+      local_region: { min_x_mm: 2, min_y_mm: 2, max_x_mm: 78, max_y_mm: 58 },
+      points: [
+        { index: 0, role: "REFERENCE", row: 0, column: 0, x_local: 2, y_local: 2, x_machine: 62, y_machine: 90.75, status: "MEASURED", z_measured: 0, delta_z: 0 },
+        { index: 1, row: 0, column: 1, x_local: 78, y_local: 2, x_machine: 138, y_machine: 90.75, status: "PENDING" },
+        { index: 2, row: 1, column: 1, x_local: 78, y_local: 58, x_machine: 138, y_machine: 146.75, status: "PENDING" },
+        { index: 3, row: 1, column: 0, x_local: 2, y_local: 58, x_machine: 62, y_machine: 146.75, status: "PENDING" },
+      ],
+    };
+    const probingMap = {
+      ...plannedMap,
+      status: "MESH_PROBING",
+      execution: { worker_active: true, point_state: "POINT_MOVE_XY" },
+    };
+    const completedMap = {
+      ...plannedMap,
+      status: "MESH_COMPLETE",
+      execution: { worker_active: false, point_state: "MESH_COMPLETE" },
+      points: [
+        { index: 0, role: "REFERENCE", row: 0, column: 0, x_local: 2, y_local: 2, x_machine: 62, y_machine: 90.75, status: "MEASURED", z_measured: 0, delta_z: 0 },
+        { index: 1, row: 0, column: 1, x_local: 78, y_local: 2, x_machine: 138, y_machine: 90.75, status: "MEASURED", z_measured: 0.01, delta_z: 0.01 },
+        { index: 2, row: 1, column: 1, x_local: 78, y_local: 58, x_machine: 138, y_machine: 146.75, status: "MEASURED", z_measured: 0.02, delta_z: 0.02 },
+        { index: 3, row: 1, column: 0, x_local: 2, y_local: 58, x_machine: 62, y_machine: 146.75, status: "MEASURED", z_measured: -0.01, delta_z: -0.01 },
+      ],
+    };
+    apiMock.getPhysicalMap.mockResolvedValueOnce({ payload: plannedMap });
+    apiMock.getPhysicalMap.mockResolvedValue({ payload: completedMap });
+    apiMock.executeAllPhysicalMapPoints.mockResolvedValue({ payload: probingMap });
+
+    renderWorkspace(physicalMachine);
+    fireEvent.click(screen.getByRole("button", { name: /Mapa de alturas/i }));
+    expect(await screen.findByText(/Mapa medido físicamente/i)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /^3\. Armar sondeo$/i }));
+    fireEvent.click(screen.getByRole("button", { name: /^4\. Iniciar sondeo automático$/i }));
+
+    await waitFor(() => expect(apiMock.executeAllPhysicalMapPoints).toHaveBeenCalledWith("proj_1", "measured/manual-2x2"));
+    await waitFor(() => expect(apiMock.getPhysicalMap).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(apiMock.getPhysicalHeightMap).toHaveBeenCalledWith("proj_1", "op_1"));
+    expect(await screen.findByText(/^MESH_COMPLETE$/i)).toBeInTheDocument();
+  });
+
   it("muestra propuesta automática, permite aceptarla y reiniciar solo el mapa", async () => {
     const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
     renderWorkspace(physicalMachine);
