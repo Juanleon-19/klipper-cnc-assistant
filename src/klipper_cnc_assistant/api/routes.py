@@ -231,7 +231,14 @@ def build_router() -> APIRouter:
     @router.post("/projects/{project_id}/setups/{setup_id}/reset-preparation", response_model=dict[str, object])
     def reset_setup_preparation(project_id: str, setup_id: str, payload: SetupResetRequest, request: Request) -> dict[str, object]:
         _reject_active_motion(request)
-        return request.app.state.physical_map_service.reset_preparation(project_id=project_id, setup_id=setup_id, reason=payload.motivo, user_session=payload.session)
+        result = request.app.state.physical_map_service.reset_preparation(project_id=project_id, setup_id=setup_id, reason=payload.motivo, user_session=payload.session)
+        machine_session_service = getattr(request.app.state, "machine_session_service", None)
+        if machine_session_service is not None:
+            result["machine_session"] = machine_session_service.reset_session().model_dump()
+        runtime = getattr(request.app.state, "machine_runtime", None)
+        if runtime is not None:
+            result["runtime"] = runtime.reset_physical_session()
+        return result
 
     @router.post("/projects/{project_id}/operations", response_model=OperationResponse, status_code=201)
     def add_operation(project_id: str, payload: OperationCreateRequest, request: Request) -> OperationResponse:
@@ -398,6 +405,32 @@ def build_router() -> APIRouter:
             ),
         )
 
+
+    @router.post("/projects/{project_id}/operations/{operation_id}/physical-map/preview", response_model=PhysicalMapResponse)
+    def preview_physical_map(project_id: str, operation_id: str, payload: PhysicalMapPlanRequest, request: Request) -> PhysicalMapResponse:
+        service = request.app.state.physical_map_service
+        plan = service.preview_mesh(
+            project_id=project_id,
+            operation_id=operation_id,
+            config=PhysicalMeshConfig(
+                grid_mode=payload.grid_mode,
+                rows=payload.rows,
+                columns=payload.columns,
+                edge_margin_left_mm=payload.edge_margin_left_mm,
+                edge_margin_right_mm=payload.edge_margin_right_mm,
+                edge_margin_bottom_mm=payload.edge_margin_bottom_mm,
+                edge_margin_top_mm=payload.edge_margin_top_mm,
+                exclusions=tuple(PhysicalExclusion(**exclusion.model_dump()) for exclusion in payload.exclusions),
+                max_spacing_mm=payload.max_spacing_mm,
+                margin_mm=payload.margin_mm,
+                safe_z_mm=payload.safe_z_mm,
+                probe_step_mm=payload.probe_step_mm,
+                probe_feed_mm_min=payload.probe_feed_mm_min,
+                retract_mm=payload.retract_mm,
+            ),
+        )
+        return PhysicalMapResponse(payload=plan)
+
     @router.post("/projects/{project_id}/operations/{operation_id}/physical-map/plan-from-reference", response_model=PhysicalMapResponse)
     def plan_physical_map_from_reference(project_id: str, operation_id: str, payload: PhysicalMapPlanRequest, request: Request) -> PhysicalMapResponse:
         runtime = request.app.state.machine_runtime
@@ -443,6 +476,17 @@ def build_router() -> APIRouter:
     def get_physical_map(project_id: str, operation_id: str, request: Request) -> PhysicalMapResponse:
         service = request.app.state.physical_map_service
         return PhysicalMapResponse(payload=service.get_active(project_id, operation_id))
+
+
+    @router.get("/projects/{project_id}/operations/{operation_id}/physical-map/history", response_model=list[dict[str, object]])
+    def get_physical_map_history(project_id: str, operation_id: str, request: Request) -> list[dict[str, object]]:
+        return request.app.state.physical_map_service.history(project_id=project_id, operation_id=operation_id)
+
+    @router.post("/projects/{project_id}/physical-maps/{map_id:path}/repeat", response_model=PhysicalMapResponse)
+    def repeat_physical_map(project_id: str, map_id: str, request: Request) -> PhysicalMapResponse:
+        _reject_active_motion(request)
+        payload = request.app.state.physical_map_service.repeat_measurement(project_id=project_id, map_id=map_id)
+        return PhysicalMapResponse(payload=payload)
 
     @router.post("/projects/{project_id}/physical-maps/{map_id:path}/execute-next", response_model=PhysicalMapResponse)
     def execute_next_physical_map_point(project_id: str, map_id: str, request: Request) -> PhysicalMapResponse:

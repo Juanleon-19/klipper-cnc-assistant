@@ -431,12 +431,13 @@ export type ProjectPayload = {
 
 export type PhysicalMeshPoint = {
   index: number;
-  row: number;
-  column: number;
+  row: number | null;
+  column: number | null;
+  role?: "GRID" | "REFERENCE" | string;
   x_local: number;
   y_local: number;
-  x_machine: number;
-  y_machine: number;
+  x_machine?: number | null;
+  y_machine?: number | null;
   z_measured?: number | null;
   z_measured_abs?: number | null;
   delta_z?: number | null;
@@ -463,7 +464,9 @@ export type PhysicalMapExclusion = {
 };
 
 export type PhysicalMapPayload = Record<string, unknown> & {
-  map_id?: string;
+  map_id?: string | null;
+  preview_id?: string;
+  preview_version?: string;
   status?: string;
   source?: string;
   point_count?: number;
@@ -482,7 +485,15 @@ export type PhysicalMapPayload = Record<string, unknown> & {
   configuration_change_warning?: string;
   grid?: { rows: number; columns: number; dx_mm: number; dy_mm: number };
   local_region?: { min_x_mm: number; min_y_mm: number; max_x_mm: number; max_y_mm: number };
-  machine_region?: { min_x_mm: number; min_y_mm: number; max_x_mm: number; max_y_mm: number };
+  probe_region?: { min_x_mm: number; min_y_mm: number; max_x_mm: number; max_y_mm: number };
+  material_bounds?: { min_x_mm: number; min_y_mm: number; max_x_mm: number; max_y_mm: number };
+  machine_region?: { min_x_mm: number; min_y_mm: number; max_x_mm: number; max_y_mm: number } | null;
+  local_points?: PhysicalMeshPoint[];
+  machine_points?: PhysicalMeshPoint[] | null;
+  serpentine_path?: PhysicalMeshPoint[];
+  reference_point?: PhysicalMeshPoint;
+  valid_for_execution?: boolean;
+  warnings?: string[];
   probe_config?: { safe_z_mm?: number | null; probe_step_mm?: number | null; probe_feed_mm_min?: number | null; retract_mm?: number | null };
   tool_references?: Record<string, unknown>;
 };

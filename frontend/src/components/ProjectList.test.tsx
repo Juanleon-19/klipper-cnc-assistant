@@ -56,6 +56,7 @@ describe("ProjectList", () => {
     });
     const onSelect = vi.fn();
     const onContinueProject = vi.fn();
+    const onResetProjectProcess = vi.fn();
     const onTrashProject = vi.fn();
     const onRestoreProject = vi.fn();
     const onPermanentlyDeleteProject = vi.fn();
@@ -66,6 +67,7 @@ describe("ProjectList", () => {
         selectedProjectId={null}
         onSelect={onSelect}
         onContinueProject={onContinueProject}
+        onResetProjectProcess={onResetProjectProcess}
         onTrashProject={onTrashProject}
         onRestoreProject={onRestoreProject}
         onPermanentlyDeleteProject={onPermanentlyDeleteProject}
@@ -80,6 +82,9 @@ describe("ProjectList", () => {
     expect(screen.getByText(/Control spindle/i)).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: /Continuar/i }));
     expect(onContinueProject).toHaveBeenCalledWith("project-active");
+    fireEvent.click(screen.getByText(/Más acciones/i));
+    fireEvent.click(screen.getByRole("button", { name: /Reiniciar proceso/i }));
+    expect(onResetProjectProcess).toHaveBeenCalledWith(active);
     fireEvent.click(screen.getByRole("button", { name: /Mover a Papelera/i }));
     expect(onTrashProject).toHaveBeenCalledWith(active);
 

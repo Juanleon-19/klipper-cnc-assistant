@@ -269,6 +269,11 @@ export const api = {
       method: "POST",
       body: JSON.stringify(payload),
     }),
+  previewPhysicalMap: (projectId: string, operationId: string, payload: PhysicalMapPlanPayload) =>
+    request<PhysicalMapResponse>(`/api/projects/${projectId}/operations/${operationId}/physical-map/preview`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
   planPhysicalMapFromReference: (projectId: string, operationId: string, payload: PhysicalMapPlanPayload) =>
     request<PhysicalMapResponse>(`/api/projects/${projectId}/operations/${operationId}/physical-map/plan-from-reference`, {
       method: "POST",
@@ -284,6 +289,10 @@ export const api = {
     request<PhysicalMapResponse>(`/api/projects/${projectId}/operations/${operationId}/physical-map`),
   getPhysicalHeightMap: (projectId: string, operationId: string) =>
     request<HeightMap>(`/api/projects/${projectId}/operations/${operationId}/physical-map/height-map`),
+  getPhysicalMapHistory: (projectId: string, operationId: string) =>
+    request<Array<Record<string, unknown>>>(`/api/projects/${projectId}/operations/${operationId}/physical-map/history`),
+  repeatPhysicalMap: (projectId: string, mapId: string) =>
+    request<PhysicalMapResponse>(`/api/projects/${projectId}/physical-maps/${mapId}/repeat`, { method: "POST" }),
   executeNextPhysicalMapPoint: (projectId: string, mapId: string) =>
     request<PhysicalMapResponse>(`/api/projects/${projectId}/physical-maps/${mapId}/execute-next`, { method: "POST" }),
   executeAllPhysicalMapPoints: (projectId: string, mapId: string) =>

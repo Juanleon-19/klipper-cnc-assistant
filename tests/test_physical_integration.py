@@ -150,9 +150,12 @@ class PhysicalIntegrationTest(unittest.TestCase):
             self.assertTrue(plan["map_id"].startswith("measured/setup-main/superior/placement-1/"))
             self.assertEqual(plan["local_region"], {"min_x_mm": 2.0, "min_y_mm": 2.0, "max_x_mm": 48.0, "max_y_mm": 38.0})
             self.assertEqual(plan["grid"], {"rows": 7, "columns": 6, "dx_mm": 9.2, "dy_mm": 6.0})
+            self.assertEqual(plan["points"][0]["role"], "REFERENCE")
             updated = service.record_point(project_id=project.id, map_id=plan["map_id"], point_index=0, z_measured=1.2)
             self.assertEqual(updated["points"][0]["status"], "MEASURED")
-            self.assertAlmostEqual(updated["points"][0]["delta_z"], -0.03)
+            self.assertAlmostEqual(updated["points"][0]["delta_z"], 0.0)
+            updated = service.record_point(project_id=project.id, map_id=plan["map_id"], point_index=1, z_measured=1.17)
+            self.assertAlmostEqual(updated["points"][1]["delta_z"], -0.03)
             self.assertEqual(updated["height_map"]["fuente_datos"], "measured")
 
             second_reference = service.capture_reference_and_plan(
@@ -187,10 +190,12 @@ class PhysicalIntegrationTest(unittest.TestCase):
             self.assertEqual(plan["point_count"], 42)
             self.assertAlmostEqual(plan["grid"]["dx_mm"], 11.2)
             self.assertAlmostEqual(plan["grid"]["dy_mm"], 56 / 6)
-            self.assertEqual((plan["points"][0]["row"], plan["points"][0]["column"], plan["points"][0]["x_local"], plan["points"][0]["y_local"]), (0, 0, 2.0, 2.0))
-            self.assertEqual((plan["points"][5]["row"], plan["points"][5]["column"], plan["points"][5]["x_local"]), (0, 5, 58.0))
-            self.assertEqual((plan["points"][6]["row"], plan["points"][6]["column"], plan["points"][6]["x_local"]), (1, 5, 58.0))
-            self.assertEqual((plan["points"][11]["row"], plan["points"][11]["column"], plan["points"][11]["x_local"]), (1, 0, 2.0))
+            self.assertEqual((plan["points"][0]["role"], plan["points"][0]["x_local"], plan["points"][0]["y_local"]), ("REFERENCE", 0.0, 0.0))
+            grid_points = [point for point in plan["points"] if point.get("role") != "REFERENCE"]
+            self.assertEqual((grid_points[0]["row"], grid_points[0]["column"], grid_points[0]["x_local"], grid_points[0]["y_local"]), (0, 0, 2.0, 2.0))
+            self.assertEqual((grid_points[5]["row"], grid_points[5]["column"], grid_points[5]["x_local"]), (0, 5, 58.0))
+            self.assertEqual((grid_points[6]["row"], grid_points[6]["column"], grid_points[6]["x_local"]), (1, 5, 58.0))
+            self.assertEqual((grid_points[11]["row"], grid_points[11]["column"], grid_points[11]["x_local"]), (1, 0, 2.0))
 
     def test_physical_mesh_supports_independent_retreats_and_exclusions(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -442,8 +447,12 @@ class PhysicalIntegrationTest(unittest.TestCase):
                 config=PhysicalMeshConfig(grid_mode="manual", rows=2, columns=2, edge_margin_left_mm=2, edge_margin_right_mm=2, edge_margin_bottom_mm=2, edge_margin_top_mm=2),
             )
             self.assertEqual(plan["point_count"], 4)
+            self.assertEqual(plan["acquisition_point_count"], 5)
+            self.assertEqual(plan["points"][0]["role"], "REFERENCE")
+            self.assertEqual((plan["points"][0]["x_local"], plan["points"][0]["y_local"]), (0.0, 0.0))
             self.assertEqual(plan["grid"], {"rows": 2, "columns": 2, "dx_mm": 56.0, "dy_mm": 56.0})
-            self.assertEqual([(p["x_local"], p["y_local"]) for p in plan["points"]], [(2.0, 2.0), (58.0, 2.0), (58.0, 58.0), (2.0, 58.0)])
+            grid_points = [point for point in plan["points"] if point.get("role") != "REFERENCE"]
+            self.assertEqual([(p["x_local"], p["y_local"]) for p in grid_points], [(2.0, 2.0), (58.0, 2.0), (58.0, 58.0), (2.0, 58.0)])
 
     def test_manual_mesh_3x4_generates_exact_count_and_spacing(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -455,10 +464,46 @@ class PhysicalIntegrationTest(unittest.TestCase):
                 config=PhysicalMeshConfig(grid_mode="manual", rows=3, columns=4, edge_margin_left_mm=2, edge_margin_right_mm=2, edge_margin_bottom_mm=2, edge_margin_top_mm=2),
             )
             self.assertEqual(plan["point_count"], 12)
+            self.assertEqual(plan["acquisition_point_count"], 13)
             self.assertAlmostEqual(plan["grid"]["dx_mm"], 56 / 3)
             self.assertAlmostEqual(plan["grid"]["dy_mm"], 28.0)
-            self.assertEqual(plan["points"][0]["x_local"], 2.0)
-            self.assertEqual(plan["points"][-1]["x_local"], 58.0)
+            grid_points = [point for point in plan["points"] if point.get("role") != "REFERENCE"]
+            self.assertEqual(grid_points[0]["x_local"], 2.0)
+            self.assertEqual(grid_points[-1]["x_local"], 58.0)
+
+    def test_preview_local_2x2_without_reference_returns_four_grid_points(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            repository, _project_service, project, operation = self._physical_project(temp)
+            service = PhysicalMapService(repository)
+            preview = service.preview_mesh(
+                project_id=project.id,
+                operation_id=operation.id,
+                config=PhysicalMeshConfig(grid_mode="manual", rows=2, columns=2, edge_margin_left_mm=2, edge_margin_right_mm=2, edge_margin_bottom_mm=2, edge_margin_top_mm=2),
+            )
+            self.assertEqual(preview["status"], "MESH_PREVIEW")
+            self.assertEqual(preview["point_count"], 4)
+            self.assertEqual(len(preview["points"]), 4)
+            self.assertIsNone(preview["points"][0]["x_machine"])
+            self.assertEqual(preview["reference_point"]["role"], "REFERENCE")
+            self.assertFalse(preview["valid_for_execution"])
+
+    def test_repeat_measurement_archives_previous_and_creates_empty_version_with_reference_first(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            repository, _project_service, project, operation = self._physical_project(temp)
+            service = PhysicalMapService(repository)
+            plan = service.capture_reference_and_plan(
+                project_id=project.id, operation_id=operation.id, machine_origin_x=5.0, machine_origin_y=6.0, reference_z=1.0,
+                machine_position={"x_mm": 5.0, "y_mm": 6.0, "z_mm": 1.0}, homed_axes="xyz", machine_label="test", session_id="session",
+                config=PhysicalMeshConfig(grid_mode="manual", rows=2, columns=2),
+            )
+            repeated = service.repeat_measurement(project_id=project.id, map_id=plan["map_id"])
+            self.assertNotEqual(repeated["map_id"], plan["map_id"])
+            self.assertEqual(repeated["status"], "REPROBE_CONFIRMATION")
+            self.assertEqual(repeated["points"][0]["role"], "REFERENCE")
+            self.assertTrue(all(point["status"] in {"PENDING", "EXCLUDED"} for point in repeated["points"]))
+            history = service.history(project_id=project.id, operation_id=operation.id)
+            self.assertGreaterEqual(len(history), 2)
+            self.assertTrue(any(item["map_id"] == plan["map_id"] and item["archived_at"] for item in history))
 
     def test_suggested_mesh_produces_concrete_rows_columns(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

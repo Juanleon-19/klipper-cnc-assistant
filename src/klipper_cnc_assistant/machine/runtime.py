@@ -251,6 +251,27 @@ class MachineRuntime:
         self.stop()
         return self.snapshot()
 
+    def reset_physical_session(self) -> dict[str, Any]:
+        self.stop()
+        with self._lock:
+            self._manual_enabled = False
+            self._diagnostic_input_only = True
+            self._ready_for_jog = False
+            self._previous_command = ControllerCommand()
+            self._last_packet = None
+            self._last_command = ControllerCommand()
+            self._last_packet_at = None
+            self._last_command_text = None
+            self._last_movement = None
+            self._last_error = None
+            self._last_probe_result = None
+            self._probe_requested = False
+            self._initialization_steps = []
+            self._serial_stop = threading.Event()
+            self._state = MachineRuntimeState.DISCONNECTED
+            self._event("warning", "Sesión física reiniciada; Arduino desconectado y paquetes anteriores invalidados.")
+        return self.snapshot()
+
     def set_diagnostic_mode(self, enabled: bool) -> dict[str, Any]:
         with self._lock:
             self._diagnostic_input_only = enabled

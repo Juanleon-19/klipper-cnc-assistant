@@ -12,6 +12,7 @@ type ProjectListProps = {
   onCreateProject?: () => void;
   onContinueProject?: (projectId: string) => void;
   onArchiveProject?: (projectId: string) => void;
+  onResetProjectProcess?: (project: Project) => void;
   onTrashProject?: (project: Project) => void;
   onRestoreProject?: (projectId: string) => void;
   onPermanentlyDeleteProject?: (project: Project) => void;
@@ -66,7 +67,7 @@ function matchesFilter(project: Project, filter: ProjectFilter, index: number) {
   return true;
 }
 
-export function ProjectList({ projects, selectedProjectId, onSelect, onCreateProject, onContinueProject, onArchiveProject, onTrashProject, onRestoreProject, onPermanentlyDeleteProject }: ProjectListProps) {
+export function ProjectList({ projects, selectedProjectId, onSelect, onCreateProject, onContinueProject, onArchiveProject, onResetProjectProcess, onTrashProject, onRestoreProject, onPermanentlyDeleteProject }: ProjectListProps) {
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<ProjectFilter>("todos");
   const normalizedQuery = query.trim().toLowerCase();
@@ -119,13 +120,20 @@ export function ProjectList({ projects, selectedProjectId, onSelect, onCreatePro
                 <div className="action-grid action-grid--inline" onClick={(event) => event.stopPropagation()}>
                   <button className="button" type="button" onClick={() => onSelect(project.id)}>Abrir</button>
                   {onContinueProject ? <button className="button button--ghost" type="button" disabled={trashed} onClick={() => onContinueProject(project.id)}>Continuar</button> : null}
-                  {onArchiveProject ? <button className="button button--ghost" type="button" disabled={trashed} onClick={() => onArchiveProject(project.id)}>Archivar</button> : null}
+                  <details className="inline-actions-menu">
+                    <summary className="button button--ghost">Más acciones</summary>
+                    <div className="inline-actions-menu__content">
+                      {onResetProjectProcess ? <button className="button button--ghost button--danger" type="button" disabled={trashed} onClick={() => onResetProjectProcess(project)}>Reiniciar proceso</button> : null}
+                      {onArchiveProject ? <button className="button button--ghost" type="button" disabled={trashed} onClick={() => onArchiveProject(project.id)}>Archivar</button> : null}
+                      {onTrashProject && !trashed ? <button className="button button--ghost button--danger" type="button" onClick={() => onTrashProject(project)}>Mover a Papelera</button> : null}
+                    </div>
+                  </details>
                   {trashed ? (
                     <>
                       {onRestoreProject ? <button className="button button--ghost" type="button" onClick={() => onRestoreProject(project.id)}>Restaurar</button> : null}
                       {onPermanentlyDeleteProject ? <button className="button button--ghost button--danger" type="button" onClick={() => onPermanentlyDeleteProject(project)}>Eliminar permanentemente</button> : null}
                     </>
-                  ) : onTrashProject ? <button className="button button--ghost button--danger" type="button" onClick={() => onTrashProject(project)}>Mover a Papelera</button> : null}
+                  ) : null}
                 </div>
               </article>
             );

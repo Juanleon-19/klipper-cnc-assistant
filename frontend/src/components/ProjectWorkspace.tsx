@@ -165,6 +165,7 @@ export function ProjectWorkspace({
   const [mapSource, setMapSource] = useState<HeightMapSource>("SIMULATED");
   const [heightMap, setHeightMap] = useState<HeightMap | null>(null);
   const [physicalMap, setPhysicalMap] = useState<PhysicalMapPayload | null>(null);
+  const [physicalMapHistory, setPhysicalMapHistory] = useState<Array<Record<string, unknown>>>([]);
   const [referenceSession, setReferenceSession] = useState<ReferenceSession | null>(null);
   const [compensationPreview, setCompensationPreview] = useState<CompensationPreview | null>(null);
   const [generatedGCode, setGeneratedGCode] = useState<CompensatedGCodeResult | null>(null);
@@ -994,13 +995,20 @@ export function ProjectWorkspace({
     setWorkspaceError("");
     try {
       const result = await action();
+      const nextMap = result ?? physicalMap;
       if (result) {
         setPhysicalMap(result);
+        setMapSource("MEASURED");
       }
-      if (project && selectedOperation) {
+      if (project && selectedOperation && nextMap?.status === "MESH_COMPLETE") {
         const measured = await api.getPhysicalHeightMap(project.id, selectedOperation.id);
         setHeightMap(measured);
         setMapSource("MEASURED");
+      } else if (result) {
+        setHeightMap(null);
+      }
+      if (project && selectedOperation) {
+        void api.getPhysicalMapHistory(project.id, selectedOperation.id).then(setPhysicalMapHistory).catch(() => undefined);
       }
       setCompensationPreview(null);
       setGeneratedGCode(null);
@@ -1049,12 +1057,14 @@ export function ProjectWorkspace({
     const plannedPoints = rows * columns;
     const executablePoints = physicalMap?.executable_point_count ?? physicalMap?.points?.filter((point) => point.status !== "EXCLUDED").length ?? plannedPoints;
     const excludedPoints = physicalMap?.excluded_count ?? physicalMap?.points?.filter((point) => point.status === "EXCLUDED").length ?? 0;
+    const hasReferencePoint = (physicalMap?.points ?? []).some((point) => point.role === "REFERENCE");
     const filteredPhysicalPoints = (physicalMap?.points ?? []).filter((point) => {
       if (pointFilter === "ALL") return true;
       if (pointFilter === "FAILED") return point.status === "FAILED" || point.status === "RETRY_REQUIRED";
       if (pointFilter === "PENDING") return ["PENDING", "MOVING", "PROBING"].includes(point.status);
       return point.status === pointFilter;
     });
+    const physicalPlanPayload = { grid_mode: gridDefinitionMode, rows, columns, edge_margin_left_mm: edgeLeft, edge_margin_right_mm: edgeRight, edge_margin_bottom_mm: edgeBottom, edge_margin_top_mm: edgeTop, exclusions: meshExclusions, max_spacing_mm: parsePositive(meshSpacingInput), margin_mm: 0, safe_z_mm: parsePositive(safeZInput), probe_step_mm: parsePositive(probeStepInput), probe_feed_mm_min: parsePositive(probeSpeedInput), retract_mm: parsePositive(probeRetractInput) };
     const mapTabItems: Array<{ id: MapTab; icon: string; label: string; title: string }> = [
       { id: "mapa2d", icon: "▦", label: "Mapa 2D", title: "Ver región, puntos y recorrido de sondeo" },
       { id: "superficie3d", icon: "◭", label: "Superficie 3D", title: "Ver superficie medida sin perder cámara" },
@@ -1235,11 +1245,21 @@ export function ProjectWorkspace({
             {probeWidth <= 0 || probeHeight <= 0 ? <div className="alert alert--warning">El retiro de los bordes deja una región de sondeo inválida. Reduzca los valores o revise las dimensiones del material.</div> : null}
             {meshValidationMessage ? <div className="alert alert--info">{meshValidationMessage}</div> : null}
             <div className="action-grid">
-              <button className="button" type="button" disabled={heightMapBusy || !selectedOperation || !physicalReady || probeWidth <= 0 || probeHeight <= 0} onClick={() => void withPhysicalMapAction(async () => {
+              <button className="button" type="button" disabled={heightMapBusy || !selectedOperation || probeWidth <= 0 || probeHeight <= 0} onClick={() => void withPhysicalMapAction(async () => {
                 if (!selectedOperation) return null;
-                const result = await api.planPhysicalMapFromReference(project.id, selectedOperation.id, { grid_mode: gridDefinitionMode, rows, columns, edge_margin_left_mm: edgeLeft, edge_margin_right_mm: edgeRight, edge_margin_bottom_mm: edgeBottom, edge_margin_top_mm: edgeTop, exclusions: meshExclusions, max_spacing_mm: parsePositive(meshSpacingInput), margin_mm: 0, safe_z_mm: parsePositive(safeZInput), probe_step_mm: parsePositive(probeStepInput), probe_feed_mm_min: parsePositive(probeSpeedInput), retract_mm: parsePositive(probeRetractInput) });
-                setActiveMapTab("mapa2d"); setMeshArmed(false); setMeshValidationMessage(result.payload.configuration_change_warning ?? "Vista previa generada desde el material. Revise retiro, exclusiones, puntos y recorrido antes de armar."); return result.payload;
+                const result = physicalReady
+                  ? await api.planPhysicalMapFromReference(project.id, selectedOperation.id, physicalPlanPayload)
+                  : await api.previewPhysicalMap(project.id, selectedOperation.id, physicalPlanPayload);
+                const payload = result.payload;
+                const total = payload.point_count ?? rows * columns;
+                setActiveMapTab("mapa2d"); setMeshArmed(false); setMeshValidationMessage(payload.configuration_change_warning ?? (physicalReady ? `Vista previa generada: ${rows} filas × ${columns} columnas, ${total} puntos. Revise retiro, exclusiones, puntos y recorrido antes de armar.` : `Vista previa generada: ${rows} filas × ${columns} columnas, ${total} puntos. Vista previa en coordenadas PCB. Complete la referencia para calcular las coordenadas CNC.`)); return payload;
               })}>Generar vista previa de malla</button>
+              <button className="button button--ghost" type="button" disabled={!physicalMapId} onClick={() => void withPhysicalMapAction(async () => {
+                if (!physicalMapId) return null;
+                const result = await api.repeatPhysicalMap(project.id, physicalMapId);
+                setActiveMapTab("mapa2d"); setMeshArmed(false); setMeshValidationMessage("Mapa anterior archivado. Nueva versión vacía generada con punto #0 X0/Y0 y todos los nodos pendientes. Confirme antes de mover."); return result.payload;
+              })} title="Conserva origen X/Y y receta; archiva el mapa actual y vuelve a medir referencia y nodos.">Repetir medición completa</button>
+              <button className="button button--ghost" type="button" disabled={!physicalMap} onClick={() => { setPhysicalMap(null); setHeightMap(null); setMeshArmed(false); setMeshValidationMessage("Vista previa limpia. La configuración y los mapas medidos no se borraron."); }}>Limpiar vista previa</button>
               <button className="button button--ghost" type="button" disabled={!physicalMapId} onClick={() => setMeshValidationMessage(physicalFailedPoints > 0 ? `La malla tiene ${physicalFailedPoints} punto(s) fallidos o pendientes de reintento.` : "Cobertura geométrica revisada. No se extrapola fuera de la región interior ni sobre exclusiones.")}>Validar límites</button>
               <button className="button button--ghost" type="button" disabled={!physicalMapId || physicalMap?.status === "MESH_COMPLETE"} onClick={() => { setMeshArmed(true); setMeshValidationMessage("Sondeo armado. Una sola confirmación ejecutará todos los puntos ejecutables de la malla."); }}>Armar sondeo</button>
               <button className="button" type="button" disabled={heightMapBusy || !physicalMapId || !meshArmed || physicalMap?.status === "MESH_COMPLETE"} onClick={() => void withPhysicalMapAction(async () => (await api.executeAllPhysicalMapPoints(project.id, physicalMapId)).payload)}>INICIAR SONDEO AUTOMÁTICO</button>
@@ -1255,16 +1275,19 @@ export function ProjectWorkspace({
           <article className="panel"><div className="section-heading section-heading--stacked"><div><p className="eyebrow">Métricas</p><h3>Alturas de la superficie</h3></div><StatusBadge tone={heightMap.etiqueta_simulada ? "warning" : "success"}>{heightMap.etiqueta_simulada ? "SIMULADO" : "MEASURED"}</StatusBadge></div><div className="info-grid info-grid--double compact-grid"><div className="metric-box"><span>Z mínima</span><strong>{formatMillimeters(heightMap.estadisticas.altura_min_mm, 4)}</strong></div><div className="metric-box"><span>Z máxima</span><strong>{formatMillimeters(heightMap.estadisticas.altura_max_mm, 4)}</strong></div><div className="metric-box"><span>Rango</span><strong>{formatMillimeters(heightMap.estadisticas.rango_alturas_mm, 4)}</strong></div><div className="metric-box"><span>Valor de referencia</span><strong>{formatMillimeters(heightMap.estadisticas.valor_referencia_mm, 4)}</strong></div><div className="metric-box"><span>RMS</span><strong>{formatMillimeters(heightMap.estadisticas.desviacion_rms_respecto_plano_mm, 4)}</strong></div><div className="metric-box"><span>Residuo máximo</span><strong>{formatMillimeters(heightMap.estadisticas.residuo_maximo_mm, 4)}</strong></div></div></article>
         ) : null}
 
-        {activeMapTab === "mapa2d" && heightMap ? <HeightMapHeatmap material={project.material} heightMap={heightMap} mode={heightMode} meshPoints={physicalMap?.points} exclusions={physicalMap?.exclusions ?? meshExclusions} coordinateMode={coordinateMode} machineOrigin={typeof physicalMap?.machine_origin_x === "number" && typeof physicalMap?.machine_origin_y === "number" ? { x_mm: physicalMap.machine_origin_x, y_mm: physicalMap.machine_origin_y } : null} /> : null}
+        {activeMapTab === "mapa2d" && (heightMap || physicalMap) ? <HeightMapHeatmap material={project.material} heightMap={heightMap} mode={heightMode} meshPoints={physicalMap?.points ?? physicalMap?.local_points ?? []} exclusions={physicalMap?.exclusions ?? meshExclusions} probeRegion={physicalMap?.local_region ?? physicalMap?.probe_region ?? heightMap?.probe_region ?? null} coordinateMode={coordinateMode} machineOrigin={typeof physicalMap?.machine_origin_x === "number" && typeof physicalMap?.machine_origin_y === "number" ? { x_mm: physicalMap.machine_origin_x, y_mm: physicalMap.machine_origin_y } : null} previewMessage={physicalMap?.warnings?.[0] ?? null} /> : null}
         {activeMapTab === "superficie3d" && heightMap ? <HeightMapSurface3D heightMap={heightMap} mode={heightMode} /> : null}
         {activeMapTab === "puntos" ? (
-          <article className="panel"><div className="section-heading section-heading--stacked"><div><p className="eyebrow">Puntos de malla</p><h3>Lecturas y estados</h3></div><div className="map-segmented" aria-label="Filtro de puntos">{(["ALL", "PENDING", "MEASURED", "EXCLUDED", "FAILED"] as const).map((filter) => <button key={filter} className={`map-segment-button${pointFilter === filter ? " map-segment-button--active" : ""}`} type="button" onClick={() => setPointFilter(filter)}>{filter === "ALL" ? "Todos" : filter === "PENDING" ? "Pendientes" : filter === "MEASURED" ? "Medidos" : filter === "EXCLUDED" ? "Excluidos" : "Fallidos"}</button>)}</div></div>{filteredPhysicalPoints.length ? <div className="point-card-grid">{filteredPhysicalPoints.map((point: PhysicalMeshPoint) => <div className="mesh-point-card" key={point.index}><strong>Punto #{point.index + 1}</strong><span>Fila {point.row + 1}</span><span>Columna {point.column + 1}</span><span>PCB X/Y: {formatMillimeters(point.x_local, 3)} / {formatMillimeters(point.y_local, 3)}</span><span>CNC X/Y: {formatMillimeters(point.x_machine, 3)} / {formatMillimeters(point.y_machine, 3)}</span><span>Z medida: {formatMillimeters(point.z_measured_abs ?? point.z_measured ?? null, 3)}</span><span>Delta Z: {formatMillimeters(point.delta_z ?? null, 3)}</span><span>Estado: {formatPointStatus(point.status)}</span><span>Intentos: {point.attempts ?? 0}</span><span>Duración: {typeof point.duration_s === "number" ? `${point.duration_s.toFixed(3)} s` : "-"}</span>{point.error || point.last_error ? <span>Error: {point.error ?? point.last_error}</span> : null}</div>)}</div> : <p className="muted">Genere la vista previa de malla para ver los puntos.</p>}</article>
+          <article className="panel"><div className="section-heading section-heading--stacked"><div><p className="eyebrow">Puntos de malla</p><h3>Lecturas y estados</h3></div><div className="map-segmented" aria-label="Filtro de puntos">{(["ALL", "PENDING", "MEASURED", "EXCLUDED", "FAILED"] as const).map((filter) => <button key={filter} className={`map-segment-button${pointFilter === filter ? " map-segment-button--active" : ""}`} type="button" onClick={() => setPointFilter(filter)}>{filter === "ALL" ? "Todos" : filter === "PENDING" ? "Pendientes" : filter === "MEASURED" ? "Medidos" : filter === "EXCLUDED" ? "Excluidos" : "Fallidos"}</button>)}</div></div>{filteredPhysicalPoints.length ? <div className="point-card-grid">{filteredPhysicalPoints.map((point: PhysicalMeshPoint) => <div className="mesh-point-card" key={point.index}><strong>{point.role === "REFERENCE" ? "Punto #0 — Referencia X0/Y0" : `Punto #${hasReferencePoint ? point.index : point.index + 1}`}</strong><span>Fila {typeof point.row === "number" && point.row >= 0 ? point.row + 1 : "-"}</span><span>Columna {typeof point.column === "number" && point.column >= 0 ? point.column + 1 : "-"}</span><span>PCB X/Y: {formatMillimeters(point.x_local, 3)} / {formatMillimeters(point.y_local, 3)}</span><span>CNC X/Y: {formatMillimeters(point.x_machine ?? null, 3)} / {formatMillimeters(point.y_machine ?? null, 3)}</span><span>Z medida: {formatMillimeters(point.z_measured_abs ?? point.z_measured ?? null, 3)}</span><span>Delta Z: {formatMillimeters(point.delta_z ?? null, 3)}</span><span>Estado: {formatPointStatus(point.status)}</span><span>Intentos: {point.attempts ?? 0}</span><span>Duración: {typeof point.duration_s === "number" ? `${point.duration_s.toFixed(3)} s` : "-"}</span>{point.error || point.last_error ? <span>Error: {point.error ?? point.last_error}</span> : null}</div>)}</div> : <p className="muted">Genere la vista previa de malla para ver los puntos.</p>}</article>
+        ) : null}
+        {activeMapTab === "puntos" && physicalMapHistory.length > 0 ? (
+          <article className="panel"><div className="section-heading"><h3>Historial de mediciones</h3></div><div className="point-card-grid">{physicalMapHistory.slice(0, 8).map((entry) => <div className="mesh-point-card" key={String(entry.map_id)}><strong>Versión {String(entry.version ?? "-")}</strong><span>Estado: {String(entry.status ?? "-")}</span><span>Placement: {String(entry.placement_revision ?? "-")}</span><span>Filas/columnas: {String(entry.rows ?? "-")} × {String(entry.columns ?? "-")}</span><span>Medidos: {String(entry.points_measured ?? 0)}</span><span>Fallidos: {String(entry.points_failed ?? 0)}</span><span>{entry.active ? "Activo" : "Histórico"}</span></div>)}</div></article>
         ) : null}
         {activeMapTab === "configuracion" && !machine.isPhysical ? (
           <HeightMapControlPanel material={project.material} heightMap={heightMap} busy={heightMapBusy} onConfigure={(nextPayload) => withHeightMapAction(() => api.configureHeightMap(project.id, selectedOperation!.id, nextPayload))} onSimulate={(nextPayload) => withHeightMapAction(() => api.simulateHeightMap(project.id, selectedOperation!.id, nextPayload))} onImportJson={(content) => withHeightMapAction(() => api.importHeightMapJson(project.id, selectedOperation!.id, content))} onImportCsv={(content) => withHeightMapAction(() => api.importHeightMapCsv(project.id, selectedOperation!.id, content))} onRecalculate={() => withHeightMapAction(() => api.recalculateHeightMap(project.id, selectedOperation!.id))} onDelete={() => withHeightMapAction(async () => { await api.deleteHeightMap(project.id, selectedOperation!.id); setHeightMap(null); })} />
         ) : null}
         {activeMapTab === "configuracion" && machine.isPhysical ? <article className="panel"><div className="section-heading"><h3>Configuración física activa</h3></div><p className="muted">La configuración física está arriba: filas, columnas, retiro de borde, exclusiones, Z segura, paso, velocidad y retracto.</p></article> : null}
-        {!heightMap ? <div className="panel empty-state"><p>{machine.isPhysical ? "Genere la vista previa de malla para ver región, puntos y recorrido." : "Configure la región sondeable, genere un mapa simulado o importe mediciones."}</p></div> : null}
+        {!heightMap && !physicalMap ? <div className="panel empty-state"><p>{machine.isPhysical ? "Genere la vista previa de malla para ver región, puntos y recorrido." : "Configure la región sondeable, genere un mapa simulado o importe mediciones."}</p></div> : null}
       </div>
     );
   };
@@ -1293,10 +1316,11 @@ export function ProjectWorkspace({
       setGeneratedGCode(null);
       setMeshArmed(false);
       setMeshSuggestion(null);
+      await machine.refreshRuntime();
       if (selectedOperation) {
         setReferenceSession(await api.getReferenceSession(project.id, selectedOperation.id));
       }
-      setMeshValidationMessage(scope === "map" ? "Mapa activo reiniciado. G-codes y operaciones siguen presentes." : "Preparación reiniciada. Referencias y mapa activos desaparecieron.");
+      setMeshValidationMessage(scope === "map" ? "Mapa activo reiniciado. G-codes y operaciones siguen presentes. Genere la vista previa para volver a medir." : "Preparación reiniciada. Arduino desconectado; G-codes, operaciones y receta de malla siguen presentes.");
     } catch (error) {
       setWorkspaceError(error instanceof Error ? error.message : "No fue posible reiniciar la preparación.");
     } finally {
@@ -1464,7 +1488,7 @@ export function ProjectWorkspace({
                 <strong>Reiniciar...</strong>
                 <button className="button button--ghost" type="button" disabled={referenceBusy || !selectedSetup} onClick={() => void resetPreparation("reference")} title="Reiniciar solo referencia">Solo origen/Z</button>
                 <button className="button button--ghost" type="button" disabled={referenceBusy || !selectedSetup} onClick={() => void resetPreparation("map")}>Reiniciar solo mapa</button>
-                <button className="button button--ghost button--danger" type="button" disabled={referenceBusy || !selectedSetup} onClick={() => void resetPreparation("preparation")}>Reiniciar preparación</button>
+                <button className="button button--ghost button--danger" type="button" disabled={referenceBusy || !selectedSetup} onClick={() => void resetPreparation("preparation")} title="Desconecta Arduino, invalida origen X/Y, referencias Z y mapa activo; conserva G-code, operaciones y receta de malla.">Reiniciar proceso</button>
               </div>
             </details>
           </div>

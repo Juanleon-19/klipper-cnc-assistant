@@ -197,6 +197,89 @@ class PhysicalMapService:
             "local_region": {"min_x_mm": region.min_x_mm, "min_y_mm": region.min_y_mm, "max_x_mm": region.max_x_mm, "max_y_mm": region.max_y_mm},
         }
 
+
+    def preview_mesh(
+        self,
+        *,
+        project_id: str,
+        operation_id: str,
+        config: PhysicalMeshConfig | None = None,
+        machine_origin_x: float | None = None,
+        machine_origin_y: float | None = None,
+    ) -> dict[str, Any]:
+        project = self._load_project(project_id)
+        operation = project.get_operation(operation_id)
+        selected_config = config or PhysicalMeshConfig()
+        if selected_config.grid_mode == "suggested":
+            suggestion = self.suggest_mesh_config(project_id=project_id, operation_id=operation_id, config=selected_config)
+            selected_config = replace(selected_config, rows=int(suggestion["rows"]), columns=int(suggestion["columns"]))
+        region = self._material_inner_region(project, selected_config)
+        grid = self._grid_for_region(region, selected_config.rows, selected_config.columns)
+        samples = self._blank_samples(grid, region, selected_config.exclusions)
+        points = self._points_from_samples(
+            samples=samples,
+            operation=operation,
+            config=selected_config,
+            origin_x=machine_origin_x,
+            origin_y=machine_origin_y,
+            include_reference=False,
+        )
+        total_distance = self._distance_for_points(points)
+        now = _iso_now()
+        reference_point = {
+            "index": 0,
+            "row": None,
+            "column": None,
+            "role": "REFERENCE",
+            "x_local": 0.0,
+            "y_local": 0.0,
+            "x_machine": machine_origin_x,
+            "y_machine": machine_origin_y,
+            "status": "REFERENCE_PENDING" if machine_origin_x is None or machine_origin_y is None else "PENDING",
+        }
+        payload = {
+            "schema_version": "surface-map-preview-v1",
+            "preview_id": f"preview/{operation.setup_id}/{operation.id}/{utc_now().strftime('%Y%m%d-%H%M%S-%f')}",
+            "preview_version": now,
+            "map_id": None,
+            "project_id": project_id,
+            "setup_id": operation.setup_id,
+            "operation_id": operation.id,
+            "face": operation.cara,
+            "placement_revision": project.get_setup(operation.setup_id).placement_revision,
+            "source": "PREVIEW",
+            "status": "MESH_PREVIEW",
+            "grid_mode": selected_config.grid_mode,
+            "rows": grid.filas,
+            "columns": grid.columnas,
+            "point_count": grid.filas * grid.columnas,
+            "excluded_count": sum(1 for point in points if point.get("status") == "EXCLUDED"),
+            "executable_point_count": sum(1 for point in points if point.get("role") != "REFERENCE" and point.get("status") != "EXCLUDED"),
+            "dx": grid.paso_x_mm,
+            "dy": grid.paso_y_mm,
+            "grid": {"rows": grid.filas, "columns": grid.columnas, "dx_mm": grid.paso_x_mm, "dy_mm": grid.paso_y_mm},
+            "material_bounds": {"min_x_mm": 0.0, "min_y_mm": 0.0, "max_x_mm": float(project.material.ancho_mm), "max_y_mm": float(project.material.alto_mm)},
+            "probe_region": {"min_x_mm": region.min_x_mm, "min_y_mm": region.min_y_mm, "max_x_mm": region.max_x_mm, "max_y_mm": region.max_y_mm},
+            "local_region": {"min_x_mm": region.min_x_mm, "min_y_mm": region.min_y_mm, "max_x_mm": region.max_x_mm, "max_y_mm": region.max_y_mm},
+            "machine_region": None if machine_origin_x is None or machine_origin_y is None else {"min_x_mm": machine_origin_x + region.min_x_mm, "min_y_mm": machine_origin_y + region.min_y_mm, "max_x_mm": machine_origin_x + region.max_x_mm, "max_y_mm": machine_origin_y + region.max_y_mm},
+            "edge_margins": {"left_mm": selected_config.edge_margin_left_mm, "right_mm": selected_config.edge_margin_right_mm, "bottom_mm": selected_config.edge_margin_bottom_mm, "top_mm": selected_config.edge_margin_top_mm},
+            "exclusions": [exclusion.to_payload() for exclusion in selected_config.exclusions],
+            "mesh_config": {"grid_mode": selected_config.grid_mode, "rows": selected_config.rows, "columns": selected_config.columns, "edge_margin_left_mm": selected_config.edge_margin_left_mm, "edge_margin_right_mm": selected_config.edge_margin_right_mm, "edge_margin_bottom_mm": selected_config.edge_margin_bottom_mm, "edge_margin_top_mm": selected_config.edge_margin_top_mm, "max_spacing_mm": selected_config.max_spacing_mm, "margin_mm": selected_config.margin_mm},
+            "probe_config": {"safe_z_mm": selected_config.safe_z_mm, "probe_step_mm": selected_config.probe_step_mm, "probe_feed_mm_min": selected_config.probe_feed_mm_min, "retract_mm": selected_config.retract_mm},
+            "local_points": points,
+            "machine_points": None if machine_origin_x is None or machine_origin_y is None else points,
+            "points": points,
+            "serpentine_path": [{"index": point["index"], "x_local": point["x_local"], "y_local": point["y_local"], "x_machine": point.get("x_machine"), "y_machine": point.get("y_machine"), "status": point.get("status")} for point in points],
+            "reference_point": reference_point,
+            "warnings": [] if machine_origin_x is not None and machine_origin_y is not None else ["Vista previa en coordenadas PCB. Complete la referencia para calcular las coordenadas CNC."],
+            "valid_for_execution": machine_origin_x is not None and machine_origin_y is not None,
+            "estimated_distance_mm": total_distance,
+            "estimated_time_s": self._estimate_time_s(points, total_distance, selected_config),
+            "created_at": now,
+            "updated_at": now,
+        }
+        return payload
+
     def capture_reference_and_plan(
         self,
         *,
@@ -337,10 +420,20 @@ class PhysicalMapService:
         measured_at = _iso_now()
         reference_z = float(payload.get("acquisition_reference_z", payload.get("reference_z", 0.0)) or 0.0)
         point = dict(points[point_index])
+        if point.get("role") == "REFERENCE":
+            reference_z = float(z_measured)
+            payload["reference_z"] = reference_z
+            payload["acquisition_reference_z"] = reference_z
+            tool_key = str(point.get("tool_id") or payload.get("acquisition_tool_id") or "sin-herramienta")
+            references = dict(payload.get("tool_references") or {})
+            existing_reference = dict(references.get(tool_key) or {})
+            existing_reference.update({"reference_z": reference_z, "measured_at": measured_at, "source": "MEASURED"})
+            references[tool_key] = existing_reference
+            payload["tool_references"] = references
         point.update({
             "z_measured": z_measured,
             "z_measured_abs": z_measured,
-            "delta_z": z_measured - reference_z,
+            "delta_z": 0.0 if point.get("role") == "REFERENCE" else z_measured - reference_z,
             "timestamp": measured_at,
             "measured_at": measured_at,
             "status": status,
@@ -646,42 +739,15 @@ class PhysicalMapService:
         config: PhysicalMeshConfig = kwargs["config"]
         origin_x = float(kwargs["machine_origin_x"])
         origin_y = float(kwargs["machine_origin_y"])
-        points = []
-        total_distance = 0.0
-        previous: tuple[float, float] | None = None
-        for index, sample in enumerate(height_map.muestras):
-            machine_x = origin_x + sample.x_mm
-            machine_y = origin_y + sample.y_mm
-            exclusion = self._exclusion_for_point(sample.x_mm, sample.y_mm, config.exclusions)
-            is_excluded = exclusion is not None
-            if not is_excluded:
-                if previous is not None:
-                    total_distance += math.dist(previous, (machine_x, machine_y))
-                previous = (machine_x, machine_y)
-            points.append({
-                "index": index,
-                "row": sample.fila,
-                "column": sample.columna,
-                "x_local": sample.x_mm,
-                "y_local": sample.y_mm,
-                "x_machine": machine_x,
-                "y_machine": machine_y,
-                "z_measured": None,
-                "z_measured_abs": None,
-                "delta_z": None,
-                "timestamp": None,
-                "started_at": None,
-                "measured_at": None,
-                "status": "EXCLUDED" if is_excluded else "PENDING",
-                "attempts": 0,
-                "duration": None,
-                "duration_s": None,
-                "last_error": None,
-                "error": f"Excluido: {exclusion.name}" if exclusion else None,
-                "exclusion_id": exclusion.id if exclusion else None,
-                "tool_id": _tool_key(operation),
-                "setup_id": operation.setup_id,
-            })
+        points = self._points_from_samples(
+            samples=list(height_map.muestras),
+            operation=operation,
+            config=config,
+            origin_x=origin_x,
+            origin_y=origin_y,
+            include_reference=True,
+        )
+        total_distance = self._distance_for_points(points)
         tool_reference = self._tool_reference(
             operation=operation,
             reference_z=float(kwargs["reference_z"]),
@@ -764,9 +830,10 @@ class PhysicalMapService:
             "dx": height_map.grid.paso_x_mm,
             "dy": height_map.grid.paso_y_mm,
             "grid": {"rows": height_map.grid.filas, "columns": height_map.grid.columnas, "dx_mm": height_map.grid.paso_x_mm, "dy_mm": height_map.grid.paso_y_mm},
-            "point_count": len(points),
+            "point_count": sum(1 for point in points if point.get("role") != "REFERENCE"),
+            "acquisition_point_count": len(points),
             "excluded_count": sum(1 for point in points if point.get("status") == "EXCLUDED"),
-            "executable_point_count": sum(1 for point in points if point.get("status") != "EXCLUDED"),
+            "executable_point_count": sum(1 for point in points if point.get("role") != "REFERENCE" and point.get("status") != "EXCLUDED"),
             "estimated_distance_mm": total_distance,
             "estimated_time_s": self._estimate_time_s(points, total_distance, config),
             "invalid_points": [],
@@ -792,6 +859,105 @@ class PhysicalMapService:
             "height_map": self._serialize_height_map(height_map),
         }
 
+
+    def _points_from_samples(
+        self,
+        *,
+        samples: list[HeightSample],
+        operation: OperacionPCB,
+        config: PhysicalMeshConfig,
+        origin_x: float | None,
+        origin_y: float | None,
+        include_reference: bool,
+    ) -> list[dict[str, Any]]:
+        points: list[dict[str, Any]] = []
+        for sample in samples:
+            machine_x = None if origin_x is None else origin_x + sample.x_mm
+            machine_y = None if origin_y is None else origin_y + sample.y_mm
+            exclusion = self._exclusion_for_point(sample.x_mm, sample.y_mm, config.exclusions)
+            is_excluded = exclusion is not None
+            points.append({
+                "index": len(points),
+                "row": sample.fila,
+                "column": sample.columna,
+                "role": "GRID",
+                "x_local": sample.x_mm,
+                "y_local": sample.y_mm,
+                "x_machine": machine_x,
+                "y_machine": machine_y,
+                "z_measured": None,
+                "z_measured_abs": None,
+                "delta_z": None,
+                "timestamp": None,
+                "started_at": None,
+                "measured_at": None,
+                "status": "EXCLUDED" if is_excluded else "PENDING",
+                "attempts": 0,
+                "duration": None,
+                "duration_s": None,
+                "last_error": None,
+                "error": f"Excluido: {exclusion.name}" if exclusion else None,
+                "exclusion_id": exclusion.id if exclusion else None,
+                "tool_id": _tool_key(operation),
+                "setup_id": operation.setup_id,
+            })
+        if include_reference:
+            points = self._with_reference_point(points, operation=operation, origin_x=origin_x, origin_y=origin_y)
+        return points
+
+    def _with_reference_point(self, points: list[dict[str, Any]], *, operation: OperacionPCB, origin_x: float | None, origin_y: float | None) -> list[dict[str, Any]]:
+        tolerance = 1e-6
+        coincident_index = next((index for index, point in enumerate(points) if abs(float(point.get("x_local", 0.0))) <= tolerance and abs(float(point.get("y_local", 0.0))) <= tolerance), None)
+        if coincident_index is not None:
+            reference = dict(points.pop(coincident_index))
+            reference["role"] = "REFERENCE"
+            reference["x_machine"] = origin_x
+            reference["y_machine"] = origin_y
+            ordered = [reference, *points]
+        else:
+            reference = {
+                "index": 0,
+                "row": -1,
+                "column": -1,
+                "role": "REFERENCE",
+                "x_local": 0.0,
+                "y_local": 0.0,
+                "x_machine": origin_x,
+                "y_machine": origin_y,
+                "z_measured": None,
+                "z_measured_abs": None,
+                "delta_z": None,
+                "timestamp": None,
+                "started_at": None,
+                "measured_at": None,
+                "status": "PENDING",
+                "attempts": 0,
+                "duration": None,
+                "duration_s": None,
+                "last_error": None,
+                "error": None,
+                "tool_id": _tool_key(operation),
+                "setup_id": operation.setup_id,
+            }
+            ordered = [reference, *points]
+        for index, point in enumerate(ordered):
+            point["index"] = index
+        return ordered
+
+    def _distance_for_points(self, points: list[dict[str, Any]]) -> float:
+        total = 0.0
+        previous: tuple[float, float] | None = None
+        for point in points:
+            if point.get("status") == "EXCLUDED":
+                continue
+            x_value = point.get("x_machine") if point.get("x_machine") is not None else point.get("x_local")
+            y_value = point.get("y_machine") if point.get("y_machine") is not None else point.get("y_local")
+            current = (float(x_value), float(y_value))
+            if previous is not None:
+                total += math.dist(previous, current)
+            previous = current
+        return total
+
     def _height_map_payload_from_points(self, payload: dict[str, Any]) -> dict[str, Any]:
         grid_payload = payload["grid"]
         region_payload = payload["local_region"]
@@ -806,6 +972,8 @@ class PhysicalMapService:
         region = ProbeRegion(**region_payload)
         samples = []
         for point in payload["points"]:
+            if point.get("role") == "REFERENCE" and (int(point.get("row", -1)) < 0 or int(point.get("column", -1)) < 0):
+                continue
             value = point.get("delta_z", point.get("z_measured"))
             status = point.get("status")
             samples.append(HeightSample(
@@ -1163,6 +1331,114 @@ class PhysicalMapService:
         migrated["executable_point_count"] = sum(1 for point in migrated_points if point.get("status") != "EXCLUDED")
         migrated["height_map"] = self._height_map_payload_from_points(migrated)
         return migrated
+
+
+    def repeat_measurement(self, *, project_id: str, map_id: str) -> dict[str, Any]:
+        active = self.get_by_id(project_id, map_id)
+        if active.get("archived_at") is not None:
+            raise ApplicationError("No se puede repetir una medición archivada.")
+        project = self._load_project(project_id)
+        operation_id = str((active.get("operation_ids") or [""])[0])
+        operation = project.get_operation(operation_id)
+        config_payload = active.get("mesh_config") or {}
+        probe_payload = active.get("probe_config") or {}
+        config = PhysicalMeshConfig(
+            grid_mode=str(config_payload.get("grid_mode") or active.get("grid_mode") or "manual"),
+            rows=int(config_payload.get("rows") or active.get("rows") or 2),
+            columns=int(config_payload.get("columns") or active.get("columns") or 2),
+            edge_margin_left_mm=float(config_payload.get("edge_margin_left_mm") or active.get("edge_margins", {}).get("left_mm") or 2.0),
+            edge_margin_right_mm=float(config_payload.get("edge_margin_right_mm") or active.get("edge_margins", {}).get("right_mm") or 2.0),
+            edge_margin_bottom_mm=float(config_payload.get("edge_margin_bottom_mm") or active.get("edge_margins", {}).get("bottom_mm") or 2.0),
+            edge_margin_top_mm=float(config_payload.get("edge_margin_top_mm") or active.get("edge_margins", {}).get("top_mm") or 2.0),
+            exclusions=tuple(PhysicalExclusion(**item) for item in active.get("exclusions", [])),
+            max_spacing_mm=float(config_payload.get("max_spacing_mm") or 10.0),
+            margin_mm=float(config_payload.get("margin_mm") or 0.0),
+            safe_z_mm=probe_payload.get("safe_z_mm"),
+            probe_step_mm=probe_payload.get("probe_step_mm"),
+            probe_feed_mm_min=probe_payload.get("probe_feed_mm_min"),
+            retract_mm=probe_payload.get("retract_mm"),
+        )
+        region = self._material_inner_region(project, config)
+        grid = self._grid_for_region(region, config.rows, config.columns)
+        samples = self._blank_samples(grid, region, config.exclusions)
+        height_map = compute_height_map(
+            proyecto_id=project_id,
+            operacion_id=operation.setup_id,
+            version=int(active.get("version") or 1) + 1,
+            fuente_datos="measured",
+            superficie_simulada=None,
+            repeticion_simulacion=None,
+            etiqueta_simulada=False,
+            grid=grid,
+            probe_region=region,
+            exclusion_zones=self._rectangular_exclusion_zones(config.exclusions),
+            muestras=samples,
+            estado="repeticion planificada",
+        )
+        next_version = int(active.get("version") or 1) + 1
+        new_map_id = f"{str(active['map_id']).rstrip('/')}/repeat-{next_version}-{utc_now().strftime('%Y%m%d-%H%M%S-%f')}"
+        payload = self._payload(
+            project_id=project_id,
+            setup_id=operation.setup_id,
+            operation=operation,
+            operations=self._operations_for_setup_face(project, operation) or (operation,),
+            map_id=new_map_id,
+            machine_origin_x=float(active.get("machine_origin_x") or 0.0),
+            machine_origin_y=float(active.get("machine_origin_y") or 0.0),
+            reference_z=float(active.get("reference_z") or active.get("acquisition_reference_z") or 0.0),
+            machine_position=active.get("machine_position") or {},
+            homed_axes=active.get("homed_axes"),
+            machine_label=active.get("machine_label"),
+            session_id=active.get("session_id"),
+            config=config,
+            height_map=height_map,
+            status="REPROBE_CONFIRMATION",
+            placement_revision=active.get("placement_revision") or project.get_setup(operation.setup_id).placement_revision,
+        )
+        payload["version"] = next_version
+        payload["replaces"] = active.get("map_id")
+        payload["map_ready_state"] = None
+        payload["validation"] = None
+        payload["message"] = "El mapa cambió. Debe volver a validar la cobertura y regenerar el G-code compensado."
+        self._archive_payload(project_id, active, replaced_by=new_map_id)
+        self._save(project_id, new_map_id, payload)
+        self._mark_setup_map_active(project_id, operation.setup_id, new_map_id)
+        return payload
+
+    def history(self, *, project_id: str, operation_id: str) -> list[dict[str, Any]]:
+        project = self._load_project(project_id)
+        operation = project.get_operation(operation_id)
+        maps_dir = self.repository.project_dir(project_id) / "maps" / "measured" / self._map_prefix(operation.setup_id, operation)
+        if not maps_dir.exists():
+            return []
+        active_map_id = project.get_setup(operation.setup_id).active_map_id
+        entries: list[dict[str, Any]] = []
+        files = sorted(maps_dir.glob("**/height_map.json"), key=lambda item: item.stat().st_mtime, reverse=True)
+        for file in files:
+            payload = self._load_file(file)
+            if payload.get("setup_id") != operation.setup_id or payload.get("face") != operation.cara:
+                continue
+            stats = (payload.get("height_map") or {}).get("estadisticas") or {}
+            points = payload.get("points") or []
+            entries.append({
+                "map_id": payload.get("map_id"),
+                "version": payload.get("version"),
+                "date": payload.get("completed_at") or payload.get("updated_at") or payload.get("created_at"),
+                "placement_revision": payload.get("placement_revision"),
+                "rows": payload.get("rows"),
+                "columns": payload.get("columns"),
+                "points_measured": sum(1 for point in points if point.get("status") == "MEASURED"),
+                "points_failed": sum(1 for point in points if point.get("status") in {"FAILED", "RETRY_REQUIRED"}),
+                "min": stats.get("altura_min_mm"),
+                "max": stats.get("altura_max_mm"),
+                "range": stats.get("rango_alturas_mm"),
+                "rms": stats.get("desviacion_rms_respecto_plano_mm"),
+                "tool": payload.get("acquisition_tool_name") or payload.get("tool_name"),
+                "status": payload.get("status"),
+                "active": payload.get("map_id") == active_map_id and payload.get("archived_at") is None,
+                "archived_at": payload.get("archived_at"),
+            })
+        return entries
 
     def reset_map(self, *, project_id: str, setup_id: str, reason: str | None = None, user_session: str | None = None) -> dict[str, Any]:
         project = self._load_project(project_id)

@@ -533,6 +533,10 @@ class MachineSessionService:
             self.referencia_maquina_confirmada_en = datetime.now(timezone.utc)
         return self.get_status()
 
+    def reset_session(self) -> MachineSessionStatus:
+        self.referencia_maquina_confirmada_en = None
+        return self.get_status()
+
     def get_status(self) -> MachineSessionStatus:
         home_realizado = self.referencia_maquina_confirmada_en is not None
         physical = self.machine_mode == "fisico"

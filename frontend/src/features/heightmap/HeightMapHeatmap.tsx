@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Circle, Layer, Line, Rect, Stage, Text } from "react-konva";
 
 import { formatCoordinate, formatMillimeters } from "../../lib/format";
-import type { HeightMap, HeightMapSample, HeightMapSurfacePoint, Material, PhysicalMapExclusion } from "../../types";
+import type { HeightMap, HeightMapSample, HeightMapSurfacePoint, Material, PhysicalMapExclusion, PhysicalMeshPoint, ProbeRegion } from "../../types";
 import { useMeasuredViewport } from "../viewer/useMeasuredViewport";
 import {
   buildGridTicks,
@@ -19,12 +19,14 @@ import type { ViewTransform } from "../viewer/viewerTypes";
 
 type HeightMapHeatmapProps = {
   material: Material;
-  heightMap: HeightMap;
+  heightMap: HeightMap | null;
   mode: "bruto" | "plano" | "residuo";
-  meshPoints?: Array<{ x_local?: number; y_local?: number; x_machine?: number; y_machine?: number; status?: string; index?: number }>;
+  meshPoints?: PhysicalMeshPoint[];
   exclusions?: PhysicalMapExclusion[];
+  probeRegion?: ProbeRegion | null;
   coordinateMode?: "local" | "machine";
   machineOrigin?: { x_mm: number; y_mm: number } | null;
+  previewMessage?: string | null;
 };
 
 type DragState = {
@@ -63,7 +65,7 @@ function findExtreme(samples: HeightMapSample[], direction: "min" | "max") {
     .sort((left, right) => (direction === "min" ? (left.z_mm ?? 0) - (right.z_mm ?? 0) : (right.z_mm ?? 0) - (left.z_mm ?? 0)))[0] ?? null;
 }
 
-export function HeightMapHeatmap({ material, heightMap, mode, meshPoints = [], exclusions = [], coordinateMode = "local", machineOrigin = null }: HeightMapHeatmapProps) {
+export function HeightMapHeatmap({ material, heightMap, mode, meshPoints = [], exclusions = [], probeRegion = null, coordinateMode = "local", machineOrigin = null, previewMessage = null }: HeightMapHeatmapProps) {
   const fullscreenRef = useRef<HTMLDivElement | null>(null);
   const dragRef = useRef<DragState | null>(null);
   const [stageNode, setStageNode] = useState<HTMLDivElement | null>(null);
@@ -95,7 +97,9 @@ export function HeightMapHeatmap({ material, heightMap, mode, meshPoints = [], e
     return () => document.removeEventListener("fullscreenchange", handleChange);
   }, []);
 
-  const surface = heightMap.superficies[mode];
+  const activeProbeRegion = probeRegion ?? heightMap?.probe_region ?? { min_x_mm: 0, min_y_mm: 0, max_x_mm: material.ancho_mm, max_y_mm: material.alto_mm };
+  const surface = heightMap?.superficies[mode] ?? { filas: 0, columnas: 0, modo: mode, puntos: [] };
+  const samples = useMemo(() => heightMap?.muestras ?? [], [heightMap]);
   const values = surface.puntos.map((point) => point.z_mm).filter((value): value is number => value != null);
   const minValue = values.length > 0 ? Math.min(...values) : 0;
   const maxValue = values.length > 0 ? Math.max(...values) : 1;
@@ -103,19 +107,24 @@ export function HeightMapHeatmap({ material, heightMap, mode, meshPoints = [], e
   const visibleRect = getVisibleWorldRect(transform, viewport);
   const gridTicks = buildGridTicks(visibleRect, gridStep);
   const minorGridTicks = buildGridTicks(visibleRect, Math.max(gridStep / 5, 0.1));
-  const cellWidth = surface.columnas > 1 ? heightMap.probe_region.max_x_mm - heightMap.probe_region.min_x_mm : material.ancho_mm;
-  const cellHeight = surface.filas > 1 ? heightMap.probe_region.max_y_mm - heightMap.probe_region.min_y_mm : material.alto_mm;
+  const cellWidth = surface.columnas > 1 ? activeProbeRegion.max_x_mm - activeProbeRegion.min_x_mm : material.ancho_mm;
+  const cellHeight = surface.filas > 1 ? activeProbeRegion.max_y_mm - activeProbeRegion.min_y_mm : material.alto_mm;
   const denseCellWidth = surface.columnas > 1 ? cellWidth / (surface.columnas - 1) : cellWidth;
   const denseCellHeight = surface.filas > 1 ? cellHeight / (surface.filas - 1) : cellHeight;
-  const minSample = useMemo(() => findExtreme(heightMap.muestras, "min"), [heightMap.muestras]);
-  const maxSample = useMemo(() => findExtreme(heightMap.muestras, "max"), [heightMap.muestras]);
-  const outliers = heightMap.muestras.filter((sample) => sample.estado_calidad === "atipica");
-  const visibleMeshPoints = meshPoints.map((point) => ({
-    x: coordinateMode === "machine" ? Number(point.x_machine) : Number(point.x_local),
-    y: coordinateMode === "machine" ? Number(point.y_machine) : Number(point.y_local),
-    status: String(point.status ?? "PENDING"),
-    index: Number(point.index ?? 0),
-  })).filter((point) => Number.isFinite(point.x) && Number.isFinite(point.y));
+  const minSample = useMemo(() => findExtreme(samples, "min"), [samples]);
+  const maxSample = useMemo(() => findExtreme(samples, "max"), [samples]);
+  const outliers = samples.filter((sample) => sample.estado_calidad === "atipica");
+  const hasMachineCoordinates = meshPoints.some((point) => typeof point.x_machine === "number" && typeof point.y_machine === "number");
+  const visibleMeshPoints = meshPoints.map((point) => {
+    const useMachine = coordinateMode === "machine" && typeof point.x_machine === "number" && typeof point.y_machine === "number";
+    return {
+      x: useMachine ? Number(point.x_machine) : Number(point.x_local),
+      y: useMachine ? Number(point.y_machine) : Number(point.y_local),
+      status: String(point.status ?? "PENDING"),
+      role: String(point.role ?? "GRID"),
+      index: Number(point.index ?? 0),
+    };
+  }).filter((point) => Number.isFinite(point.x) && Number.isFinite(point.y));
   const meshLinePoints = visibleMeshPoints.flatMap((point) => { const screen = worldToScreen({ x: point.x, y: point.y }, transform); return [screen.x, screen.y]; });
   const activeMeshPoint = visibleMeshPoints.find((point) => point.status === "MOVING" || point.status === "PROBING")
     ?? visibleMeshPoints.find((point) => point.status !== "MEASURED" && point.status !== "SKIPPED" && point.status !== "EXCLUDED")
@@ -123,7 +132,7 @@ export function HeightMapHeatmap({ material, heightMap, mode, meshPoints = [], e
   const offsetX = coordinateMode === "machine" ? machineOrigin?.x_mm ?? 0 : 0;
   const offsetY = coordinateMode === "machine" ? machineOrigin?.y_mm ?? 0 : 0;
   const world = (x: number, y: number) => ({ x: x + offsetX, y: y + offsetY });
-  const visibleExclusions = exclusions.length > 0 ? exclusions : heightMap.exclusion_zones.map((zone) => ({ id: zone.id, name: zone.nombre, shape: "rectangle" as const, enabled: true, x_min_mm: zone.min_x_mm, x_max_mm: zone.max_x_mm, y_min_mm: zone.min_y_mm, y_max_mm: zone.max_y_mm }));
+  const visibleExclusions = exclusions.length > 0 ? exclusions : (heightMap?.exclusion_zones ?? []).map((zone) => ({ id: zone.id, name: zone.nombre, shape: "rectangle" as const, enabled: true, x_min_mm: zone.min_x_mm, x_max_mm: zone.max_x_mm, y_min_mm: zone.min_y_mm, y_max_mm: zone.max_y_mm }));
 
   const toggleFullscreen = async () => {
     const node = fullscreenRef.current;
@@ -139,15 +148,15 @@ export function HeightMapHeatmap({ material, heightMap, mode, meshPoints = [], e
 
   const focusMaterial = () => setTransform(buildTransform(material, viewport.width, viewport.height));
   const focusProbeRegion = () => setTransform(fitRectWithinViewport({
-    minX: heightMap.probe_region.min_x_mm + offsetX,
-    maxX: heightMap.probe_region.max_x_mm + offsetX,
-    minY: heightMap.probe_region.min_y_mm + offsetY,
-    maxY: heightMap.probe_region.max_y_mm + offsetY,
+    minX: activeProbeRegion.min_x_mm + offsetX,
+    maxX: activeProbeRegion.max_x_mm + offsetX,
+    minY: activeProbeRegion.min_y_mm + offsetY,
+    maxY: activeProbeRegion.max_y_mm + offsetY,
   }, { width: viewport.width, height: viewport.height }));
   const focusAll = () => {
     const rects = [
       rectFromMaterial(material),
-      { minX: heightMap.probe_region.min_x_mm + offsetX, maxX: heightMap.probe_region.max_x_mm + offsetX, minY: heightMap.probe_region.min_y_mm + offsetY, maxY: heightMap.probe_region.max_y_mm + offsetY },
+      { minX: activeProbeRegion.min_x_mm + offsetX, maxX: activeProbeRegion.max_x_mm + offsetX, minY: activeProbeRegion.min_y_mm + offsetY, maxY: activeProbeRegion.max_y_mm + offsetY },
     ].filter((item): item is { minX: number; maxX: number; minY: number; maxY: number } => Boolean(item));
     setTransform(fitRectWithinViewport({
       minX: Math.min(...rects.map((item) => item.minX)),
@@ -286,8 +295,8 @@ export function HeightMapHeatmap({ material, heightMap, mode, meshPoints = [], e
 
               {layers.surface
                 ? surface.puntos.map((point) => {
-                    const topLeft = worldToScreen(world(point.x_mm, Math.min(heightMap.probe_region.max_y_mm, point.y_mm + denseCellHeight)), transform);
-                    const bottomRight = worldToScreen(world(Math.min(heightMap.probe_region.max_x_mm, point.x_mm + denseCellWidth), point.y_mm), transform);
+                    const topLeft = worldToScreen(world(point.x_mm, Math.min(activeProbeRegion.max_y_mm, point.y_mm + denseCellHeight)), transform);
+                    const bottomRight = worldToScreen(world(Math.min(activeProbeRegion.max_x_mm, point.x_mm + denseCellWidth), point.y_mm), transform);
                     return (
                       <Rect
                         key={`${point.fila}-${point.columna}`}
@@ -325,8 +334,8 @@ export function HeightMapHeatmap({ material, heightMap, mode, meshPoints = [], e
 
               {layers.probeRegion
                 ? (() => {
-                    const bottomLeft = worldToScreen(world(heightMap.probe_region.min_x_mm, heightMap.probe_region.min_y_mm), transform);
-                    const topRight = worldToScreen(world(heightMap.probe_region.max_x_mm, heightMap.probe_region.max_y_mm), transform);
+                    const bottomLeft = worldToScreen(world(activeProbeRegion.min_x_mm, activeProbeRegion.min_y_mm), transform);
+                    const topRight = worldToScreen(world(activeProbeRegion.max_x_mm, activeProbeRegion.max_y_mm), transform);
                     return (
                       <Rect
                         x={bottomLeft.x}
@@ -355,7 +364,7 @@ export function HeightMapHeatmap({ material, heightMap, mode, meshPoints = [], e
                 : null}
 
               {layers.samples
-                ? heightMap.muestras.map((sample) => {
+                ? samples.map((sample) => {
                     const screen = worldToScreen(world(sample.x_mm, sample.y_mm), transform);
                     const isProblem = sample.estado_calidad === "atipica" || sample.estado_calidad === "faltante" || !sample.incluida;
                     return (
@@ -397,16 +406,20 @@ export function HeightMapHeatmap({ material, heightMap, mode, meshPoints = [], e
                 const failed = point.status === "FAILED" || point.status === "RETRY_REQUIRED";
                 const excluded = point.status === "EXCLUDED";
                 const active = activeMeshPoint?.index === point.index;
+                const reference = point.role === "REFERENCE";
                 return (
-                  <Circle
-                    key={`mesh-${point.index}`}
-                    x={screen.x}
-                    y={screen.y}
-                    radius={active ? 7 : measured ? 5 : 4}
-                    fill={excluded ? "#6c8496" : measured ? "#63d471" : failed ? "#ff7a7a" : "#f6cf73"}
-                    stroke={active ? "#ffffff" : "#071015"}
-                    strokeWidth={active ? 2.2 : 1.2}
-                  />
+                  <>
+                    <Circle
+                      key={`mesh-${point.index}`}
+                      x={screen.x}
+                      y={screen.y}
+                      radius={reference ? 7 : active ? 7 : measured ? 5 : 4}
+                      fill={reference ? "#64d8ff" : excluded ? "#6c8496" : measured ? "#63d471" : failed ? "#ff7a7a" : "#f6cf73"}
+                      stroke={active || reference ? "#ffffff" : "#071015"}
+                      strokeWidth={active || reference ? 2.2 : 1.2}
+                    />
+                    {reference ? <Text key={`mesh-label-${point.index}`} x={screen.x + 8} y={screen.y - 18} text="X0/Y0" fill="#d9f7ff" fontSize={11} /> : null}
+                  </>
                 );
               }) : null}
 
@@ -434,7 +447,7 @@ export function HeightMapHeatmap({ material, heightMap, mode, meshPoints = [], e
             Material · región/malla · exclusiones · recorrido serpentino · muestras
           </div>
           <div className="viewer-stage__overlay viewer-stage__overlay--bottom mono-text">
-            {cursor ? `${coordinateMode === "machine" ? "Máquina" : "Local"} ${formatCoordinate(cursor.x)}, ${formatCoordinate(cursor.y)} mm` : "Cursor -"}
+            {cursor ? `${coordinateMode === "machine" && hasMachineCoordinates ? "Máquina" : "PCB"} ${formatCoordinate(cursor.x)}, ${formatCoordinate(cursor.y)} mm` : "Cursor -"}
           </div>
         </div>
       </div>
@@ -442,10 +455,10 @@ export function HeightMapHeatmap({ material, heightMap, mode, meshPoints = [], e
       {inspectorOpen ? (
         <aside className="heightmap-inspector" aria-label="Inspector del mapa 2D">
           <div className="viewer-footer__meta mono-text">
-            Coordenadas: {coordinateMode === "machine" ? "Máquina" : "Local G-code"}
+            Coordenadas: {coordinateMode === "machine" && hasMachineCoordinates ? "Máquina" : "PCB/local"}
           </div>
           <div className="viewer-footer__meta mono-text">
-            Alturas · mín {formatMillimeters(minValue, 3)} · máx {formatMillimeters(maxValue, 3)} · RMS {formatMillimeters(heightMap.estadisticas.desviacion_rms_respecto_plano_mm, 3)}
+            {heightMap ? <>Alturas · mín {formatMillimeters(minValue, 3)} · máx {formatMillimeters(maxValue, 3)} · RMS {formatMillimeters(heightMap.estadisticas.desviacion_rms_respecto_plano_mm, 3)}</> : (previewMessage ?? "Vista previa en coordenadas PCB. Complete la referencia para calcular las coordenadas CNC.")}
           </div>
           <div className="viewer-footer__meta mono-text">
             Malla · {visibleMeshPoints.length} puntos · activo {activeMeshPoint ? `#${activeMeshPoint.index}` : "-"}

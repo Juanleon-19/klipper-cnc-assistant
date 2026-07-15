@@ -25,6 +25,9 @@ const apiMock = vi.hoisted(() => ({
   getCompensationPreview: vi.fn(),
   getPhysicalMap: vi.fn(),
   getPhysicalHeightMap: vi.fn(),
+  getPhysicalMapHistory: vi.fn(),
+  repeatPhysicalMap: vi.fn(),
+  previewPhysicalMap: vi.fn(),
   planPhysicalMapFromReference: vi.fn(),
   executeNextPhysicalMapPoint: vi.fn(),
   executeAllPhysicalMapPoints: vi.fn(),
@@ -54,7 +57,7 @@ vi.mock("../features/viewer/ToolpathViewer", () => ({
 }));
 
 vi.mock("../features/heightmap/HeightMapHeatmap", () => ({
-  HeightMapHeatmap: () => <div>Heatmap mock</div>,
+  HeightMapHeatmap: (props: { meshPoints?: unknown[]; heightMap?: unknown }) => <div>Heatmap mock · {props.meshPoints?.length ?? 0} puntos · {props.heightMap ? "medido" : "preview"}</div>,
 }));
 
 vi.mock("../features/heightmap/HeightMapSurface3D", () => ({
@@ -252,6 +255,7 @@ describe("ProjectWorkspace", () => {
     apiMock.getReferenceSession.mockResolvedValue(referenceSession);
     apiMock.getPhysicalMap.mockRejectedValue(new Error("No existe mapa físico medido para este montaje y cara."));
     apiMock.getPhysicalHeightMap.mockResolvedValue(heightMap);
+    apiMock.getPhysicalMapHistory.mockResolvedValue([]);
     apiMock.planPhysicalMapFromReference.mockResolvedValue({
       payload: {
         map_id: "measured/manual-2x2",
@@ -272,6 +276,28 @@ describe("ProjectWorkspace", () => {
           { index: 2, row: 1, column: 1, x_local: 78, y_local: 58, x_machine: 138, y_machine: 146.75, status: "PENDING" },
           { index: 3, row: 1, column: 0, x_local: 2, y_local: 58, x_machine: 62, y_machine: 146.75, status: "PENDING" },
         ],
+      },
+    });
+    apiMock.previewPhysicalMap.mockResolvedValue({
+      payload: {
+        preview_id: "preview/manual-2x2",
+        status: "MESH_PREVIEW",
+        source: "PREVIEW",
+        point_count: 4,
+        grid_mode: "manual",
+        rows: 2,
+        columns: 2,
+        dx: 76,
+        dy: 56,
+        grid: { rows: 2, columns: 2, dx_mm: 76, dy_mm: 56 },
+        local_region: { min_x_mm: 2, min_y_mm: 2, max_x_mm: 78, max_y_mm: 58 },
+        points: [
+          { index: 0, row: 0, column: 0, x_local: 2, y_local: 2, x_machine: null, y_machine: null, status: "PENDING" },
+          { index: 1, row: 0, column: 1, x_local: 78, y_local: 2, x_machine: null, y_machine: null, status: "PENDING" },
+          { index: 2, row: 1, column: 1, x_local: 78, y_local: 58, x_machine: null, y_machine: null, status: "PENDING" },
+          { index: 3, row: 1, column: 0, x_local: 2, y_local: 58, x_machine: null, y_machine: null, status: "PENDING" },
+        ],
+        warnings: ["Vista previa en coordenadas PCB. Complete la referencia para calcular las coordenadas CNC."],
       },
     });
     apiMock.suggestPhysicalMap.mockResolvedValue({
@@ -391,6 +417,26 @@ describe("ProjectWorkspace", () => {
     expect(screen.queryByText(/Punto #5/i)).toBeNull();
     expect(screen.getByText(/PCB X\/Y: 2.000 mm \/ 2.000 mm/i)).toBeInTheDocument();
     expect(screen.getByText(/PCB X\/Y: 78.000 mm \/ 58.000 mm/i)).toBeInTheDocument();
+  });
+
+  it("genera preview local sin referencia fisica y actualiza el visor 2D", async () => {
+    const noReferenceSession = { ...referenceSession, origen_trabajo: null, referencia_z: null, lista_para_compensacion: false };
+    apiMock.getReferenceSession.mockResolvedValue(noReferenceSession);
+    renderWorkspace(physicalMachine);
+    fireEvent.click(screen.getByRole("button", { name: /Mapa de alturas/i }));
+    expect(await screen.findByText(/Mapa medido físicamente/i)).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText(/^Filas$/i), { target: { value: "2" } });
+    fireEvent.change(screen.getByLabelText(/^Columnas$/i), { target: { value: "2" } });
+    fireEvent.click(screen.getByRole("button", { name: /Generar vista previa de malla/i }));
+
+    await waitFor(() => expect(apiMock.previewPhysicalMap).toHaveBeenCalledWith(
+      "proj_1",
+      "op_1",
+      expect.objectContaining({ grid_mode: "manual", rows: 2, columns: 2 })
+    ));
+    expect(await screen.findByText(/Heatmap mock · 4 puntos · preview/i)).toBeInTheDocument();
+    expect(screen.getByText(/Vista previa en coordenadas PCB/i)).toBeInTheDocument();
   });
 
   it("muestra propuesta automática, permite aceptarla y reiniciar solo el mapa", async () => {

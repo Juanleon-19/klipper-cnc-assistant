@@ -354,6 +354,30 @@ export default function App() {
     }
   };
 
+  const handleResetProjectProcess = async (project: Project) => {
+    const setup = project.montajes.find((item) => item.id === project.current_setup_id) ?? project.montajes[0];
+    if (!setup) return;
+    const confirmed = window.confirm(`Se eliminarán las referencias, la medición activa y el estado físico del montaje. Los G-codes, operaciones, herramientas, configuración de malla y mediciones anteriores se conservarán en el historial.
+
+Proyecto: ${project.nombre}
+Montaje: ${setup.nombre}
+
+Después deberá volver a conectar el Arduino, hacer homing, posicionar X0/Y0 y medir la referencia.`);
+    if (!confirmed) return;
+    setBusyKey(`project:reset-process:${project.id}`);
+    setError("");
+    try {
+      await api.resetSetupPreparation(project.id, setup.id, "Reinicio de proceso desde proyectos.");
+      const updated = await syncProject(project.id);
+      setProjects((current) => current.map((item) => item.id === project.id ? updated : item));
+      await refreshMachineRuntime();
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : "No fue posible reiniciar el proceso del proyecto.");
+    } finally {
+      setBusyKey(null);
+    }
+  };
+
   const handleArchiveProject = async (projectId: string) => {
     setBusyKey(`project:archive:${projectId}`);
     setError("");
@@ -605,6 +629,7 @@ export default function App() {
                 onCreateProject={() => handleSelectView("nuevo")}
                 onContinueProject={handleContinueProject}
                 onArchiveProject={handleArchiveProject}
+                onResetProjectProcess={handleResetProjectProcess}
                 onTrashProject={handleTrashProject}
                 onRestoreProject={handleRestoreProject}
                 onPermanentlyDeleteProject={handlePermanentlyDeleteProject}
