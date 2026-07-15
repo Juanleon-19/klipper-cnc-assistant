@@ -1208,7 +1208,11 @@ class MachineRuntime:
                     consecutive_away_samples += 1
                     if consecutive_away_samples >= away_required_samples:
                         detail = self._observed_detail(last_snapshot)
-                        raise MachineRuntimeError(f"{label}: la posición se aleja del objetivo. Observado {detail}; objetivo {self._target_detail(targets)}.")
+                        if label == "z_preparacion_referencia":
+                            with self._lock:
+                                self._event("warning", f"{label}: detección de alejamiento tratada como diagnóstico; Observado {detail}; objetivo {self._target_detail(targets)}.")
+                        else:
+                            raise MachineRuntimeError(f"{label}: la posición se aleja del objetivo. Observado {detail}; objetivo {self._target_detail(targets)}.")
                 elif moving_by_velocity:
                     last_progress_at = now
                     consecutive_away_samples = 0

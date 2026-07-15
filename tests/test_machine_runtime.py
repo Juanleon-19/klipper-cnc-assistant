@@ -750,7 +750,7 @@ class MachineRuntimeTest(unittest.TestCase):
         self.assertEqual(snapshot["last_movement"]["live_position_source"], "http")
         self.assertIn("X50.000000", client.scripts[2])
 
-    def test_reference_z_wrong_direction_is_blocked_before_center(self) -> None:
+    def test_reference_z_wrong_direction_times_out_without_away_hard_stop(self) -> None:
         cfg = config(MachineMode.PHYSICAL, no_progress_timeout_s=15.0)
         machine = MachineState(
             position=MachinePosition(0, 0, 0),
@@ -770,13 +770,14 @@ class MachineRuntimeTest(unittest.TestCase):
         original_time = runtime_module.time
         runtime_module.time = fake_clock
         try:
-            with self.assertRaisesRegex(MachineRuntimeError, "se aleja del objetivo"):
+            with self.assertRaisesRegex(MachineRuntimeError, "sin progreso durante 15.000 s"):
                 runtime.initialize()
         finally:
             runtime_module.time = original_time
 
         self.assertEqual(len(client.scripts), 2)
         self.assertIn("Z115.000000", client.scripts[1])
+        self.assertFalse(any("X50.000000" in script for script in client.scripts))
 
     def test_http_timeout_after_completed_reference_z_continues_to_center(self) -> None:
         machine = MachineState(
