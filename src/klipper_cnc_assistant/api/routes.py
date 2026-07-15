@@ -234,7 +234,7 @@ def build_router() -> APIRouter:
         result = request.app.state.physical_map_service.reset_preparation(project_id=project_id, setup_id=setup_id, reason=payload.motivo, user_session=payload.session)
         machine_session_service = getattr(request.app.state, "machine_session_service", None)
         if machine_session_service is not None:
-            result["machine_session"] = machine_session_service.reset_session().model_dump()
+            result["machine_session"] = machine_session_to_response(machine_session_service.reset_session()).model_dump()
         runtime = getattr(request.app.state, "machine_runtime", None)
         if runtime is not None:
             result["runtime"] = runtime.reset_physical_session()

@@ -327,6 +327,22 @@ class ApiTest(unittest.TestCase):
         self.assertEqual(shared_map.status_code, 200)
         self.assertEqual(shared_map.json()["version"], simulated.json()["version"])
 
+    def test_reset_setup_preparation_serializes_machine_session_without_crash(self) -> None:
+        project_id = self._create_project()
+        project = self.client.get(f"/api/projects/{project_id}").json()
+        setup_id = project["montajes"][0]["id"]
+
+        response = self.client.post(
+            f"/api/projects/{project_id}/setups/{setup_id}/reset-preparation",
+            json={},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertIn("machine_session", payload)
+        self.assertIn("estado", payload["machine_session"])
+        self.assertIn("runtime", payload)
+
     def test_system_info_exposes_build_compatibility(self) -> None:
         payload = self.client.get("/api/system/info").json()
         self.assertIn("backend_version", payload)
