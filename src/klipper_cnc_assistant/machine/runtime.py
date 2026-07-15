@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import _thread
 import asyncio
+import math
 import threading
 import time
 from dataclasses import dataclass, field
@@ -915,6 +916,15 @@ class MachineRuntime:
 
     def _move_absolute(self, *, x: float | None = None, y: float | None = None, z: float | None = None, label: str) -> None:
         self._validate_machine_target(x=x, y=y, z=z, label=label)
+        if self._machine is None:
+            raise MachineRuntimeError("No hay telemetría de máquina.")
+        feed_mm_min = 600.0
+        start_snapshot = self._machine.get_motion_snapshot()
+        targets = {axis: target for axis, target in (("x", x), ("y", y), ("z", z)) if target is not None}
+        distance_mm = self._target_distance(start_snapshot, targets)
+        speed_mm_s = feed_mm_min / 60.0
+        expected_time_s = distance_mm / speed_mm_s if speed_mm_s > 0 else 0.0
+        operation_timeout_s = self._operation_timeout_s(distance_mm=distance_mm, feed_mm_min=feed_mm_min)
         axes = []
         if x is not None:
             axes.append(f"X{x:.6f}")
@@ -922,31 +932,110 @@ class MachineRuntime:
             axes.append(f"Y{y:.6f}")
         if z is not None:
             axes.append(f"Z{z:.6f}")
-        script = "SAVE_GCODE_STATE NAME=cnc_assistant_machine_move\nG90\nG1 " + " ".join(axes) + " F600.000\nRESTORE_GCODE_STATE NAME=cnc_assistant_machine_move"
+        script = "SAVE_GCODE_STATE NAME=cnc_assistant_machine_move\nG90\nG1 " + " ".join(axes) + f" F{feed_mm_min:.3f}\nRESTORE_GCODE_STATE NAME=cnc_assistant_machine_move"
+        movement = {
+            "label": label,
+            "initial_position": {axis: float(start_snapshot[axis]) for axis in ("x", "y", "z")},
+            "target": targets,
+            "distance_mm": distance_mm,
+            "feed_mm_min": feed_mm_min,
+            "speed_mm_s": speed_mm_s,
+            "expected_time_s": expected_time_s,
+            "timeout_s": operation_timeout_s,
+            "position_tolerance_mm": self.config.settle_tolerance_mm,
+            "velocity_tolerance_mm_s": self.config.velocity_tolerance_mm_s,
+            "stable_samples_required": max(1, int(self.config.stable_samples)),
+        }
+        with self._lock:
+            self._last_movement = movement
         self._send_script(script, label=label)
-        self._last_movement = {"label": label, "x": x, "y": y, "z": z}
-        targets = {axis: target for axis, target in (("x", x), ("y", y), ("z", z)) if target is not None}
-        self._wait_for_targets(targets, label)
-        self._step(label, "ok", script.replace("\n", " "))
+        result = self._wait_for_targets(targets, label, operation_timeout_s=operation_timeout_s)
+        movement.update(result)
+        with self._lock:
+            self._last_movement = movement
+        self._step(label, "ok", self._movement_step_detail(label, movement))
 
-    def _wait_for_targets(self, targets: dict[str, float], label: str) -> None:
+    def _target_distance(self, snapshot: dict[str, Any], targets: dict[str, float]) -> float:
+        return math.sqrt(sum((float(snapshot[axis]) - target) ** 2 for axis, target in targets.items()))
+
+    def _operation_timeout_s(self, *, distance_mm: float, feed_mm_min: float) -> float:
+        speed_mm_s = feed_mm_min / 60.0
+        expected_time_s = distance_mm / speed_mm_s if speed_mm_s > 0 else 0.0
+        minimum_timeout_s = max(float(self.config.move_timeout_s), float(self.config.move_minimum_timeout_s))
+        return max(minimum_timeout_s, expected_time_s * float(self.config.move_timeout_factor) + float(self.config.move_settle_margin_s))
+
+    def _movement_step_detail(self, label: str, movement: dict[str, Any]) -> str:
+        observed = movement.get("observed_position", {})
+        target = movement.get("target", {})
+        target_detail = ", ".join(f"{axis.upper()}={value:.3f}" for axis, value in target.items())
+        observed_detail = ", ".join(
+            f"{axis.upper()}={float(observed[axis]):.3f}"
+            for axis in ("x", "y", "z")
+            if axis in observed
+        )
+        return (
+            f"{label}: objetivo {target_detail}; distancia {movement['distance_mm']:.3f} mm; "
+            f"velocidad {movement['speed_mm_s']:.3f} mm/s; estimado {movement['expected_time_s']:.3f} s; "
+            f"timeout {movement['timeout_s']:.3f} s; observado {observed_detail}; "
+            f"resultado {movement.get('result', 'confirmado')}."
+        )
+
+    def _targets_reached(self, snapshot: dict[str, Any], targets: dict[str, float]) -> tuple[bool, float]:
+        velocity = abs(float(snapshot["velocity"]))
+        positions_ok = all(
+            abs(float(snapshot[axis]) - target) <= self.config.settle_tolerance_mm
+            for axis, target in targets.items()
+        )
+        return positions_ok and velocity <= self.config.velocity_tolerance_mm_s, velocity
+
+    def _wait_for_targets(self, targets: dict[str, float], label: str, *, operation_timeout_s: float) -> dict[str, Any]:
         if self._machine is None:
             raise MachineRuntimeError("No hay telemetría de máquina.")
         start = time.monotonic()
-        while time.monotonic() - start <= self.config.move_timeout_s:
+        stable_samples = 0
+        required_stable_samples = max(1, int(self.config.stable_samples))
+        last_snapshot = self._machine.get_motion_snapshot()
+        last_velocity = abs(float(last_snapshot["velocity"]))
+        last_refresh = start
+        while time.monotonic() - start <= operation_timeout_s:
             self._assert_safety_for_connection()
-            snapshot = self._machine.get_motion_snapshot()
-            velocity = abs(float(snapshot["velocity"]))
-            positions_ok = all(
-                abs(float(snapshot[axis]) - target) <= self.config.settle_tolerance_mm
-                for axis, target in targets.items()
-            )
-            if positions_ok and velocity <= self.config.velocity_tolerance_mm_s:
+            now = time.monotonic()
+            if now - last_refresh >= 0.25:
+                self._refresh_machine_best_effort()
+                last_refresh = now
+            last_snapshot = self._machine.get_motion_snapshot()
+            reached, last_velocity = self._targets_reached(last_snapshot, targets)
+            stable_samples = stable_samples + 1 if reached else 0
+            if stable_samples >= required_stable_samples:
                 self._clear_resolved_transport_timeout(label)
-                return
+                return {
+                    "observed_position": {axis: float(last_snapshot[axis]) for axis in ("x", "y", "z")},
+                    "observed_velocity_mm_s": last_velocity,
+                    "stable_samples": stable_samples,
+                    "elapsed_s": time.monotonic() - start,
+                    "result": "confirmado",
+                }
             time.sleep(0.05)
+        self._refresh_machine_best_effort()
+        final_snapshot = self._machine.get_motion_snapshot()
+        reached, final_velocity = self._targets_reached(final_snapshot, targets)
+        if reached:
+            self._clear_resolved_transport_timeout(label)
+            with self._lock:
+                self._event("info", f"{label}: timeout de espera reconciliado por posición física dentro de tolerancia y velocidad cero.")
+            return {
+                "observed_position": {axis: float(final_snapshot[axis]) for axis in ("x", "y", "z")},
+                "observed_velocity_mm_s": final_velocity,
+                "stable_samples": stable_samples,
+                "elapsed_s": time.monotonic() - start,
+                "result": "reconciliado",
+            }
         detail = ", ".join(f"{axis.upper()}={target:.3f}" for axis, target in targets.items())
-        raise MachineRuntimeError(f"Timeout esperando confirmación de {label} ({detail}).")
+        observed_detail = ", ".join(f"{axis.upper()}={float(final_snapshot[axis]):.3f}" for axis in ("x", "y", "z"))
+        raise MachineRuntimeError(
+            f"Timeout esperando confirmación de {label} ({detail}) tras {operation_timeout_s:.3f} s. "
+            f"Posición observada: {observed_detail}; velocidad={final_velocity:.3f} mm/s."
+        )
 
     def _wait_for_homing(self, required_axes: set[str]) -> None:
         if self._machine is None:

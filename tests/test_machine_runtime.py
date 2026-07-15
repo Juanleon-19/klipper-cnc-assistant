@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import re
+import threading
 import time
 import unittest
+from dataclasses import replace
 
 from klipper_cnc_assistant.input.command_mapper import CommandMapper
 from klipper_cnc_assistant.input.serial_driver import ControllerPacket
@@ -12,8 +14,8 @@ from klipper_cnc_assistant.machine.state import AxisLimits, MachinePosition, Mac
 from klipper_cnc_assistant.moonraker.client import MoonrakerTimeout
 
 
-def config(mode: MachineMode = MachineMode.SIMULATED) -> MachineRuntimeConfig:
-    return MachineRuntimeConfig(
+def config(mode: MachineMode = MachineMode.SIMULATED, **overrides) -> MachineRuntimeConfig:
+    cfg = MachineRuntimeConfig(
         mode=mode,
         auto_connect=False,
         moonraker_url=None,
@@ -30,14 +32,19 @@ def config(mode: MachineMode = MachineMode.SIMULATED) -> MachineRuntimeConfig:
         telemetry_fresh_timeout_s=2.0,
         serial_fresh_timeout_s=2.0,
         serial_startup_delay_s=0.0,
-        settle_tolerance_mm=0.02,
-        velocity_tolerance_mm_s=0.05,
+        settle_tolerance_mm=0.05,
+        velocity_tolerance_mm_s=0.01,
         move_timeout_s=1.0,
+        move_minimum_timeout_s=20.0,
+        move_timeout_factor=1.5,
+        move_settle_margin_s=5.0,
+        stable_samples=2,
         probe_step_mm=0.05,
         probe_lower_speed_mm_s=1.0,
         probe_retract_mm=1.0,
         probe_retract_speed_mm_s=2.0,
     )
+    return replace(cfg, **overrides) if overrides else cfg
 
 
 class FakeDiagnostics:
@@ -97,8 +104,54 @@ class MotionClient:
         return {"result": "ok"}
 
 
-def physical_runtime_with_machine(machine: MachineState) -> tuple[MachineRuntime, MotionClient]:
-    cfg = config(MachineMode.PHYSICAL)
+class TimeoutAfterCompletedMoveClient(MotionClient):
+    def send_gcode(self, script: str, *, timeout: float | None = None) -> dict[str, object]:
+        if "G28" in script:
+            return super().send_gcode(script, timeout=timeout)
+        super().send_gcode(script, timeout=timeout)
+        raise MoonrakerTimeout("G-code request timed out: movimiento terminado")
+
+
+class IncompleteMoveClient(MotionClient):
+    def send_gcode(self, script: str, *, timeout: float | None = None) -> dict[str, object]:
+        self.scripts.append(script)
+        if "G28" in script:
+            self.machine.update_toolhead(position=(0, 0, 0), homed_axes="xyz")
+            self.machine.update_motion(live_position=(0, 0, 0), live_velocity=0)
+        return {"result": "ok"}
+
+
+class DelayedMoveClient(MotionClient):
+    def send_gcode(self, script: str, *, timeout: float | None = None) -> dict[str, object]:
+        self.scripts.append(script)
+        if "G28" in script:
+            self.machine.update_toolhead(position=(0, 0, 0), homed_axes="xyz")
+            self.machine.update_motion(live_position=(0, 0, 0), live_velocity=0)
+            return {"result": "ok"}
+        snapshot = self.machine.get_motion_snapshot()
+        x = float(snapshot["x"])
+        y = float(snapshot["y"])
+        z = float(snapshot["z"])
+        match_x = re.search(r"\bX(-?\d+(?:\.\d+)?)", script)
+        match_y = re.search(r"\bY(-?\d+(?:\.\d+)?)", script)
+        match_z = re.search(r"\bZ(-?\d+(?:\.\d+)?)", script)
+        if match_x:
+            x = float(match_x.group(1))
+        if match_y:
+            y = float(match_y.group(1))
+        if match_z:
+            z = float(match_z.group(1))
+        self.machine.update_motion(live_velocity=10)
+
+        def arrive() -> None:
+            self.machine.update_motion(live_position=(x, y, z), live_velocity=0)
+
+        threading.Timer(0.12, arrive).start()
+        return {"result": "ok"}
+
+
+def physical_runtime_with_machine(machine: MachineState, cfg: MachineRuntimeConfig | None = None) -> tuple[MachineRuntime, MotionClient]:
+    cfg = cfg or config(MachineMode.PHYSICAL)
     runtime = MachineRuntime(cfg, discovery=lambda _client: machine)
     client = MotionClient(machine)
     runtime._client = client
@@ -182,6 +235,102 @@ class MachineRuntimeTest(unittest.TestCase):
         self.assertEqual(machine.get_motion_snapshot()["x"], 50.0)
         self.assertEqual(machine.get_motion_snapshot()["y"], 30.0)
         self.assertTrue(any(step["name"] == "centro_confirmado" for step in snapshot["initialization_steps"]))
+
+    def test_reference_z_115_uses_dynamic_timeout_above_travel_time(self) -> None:
+        machine = MachineState(
+            position=MachinePosition(0, 0, 0),
+            x_limits=AxisLimits(0, 100),
+            y_limits=AxisLimits(0, 100),
+            z_limits=AxisLimits(0, 200),
+            homed_axes="",
+            max_velocity=100,
+            max_accel=500,
+            live_velocity=0,
+        )
+        runtime, client = physical_runtime_with_machine(machine)
+
+        snapshot = runtime.initialize()
+
+        z_step = next(step for step in snapshot["initialization_steps"] if step["name"] == "z_preparacion_referencia")
+        self.assertIn("distancia 115.000 mm", z_step["detail"])
+        self.assertIn("estimado 11.500 s", z_step["detail"])
+        self.assertIn("timeout 22.250 s", z_step["detail"])
+        self.assertIn("X50.000000", client.scripts[2])
+        self.assertEqual(snapshot["state"], "WAITING_FOR_XY_REFERENCE")
+
+    def test_http_timeout_after_completed_reference_z_continues_to_center(self) -> None:
+        machine = MachineState(
+            position=MachinePosition(0, 0, 0),
+            x_limits=AxisLimits(0, 100),
+            y_limits=AxisLimits(0, 100),
+            z_limits=AxisLimits(0, 200),
+            homed_axes="",
+            max_velocity=100,
+            max_accel=500,
+            live_velocity=0,
+        )
+        runtime, _client = physical_runtime_with_machine(machine)
+        client = TimeoutAfterCompletedMoveClient(machine)
+        runtime._client = client
+
+        snapshot = runtime.initialize()
+
+        self.assertEqual(snapshot["state"], "WAITING_FOR_XY_REFERENCE")
+        self.assertIsNone(snapshot["last_error"])
+        self.assertIn("Z115.000000", client.scripts[1])
+        self.assertIn("X50.000000", client.scripts[2])
+        self.assertTrue(any("Timeout HTTP de z_preparacion_referencia resuelto" in event["message"] for event in snapshot["events"]))
+
+    def test_delayed_telemetry_for_reference_z_is_reconciled_before_center(self) -> None:
+        machine = MachineState(
+            position=MachinePosition(0, 0, 0),
+            x_limits=AxisLimits(0, 100),
+            y_limits=AxisLimits(0, 100),
+            z_limits=AxisLimits(0, 200),
+            homed_axes="",
+            max_velocity=100,
+            max_accel=500,
+            live_velocity=0,
+        )
+        runtime, _client = physical_runtime_with_machine(machine)
+        client = DelayedMoveClient(machine)
+        runtime._client = client
+
+        snapshot = runtime.initialize()
+
+        self.assertEqual(snapshot["state"], "WAITING_FOR_XY_REFERENCE")
+        self.assertIn("Z115.000000", client.scripts[1])
+        self.assertIn("X50.000000", client.scripts[2])
+        self.assertAlmostEqual(machine.get_motion_snapshot()["z"], 115.0, places=3)
+
+    def test_incomplete_reference_z_times_out_with_observed_position(self) -> None:
+        cfg = config(
+            MachineMode.PHYSICAL,
+            move_timeout_s=0.1,
+            move_minimum_timeout_s=0.1,
+            move_timeout_factor=0.0,
+            move_settle_margin_s=0.0,
+            stable_samples=1,
+        )
+        machine = MachineState(
+            position=MachinePosition(0, 0, 0),
+            x_limits=AxisLimits(0, 100),
+            y_limits=AxisLimits(0, 100),
+            z_limits=AxisLimits(0, 200),
+            homed_axes="",
+            max_velocity=100,
+            max_accel=500,
+            live_velocity=0,
+        )
+        runtime, _client = physical_runtime_with_machine(machine, cfg=cfg)
+        client = IncompleteMoveClient(machine)
+        runtime._client = client
+
+        with self.assertRaisesRegex(MachineRuntimeError, "Posición observada: X=0.000, Y=0.000, Z=0.000"):
+            runtime.initialize()
+
+        self.assertEqual(len(client.scripts), 2)
+        self.assertIn("Z115.000000", client.scripts[1])
 
     def test_initialize_rejects_reference_z_outside_klipper_limits(self) -> None:
         machine = MachineState(

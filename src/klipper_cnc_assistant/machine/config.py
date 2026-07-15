@@ -31,6 +31,10 @@ class MachineRuntimeConfig:
     settle_tolerance_mm: float
     velocity_tolerance_mm_s: float
     move_timeout_s: float
+    move_minimum_timeout_s: float
+    move_timeout_factor: float
+    move_settle_margin_s: float
+    stable_samples: int
     probe_step_mm: float
     probe_lower_speed_mm_s: float
     probe_retract_mm: float
@@ -82,9 +86,13 @@ def load_machine_runtime_config() -> MachineRuntimeConfig:
         telemetry_fresh_timeout_s=_env_float("TELEMETRY_STALE_TIMEOUT", _env_float("MACHINE_TELEMETRY_FRESH_TIMEOUT", 2.0)),
         serial_fresh_timeout_s=_env_float("MACHINE_SERIAL_FRESH_TIMEOUT", 2.0),
         serial_startup_delay_s=_env_float("SERIAL_STARTUP_DELAY", 2.0),
-        settle_tolerance_mm=_env_float("MACHINE_SETTLE_TOLERANCE", 0.02),
-        velocity_tolerance_mm_s=_env_float("MACHINE_VELOCITY_TOLERANCE", 0.05),
-        move_timeout_s=_env_float("MACHINE_MOVE_TIMEOUT", 8.0),
+        settle_tolerance_mm=_env_float("MACHINE_POSITION_TOLERANCE_MM", _env_float("MACHINE_SETTLE_TOLERANCE", 0.05)),
+        velocity_tolerance_mm_s=_env_float("MACHINE_VELOCITY_TOLERANCE_MM_S", _env_float("MACHINE_VELOCITY_TOLERANCE", 0.01)),
+        move_timeout_s=_env_float("MACHINE_MOVE_TIMEOUT", 20.0),
+        move_minimum_timeout_s=_env_float("MACHINE_MOVE_MINIMUM_TIMEOUT", 20.0),
+        move_timeout_factor=_env_float("MACHINE_MOVE_TIMEOUT_FACTOR", 1.5),
+        move_settle_margin_s=_env_float("MACHINE_MOVE_SETTLE_MARGIN", 5.0),
+        stable_samples=_env_int("MACHINE_STABLE_SAMPLES", 3),
         probe_step_mm=_env_float("PROBE_STEP_DISTANCE", 0.05),
         probe_lower_speed_mm_s=_env_float("PROBE_LOWER_SPEED", 1.0),
         probe_retract_mm=_env_float("PROBE_RETRACT_DISTANCE", 1.0),
