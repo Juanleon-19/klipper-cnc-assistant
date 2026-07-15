@@ -358,6 +358,7 @@ class PhysicalMapService:
             config=selected_config,
             height_map=height_map,
             status="MESH_PLANNED",
+            reference_already_measured=True,
             placement_revision=project.get_setup(operation.setup_id).placement_revision,
         )
         if previous_partial_message:
@@ -747,6 +748,8 @@ class PhysicalMapService:
             origin_y=origin_y,
             include_reference=True,
         )
+        if kwargs.get("reference_already_measured"):
+            points = self._apply_captured_reference_point(points, reference_z=float(kwargs["reference_z"]))
         total_distance = self._distance_for_points(points)
         tool_reference = self._tool_reference(
             operation=operation,
@@ -848,7 +851,7 @@ class PhysicalMapService:
                 "last_result": None,
                 "retry_count": 0,
                 "error": None,
-                "measured_count": 0,
+                "measured_count": sum(1 for point in points if point.get("status") == "MEASURED"),
                 "pending_count": sum(1 for point in points if point.get("status") in {"PENDING", "RETRY_REQUIRED", "FAILED"}),
                 "excluded_count": sum(1 for point in points if point.get("status") == "EXCLUDED"),
                 "failed_count": 0,
@@ -859,6 +862,31 @@ class PhysicalMapService:
             "height_map": self._serialize_height_map(height_map),
         }
 
+
+    def _apply_captured_reference_point(self, points: list[dict[str, Any]], *, reference_z: float) -> list[dict[str, Any]]:
+        measured_at = _iso_now()
+        updated_points: list[dict[str, Any]] = []
+        for point in points:
+            if point.get("role") != "REFERENCE":
+                updated_points.append(point)
+                continue
+            reference_point = dict(point)
+            reference_point.update({
+                "z_measured": reference_z,
+                "z_measured_abs": reference_z,
+                "delta_z": 0.0,
+                "timestamp": measured_at,
+                "started_at": measured_at,
+                "measured_at": measured_at,
+                "status": "MEASURED",
+                "attempts": max(1, int(reference_point.get("attempts", 0))),
+                "duration": 0.0,
+                "duration_s": 0.0,
+                "error": None,
+                "last_error": None,
+            })
+            updated_points.append(reference_point)
+        return updated_points
 
     def _points_from_samples(
         self,
