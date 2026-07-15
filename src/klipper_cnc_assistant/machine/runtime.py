@@ -944,7 +944,7 @@ class MachineRuntime:
                     max_z_velocity=refreshed.max_z_velocity,
                 )
                 if refreshed.live_position is not None:
-                    self._machine.update_motion(live_position=refreshed.live_position.as_tuple(), live_velocity=refreshed.live_velocity)
+                    self._machine.update_motion(live_position=refreshed.live_position.as_tuple(), live_velocity=refreshed.live_velocity, source=refreshed.live_position_source)
                 self._machine.update_gcode_move(
                     gcode_position=None if refreshed.gcode_position is None else refreshed.gcode_position.as_tuple(),
                     position=None if refreshed.gcode_move_position is None else refreshed.gcode_move_position.as_tuple(),
@@ -1145,11 +1145,14 @@ class MachineRuntime:
         required_stable_samples = max(1, int(self.config.stable_samples))
         start_snapshot = self._machine.get_motion_snapshot()
         last_snapshot = start_snapshot
-        previous_live_axis = {axis: float(start_snapshot[axis]) for axis in targets}
-        best_remaining = self._remaining_distance(start_snapshot, targets)
+        previous_live_sample: dict[str, float] | None = None
+        previous_live_source: str | None = None
         last_progress_at = start
         reached_position_at: float | None = None
-        wrong_direction_samples = 0
+        away_required_samples = 5
+        progress_epsilon = 0.005
+        away_tolerance = 0.050
+        consecutive_away_samples = 0
         last_refresh = start
         while time.monotonic() - start <= operation_timeout_s:
             self._assert_safety_for_connection()
@@ -1160,13 +1163,20 @@ class MachineRuntime:
             last_snapshot = self._machine.get_motion_snapshot()
             reached, positions_ok, last_velocity = self._targets_reached(last_snapshot, targets)
             remaining = self._remaining_distance(last_snapshot, targets)
-            traveled = self._distance_from_start(start_snapshot, last_snapshot, targets)
+            live_sample_source = str(last_snapshot.get("live_position_source") or "unknown")
+            current_live_sample = {axis: float(last_snapshot[axis]) for axis in targets}
+            previous_distance = None
+            current_distance = None
+            if previous_live_sample is not None and previous_live_source == live_sample_source:
+                previous_distance = math.sqrt(sum((targets[axis] - previous_live_sample[axis]) ** 2 for axis in targets))
+                current_distance = math.sqrt(sum((targets[axis] - current_live_sample[axis]) ** 2 for axis in targets))
             with self._lock:
                 if self._last_movement is not None and self._last_movement.get("label") == label:
                     self._last_movement.update({
                         "observed_position": {axis: float(last_snapshot[axis]) for axis in ("x", "y", "z")},
                         "observed_velocity_mm_s": last_velocity,
                         "position_source": last_snapshot.get("source"),
+                        "live_position_source": live_sample_source,
                         "live_position": last_snapshot.get("live_position"),
                         "commanded_position": last_snapshot.get("commanded_position"),
                         "gcode_position": last_snapshot.get("gcode_position"),
@@ -1177,20 +1187,33 @@ class MachineRuntime:
                         "no_progress_elapsed_s": now - last_progress_at,
                         "progress_remaining_mm": remaining,
                         "stable_samples": stable_samples,
+                        "previous_live_z": None if previous_live_sample is None or "z" not in previous_live_sample else previous_live_sample["z"],
+                        "current_live_z": current_live_sample.get("z"),
+                        "target_z": targets.get("z"),
+                        "previous_distance_mm": previous_distance,
+                        "current_distance_mm": current_distance,
+                        "consecutive_away_samples": consecutive_away_samples,
                     })
-            live_axis_changed = any(abs(float(last_snapshot[axis]) - previous_live_axis[axis]) >= 0.02 for axis in targets)
-            moving_by_velocity = abs(last_velocity) >= self.config.velocity_tolerance_mm_s
-            if traveled > self.config.settle_tolerance_mm and remaining > best_remaining + self.config.settle_tolerance_mm:
-                wrong_direction_samples += 1
-                previous_live_axis = {axis: float(last_snapshot[axis]) for axis in targets}
-                if wrong_direction_samples >= max(3, required_stable_samples):
-                    detail = self._observed_detail(last_snapshot)
-                    raise MachineRuntimeError(f"{label}: la posición se aleja del objetivo. Observado {detail}; objetivo {self._target_detail(targets)}.")
-            elif live_axis_changed or moving_by_velocity or remaining < best_remaining - self.config.settle_tolerance_mm:
-                best_remaining = min(best_remaining, remaining)
+            if previous_live_source != live_sample_source or previous_live_sample is None:
+                previous_live_sample = current_live_sample
+                previous_live_source = live_sample_source
+                consecutive_away_samples = 0
                 last_progress_at = now
-                wrong_direction_samples = 0
-                previous_live_axis = {axis: float(last_snapshot[axis]) for axis in targets}
+            elif previous_distance is not None and current_distance is not None:
+                moving_by_velocity = abs(last_velocity) >= self.config.velocity_tolerance_mm_s
+                if current_distance < previous_distance - progress_epsilon:
+                    last_progress_at = now
+                    consecutive_away_samples = 0
+                elif current_distance > previous_distance + away_tolerance:
+                    consecutive_away_samples += 1
+                    if consecutive_away_samples >= away_required_samples:
+                        detail = self._observed_detail(last_snapshot)
+                        raise MachineRuntimeError(f"{label}: la posición se aleja del objetivo. Observado {detail}; objetivo {self._target_detail(targets)}.")
+                elif moving_by_velocity:
+                    last_progress_at = now
+                    consecutive_away_samples = 0
+                previous_live_sample = current_live_sample
+                previous_live_source = live_sample_source
             if positions_ok:
                 reached_position_at = reached_position_at or now
                 if now - reached_position_at > self.config.settle_timeout_s:

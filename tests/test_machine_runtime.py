@@ -247,6 +247,57 @@ class QueryFallbackClient(MotionClient):
         return super().send_gcode(script, timeout=timeout)
 
 
+class SampleSequenceZClient(MotionClient):
+    def __init__(self, machine: MachineState, z_samples: list[float], *, sources: list[str] | None = None, commanded_z: float | None = None) -> None:
+        super().__init__(machine)
+        self.z_samples = z_samples
+        self.sources = sources or ["websocket"] * len(z_samples)
+        self.commanded_z = commanded_z
+        self.sample_index = 0
+        self.z_active = False
+
+    def send_gcode(self, script: str, *, timeout: float | None = None) -> dict[str, object]:
+        self.scripts.append(script)
+        if "G28" in script:
+            self.machine.update_toolhead(position=(0, 0, 0), homed_axes="xyz")
+            self.machine.update_motion(live_position=(0, 0, 0), live_velocity=0, source="websocket")
+            return {"result": "ok"}
+        snapshot = self.machine.get_motion_snapshot()
+        match_z = re.search(r"\bZ(-?\d+(?:\.\d+)?)", script)
+        match_x = re.search(r"\bX(-?\d+(?:\.\d+)?)", script)
+        match_y = re.search(r"\bY(-?\d+(?:\.\d+)?)", script)
+        if match_z and not match_x and not match_y:
+            self.z_active = True
+            self.sample_index = 0
+            commanded_z = float(match_z.group(1)) if self.commanded_z is None else self.commanded_z
+            self.machine.update_toolhead(position=(0, 0, commanded_z))
+            self.machine.update_motion(
+                live_position=(float(snapshot["x"]), float(snapshot["y"]), self.z_samples[0]),
+                live_velocity=0 if len(self.z_samples) == 1 else 1.0,
+                source=self.sources[0],
+            )
+            return {"result": "ok"}
+        if match_x and match_y:
+            x = float(match_x.group(1))
+            y = float(match_y.group(1))
+            self.machine.update_motion(live_position=(x, y, float(snapshot["z"])), live_velocity=0, source=self.sources[min(self.sample_index, len(self.sources) - 1)])
+            return {"result": "ok"}
+        return super().send_gcode(script, timeout=timeout)
+
+    def advance(self, _seconds: float) -> None:
+        if not self.z_active or self.sample_index >= len(self.z_samples) - 1:
+            return
+        self.sample_index += 1
+        snapshot = self.machine.get_motion_snapshot()
+        z_value = self.z_samples[self.sample_index]
+        velocity = 0 if self.sample_index >= len(self.z_samples) - 1 else 1.0
+        self.machine.update_motion(
+            live_position=(float(snapshot["x"]), float(snapshot["y"]), z_value),
+            live_velocity=velocity,
+            source=self.sources[self.sample_index],
+        )
+
+
 class FakeClock:
     def __init__(self, updater=None) -> None:
         self.now = 0.0
@@ -536,6 +587,168 @@ class MachineRuntimeTest(unittest.TestCase):
             self.assertEqual(reloaded.config.no_progress_timeout_s, 70)
             self.assertEqual(reloaded.config.settle_tolerance_mm, 0.04)
             self.assertEqual(reloaded.config.velocity_tolerance_mm_s, 0.015)
+
+    def test_reference_z_sequence_0_5_17_783_50_100_115_continues_to_center(self) -> None:
+        machine = MachineState(
+            position=MachinePosition(0, 0, 0),
+            x_limits=AxisLimits(0, 100),
+            y_limits=AxisLimits(0, 100),
+            z_limits=AxisLimits(0, 200),
+            homed_axes="",
+            max_velocity=100,
+            max_accel=500,
+            max_z_velocity=10,
+            live_velocity=0,
+        )
+        runtime, _client = physical_runtime_with_machine(machine)
+        client = SampleSequenceZClient(machine, [0.0, 5.0, 17.783, 50.0, 100.0, 115.0, 115.0])
+        runtime._client = client
+        fake_clock = FakeClock(client.advance)
+        original_time = runtime_module.time
+        runtime_module.time = fake_clock
+        try:
+            snapshot = runtime.initialize()
+        finally:
+            runtime_module.time = original_time
+
+        self.assertEqual(snapshot["state"], "WAITING_FOR_XY_REFERENCE")
+        self.assertIn("Z115.000000", client.scripts[1])
+        self.assertIn("X50.000000", client.scripts[2])
+        self.assertEqual(sum(1 for script in client.scripts if "Z115.000000" in script), 1)
+
+    def test_reference_z_descending_sequence_115_100_60_17_0_is_progress(self) -> None:
+        machine = MachineState(
+            position=MachinePosition(0, 0, 115),
+            x_limits=AxisLimits(0, 100),
+            y_limits=AxisLimits(0, 100),
+            z_limits=AxisLimits(0, 200),
+            homed_axes="xyz",
+            max_velocity=100,
+            max_accel=500,
+            max_z_velocity=10,
+            live_velocity=0,
+        )
+        runtime, _client = physical_runtime_with_machine(machine)
+        client = SampleSequenceZClient(machine, [115.0, 100.0, 60.0, 17.0, 0.0, 0.0], commanded_z=0.0)
+        runtime._client = client
+        fake_clock = FakeClock(client.advance)
+        original_time = runtime_module.time
+        runtime_module.time = fake_clock
+        try:
+            runtime._move_absolute(z=0.0, label="z_descenso_prueba", feed_mm_min=120.0)
+        finally:
+            runtime_module.time = original_time
+
+        snapshot = runtime.snapshot()
+        self.assertEqual(snapshot["last_movement"]["result"], "confirmado")
+        self.assertEqual(sum(1 for script in client.scripts if "Z0.000000" in script), 1)
+
+    def test_reference_z_small_noise_does_not_trigger_away_detection(self) -> None:
+        machine = MachineState(
+            position=MachinePosition(0, 0, 0),
+            x_limits=AxisLimits(0, 100),
+            y_limits=AxisLimits(0, 100),
+            z_limits=AxisLimits(0, 200),
+            homed_axes="xyz",
+            max_velocity=100,
+            max_accel=500,
+            max_z_velocity=10,
+            live_velocity=0,
+        )
+        runtime, _client = physical_runtime_with_machine(machine)
+        client = SampleSequenceZClient(machine, [0.0, 5.0, 4.995, 5.004, 20.0, 115.0, 115.0])
+        runtime._client = client
+        fake_clock = FakeClock(client.advance)
+        original_time = runtime_module.time
+        runtime_module.time = fake_clock
+        try:
+            runtime._move_absolute(z=115.0, label="z_ruido_prueba", feed_mm_min=120.0)
+        finally:
+            runtime_module.time = original_time
+
+        snapshot = runtime.snapshot()
+        self.assertEqual(snapshot["last_movement"]["result"], "confirmado")
+
+    def test_reference_z_single_away_sample_is_not_enough_to_abort(self) -> None:
+        machine = MachineState(
+            position=MachinePosition(0, 0, 0),
+            x_limits=AxisLimits(0, 100),
+            y_limits=AxisLimits(0, 100),
+            z_limits=AxisLimits(0, 200),
+            homed_axes="xyz",
+            max_velocity=100,
+            max_accel=500,
+            max_z_velocity=10,
+            live_velocity=0,
+        )
+        runtime, _client = physical_runtime_with_machine(machine)
+        client = SampleSequenceZClient(machine, [0.0, 20.0, 19.9, 21.0, 40.0, 115.0, 115.0])
+        runtime._client = client
+        fake_clock = FakeClock(client.advance)
+        original_time = runtime_module.time
+        runtime_module.time = fake_clock
+        try:
+            runtime._move_absolute(z=115.0, label="z_away_aislado", feed_mm_min=120.0)
+        finally:
+            runtime_module.time = original_time
+
+        snapshot = runtime.snapshot()
+        self.assertEqual(snapshot["last_movement"]["result"], "confirmado")
+
+    def test_reference_z_five_consecutive_away_samples_abort(self) -> None:
+        machine = MachineState(
+            position=MachinePosition(0, 0, 0),
+            x_limits=AxisLimits(0, 100),
+            y_limits=AxisLimits(0, 100),
+            z_limits=AxisLimits(0, 200),
+            homed_axes="xyz",
+            max_velocity=100,
+            max_accel=500,
+            max_z_velocity=10,
+            live_velocity=0,
+        )
+        runtime, _client = physical_runtime_with_machine(machine)
+        client = SampleSequenceZClient(machine, [0.0, 20.0, 19.9, 19.8, 19.7, 19.6, 19.5])
+        runtime._client = client
+        fake_clock = FakeClock(client.advance)
+        original_time = runtime_module.time
+        runtime_module.time = fake_clock
+        try:
+            with self.assertRaisesRegex(MachineRuntimeError, "se aleja del objetivo"):
+                runtime._move_absolute(z=115.0, label="z_away_cinco", feed_mm_min=120.0)
+        finally:
+            runtime_module.time = original_time
+
+    def test_reference_z_source_change_resets_temporal_comparison(self) -> None:
+        machine = MachineState(
+            position=MachinePosition(0, 0, 0),
+            x_limits=AxisLimits(0, 100),
+            y_limits=AxisLimits(0, 100),
+            z_limits=AxisLimits(0, 200),
+            homed_axes="",
+            max_velocity=100,
+            max_accel=500,
+            max_z_velocity=10,
+            live_velocity=0,
+        )
+        runtime, _client = physical_runtime_with_machine(machine)
+        client = SampleSequenceZClient(
+            machine,
+            [0.0, 5.0, 17.783, 40.0, 80.0, 115.0, 115.0],
+            sources=["websocket", "websocket", "http", "http", "http", "http", "http"],
+        )
+        runtime._client = client
+        fake_clock = FakeClock(client.advance)
+        original_time = runtime_module.time
+        runtime_module.time = fake_clock
+        try:
+            snapshot = runtime.initialize()
+        finally:
+            runtime_module.time = original_time
+
+        self.assertEqual(snapshot["state"], "WAITING_FOR_XY_REFERENCE")
+        self.assertEqual(snapshot["last_movement"]["live_position_source"], "http")
+        self.assertIn("X50.000000", client.scripts[2])
 
     def test_reference_z_wrong_direction_is_blocked_before_center(self) -> None:
         cfg = config(MachineMode.PHYSICAL, no_progress_timeout_s=15.0)

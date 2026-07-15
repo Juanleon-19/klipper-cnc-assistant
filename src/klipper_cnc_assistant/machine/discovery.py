@@ -86,6 +86,7 @@ def discover_machine(
         machine.update_motion(
             live_position=motion_report.get("live_position"),
             live_velocity=motion_report.get("live_velocity"),
+            source="http",
         )
     gcode_move = status.get("gcode_move")
     if isinstance(gcode_move, dict):

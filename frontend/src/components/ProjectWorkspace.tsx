@@ -970,6 +970,12 @@ export function ProjectWorkspace({
             <div className="metric-box"><span>Fuente de posición</span><strong>{String(position?.source ?? "-")}</strong></div>
             <div className="metric-box"><span>Objetivo</span><strong>X {formatMillimeters(centerX, 3)} · Y {formatMillimeters(centerY, 3)} · Z {formatMillimeters(referencePrepZ, 3)}</strong></div>
             <div className="metric-box"><span>Timeout calculado</span><strong>{typeof lastMovement?.timeout_s === "number" ? `${lastMovement.timeout_s.toFixed(1)} s` : "-"}</strong></div>
+            <div className="metric-box"><span>Z viva anterior</span><strong>{formatMillimeters(typeof lastMovement?.previous_live_z === "number" ? lastMovement.previous_live_z : null, 3)}</strong></div>
+            <div className="metric-box"><span>Z viva actual</span><strong>{formatMillimeters(typeof lastMovement?.current_live_z === "number" ? lastMovement.current_live_z : null, 3)}</strong></div>
+            <div className="metric-box"><span>Distancia anterior</span><strong>{formatMillimeters(typeof lastMovement?.previous_distance_mm === "number" ? lastMovement.previous_distance_mm : null, 3)}</strong></div>
+            <div className="metric-box"><span>Distancia actual</span><strong>{formatMillimeters(typeof lastMovement?.current_distance_mm === "number" ? lastMovement.current_distance_mm : null, 3)}</strong></div>
+            <div className="metric-box"><span>Fuente viva</span><strong>{String(lastMovement?.live_position_source ?? "-")}</strong></div>
+            <div className="metric-box"><span>Muestras alejándose</span><strong>{typeof lastMovement?.consecutive_away_samples === "number" ? String(lastMovement.consecutive_away_samples) : "-"}</strong></div>
           </div>
           <details className="advanced-settings">
             <summary>Configuración avanzada de movimiento</summary>

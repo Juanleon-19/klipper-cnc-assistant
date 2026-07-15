@@ -67,6 +67,7 @@ class MoonrakerTelemetry:
         self.machine_state.update_motion(
             live_position=live_position,
             live_velocity=live_velocity,
+            source="websocket",
         )
 
     def _process_toolhead(

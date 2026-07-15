@@ -49,6 +49,7 @@ class MachineState:
     absolute_coordinates: bool | None = None
     homing_origin: MachinePosition | None = None
     live_position_updated_at: float | None = None
+    live_position_source: str | None = None
     commanded_position_updated_at: float | None = None
     gcode_position_updated_at: float | None = None
 
@@ -89,12 +90,13 @@ class MachineState:
             if max_z_velocity is not None:
                 self.max_z_velocity = float(max_z_velocity)
 
-    def update_motion(self, live_position=None, live_velocity=None):
+    def update_motion(self, live_position=None, live_velocity=None, source=None):
         with self._lock:
             now = time.monotonic()
             if live_position is not None:
                 self.live_position = MachinePosition.from_iterable(live_position)
                 self.live_position_updated_at = now
+                self.live_position_source = None if source is None else str(source)
                 self.position = MachinePosition(self.live_position.x, self.live_position.y, self.live_position.z)
             if live_velocity is not None:
                 self.live_velocity = float(live_velocity)
@@ -125,6 +127,7 @@ class MachineState:
                 "z": live.z,
                 "velocity": self.live_velocity,
                 "source": "motion_report.live_position" if self.live_position is not None else "toolhead.position",
+                "live_position_source": self.live_position_source,
                 "live_position": {"x": live.x, "y": live.y, "z": live.z},
                 "commanded_position": None if commanded is None else {"x": commanded.x, "y": commanded.y, "z": commanded.z},
                 "gcode_position": None if gcode is None else {"x": gcode.x, "y": gcode.y, "z": gcode.z},
