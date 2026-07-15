@@ -7,7 +7,7 @@ import time
 import unittest
 from dataclasses import replace
 
-from klipper_cnc_assistant.input.command_mapper import CommandMapper
+from klipper_cnc_assistant.input.command_mapper import CommandMapper, ControllerCommand
 from klipper_cnc_assistant.input.serial_driver import ControllerPacket
 from klipper_cnc_assistant.machine.config import MachineMode, MachineRuntimeConfig
 from klipper_cnc_assistant.machine.runtime import MachineRuntime, MachineRuntimeError
@@ -296,6 +296,22 @@ class SampleSequenceZClient(MotionClient):
             live_velocity=velocity,
             source=self.sources[self.sample_index],
         )
+
+
+class ProbeJogSpy:
+    def __init__(self, runtime, machine: MachineState) -> None:
+        self.runtime = runtime
+        self.machine = machine
+        self.calls: list[dict[str, float | str]] = []
+
+    def move_relative(self, axis, distance, speed):
+        snapshot = self.machine.get_motion_snapshot()
+        target = float(snapshot[axis]) + float(distance)
+        self.calls.append({"axis": axis, "distance": float(distance), "speed": float(speed), "target": target})
+        self.machine.update_motion(live_position=(float(snapshot["x"]), float(snapshot["y"]), target), live_velocity=0, source="websocket")
+        if distance < 0:
+            self.runtime._last_command = ControllerCommand(probe_triggered=True)
+        return {"axis": axis, "target": target, "speed": float(speed)}
 
 
 class FakeClock:
@@ -870,6 +886,32 @@ class MachineRuntimeTest(unittest.TestCase):
             runtime.initialize()
 
         self.assertEqual(client.scripts, ["G28"])
+
+    def test_reference_probe_retract_uses_same_speed_as_lowering(self) -> None:
+        machine = MachineState(
+            position=MachinePosition(10, 8, 5),
+            x_limits=AxisLimits(0, 100),
+            y_limits=AxisLimits(0, 100),
+            z_limits=AxisLimits(0, 200),
+            homed_axes="xyz",
+            max_velocity=100,
+            max_accel=500,
+            live_velocity=0,
+        )
+        runtime, _client = physical_runtime_with_machine(machine, cfg=config(MachineMode.PHYSICAL, probe_lower_speed_mm_s=1.25, probe_retract_speed_mm_s=9.0))
+        runtime._state = runtime_module.MachineRuntimeState.REFERENCE_ARMED
+        runtime._probe_requested = True
+        runtime._jog = ProbeJogSpy(runtime, machine)
+        runtime._last_command = ControllerCommand()
+        runtime._wait_for_axis = lambda *args, **kwargs: None
+
+        snapshot = runtime.confirm_probe()
+
+        self.assertEqual(snapshot["state"], "REFERENCE_CAPTURED")
+        self.assertEqual(len(runtime._jog.calls), 2)
+        self.assertEqual(runtime._jog.calls[0]["speed"], 1.25)
+        self.assertEqual(runtime._jog.calls[1]["speed"], 1.25)
+        self.assertGreater(float(runtime._jog.calls[1]["distance"]), 0.0)
 
     def test_tool_change_position_moves_z_before_xy(self) -> None:
         machine = MachineState(

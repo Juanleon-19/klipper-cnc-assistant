@@ -499,7 +499,7 @@ class MachineRuntime:
             self._manual_enabled = False
             self._diagnostic_input_only = True
             self._state = MachineRuntimeState.REFERENCE_ARMED
-            self._event("warning", "REFERENCE_ARMED: pulse el botón externo para sondear la referencia.")
+            self._event("info", "REFERENCE_ARMED: pulse el botón externo para sondear la referencia.")
         return self.snapshot()
 
     def confirm_probe(self) -> dict[str, Any]:
@@ -549,7 +549,7 @@ class MachineRuntime:
             if retract_available <= self.config.settle_tolerance_mm:
                 raise MachineRuntimeError("No hay margen Z para retraer después del contacto.")
             retract = min(self.config.probe_retract_mm, retract_available)
-            result = jog.move_relative("z", retract, self.config.probe_retract_speed_mm_s)
+            result = jog.move_relative("z", retract, self.config.probe_lower_speed_mm_s)
             with self._lock:
                 self._last_movement = result
                 self._last_command_text = "probe_retract"
@@ -642,7 +642,7 @@ class MachineRuntime:
         if retract_available <= self.config.settle_tolerance_mm:
             raise MachineRuntimeError("No hay margen Z para retraer después del contacto.")
         retract = min(self.config.probe_retract_mm, retract_available)
-        result = jog.move_relative("z", retract, self.config.probe_retract_speed_mm_s)
+        result = jog.move_relative("z", retract, self.config.probe_lower_speed_mm_s)
         with self._lock:
             self._last_movement = result
             self._last_command_text = f"{label}_retract"

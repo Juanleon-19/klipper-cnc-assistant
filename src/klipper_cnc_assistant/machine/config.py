@@ -104,5 +104,5 @@ def load_machine_runtime_config() -> MachineRuntimeConfig:
         probe_step_mm=_env_float("PROBE_STEP_DISTANCE", 0.05),
         probe_lower_speed_mm_s=_env_float("PROBE_LOWER_SPEED", 1.0),
         probe_retract_mm=_env_float("PROBE_RETRACT_DISTANCE", 1.0),
-        probe_retract_speed_mm_s=_env_float("PROBE_RETRACT_SPEED", 2.0),
+        probe_retract_speed_mm_s=_env_float("PROBE_RETRACT_SPEED", 1.0),
     )
