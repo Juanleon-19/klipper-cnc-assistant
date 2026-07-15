@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+import time
 import unittest
 
 from klipper_cnc_assistant.input.command_mapper import CommandMapper
@@ -19,6 +21,10 @@ def config(mode: MachineMode = MachineMode.SIMULATED) -> MachineRuntimeConfig:
         serial_port=None,
         serial_baudrate=115200,
         safe_z_mm=10.0,
+        reference_prep_z_mm=115.0,
+        tool_change_z_mm=115.0,
+        tool_change_x_mm=0.0,
+        tool_change_y_mm=0.0,
         moonraker_request_timeout_s=0.1,
         home_timeout_s=1.0,
         telemetry_fresh_timeout_s=2.0,
@@ -32,6 +38,76 @@ def config(mode: MachineMode = MachineMode.SIMULATED) -> MachineRuntimeConfig:
         probe_retract_mm=1.0,
         probe_retract_speed_mm_s=2.0,
     )
+
+
+class FakeDiagnostics:
+    thread_active = True
+
+    def snapshot(self, *, now: float) -> dict[str, object]:
+        return {
+            "port": "/dev/null",
+            "baudrate": 115200,
+            "open": True,
+            "thread_active": True,
+            "bytes_received": 1,
+            "packets_complete": 1,
+            "valid_packets": 1,
+            "invalid_packets": 0,
+            "checksum_errors": 0,
+            "sync_drops": 0,
+            "partial_packets": 0,
+            "reconnects": 0,
+            "last_byte_age_s": 0,
+            "last_valid_packet_age_s": 0,
+            "last_invalid_packet_age_s": None,
+            "last_exception": None,
+        }
+
+
+class FakeThread:
+    def is_alive(self) -> bool:
+        return True
+
+
+class MotionClient:
+    def __init__(self, machine: MachineState) -> None:
+        self.machine = machine
+        self.scripts: list[str] = []
+
+    def send_gcode(self, script: str, *, timeout: float | None = None) -> dict[str, object]:
+        self.scripts.append(script)
+        if "G28" in script:
+            self.machine.update_toolhead(position=(0, 0, 0), homed_axes="xyz")
+            self.machine.update_motion(live_position=(0, 0, 0), live_velocity=0)
+            return {"result": "ok"}
+        snapshot = self.machine.get_motion_snapshot()
+        x = float(snapshot["x"])
+        y = float(snapshot["y"])
+        z = float(snapshot["z"])
+        match_x = re.search(r"\bX(-?\d+(?:\.\d+)?)", script)
+        match_y = re.search(r"\bY(-?\d+(?:\.\d+)?)", script)
+        match_z = re.search(r"\bZ(-?\d+(?:\.\d+)?)", script)
+        if match_x:
+            x = float(match_x.group(1))
+        if match_y:
+            y = float(match_y.group(1))
+        if match_z:
+            z = float(match_z.group(1))
+        self.machine.update_motion(live_position=(x, y, z), live_velocity=0)
+        return {"result": "ok"}
+
+
+def physical_runtime_with_machine(machine: MachineState) -> tuple[MachineRuntime, MotionClient]:
+    cfg = config(MachineMode.PHYSICAL)
+    runtime = MachineRuntime(cfg, discovery=lambda _client: machine)
+    client = MotionClient(machine)
+    runtime._client = client
+    runtime._machine = machine
+    runtime._driver = type("Driver", (), {"diagnostics": FakeDiagnostics()})()
+    runtime._serial_thread = FakeThread()
+    runtime._last_packet_at = time.monotonic()
+    runtime._last_telemetry_at = time.monotonic()
+    return runtime, client
 
 
 class MachineRuntimeTest(unittest.TestCase):
@@ -80,6 +156,73 @@ class MachineRuntimeTest(unittest.TestCase):
         snapshot = runtime.snapshot()
         self.assertIsNone(snapshot["last_error"])
         self.assertTrue(any("Timeout HTTP de homing resuelto" in event["message"] for event in snapshot["events"]))
+
+    def test_initialize_runs_g28_then_reference_z_then_machine_center(self) -> None:
+        machine = MachineState(
+            position=MachinePosition(5, 5, 3),
+            x_limits=AxisLimits(-10, 110),
+            y_limits=AxisLimits(-20, 80),
+            z_limits=AxisLimits(0, 200),
+            homed_axes="",
+            max_velocity=100,
+            max_accel=500,
+            live_velocity=0,
+        )
+        runtime, client = physical_runtime_with_machine(machine)
+
+        snapshot = runtime.initialize()
+
+        self.assertEqual(snapshot["state"], "WAITING_FOR_XY_REFERENCE")
+        self.assertEqual(client.scripts[0], "G28")
+        self.assertIn("Z115.000000", client.scripts[1])
+        self.assertIn("X50.000000", client.scripts[2])
+        self.assertIn("Y30.000000", client.scripts[2])
+        self.assertLess(client.scripts[1].find("Z115.000000"), len(client.scripts[1]))
+        self.assertEqual(machine.get_motion_snapshot()["z"], 115.0)
+        self.assertEqual(machine.get_motion_snapshot()["x"], 50.0)
+        self.assertEqual(machine.get_motion_snapshot()["y"], 30.0)
+        self.assertTrue(any(step["name"] == "centro_confirmado" for step in snapshot["initialization_steps"]))
+
+    def test_initialize_rejects_reference_z_outside_klipper_limits(self) -> None:
+        machine = MachineState(
+            position=MachinePosition(0, 0, 0),
+            x_limits=AxisLimits(0, 100),
+            y_limits=AxisLimits(0, 100),
+            z_limits=AxisLimits(0, 60),
+            homed_axes="",
+            max_velocity=100,
+            max_accel=500,
+            live_velocity=0,
+        )
+        runtime, client = physical_runtime_with_machine(machine)
+
+        with self.assertRaisesRegex(MachineRuntimeError, "fuera de límites"):
+            runtime.initialize()
+
+        self.assertEqual(client.scripts, ["G28"])
+
+    def test_tool_change_position_moves_z_before_xy(self) -> None:
+        machine = MachineState(
+            position=MachinePosition(40, 30, 10),
+            x_limits=AxisLimits(0, 100),
+            y_limits=AxisLimits(0, 100),
+            z_limits=AxisLimits(0, 200),
+            homed_axes="xyz",
+            max_velocity=100,
+            max_accel=500,
+            live_velocity=0,
+        )
+        runtime, client = physical_runtime_with_machine(machine)
+
+        snapshot = runtime.move_to_tool_change_position()
+
+        self.assertEqual(snapshot["state"], "WAITING_FOR_XY_REFERENCE")
+        self.assertIn("Z115.000000", client.scripts[0])
+        self.assertIn("X0.000000", client.scripts[1])
+        self.assertIn("Y0.000000", client.scripts[1])
+        self.assertEqual(machine.get_motion_snapshot()["z"], 115.0)
+        self.assertEqual(machine.get_motion_snapshot()["x"], 0.0)
+        self.assertEqual(machine.get_motion_snapshot()["y"], 0.0)
 
     def test_command_mapper_discards_diagonal_jog(self) -> None:
         mapper = CommandMapper()

@@ -307,7 +307,7 @@ class MachineRuntime:
             self._event("info", f"Modo de jog cambiado a {selected.name}.")
         return self.snapshot()
 
-    def initialize(self, target_z_mm: float) -> dict[str, Any]:
+    def initialize(self, target_z_mm: float | None = None) -> dict[str, Any]:
         self._require_physical_ready()
         if not self._movement_lock.acquire(blocking=False):
             raise MachineRuntimeError("Ya hay un movimiento u operación física activa.")
@@ -324,6 +324,7 @@ class MachineRuntime:
             self._wait_for_serial_recent()
             self._step("verificar_arduino", "ok", "Arduino con paquetes válidos recientes.")
 
+            target_z_mm = self.config.reference_prep_z_mm if target_z_mm is None else float(target_z_mm)
             self._send_script("G28", label="homing")
             self._step("homing_solicitado", "ok", "G28 enviado; la finalización se confirma por toolhead.homed_axes y velocidad cero.")
             self._wait_for_homing({"x", "y", "z"})
@@ -338,24 +339,28 @@ class MachineRuntime:
                 self._state = MachineRuntimeState.HOMED
             self._step("homing_confirmado", "ok", f"Klipper reporta homed_axes={machine.homed_axes}.")
 
-            if target_z_mm < machine.z_limits.minimum or target_z_mm > machine.z_limits.maximum:
+            current_snapshot = machine.get_motion_snapshot()
+            self._validate_machine_target(z=target_z_mm, label="Z de preparación")
+            if target_z_mm < float(current_snapshot["z"]):
                 raise MachineRuntimeError(
-                    f"Z segura de traslado fuera de límites: recibido {target_z_mm:.3f} mm, esperado {machine.z_limits.minimum:.3f}..{machine.z_limits.maximum:.3f} mm."
+                    f"Z de preparación {target_z_mm:.3f} mm queda por debajo de la Z actual {float(current_snapshot['z']):.3f} mm. No se puede confirmar que subir Z aleje la herramienta de la PCB."
                 )
             center_x = (machine.x_limits.minimum + machine.x_limits.maximum) / 2.0
             center_y = (machine.y_limits.minimum + machine.y_limits.maximum) / 2.0
+            self._validate_machine_target(x=center_x, y=center_y, label="centro de máquina")
+            self._step("actualizar_limites", "ok", f"Límites Klipper X={machine.x_limits.minimum:.3f}..{machine.x_limits.maximum:.3f} Y={machine.y_limits.minimum:.3f}..{machine.y_limits.maximum:.3f} Z={machine.z_limits.minimum:.3f}..{machine.z_limits.maximum:.3f}.")
             self._step("calcular_centro", "ok", f"Centro real calculado X={center_x:.3f} Y={center_y:.3f}.")
 
             with self._lock:
                 self._state = MachineRuntimeState.MOVING_TO_SAFE_Z
-            self._move_absolute(z=target_z_mm, label="z_segura_traslado")
+            self._move_absolute(z=target_z_mm, label="z_preparacion_referencia")
             self._step("z_segura_confirmada", "ok", f"Z de traslado segura alcanzada: {target_z_mm:.3f} mm.")
 
             with self._lock:
                 self._state = MachineRuntimeState.MOVING_TO_CENTER
             self._move_absolute(x=center_x, y=center_y, label="xy_centro")
             self._refresh_machine()
-            self._step("centro_confirmado", "ok", f"Herramienta posicionada en centro X={center_x:.3f} Y={center_y:.3f} con Z segura.")
+            self._step("centro_confirmado", "ok", f"Máquina preparada en X={center_x:.3f} Y={center_y:.3f} Z={target_z_mm:.3f} mm.")
             with self._lock:
                 self._state = MachineRuntimeState.WAITING_FOR_XY_REFERENCE
                 self._event("info", "Inicialización física completada; posicione X/Y del origen 0,0 y arme la referencia.")
@@ -365,6 +370,42 @@ class MachineRuntime:
                 self._state = MachineRuntimeState.ERROR
                 self._last_error = str(error)
                 self._step("abortar", "error", str(error))
+                self._event("error", str(error))
+            raise
+        finally:
+            self._movement_lock.release()
+
+    def move_to_tool_change_position(self) -> dict[str, Any]:
+        self._require_physical_ready()
+        if not self._movement_lock.acquire(blocking=False):
+            raise MachineRuntimeError("Ya hay un movimiento u operación física activa.")
+        try:
+            with self._lock:
+                self._manual_enabled = False
+                self._diagnostic_input_only = True
+                self._state = MachineRuntimeState.MOVING_TO_SAFE_Z
+            self._assert_safety_for_motion()
+            self._refresh_machine()
+            machine = self._machine
+            if machine is None:
+                raise MachineRuntimeError("No hay estado de máquina descubierto.")
+            target_x = float(self.config.tool_change_x_mm)
+            target_y = float(self.config.tool_change_y_mm)
+            target_z = float(self.config.tool_change_z_mm)
+            self._validate_machine_target(z=target_z, label="Z de cambio de herramienta")
+            self._validate_machine_target(x=target_x, y=target_y, label="posición XY de cambio de herramienta")
+            self._move_absolute(z=target_z, label="tool_change_z_segura")
+            with self._lock:
+                self._state = MachineRuntimeState.MOVING_TO_CENTER
+            self._move_absolute(x=target_x, y=target_y, label="tool_change_xy")
+            with self._lock:
+                self._state = MachineRuntimeState.WAITING_FOR_XY_REFERENCE
+                self._event("info", "Máquina en posición segura para cambio de herramienta.")
+            return self.snapshot()
+        except Exception as error:
+            with self._lock:
+                self._state = MachineRuntimeState.ERROR
+                self._last_error = str(error)
                 self._event("error", str(error))
             raise
         finally:
@@ -602,6 +643,22 @@ class MachineRuntime:
                     },
                     "max_velocity": None if self._machine is None else self._machine.max_velocity,
                     "max_accel": None if self._machine is None else self._machine.max_accel,
+                },
+                "preparation": {
+                    "reference_prep_z_mm": self.config.reference_prep_z_mm,
+                    "center_x_mm": None if self._machine is None else (self._machine.x_limits.minimum + self._machine.x_limits.maximum) / 2.0,
+                    "center_y_mm": None if self._machine is None else (self._machine.y_limits.minimum + self._machine.y_limits.maximum) / 2.0,
+                    "target": None if self._machine is None else {
+                        "x_mm": (self._machine.x_limits.minimum + self._machine.x_limits.maximum) / 2.0,
+                        "y_mm": (self._machine.y_limits.minimum + self._machine.y_limits.maximum) / 2.0,
+                        "z_mm": self.config.reference_prep_z_mm,
+                    },
+                    "sequence": ["HOME", "MOVE_Z_PREP", "MOVE_XY_CENTER", "WAITING_FOR_REFERENCE"],
+                },
+                "tool_change": {
+                    "x_mm": self.config.tool_change_x_mm,
+                    "y_mm": self.config.tool_change_y_mm,
+                    "z_mm": self.config.tool_change_z_mm,
                 },
                 "arduino": self._arduino_snapshot(now=now, serial_age=serial_age),
                 "controller": {
@@ -842,7 +899,22 @@ class MachineRuntime:
                 self._event("info", f"Timeout HTTP de {label} resuelto por confirmación de estado Klipper.")
                 self._last_error = None
 
+    def _validate_machine_target(self, *, x: float | None = None, y: float | None = None, z: float | None = None, label: str) -> None:
+        if self._machine is None:
+            raise MachineRuntimeError("No hay estado de máquina.")
+        checks = (
+            ("X", x, self._machine.x_limits.minimum, self._machine.x_limits.maximum),
+            ("Y", y, self._machine.y_limits.minimum, self._machine.y_limits.maximum),
+            ("Z", z, self._machine.z_limits.minimum, self._machine.z_limits.maximum),
+        )
+        for axis, value, minimum, maximum in checks:
+            if value is None:
+                continue
+            if value < minimum or value > maximum:
+                raise MachineRuntimeError(f"{label}: {axis}={value:.3f} mm fuera de límites Klipper {minimum:.3f}..{maximum:.3f} mm.")
+
     def _move_absolute(self, *, x: float | None = None, y: float | None = None, z: float | None = None, label: str) -> None:
+        self._validate_machine_target(x=x, y=y, z=z, label=label)
         axes = []
         if x is not None:
             axes.append(f"X{x:.6f}")
@@ -850,7 +922,7 @@ class MachineRuntime:
             axes.append(f"Y{y:.6f}")
         if z is not None:
             axes.append(f"Z{z:.6f}")
-        script = "G90\nG1 " + " ".join(axes) + " F600.000"
+        script = "SAVE_GCODE_STATE NAME=cnc_assistant_machine_move\nG90\nG1 " + " ".join(axes) + " F600.000\nRESTORE_GCODE_STATE NAME=cnc_assistant_machine_move"
         self._send_script(script, label=label)
         self._last_movement = {"label": label, "x": x, "y": y, "z": z}
         targets = {axis: target for axis, target in (("x", x), ("y", y), ("z", z)) if target is not None}

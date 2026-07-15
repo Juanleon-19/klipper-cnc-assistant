@@ -48,6 +48,10 @@ def build_machine_router() -> APIRouter:
     def manual_control(payload: ManualControlRequest, request: Request) -> MachineRuntimeResponse:
         return MachineRuntimeResponse(**runtime(request).enable_manual_control(payload.enabled))
 
+    @router.post("/tool-change-position", response_model=MachineRuntimeResponse)
+    def tool_change_position(request: Request) -> MachineRuntimeResponse:
+        return MachineRuntimeResponse(**runtime(request).move_to_tool_change_position())
+
     @router.post("/jog-mode", response_model=MachineRuntimeResponse)
     def jog_mode(payload: JogModeRequest, request: Request) -> MachineRuntimeResponse:
         return MachineRuntimeResponse(**runtime(request).change_jog_mode(payload.mode))

@@ -199,6 +199,14 @@ const physicalMachine: MachineContextValue = {
     mode_label: "FÍSICO",
     moonraker: { http_connected: true, websocket_connected: true },
     klipper: { ready: true, homed_axes: "xyz", position: { x: 60, y: 88.75, z: 10.05 } },
+    preparation: {
+      reference_prep_z_mm: 115,
+      center_x_mm: 110,
+      center_y_mm: 110,
+      target: { x_mm: 110, y_mm: 110, z_mm: 115 },
+      sequence: ["HOME", "MOVE_Z_PREP", "MOVE_XY_CENTER", "WAITING_FOR_REFERENCE"],
+    },
+    tool_change: { x_mm: 0, y_mm: 0, z_mm: 115 },
     arduino: { port: "/dev/ttyUSB0", valid_packets: 12 },
     controller: { direction: "CENTER", jog_mode: "FINE", external_button: false, probe: false },
     safety: { serial_recent: true, telemetry_recent: true, movement_authorized: false },
@@ -361,6 +369,23 @@ describe("ProjectWorkspace", () => {
     expect(screen.queryByText(/Flujo simulado de preparación/i)).toBeNull();
     expect(screen.getByText(/Captura referencia/i)).toBeInTheDocument();
     expect(screen.getByText(/X 10.000 mm · Y 8.000 mm · Z 0.000 mm/i)).toBeInTheDocument();
+  });
+
+  it("muestra Z de preparación, centro y posición de cambio en referencia física", async () => {
+    vi.mocked(physicalMachine.runMachineAction).mockClear();
+    renderWorkspace(physicalMachine);
+
+    fireEvent.click(screen.getByRole("button", { name: /Referencia/i }));
+
+    expect(await screen.findByText(/Home, Z de preparación y centro/i)).toBeInTheDocument();
+    expect(screen.getAllByText(/Z de preparación/i).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/X 110.000 mm · Y 110.000 mm/i).length).toBeGreaterThan(0);
+    expect(screen.getByText(/Posición segura de cambio de herramienta/i)).toBeInTheDocument();
+    expect(screen.getByText(/Z primero, luego X\/Y/i)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /Ir a posición de cambio/i }));
+
+    await waitFor(() => expect(physicalMachine.runMachineAction).toHaveBeenCalledWith("tool-change-position"));
   });
 
   it("muestra mapa físico como flujo principal sin botón operativo SIMULADO", async () => {

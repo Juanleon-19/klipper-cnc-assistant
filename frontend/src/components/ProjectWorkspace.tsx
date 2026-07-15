@@ -417,8 +417,6 @@ export function ProjectWorkspace({
     }
   };
 
-  const parsedSafeZ = Number(safeZInput.replace(",", "."));
-  const safeZInvalid = !Number.isFinite(parsedSafeZ);
 
   const submitWorkOrigin = async () => {
     const xParsed = parseFiniteNumber(workOrigin.x_mm);
@@ -836,8 +834,16 @@ export function ProjectWorkspace({
     const position = runtime?.klipper?.position as Record<string, unknown> | null | undefined;
     const controller = runtime?.controller ?? {};
     const arduino = runtime?.arduino ?? {};
+    const preparation = runtime?.preparation ?? {};
+    const toolChange = runtime?.tool_change ?? {};
+    const referencePrepZ = typeof preparation.reference_prep_z_mm === "number" ? preparation.reference_prep_z_mm : 115;
+    const centerX = typeof preparation.center_x_mm === "number" ? preparation.center_x_mm : null;
+    const centerY = typeof preparation.center_y_mm === "number" ? preparation.center_y_mm : null;
+    const toolChangeX = typeof toolChange.x_mm === "number" ? toolChange.x_mm : 0;
+    const toolChangeY = typeof toolChange.y_mm === "number" ? toolChange.y_mm : 0;
+    const toolChangeZ = typeof toolChange.z_mm === "number" ? toolChange.z_mm : 115;
     const canConnect = machine.isPhysical && machine.runtimeState === "DISCONNECTED";
-    const canInitialize = machine.isPhysical && ["DIAGNOSTIC", "READY_FOR_HOME", "HOMED", "ERROR", "CANCELLED"].includes(machine.runtimeState) && !safeZInvalid;
+    const canInitialize = machine.isPhysical && ["DIAGNOSTIC", "READY_FOR_HOME", "HOMED", "ERROR", "CANCELLED"].includes(machine.runtimeState);
     const canEnableJog = machine.isPhysical && machine.runtimeState === "WAITING_FOR_XY_REFERENCE";
     const canArm = machine.isPhysical && machine.runtimeState === "WAITING_FOR_XY_REFERENCE";
     const canProbe = machine.isPhysical && machine.runtimeState === "REFERENCE_ARMED";
@@ -880,11 +886,15 @@ export function ProjectWorkspace({
         </article>
 
         <article className="panel">
-          <div className="section-heading"><h3>2. Homing, Z segura y centro</h3></div>
-          <p className="muted">El backend envía G28, confirma `toolhead.homed_axes`, mueve Z a traslado seguro y después mueve X/Y al centro real calculado desde límites Klipper.</p>
-          <label className="inline-field">Z segura de traslado (mm)<input value={safeZInput} inputMode="decimal" onChange={(event) => setSafeZInput(event.target.value)} /></label>
-          {safeZInvalid ? <p className="form-error">Z segura debe ser un número finito en milímetros.</p> : null}
-          <button className="button" type="button" disabled={!canInitialize || referenceBusy || machine.refreshing} onClick={() => void withPhysicalReferenceAction(async () => { await machine.runMachineAction("initialize", parsedSafeZ); })}>Realizar homing, mover Z segura e ir al centro</button>
+          <div className="section-heading"><h3>2. Home, Z de preparación y centro</h3></div>
+          <p className="muted">El backend envía G28, confirma `toolhead.homed_axes`, mueve primero Z a la altura de preparación configurada y después mueve X/Y al centro real calculado desde límites Klipper.</p>
+          <div className="info-grid info-grid--double compact-grid">
+            <div className="metric-box"><span>Z de preparación</span><strong>{formatMillimeters(referencePrepZ, 3)}</strong></div>
+            <div className="metric-box"><span>Centro calculado</span><strong>X {formatMillimeters(centerX, 3)} · Y {formatMillimeters(centerY, 3)}</strong></div>
+            <div className="metric-box"><span>Posición actual</span><strong>X {formatMillimeters(typeof position?.x === "number" ? position.x : null, 3)} · Y {formatMillimeters(typeof position?.y === "number" ? position.y : null, 3)} · Z {formatMillimeters(typeof position?.z === "number" ? position.z : null, 3)}</strong></div>
+            <div className="metric-box"><span>Objetivo</span><strong>X {formatMillimeters(centerX, 3)} · Y {formatMillimeters(centerY, 3)} · Z {formatMillimeters(referencePrepZ, 3)}</strong></div>
+          </div>
+          <button className="button" type="button" disabled={!canInitialize || referenceBusy || machine.refreshing} onClick={() => void withPhysicalReferenceAction(async () => { await machine.runMachineAction("initialize", referencePrepZ); })}>Realizar homing, subir Z e ir al centro</button>
           <div className="workflow-steps-grid">
             {(runtime?.initialization_steps ?? []).map((step, index) => (
               <div className="workflow-step-card" key={`${String(step.name)}-${index}`}>
@@ -904,6 +914,21 @@ export function ProjectWorkspace({
             <div className="metric-box"><span>Modo jog</span><strong>{String(controller.jog_mode ?? "FINE")}</strong></div>
           </div>
           <button className="button" type="button" disabled={!canEnableJog || referenceBusy || machine.refreshing} onClick={() => void machine.runMachineAction("manual-on")}>Habilitar joystick X/Y</button>
+        </article>
+
+        <article className="panel">
+          <div className="section-heading"><h3>Posición segura de cambio de herramienta</h3></div>
+          <p className="muted">Estas son coordenadas de máquina, no el origen X0/Y0 de FlatCAM ni la referencia Z de la PCB.</p>
+          <div className="info-grid info-grid--double compact-grid">
+            <div className="metric-box"><span>X cambio</span><strong>{formatMillimeters(toolChangeX, 3)}</strong></div>
+            <div className="metric-box"><span>Y cambio</span><strong>{formatMillimeters(toolChangeY, 3)}</strong></div>
+            <div className="metric-box"><span>Z cambio</span><strong>{formatMillimeters(toolChangeZ, 3)}</strong></div>
+            <div className="metric-box"><span>Orden</span><strong>Z primero, luego X/Y</strong></div>
+          </div>
+          <div className="action-grid action-grid--inline">
+            <button className="button button--ghost" type="button" disabled={!machine.isPhysical || referenceBusy || machine.refreshing} onClick={() => window.alert("Modifique TOOL_CHANGE_X_MM, TOOL_CHANGE_Y_MM y TOOL_CHANGE_Z_MM en la configuración del servicio y reinicie la aplicación para persistir los cambios.")}>Modificar posición de cambio</button>
+            <button className="button" type="button" disabled={!machine.isPhysical || referenceBusy || machine.refreshing || !machine.homedAxes} onClick={() => void withPhysicalReferenceAction(async () => { await machine.runMachineAction("tool-change-position"); })}>Ir a posición de cambio</button>
+          </div>
         </article>
 
         <article className="panel">

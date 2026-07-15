@@ -460,6 +460,7 @@ Después deberá volver a conectar el Arduino, hacer homing, posicionar X0/Y0 y 
       else if (action === "manual-off") runtime = await api.setManualControl(false);
       else if (action === "probe-request") runtime = await api.requestProbe();
       else if (action === "probe-confirm") runtime = await api.confirmProbe();
+      else if (action === "tool-change-position") runtime = await api.moveToToolChangePosition();
       else if (action === "cancel") runtime = await api.cancelMachineOperation();
       else if (action === "safe-stop") runtime = await api.safeStopMachine();
       else if (action === "emergency") runtime = await api.emergencyStopMachine();

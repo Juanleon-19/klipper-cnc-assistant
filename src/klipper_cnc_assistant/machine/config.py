@@ -19,6 +19,10 @@ class MachineRuntimeConfig:
     serial_port: str | None
     serial_baudrate: int
     safe_z_mm: float
+    reference_prep_z_mm: float
+    tool_change_z_mm: float
+    tool_change_x_mm: float
+    tool_change_y_mm: float
     moonraker_request_timeout_s: float
     home_timeout_s: float
     telemetry_fresh_timeout_s: float
@@ -69,6 +73,10 @@ def load_machine_runtime_config() -> MachineRuntimeConfig:
         serial_port=os.getenv("SERIAL_PORT") or None,
         serial_baudrate=_env_int("SERIAL_BAUDRATE", 115200),
         safe_z_mm=_env_float("MACHINE_SAFE_Z", 10.0),
+        reference_prep_z_mm=_env_float("REFERENCE_PREP_Z_MM", 115.0),
+        tool_change_z_mm=_env_float("TOOL_CHANGE_Z_MM", 115.0),
+        tool_change_x_mm=_env_float("TOOL_CHANGE_X_MM", 0.0),
+        tool_change_y_mm=_env_float("TOOL_CHANGE_Y_MM", 0.0),
         moonraker_request_timeout_s=_env_float("MOONRAKER_REQUEST_TIMEOUT", 2.0),
         home_timeout_s=_env_float("MACHINE_HOME_TIMEOUT", 90.0),
         telemetry_fresh_timeout_s=_env_float("TELEMETRY_STALE_TIMEOUT", _env_float("MACHINE_TELEMETRY_FRESH_TIMEOUT", 2.0)),

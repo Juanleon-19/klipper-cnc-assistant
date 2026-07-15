@@ -12,6 +12,8 @@ class MachineRuntimeResponse(BaseModel):
     application: dict
     moonraker: dict
     klipper: dict
+    preparation: dict = Field(default_factory=dict)
+    tool_change: dict = Field(default_factory=dict)
     arduino: dict
     controller: dict
     safety: dict
@@ -36,7 +38,7 @@ class JogModeRequest(BaseModel):
 
 
 class MachineInitializationRequest(BaseModel):
-    target_z_mm: float
+    target_z_mm: float | None = None
 
 
 class EmergencyStopRequest(BaseModel):

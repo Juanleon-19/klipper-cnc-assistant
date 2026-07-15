@@ -162,8 +162,9 @@ export const api = {
   disconnectMachine: () => request<MachineRuntime>("/api/machine/disconnect", { method: "POST" }),
   setMachineDiagnosticMode: (enabled: boolean) =>
     request<MachineRuntime>("/api/machine/diagnostic-mode", { method: "POST", body: JSON.stringify({ enabled }) }),
-  initializeMachine: (target_z_mm: number) =>
+  initializeMachine: (target_z_mm?: number) =>
     request<MachineRuntime>("/api/machine/initialize", { method: "POST", body: JSON.stringify({ target_z_mm }) }),
+  moveToToolChangePosition: () => request<MachineRuntime>("/api/machine/tool-change-position", { method: "POST" }),
   setManualControl: (enabled: boolean) =>
     request<MachineRuntime>("/api/machine/manual-control", { method: "POST", body: JSON.stringify({ enabled }) }),
   setJogMode: (mode: "fine" | "normal" | "coarse") =>
