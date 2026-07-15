@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import tempfile
 import threading
 import time
 import unittest
@@ -12,7 +13,7 @@ from klipper_cnc_assistant.machine.config import MachineMode, MachineRuntimeConf
 from klipper_cnc_assistant.machine.runtime import MachineRuntime, MachineRuntimeError
 import klipper_cnc_assistant.machine.runtime as runtime_module
 from klipper_cnc_assistant.machine.state import AxisLimits, MachinePosition, MachineState
-from klipper_cnc_assistant.moonraker.client import MoonrakerTimeout
+from klipper_cnc_assistant.moonraker.client import MoonrakerError, MoonrakerTimeout
 
 
 def config(mode: MachineMode = MachineMode.SIMULATED, **overrides) -> MachineRuntimeConfig:
@@ -25,7 +26,7 @@ def config(mode: MachineMode = MachineMode.SIMULATED, **overrides) -> MachineRun
         serial_baudrate=115200,
         safe_z_mm=10.0,
         reference_prep_z_mm=115.0,
-        reference_prep_z_feed_mm_min=180.0,
+        reference_prep_z_feed_mm_min=120.0,
         tool_change_z_mm=115.0,
         tool_change_z_feed_mm_min=180.0,
         tool_change_x_mm=0.0,
@@ -36,12 +37,12 @@ def config(mode: MachineMode = MachineMode.SIMULATED, **overrides) -> MachineRun
         serial_fresh_timeout_s=2.0,
         serial_startup_delay_s=0.0,
         settle_tolerance_mm=0.05,
-        velocity_tolerance_mm_s=0.01,
-        move_timeout_s=90.0,
-        move_minimum_timeout_s=90.0,
+        velocity_tolerance_mm_s=0.02,
+        move_timeout_s=180.0,
+        move_minimum_timeout_s=180.0,
         move_timeout_factor=1.5,
         move_settle_margin_s=10.0,
-        no_progress_timeout_s=15.0,
+        no_progress_timeout_s=60.0,
         settle_timeout_s=5.0,
         stable_samples=2,
         probe_step_mm=0.05,
@@ -203,6 +204,49 @@ class SlowZClient(MotionClient):
         self.machine.update_motion(live_position=(float(snapshot["x"]), float(snapshot["y"]), next_z), live_velocity=velocity)
 
 
+class CommandedTargetSlowLiveZClient(SlowZClient):
+    def send_gcode(self, script: str, *, timeout: float | None = None) -> dict[str, object]:
+        result = super().send_gcode(script, timeout=timeout)
+        match_z = re.search(r"\bZ(-?\d+(?:\.\d+)?)", script)
+        match_x = re.search(r"\bX(-?\d+(?:\.\d+)?)", script)
+        match_y = re.search(r"\bY(-?\d+(?:\.\d+)?)", script)
+        if match_z and not match_x and not match_y:
+            # Klipper can report the commanded destination while motion_report.live_position is still moving.
+            self.machine.update_toolhead(position=(0, 0, float(match_z.group(1))))
+        return result
+
+
+class RejectedZClient(MotionClient):
+    def send_gcode(self, script: str, *, timeout: float | None = None) -> dict[str, object]:
+        self.scripts.append(script)
+        if "G28" in script:
+            self.machine.update_toolhead(position=(0, 0, 0), homed_axes="xyz")
+            self.machine.update_motion(live_position=(0, 0, 0), live_velocity=0)
+            return {"result": "ok"}
+        if "Z115" in script:
+            raise MoonrakerError("Move rejected by Klipper")
+        return super().send_gcode(script, timeout=timeout)
+
+
+class QueryFallbackClient(MotionClient):
+    def __init__(self, machine: MachineState) -> None:
+        super().__init__(machine)
+        self.z_command_sent = False
+
+    def send_gcode(self, script: str, *, timeout: float | None = None) -> dict[str, object]:
+        self.scripts.append(script)
+        if "G28" in script:
+            self.machine.update_toolhead(position=(0, 0, 0), homed_axes="xyz")
+            self.machine.update_motion(live_position=(0, 0, 0), live_velocity=0)
+            return {"result": "ok"}
+        if "Z115" in script:
+            self.z_command_sent = True
+            self.machine.update_toolhead(position=(0, 0, 115))
+            self.machine.update_motion(live_position=(0, 0, 0), live_velocity=0)
+            return {"result": "ok"}
+        return super().send_gcode(script, timeout=timeout)
+
+
 class FakeClock:
     def __init__(self, updater=None) -> None:
         self.now = 0.0
@@ -295,7 +339,7 @@ class MachineRuntimeTest(unittest.TestCase):
         self.assertEqual(snapshot["state"], "WAITING_FOR_XY_REFERENCE")
         self.assertEqual(client.scripts[0], "G28")
         self.assertIn("Z115.000000", client.scripts[1])
-        self.assertIn("F180.000", client.scripts[1])
+        self.assertIn("F120.000", client.scripts[1])
         self.assertIn("X50.000000", client.scripts[2])
         self.assertIn("F600.000", client.scripts[2])
         self.assertIn("Y30.000000", client.scripts[2])
@@ -322,13 +366,14 @@ class MachineRuntimeTest(unittest.TestCase):
 
         z_step = next(step for step in snapshot["initialization_steps"] if step["name"] == "z_preparacion_referencia")
         self.assertIn("distancia 115.000 mm", z_step["detail"])
-        self.assertIn("velocidad configurada 180.000 mm/min", z_step["detail"])
-        self.assertIn("estimado 38.333 s", z_step["detail"])
-        self.assertIn("timeout 90.000 s", z_step["detail"])
+        self.assertIn("velocidad configurada 120.000 mm/min", z_step["detail"])
+        self.assertIn("velocidad efectiva 2.000 mm/s", z_step["detail"])
+        self.assertIn("estimado 57.500 s", z_step["detail"])
+        self.assertIn("timeout 180.000 s", z_step["detail"])
         self.assertIn("X50.000000", client.scripts[2])
         self.assertEqual(snapshot["state"], "WAITING_FOR_XY_REFERENCE")
 
-    def test_reference_z_progresses_for_more_than_38_seconds_without_abort_and_then_centers(self) -> None:
+    def test_reference_z_progresses_for_more_than_57_seconds_without_abort_and_then_centers(self) -> None:
         machine = MachineState(
             position=MachinePosition(0, 0, 0),
             x_limits=AxisLimits(0, 100),
@@ -341,7 +386,7 @@ class MachineRuntimeTest(unittest.TestCase):
             live_velocity=0,
         )
         runtime, _client = physical_runtime_with_machine(machine)
-        client = SlowZClient(machine, speed_mm_s=3)
+        client = SlowZClient(machine, speed_mm_s=2)
         runtime._client = client
         fake_clock = FakeClock(client.advance)
         original_time = runtime_module.time
@@ -352,11 +397,12 @@ class MachineRuntimeTest(unittest.TestCase):
             runtime_module.time = original_time
 
         self.assertEqual(snapshot["state"], "WAITING_FOR_XY_REFERENCE")
-        self.assertGreaterEqual(fake_clock.now, 38.0)
+        self.assertGreaterEqual(fake_clock.now, 57.0)
         z_step = next(step for step in snapshot["initialization_steps"] if step["name"] == "z_preparacion_referencia")
-        self.assertIn("estimado 38.333 s", z_step["detail"])
+        self.assertIn("estimado 57.500 s", z_step["detail"])
+        self.assertIn("timeout 180.000 s", z_step["detail"])
         self.assertIn("Z115.000000", client.scripts[1])
-        self.assertIn("F180.000", client.scripts[1])
+        self.assertIn("F120.000", client.scripts[1])
         self.assertIn("X50.000000", client.scripts[2])
         self.assertEqual(len(client.scripts), 3)
 
@@ -369,19 +415,127 @@ class MachineRuntimeTest(unittest.TestCase):
             homed_axes="",
             max_velocity=100,
             max_accel=500,
-            max_z_velocity=2,
+            max_z_velocity=1,
             live_velocity=0,
         )
         runtime, client = physical_runtime_with_machine(machine)
 
         snapshot = runtime.initialize()
 
-        self.assertIn("F120.000", client.scripts[1])
+        self.assertIn("F60.000", client.scripts[1])
         z_step = next(step for step in snapshot["initialization_steps"] if step["name"] == "z_preparacion_referencia")
-        self.assertIn("velocidad efectiva 2.000 mm/s", z_step["detail"])
-        self.assertIn("estimado 57.500 s", z_step["detail"])
-        self.assertIn("timeout 96.250 s", z_step["detail"])
+        self.assertIn("velocidad efectiva 1.000 mm/s", z_step["detail"])
+        self.assertIn("estimado 115.000 s", z_step["detail"])
+        self.assertIn("timeout 182.500 s", z_step["detail"])
         self.assertIn("X50.000000", client.scripts[2])
+
+    def test_reference_z_uses_live_position_not_commanded_position_for_progress(self) -> None:
+        machine = MachineState(
+            position=MachinePosition(0, 0, 0),
+            x_limits=AxisLimits(0, 100),
+            y_limits=AxisLimits(0, 100),
+            z_limits=AxisLimits(0, 200),
+            homed_axes="",
+            max_velocity=100,
+            max_accel=500,
+            max_z_velocity=10,
+            live_velocity=0,
+        )
+        runtime, _client = physical_runtime_with_machine(machine)
+        client = CommandedTargetSlowLiveZClient(machine, speed_mm_s=2)
+        runtime._client = client
+        fake_clock = FakeClock(client.advance)
+        original_time = runtime_module.time
+        runtime_module.time = fake_clock
+        try:
+            snapshot = runtime.initialize()
+        finally:
+            runtime_module.time = original_time
+
+        self.assertEqual(snapshot["state"], "WAITING_FOR_XY_REFERENCE")
+        self.assertGreaterEqual(fake_clock.now, 57.0)
+        self.assertEqual(machine.get_motion_snapshot()["source"], "motion_report.live_position")
+        self.assertEqual(machine.get_motion_snapshot()["commanded_position"]["z"], 115.0)
+        self.assertIn("X50.000000", client.scripts[2])
+
+    def test_reference_z_websocket_stale_uses_http_query_fallback(self) -> None:
+        machine = MachineState(
+            position=MachinePosition(0, 0, 0),
+            x_limits=AxisLimits(0, 100),
+            y_limits=AxisLimits(0, 100),
+            z_limits=AxisLimits(0, 200),
+            homed_axes="",
+            max_velocity=100,
+            max_accel=500,
+            live_velocity=0,
+        )
+        client = QueryFallbackClient(machine)
+
+        def discovery(_client):
+            if client.z_command_sent:
+                machine.update_motion(live_position=(0, 0, 115), live_velocity=0)
+            return machine
+
+        runtime = MachineRuntime(config(MachineMode.PHYSICAL), discovery=discovery)
+        runtime._client = client
+        runtime._machine = machine
+        runtime._driver = type("Driver", (), {"diagnostics": FakeDiagnostics()})()
+        runtime._serial_thread = FakeThread()
+        runtime._last_packet_at = time.monotonic()
+        runtime._last_telemetry_at = time.monotonic() - 10
+
+        snapshot = runtime.initialize()
+
+        self.assertEqual(snapshot["state"], "WAITING_FOR_XY_REFERENCE")
+        self.assertIn("Z115.000000", client.scripts[1])
+        self.assertIn("X50.000000", client.scripts[2])
+        self.assertAlmostEqual(machine.get_motion_snapshot()["z"], 115.0, places=3)
+
+    def test_reference_z_command_rejection_stops_before_center(self) -> None:
+        machine = MachineState(
+            position=MachinePosition(0, 0, 0),
+            x_limits=AxisLimits(0, 100),
+            y_limits=AxisLimits(0, 100),
+            z_limits=AxisLimits(0, 200),
+            homed_axes="",
+            max_velocity=100,
+            max_accel=500,
+            live_velocity=0,
+        )
+        runtime, _client = physical_runtime_with_machine(machine)
+        client = RejectedZClient(machine)
+        runtime._client = client
+
+        with self.assertRaisesRegex(MoonrakerError, "Move rejected"):
+            runtime.initialize()
+
+        self.assertEqual(len(client.scripts), 2)
+        self.assertIn("Z115.000000", client.scripts[1])
+
+    def test_machine_settings_are_editable_and_persisted(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            settings_path = f"{directory}/machine_runtime_settings.json"
+            runtime = MachineRuntime(config(MachineMode.PHYSICAL), settings_path=runtime_module.Path(settings_path))
+
+            saved = runtime.update_machine_settings({
+                "reference_prep_z_mm": 110,
+                "reference_prep_z_feed_mm_min": 90,
+                "move_total_timeout_s": 240,
+                "no_progress_timeout_s": 70,
+                "position_tolerance_mm": 0.04,
+                "velocity_tolerance_mm_s": 0.015,
+            })
+
+            self.assertEqual(saved["reference_prep_z_mm"], 110)
+            self.assertEqual(saved["reference_prep_z_feed_mm_min"], 90)
+            reloaded = MachineRuntime(config(MachineMode.PHYSICAL), settings_path=runtime_module.Path(settings_path))
+            self.assertEqual(reloaded.config.reference_prep_z_mm, 110)
+            self.assertEqual(reloaded.config.reference_prep_z_feed_mm_min, 90)
+            self.assertEqual(reloaded.config.move_timeout_s, 240)
+            self.assertEqual(reloaded.config.move_minimum_timeout_s, 240)
+            self.assertEqual(reloaded.config.no_progress_timeout_s, 70)
+            self.assertEqual(reloaded.config.settle_tolerance_mm, 0.04)
+            self.assertEqual(reloaded.config.velocity_tolerance_mm_s, 0.015)
 
     def test_reference_z_wrong_direction_is_blocked_before_center(self) -> None:
         cfg = config(MachineMode.PHYSICAL, no_progress_timeout_s=15.0)

@@ -203,6 +203,33 @@ export function ProjectWorkspace({
   const [meshValidationMessage, setMeshValidationMessage] = useState("");
   const [executionState, setExecutionState] = useState<"PREFLIGHT" | "READY_TO_EXECUTE" | "UPLOADING" | "RUNNING" | "PAUSED" | "CANCELLED" | "COMPLETED">("PREFLIGHT");
   const [executionEvent, setExecutionEvent] = useState("Sin acciones de ejecución todavía.");
+  const [machineSettingsInput, setMachineSettingsInput] = useState({
+    reference_prep_z_mm: "115",
+    reference_prep_z_feed_mm_min: "120",
+    move_total_timeout_s: "180",
+    no_progress_timeout_s: "60",
+    position_tolerance_mm: "0.05",
+    velocity_tolerance_mm_s: "0.02",
+  });
+  const [machineSettingsMessage, setMachineSettingsMessage] = useState("");
+
+  useEffect(() => {
+    if (!machine.isPhysical) {
+      return;
+    }
+    void api.getMachineSettings().then((settings) => {
+      setMachineSettingsInput({
+        reference_prep_z_mm: String(settings.reference_prep_z_mm ?? 115),
+        reference_prep_z_feed_mm_min: String(settings.reference_prep_z_feed_mm_min ?? 120),
+        move_total_timeout_s: String(settings.move_total_timeout_s ?? 180),
+        no_progress_timeout_s: String(settings.no_progress_timeout_s ?? 60),
+        position_tolerance_mm: String(settings.position_tolerance_mm ?? 0.05),
+        velocity_tolerance_mm_s: String(settings.velocity_tolerance_mm_s ?? 0.02),
+      });
+    }).catch(() => {
+      setMachineSettingsMessage("No se pudo leer la configuración avanzada de máquina.");
+    });
+  }, [machine.isPhysical]);
 
   useEffect(() => {
     setSelectedOperationId((current) => {
@@ -412,6 +439,45 @@ export function ProjectWorkspace({
       setGeneratedGCode(null);
     } catch (error) {
       setWorkspaceError(error instanceof Error ? error.message : "No fue posible completar la acción física de referencia.");
+    } finally {
+      setReferenceBusy(false);
+    }
+  };
+
+  const saveMachineSettings = async () => {
+    const labels: Record<keyof typeof machineSettingsInput, string> = {
+      reference_prep_z_mm: "Z de preparación",
+      reference_prep_z_feed_mm_min: "Velocidad Z de preparación",
+      move_total_timeout_s: "Timeout total",
+      no_progress_timeout_s: "Timeout sin progreso",
+      position_tolerance_mm: "Tolerancia de posición",
+      velocity_tolerance_mm_s: "Tolerancia de velocidad",
+    };
+    const payload: Record<string, number> = {};
+    for (const [key, label] of Object.entries(labels)) {
+      const parsed = parseFiniteNumber(machineSettingsInput[key as keyof typeof machineSettingsInput]);
+      if (parsed.value === null || parsed.value <= 0) {
+        setMachineSettingsMessage(`${label} debe ser un número mayor que cero.`);
+        return;
+      }
+      payload[key] = parsed.value;
+    }
+    setReferenceBusy(true);
+    setMachineSettingsMessage("");
+    try {
+      const settings = await api.updateMachineSettings(payload);
+      setMachineSettingsInput({
+        reference_prep_z_mm: String(settings.reference_prep_z_mm ?? payload.reference_prep_z_mm),
+        reference_prep_z_feed_mm_min: String(settings.reference_prep_z_feed_mm_min ?? payload.reference_prep_z_feed_mm_min),
+        move_total_timeout_s: String(settings.move_total_timeout_s ?? payload.move_total_timeout_s),
+        no_progress_timeout_s: String(settings.no_progress_timeout_s ?? payload.no_progress_timeout_s),
+        position_tolerance_mm: String(settings.position_tolerance_mm ?? payload.position_tolerance_mm),
+        velocity_tolerance_mm_s: String(settings.velocity_tolerance_mm_s ?? payload.velocity_tolerance_mm_s),
+      });
+      setMachineSettingsMessage("Configuración avanzada de máquina guardada.");
+      await machine.refreshRuntime();
+    } catch (error) {
+      setMachineSettingsMessage(error instanceof Error ? error.message : "No se pudo guardar la configuración avanzada de máquina.");
     } finally {
       setReferenceBusy(false);
     }
@@ -832,12 +898,15 @@ export function ProjectWorkspace({
   const renderPhysicalReference = () => {
     const runtime = machine.runtime;
     const position = runtime?.klipper?.position as Record<string, unknown> | null | undefined;
+    const livePosition = position?.live_position as Record<string, unknown> | null | undefined;
+    const commandedPosition = position?.commanded_position as Record<string, unknown> | null | undefined;
+    const lastMovement = runtime?.last_movement as Record<string, unknown> | null | undefined;
     const controller = runtime?.controller ?? {};
     const arduino = runtime?.arduino ?? {};
     const preparation = runtime?.preparation ?? {};
     const toolChange = runtime?.tool_change ?? {};
     const referencePrepZ = typeof preparation.reference_prep_z_mm === "number" ? preparation.reference_prep_z_mm : 115;
-    const referencePrepZFeed = typeof preparation.reference_prep_z_feed_mm_min === "number" ? preparation.reference_prep_z_feed_mm_min : 180;
+    const referencePrepZFeed = typeof preparation.reference_prep_z_feed_mm_min === "number" ? preparation.reference_prep_z_feed_mm_min : 120;
     const centerX = typeof preparation.center_x_mm === "number" ? preparation.center_x_mm : null;
     const centerY = typeof preparation.center_y_mm === "number" ? preparation.center_y_mm : null;
     const toolChangeX = typeof toolChange.x_mm === "number" ? toolChange.x_mm : 0;
@@ -895,8 +964,28 @@ export function ProjectWorkspace({
             <div className="metric-box"><span>Velocidad Z</span><strong>{referencePrepZFeed.toFixed(0)} mm/min · {(referencePrepZFeed / 60).toFixed(3)} mm/s</strong></div>
             <div className="metric-box"><span>Centro calculado</span><strong>X {formatMillimeters(centerX, 3)} · Y {formatMillimeters(centerY, 3)}</strong></div>
             <div className="metric-box"><span>Posición actual</span><strong>X {formatMillimeters(typeof position?.x === "number" ? position.x : null, 3)} · Y {formatMillimeters(typeof position?.y === "number" ? position.y : null, 3)} · Z {formatMillimeters(typeof position?.z === "number" ? position.z : null, 3)}</strong></div>
+            <div className="metric-box"><span>Z en vivo</span><strong>{formatMillimeters(typeof livePosition?.z === "number" ? livePosition.z : null, 3)}</strong></div>
+            <div className="metric-box"><span>Z comandada</span><strong>{formatMillimeters(typeof commandedPosition?.z === "number" ? commandedPosition.z : null, 3)}</strong></div>
+            <div className="metric-box"><span>Velocidad observada</span><strong>{typeof position?.velocity === "number" ? `${position.velocity.toFixed(3)} mm/s` : "-"}</strong></div>
+            <div className="metric-box"><span>Fuente de posición</span><strong>{String(position?.source ?? "-")}</strong></div>
             <div className="metric-box"><span>Objetivo</span><strong>X {formatMillimeters(centerX, 3)} · Y {formatMillimeters(centerY, 3)} · Z {formatMillimeters(referencePrepZ, 3)}</strong></div>
+            <div className="metric-box"><span>Timeout calculado</span><strong>{typeof lastMovement?.timeout_s === "number" ? `${lastMovement.timeout_s.toFixed(1)} s` : "-"}</strong></div>
           </div>
+          <details className="advanced-settings">
+            <summary>Configuración avanzada de movimiento</summary>
+            <div className="form-grid form-grid--dense">
+              <label>Z de preparación (mm)<input value={machineSettingsInput.reference_prep_z_mm} inputMode="decimal" onChange={(event) => setMachineSettingsInput((current) => ({ ...current, reference_prep_z_mm: event.target.value }))} /></label>
+              <label>Velocidad Z de preparación (mm/min)<input value={machineSettingsInput.reference_prep_z_feed_mm_min} inputMode="decimal" onChange={(event) => setMachineSettingsInput((current) => ({ ...current, reference_prep_z_feed_mm_min: event.target.value }))} /></label>
+              <label>Timeout total de movimiento (s)<input value={machineSettingsInput.move_total_timeout_s} inputMode="decimal" onChange={(event) => setMachineSettingsInput((current) => ({ ...current, move_total_timeout_s: event.target.value }))} /></label>
+              <label>Timeout sin progreso (s)<input value={machineSettingsInput.no_progress_timeout_s} inputMode="decimal" onChange={(event) => setMachineSettingsInput((current) => ({ ...current, no_progress_timeout_s: event.target.value }))} /></label>
+              <label>Tolerancia de posición (mm)<input value={machineSettingsInput.position_tolerance_mm} inputMode="decimal" onChange={(event) => setMachineSettingsInput((current) => ({ ...current, position_tolerance_mm: event.target.value }))} /></label>
+              <label>Tolerancia de velocidad (mm/s)<input value={machineSettingsInput.velocity_tolerance_mm_s} inputMode="decimal" onChange={(event) => setMachineSettingsInput((current) => ({ ...current, velocity_tolerance_mm_s: event.target.value }))} /></label>
+            </div>
+            <div className="action-grid action-grid--inline">
+              <button className="button button--ghost" type="button" disabled={!machine.isPhysical || referenceBusy || machine.refreshing} onClick={() => void saveMachineSettings()}>Guardar configuración</button>
+            </div>
+            {machineSettingsMessage ? <p className="muted">{machineSettingsMessage}</p> : null}
+          </details>
           <button className="button" type="button" disabled={!canInitialize || referenceBusy || machine.refreshing} onClick={() => void withPhysicalReferenceAction(async () => { await machine.runMachineAction("initialize", referencePrepZ); })}>Realizar homing, subir Z e ir al centro</button>
           <div className="workflow-steps-grid">
             {(runtime?.initialization_steps ?? []).map((step, index) => (

@@ -36,6 +36,12 @@ class MoonrakerTelemetry:
                         "axis_maximum",
                         "max_velocity",
                         "max_accel",
+                    ],
+                    "gcode_move": [
+                        "gcode_position",
+                        "position",
+                        "absolute_coordinates",
+                        "homing_origin",
                     ]
                 }
             },
@@ -76,6 +82,18 @@ class MoonrakerTelemetry:
             max_accel=toolhead.get("max_accel"),
         )
 
+
+    def _process_gcode_move(
+        self,
+        gcode_move,
+    ):
+        self.machine_state.update_gcode_move(
+            gcode_position=gcode_move.get("gcode_position"),
+            position=gcode_move.get("position"),
+            absolute_coordinates=gcode_move.get("absolute_coordinates"),
+            homing_origin=gcode_move.get("homing_origin"),
+        )
+
     def _process_message(
         self,
         data,
@@ -107,6 +125,11 @@ class MoonrakerTelemetry:
 
             if isinstance(toolhead, dict):
                 self._process_toolhead(toolhead)
+
+            gcode_move = status.get("gcode_move")
+
+            if isinstance(gcode_move, dict):
+                self._process_gcode_move(gcode_move)
 
             return
 
@@ -142,6 +165,11 @@ class MoonrakerTelemetry:
 
         if isinstance(toolhead, dict):
             self._process_toolhead(toolhead)
+
+        gcode_move = status.get("gcode_move")
+
+        if isinstance(gcode_move, dict):
+            self._process_gcode_move(gcode_move)
 
     async def run(self):
         self._running = True

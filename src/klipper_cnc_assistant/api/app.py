@@ -40,7 +40,7 @@ def create_app(
     )
     repository = JsonProjectRepository(resolved_data_dir)
     machine_session_service = MachineSessionService()
-    machine_runtime = MachineRuntime(load_machine_runtime_config())
+    machine_runtime = MachineRuntime(load_machine_runtime_config(), settings_path=resolved_data_dir / "machine_runtime_settings.json")
     machine_session_service.machine_mode = "fisico" if machine_runtime.config.mode.value == "physical" else "simulado"
     project_service = ProjectService(repository)
     height_map_service = HeightMapService(repository)

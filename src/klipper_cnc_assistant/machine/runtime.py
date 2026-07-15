@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import _thread
 import asyncio
+import json
 import math
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from enum import StrEnum
+from pathlib import Path
 from typing import Any, Callable
 
 from klipper_cnc_assistant.input.command_mapper import CommandMapper, ControllerCommand
@@ -125,8 +127,10 @@ class MachineRuntime:
         telemetry_factory: Callable[[str, Any], MoonrakerTelemetry] = MoonrakerTelemetry,
         serial_factory: Callable[..., SerialDriver] = SerialDriver,
         discovery: Callable[[MoonrakerClient], Any] = discover_machine,
+        settings_path: Path | None = None,
     ) -> None:
-        self.config = config
+        self._settings_path = settings_path
+        self.config = self._load_persisted_config(config)
         self._client_factory = client_factory
         self._telemetry_factory = telemetry_factory
         self._serial_factory = serial_factory
@@ -162,6 +166,80 @@ class MachineRuntime:
         self._initialization_steps: list[InitializationStep] = []
         self._events: list[RuntimeEvent] = []
         self._counters = RuntimeCounters()
+
+
+    _MACHINE_SETTINGS_FIELDS = {
+        "reference_prep_z_mm",
+        "reference_prep_z_feed_mm_min",
+        "move_timeout_s",
+        "no_progress_timeout_s",
+        "settle_tolerance_mm",
+        "velocity_tolerance_mm_s",
+    }
+
+    def _load_persisted_config(self, config: MachineRuntimeConfig) -> MachineRuntimeConfig:
+        if self._settings_path is None or not self._settings_path.exists():
+            return config
+        try:
+            payload = json.loads(self._settings_path.read_text())
+        except Exception:
+            return config
+        if not isinstance(payload, dict):
+            return config
+        external_mapping = {
+            "reference_prep_z_mm": "reference_prep_z_mm",
+            "reference_prep_z_feed_mm_min": "reference_prep_z_feed_mm_min",
+            "move_total_timeout_s": "move_timeout_s",
+            "no_progress_timeout_s": "no_progress_timeout_s",
+            "position_tolerance_mm": "settle_tolerance_mm",
+            "velocity_tolerance_mm_s": "velocity_tolerance_mm_s",
+        }
+        overrides = {field: payload[field] for field in self._MACHINE_SETTINGS_FIELDS if field in payload}
+        for external, field in external_mapping.items():
+            if external in payload:
+                overrides[field] = payload[external]
+        if "move_timeout_s" in overrides:
+            overrides.setdefault("move_minimum_timeout_s", overrides["move_timeout_s"])
+        return replace(config, **overrides) if overrides else config
+
+    def machine_settings(self) -> dict[str, float]:
+        return {
+            "reference_prep_z_mm": self.config.reference_prep_z_mm,
+            "reference_prep_z_feed_mm_min": self.config.reference_prep_z_feed_mm_min,
+            "move_total_timeout_s": self.config.move_timeout_s,
+            "no_progress_timeout_s": self.config.no_progress_timeout_s,
+            "position_tolerance_mm": self.config.settle_tolerance_mm,
+            "velocity_tolerance_mm_s": self.config.velocity_tolerance_mm_s,
+        }
+
+    def update_machine_settings(self, payload: dict[str, Any]) -> dict[str, float]:
+        mapping = {
+            "reference_prep_z_mm": "reference_prep_z_mm",
+            "reference_prep_z_feed_mm_min": "reference_prep_z_feed_mm_min",
+            "move_total_timeout_s": "move_timeout_s",
+            "no_progress_timeout_s": "no_progress_timeout_s",
+            "position_tolerance_mm": "settle_tolerance_mm",
+            "velocity_tolerance_mm_s": "velocity_tolerance_mm_s",
+        }
+        overrides: dict[str, float] = {}
+        for external, field in mapping.items():
+            if external not in payload or payload[external] is None:
+                continue
+            value = float(payload[external])
+            if value <= 0:
+                raise MachineRuntimeError(f"{external} debe ser mayor que cero.")
+            overrides[field] = value
+        if "reference_prep_z_mm" in overrides and self._machine is not None:
+            z = overrides["reference_prep_z_mm"]
+            if z < self._machine.z_limits.minimum or z > self._machine.z_limits.maximum:
+                raise MachineRuntimeError(f"reference_prep_z_mm fuera de límites Klipper {self._machine.z_limits.minimum:.3f}..{self._machine.z_limits.maximum:.3f} mm.")
+        if "move_timeout_s" in overrides:
+            overrides["move_minimum_timeout_s"] = overrides["move_timeout_s"]
+        self.config = replace(self.config, **overrides)
+        if self._settings_path is not None:
+            self._settings_path.parent.mkdir(parents=True, exist_ok=True)
+            self._settings_path.write_text(json.dumps(self.machine_settings(), indent=2, sort_keys=True))
+        return self.machine_settings()
 
     def start(self) -> None:
         with self._lock:
@@ -855,8 +933,9 @@ class MachineRuntime:
                 if self._jog is not None:
                     self._jog.machine = refreshed
             else:
+                commanded = refreshed.commanded_position or refreshed.position
                 self._machine.update_toolhead(
-                    position=(refreshed.position.x, refreshed.position.y, refreshed.position.z),
+                    position=commanded.as_tuple(),
                     homed_axes=refreshed.homed_axes,
                     axis_minimum=(refreshed.x_limits.minimum, refreshed.y_limits.minimum, refreshed.z_limits.minimum),
                     axis_maximum=(refreshed.x_limits.maximum, refreshed.y_limits.maximum, refreshed.z_limits.maximum),
@@ -864,11 +943,20 @@ class MachineRuntime:
                     max_accel=refreshed.max_accel,
                     max_z_velocity=refreshed.max_z_velocity,
                 )
+                if refreshed.live_position is not None:
+                    self._machine.update_motion(live_position=refreshed.live_position.as_tuple(), live_velocity=refreshed.live_velocity)
+                self._machine.update_gcode_move(
+                    gcode_position=None if refreshed.gcode_position is None else refreshed.gcode_position.as_tuple(),
+                    position=None if refreshed.gcode_move_position is None else refreshed.gcode_move_position.as_tuple(),
+                    absolute_coordinates=refreshed.absolute_coordinates,
+                    homing_origin=None if refreshed.homing_origin is None else refreshed.homing_origin.as_tuple(),
+                )
             self._last_telemetry_at = time.monotonic()
 
     def _attach_telemetry_tracking(self, machine) -> None:
         original_update_motion = machine.update_motion
         original_update_toolhead = machine.update_toolhead
+        original_update_gcode_move = machine.update_gcode_move
 
         def mark_telemetry() -> None:
             with self._lock:
@@ -884,20 +972,30 @@ class MachineRuntime:
             mark_telemetry()
             return result
 
+        def update_gcode_move_with_timestamp(*args, **kwargs):
+            result = original_update_gcode_move(*args, **kwargs)
+            mark_telemetry()
+            return result
+
         machine.update_motion = update_motion_with_timestamp
         machine.update_toolhead = update_toolhead_with_timestamp
+        machine.update_gcode_move = update_gcode_move_with_timestamp
 
     def _send_script(self, script: str, *, label: str) -> None:
         if self._client is None:
             raise MachineRuntimeError("Moonraker no está conectado.")
+        response: dict[str, Any] | None = None
+        sent_at = _iso_now()
         try:
-            self._client.send_gcode(script, timeout=self.config.moonraker_request_timeout_s)
+            response = self._client.send_gcode(script, timeout=self.config.moonraker_request_timeout_s)
         except MoonrakerTimeout as error:
             with self._lock:
                 self._last_error = str(error)
                 self._event("warning", f"Timeout HTTP enviando {label}; se comprobará el estado real de Klipper.")
         with self._lock:
             self._last_command_text = script
+            if self._last_movement is not None and self._last_movement.get("label") == label:
+                self._last_movement.update({"command_sent_at": sent_at, "moonraker_response": response})
             self._event("info", f"Comando físico enviado: {label}.")
 
     def _clear_resolved_transport_timeout(self, label: str) -> None:
@@ -946,6 +1044,8 @@ class MachineRuntime:
         movement = {
             "label": label,
             "gcode": script,
+            "command_sent_at": None,
+            "moonraker_response": None,
             "initial_position": {axis: float(start_snapshot[axis]) for axis in ("x", "y", "z")},
             "target": targets,
             "direction": {axis: self._target_direction(float(start_snapshot[axis]), target) for axis, target in targets.items()},
@@ -962,6 +1062,10 @@ class MachineRuntime:
             "position_tolerance_mm": self.config.settle_tolerance_mm,
             "velocity_tolerance_mm_s": self.config.velocity_tolerance_mm_s,
             "stable_samples_required": max(1, int(self.config.stable_samples)),
+            "position_source": start_snapshot.get("source"),
+            "live_position": start_snapshot.get("live_position"),
+            "commanded_position": start_snapshot.get("commanded_position"),
+            "gcode_position": start_snapshot.get("gcode_position"),
         }
         with self._lock:
             self._last_movement = movement
@@ -1041,6 +1145,7 @@ class MachineRuntime:
         required_stable_samples = max(1, int(self.config.stable_samples))
         start_snapshot = self._machine.get_motion_snapshot()
         last_snapshot = start_snapshot
+        previous_live_axis = {axis: float(start_snapshot[axis]) for axis in targets}
         best_remaining = self._remaining_distance(start_snapshot, targets)
         last_progress_at = start
         reached_position_at: float | None = None
@@ -1056,15 +1161,36 @@ class MachineRuntime:
             reached, positions_ok, last_velocity = self._targets_reached(last_snapshot, targets)
             remaining = self._remaining_distance(last_snapshot, targets)
             traveled = self._distance_from_start(start_snapshot, last_snapshot, targets)
-            if remaining < best_remaining - self.config.settle_tolerance_mm:
-                best_remaining = remaining
-                last_progress_at = now
-                wrong_direction_samples = 0
-            elif traveled > self.config.settle_tolerance_mm and remaining > best_remaining + self.config.settle_tolerance_mm:
+            with self._lock:
+                if self._last_movement is not None and self._last_movement.get("label") == label:
+                    self._last_movement.update({
+                        "observed_position": {axis: float(last_snapshot[axis]) for axis in ("x", "y", "z")},
+                        "observed_velocity_mm_s": last_velocity,
+                        "position_source": last_snapshot.get("source"),
+                        "live_position": last_snapshot.get("live_position"),
+                        "commanded_position": last_snapshot.get("commanded_position"),
+                        "gcode_position": last_snapshot.get("gcode_position"),
+                        "gcode_move_position": last_snapshot.get("gcode_move_position"),
+                        "absolute_coordinates": last_snapshot.get("absolute_coordinates"),
+                        "homing_origin": last_snapshot.get("homing_origin"),
+                        "elapsed_s": now - start,
+                        "no_progress_elapsed_s": now - last_progress_at,
+                        "progress_remaining_mm": remaining,
+                        "stable_samples": stable_samples,
+                    })
+            live_axis_changed = any(abs(float(last_snapshot[axis]) - previous_live_axis[axis]) >= 0.02 for axis in targets)
+            moving_by_velocity = abs(last_velocity) >= self.config.velocity_tolerance_mm_s
+            if traveled > self.config.settle_tolerance_mm and remaining > best_remaining + self.config.settle_tolerance_mm:
                 wrong_direction_samples += 1
+                previous_live_axis = {axis: float(last_snapshot[axis]) for axis in targets}
                 if wrong_direction_samples >= max(3, required_stable_samples):
                     detail = self._observed_detail(last_snapshot)
                     raise MachineRuntimeError(f"{label}: la posición se aleja del objetivo. Observado {detail}; objetivo {self._target_detail(targets)}.")
+            elif live_axis_changed or moving_by_velocity or remaining < best_remaining - self.config.settle_tolerance_mm:
+                best_remaining = min(best_remaining, remaining)
+                last_progress_at = now
+                wrong_direction_samples = 0
+                previous_live_axis = {axis: float(last_snapshot[axis]) for axis in targets}
             if positions_ok:
                 reached_position_at = reached_position_at or now
                 if now - reached_position_at > self.config.settle_timeout_s:
@@ -1081,6 +1207,9 @@ class MachineRuntime:
                 return {
                     "observed_position": {axis: float(last_snapshot[axis]) for axis in ("x", "y", "z")},
                     "observed_velocity_mm_s": last_velocity,
+                    "position_source": last_snapshot.get("source"),
+                    "live_position": last_snapshot.get("live_position"),
+                    "commanded_position": last_snapshot.get("commanded_position"),
                     "stable_samples": stable_samples,
                     "elapsed_s": time.monotonic() - start,
                     "progress_remaining_mm": remaining,
@@ -1096,6 +1225,9 @@ class MachineRuntime:
                     return {
                         "observed_position": {axis: float(checked_snapshot[axis]) for axis in ("x", "y", "z")},
                         "observed_velocity_mm_s": checked_velocity,
+                        "position_source": checked_snapshot.get("source"),
+                        "live_position": checked_snapshot.get("live_position"),
+                        "commanded_position": checked_snapshot.get("commanded_position"),
                         "stable_samples": stable_samples,
                         "elapsed_s": time.monotonic() - start,
                         "progress_remaining_mm": checked_remaining,
@@ -1114,6 +1246,9 @@ class MachineRuntime:
             return {
                 "observed_position": {axis: float(final_snapshot[axis]) for axis in ("x", "y", "z")},
                 "observed_velocity_mm_s": final_velocity,
+                "position_source": final_snapshot.get("source"),
+                "live_position": final_snapshot.get("live_position"),
+                "commanded_position": final_snapshot.get("commanded_position"),
                 "stable_samples": stable_samples,
                 "elapsed_s": time.monotonic() - start,
                 "progress_remaining_mm": self._remaining_distance(final_snapshot, targets),

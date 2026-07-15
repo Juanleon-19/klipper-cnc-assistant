@@ -158,6 +158,9 @@ export const api = {
   getSystemInfo: () => request<SystemInfoResponse>("/api/system/info"),
   getMachineSession: () => request<MachineSession>("/api/machine/session"),
   getMachineRuntime: () => request<MachineRuntime>("/api/machine/status"),
+  getMachineSettings: () => request<Record<string, number>>("/api/machine/settings"),
+  updateMachineSettings: (payload: Record<string, number>) =>
+    request<Record<string, number>>("/api/machine/settings", { method: "PUT", body: JSON.stringify(payload) }),
   connectMachine: () => request<MachineRuntime>("/api/machine/connect", { method: "POST" }),
   disconnectMachine: () => request<MachineRuntime>("/api/machine/disconnect", { method: "POST" }),
   setMachineDiagnosticMode: (enabled: boolean) =>

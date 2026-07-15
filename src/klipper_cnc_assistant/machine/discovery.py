@@ -10,6 +10,10 @@ def discover_machine(
 ):
     status = moonraker_client.query_objects(
         {
+            "motion_report": [
+                "live_position",
+                "live_velocity",
+            ],
             "toolhead": [
                 "position",
                 "homed_axes",
@@ -17,6 +21,12 @@ def discover_machine(
                 "axis_maximum",
                 "max_velocity",
                 "max_accel",
+            ],
+            "gcode_move": [
+                "gcode_position",
+                "position",
+                "absolute_coordinates",
+                "homing_origin",
             ],
             "configfile": [
                 "settings",
@@ -42,7 +52,7 @@ def discover_machine(
     raw_max_z_velocity = printer_settings.get("max_z_velocity") if isinstance(printer_settings, dict) else None
     max_z_velocity = None if raw_max_z_velocity is None else float(raw_max_z_velocity)
 
-    return MachineState(
+    machine = MachineState(
         position=MachinePosition(
             x=float(position[0]),
             y=float(position[1]),
@@ -71,3 +81,18 @@ def discover_machine(
         ),
         max_z_velocity=max_z_velocity,
     )
+    motion_report = status.get("motion_report")
+    if isinstance(motion_report, dict):
+        machine.update_motion(
+            live_position=motion_report.get("live_position"),
+            live_velocity=motion_report.get("live_velocity"),
+        )
+    gcode_move = status.get("gcode_move")
+    if isinstance(gcode_move, dict):
+        machine.update_gcode_move(
+            gcode_position=gcode_move.get("gcode_position"),
+            position=gcode_move.get("position"),
+            absolute_coordinates=gcode_move.get("absolute_coordinates"),
+            homing_origin=gcode_move.get("homing_origin"),
+        )
+    return machine

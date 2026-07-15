@@ -10,6 +10,7 @@ from .machine_schemas import (
     JogModeRequest,
     MachineInitializationRequest,
     MachineRuntimeResponse,
+    MachineSettingsRequest,
     ManualControlRequest,
 )
 
@@ -27,6 +28,14 @@ def build_machine_router() -> APIRouter:
     @router.get("/status", response_model=MachineRuntimeResponse)
     def get_status(request: Request) -> MachineRuntimeResponse:
         return MachineRuntimeResponse(**runtime(request).snapshot())
+
+    @router.get("/settings", response_model=dict[str, float])
+    def get_settings(request: Request) -> dict[str, float]:
+        return runtime(request).machine_settings()
+
+    @router.put("/settings", response_model=dict[str, float])
+    def update_settings(payload: MachineSettingsRequest, request: Request) -> dict[str, float]:
+        return runtime(request).update_machine_settings(payload.model_dump(exclude_unset=True))
 
     @router.post("/connect", response_model=MachineRuntimeResponse)
     def connect(request: Request) -> MachineRuntimeResponse:

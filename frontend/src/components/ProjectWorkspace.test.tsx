@@ -42,6 +42,8 @@ const apiMock = vi.hoisted(() => ({
   executionPreflight: vi.fn(),
   executionAction: vi.fn(),
   generatedFileUrl: vi.fn(),
+  getMachineSettings: vi.fn(),
+  updateMachineSettings: vi.fn(),
 }));
 
 vi.mock("../lib/api", async () => {
@@ -201,8 +203,8 @@ const physicalMachine: MachineContextValue = {
     klipper: { ready: true, homed_axes: "xyz", position: { x: 60, y: 88.75, z: 10.05 } },
     preparation: {
       reference_prep_z_mm: 115,
-      reference_prep_z_feed_mm_min: 180,
-      reference_prep_z_speed_mm_s: 3,
+      reference_prep_z_feed_mm_min: 120,
+      reference_prep_z_speed_mm_s: 2,
       center_x_mm: 110,
       center_y_mm: 110,
       target: { x_mm: 110, y_mm: 110, z_mm: 115 },
@@ -261,6 +263,8 @@ function renderWorkspace(machine?: MachineContextValue) {
 describe("ProjectWorkspace", () => {
   beforeEach(() => {
     Object.values(apiMock).forEach((fn) => fn.mockReset());
+    apiMock.getMachineSettings.mockResolvedValue({ reference_prep_z_mm: 115, reference_prep_z_feed_mm_min: 120, move_total_timeout_s: 180, no_progress_timeout_s: 60, position_tolerance_mm: 0.05, velocity_tolerance_mm_s: 0.02 });
+    apiMock.updateMachineSettings.mockResolvedValue({ reference_prep_z_mm: 115, reference_prep_z_feed_mm_min: 120, move_total_timeout_s: 180, no_progress_timeout_s: 60, position_tolerance_mm: 0.05, velocity_tolerance_mm_s: 0.02 });
     apiMock.getHeightMap.mockResolvedValue(heightMap);
     apiMock.getReferenceSession.mockResolvedValue(referenceSession);
     apiMock.getPhysicalMap.mockRejectedValue(new Error("No existe mapa físico medido para este montaje y cara."));
@@ -382,6 +386,7 @@ describe("ProjectWorkspace", () => {
     expect(await screen.findByText(/Home, Z de preparación y centro/i)).toBeInTheDocument();
     expect(screen.getAllByText(/Z de preparación/i).length).toBeGreaterThan(0);
     expect(screen.getAllByText(/X 110.000 mm · Y 110.000 mm/i).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/120 mm\/min · 2.000 mm\/s/i).length).toBeGreaterThan(0);
     expect(screen.getAllByText(/180 mm\/min · 3.000 mm\/s/i).length).toBeGreaterThan(0);
     expect(screen.getByText(/Posición segura de cambio de herramienta/i)).toBeInTheDocument();
     expect(screen.getByText(/Z primero, luego X\/Y/i)).toBeInTheDocument();
@@ -389,6 +394,27 @@ describe("ProjectWorkspace", () => {
     fireEvent.click(screen.getByRole("button", { name: /Ir a posición de cambio/i }));
 
     await waitFor(() => expect(physicalMachine.runMachineAction).toHaveBeenCalledWith("tool-change-position"));
+  });
+
+  it("permite guardar parámetros avanzados de preparación física", async () => {
+    vi.mocked(physicalMachine.refreshRuntime).mockClear();
+    renderWorkspace(physicalMachine);
+
+    fireEvent.click(screen.getByRole("button", { name: /Referencia/i }));
+    expect(await screen.findByText(/Configuración avanzada de movimiento/i)).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText(/Velocidad Z de preparación/i), { target: { value: "90" } });
+    fireEvent.click(screen.getByRole("button", { name: /Guardar configuración/i }));
+
+    await waitFor(() => expect(apiMock.updateMachineSettings).toHaveBeenCalledWith(expect.objectContaining({
+      reference_prep_z_mm: 115,
+      reference_prep_z_feed_mm_min: 90,
+      move_total_timeout_s: 180,
+      no_progress_timeout_s: 60,
+      position_tolerance_mm: 0.05,
+      velocity_tolerance_mm_s: 0.02,
+    })));
+    expect(physicalMachine.refreshRuntime).toHaveBeenCalled();
   });
 
   it("muestra mapa físico como flujo principal sin botón operativo SIMULADO", async () => {
