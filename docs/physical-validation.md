@@ -176,3 +176,22 @@ Se verificó la aplicación servida por FastAPI con fixture local en modo físic
 - Ejecución/preflight.
 
 Limitación de la verificación headless: Firefox sin pantalla no tuvo WebGL para Plotly, así que la superficie 3D debe comprobarse visualmente en navegador normal con WebGL durante la prueba con PCB de descarte.
+
+## Malla física por material
+
+La malla física se planifica desde las dimensiones reales del material, no desde las operaciones. El operador define filas y columnas manualmente. La aplicación genera todos los puntos e incluye los cuatro límites interiores.
+
+Fórmula de región interior:
+
+```text
+probe_x_min = material_x_min + edge_margin_left
+probe_x_max = material_x_max - edge_margin_right
+probe_y_min = material_y_min + edge_margin_bottom
+probe_y_max = material_y_max - edge_margin_top
+```
+
+Si `probe_x_min >= probe_x_max` o `probe_y_min >= probe_y_max`, el sondeo se bloquea con el mensaje de retiro inválido.
+
+Ejemplo: material 60 x 60 mm, retiro 2 mm por lado, filas 7 y columnas 6 produce región X=2..58, Y=2..58, 42 puntos, `dx=11.200 mm` y `dy=9.333 mm`, ordenados en serpentina.
+
+Las exclusiones rectangulares y circulares representan pinzas, tornillos y obstáculos. Los puntos dentro se marcan `EXCLUDED`, se muestran en el visor y no se ejecutan. El sondeo automático mide todos los puntos ejecutables después de una sola confirmación; pausa termina el punto seguro actual, cancelar conserva puntos medidos y emergencia sigue siendo M112.

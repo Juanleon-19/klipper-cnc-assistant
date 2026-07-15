@@ -127,9 +127,30 @@ class SurfaceResponse(BaseModel):
 
 
 
+class PhysicalMapExclusionRequest(BaseModel):
+    id: str = Field(min_length=1)
+    name: str = Field(min_length=1)
+    shape: str
+    enabled: bool = True
+    x_min_mm: float | None = None
+    x_max_mm: float | None = None
+    y_min_mm: float | None = None
+    y_max_mm: float | None = None
+    center_x_mm: float | None = None
+    center_y_mm: float | None = None
+    radius_mm: float | None = Field(default=None, gt=0)
+
+
 class PhysicalMapPlanRequest(BaseModel):
+    rows: int = Field(default=7, ge=2)
+    columns: int = Field(default=6, ge=2)
+    edge_margin_left_mm: float = Field(default=2.0, ge=0)
+    edge_margin_right_mm: float = Field(default=2.0, ge=0)
+    edge_margin_bottom_mm: float = Field(default=2.0, ge=0)
+    edge_margin_top_mm: float = Field(default=2.0, ge=0)
+    exclusions: list[PhysicalMapExclusionRequest] = Field(default_factory=list)
     max_spacing_mm: float = Field(default=10.0, gt=0)
-    margin_mm: float = Field(default=1.0, ge=0)
+    margin_mm: float = Field(default=0.0, ge=0)
     safe_z_mm: float | None = Field(default=None, gt=0)
     probe_step_mm: float | None = Field(default=None, gt=0)
     probe_feed_mm_min: float | None = Field(default=None, gt=0)

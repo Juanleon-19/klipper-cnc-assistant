@@ -396,15 +396,55 @@ export type ProjectPayload = {
   agujeros_alineacion: AgujeroAlineacion[];
 };
 
+export type PhysicalMeshPoint = {
+  index: number;
+  row: number;
+  column: number;
+  x_local: number;
+  y_local: number;
+  x_machine: number;
+  y_machine: number;
+  z_measured?: number | null;
+  z_measured_abs?: number | null;
+  delta_z?: number | null;
+  status: string;
+  attempts?: number;
+  duration?: number | null;
+  duration_s?: number | null;
+  error?: string | null;
+  last_error?: string | null;
+};
+
+export type PhysicalMapExclusion = {
+  id: string;
+  name: string;
+  shape: "rectangle" | "circle";
+  enabled: boolean;
+  x_min_mm?: number | null;
+  x_max_mm?: number | null;
+  y_min_mm?: number | null;
+  y_max_mm?: number | null;
+  center_x_mm?: number | null;
+  center_y_mm?: number | null;
+  radius_mm?: number | null;
+};
+
 export type PhysicalMapPayload = Record<string, unknown> & {
   map_id?: string;
   status?: string;
   source?: string;
   point_count?: number;
-  points?: Array<Record<string, unknown>>;
+  excluded_count?: number;
+  executable_point_count?: number;
+  estimated_distance_mm?: number | null;
+  estimated_time_s?: number | null;
+  edge_margins?: { left_mm: number; right_mm: number; bottom_mm: number; top_mm: number };
+  exclusions?: PhysicalMapExclusion[];
+  points?: PhysicalMeshPoint[];
   grid?: { rows: number; columns: number; dx_mm: number; dy_mm: number };
   local_region?: { min_x_mm: number; min_y_mm: number; max_x_mm: number; max_y_mm: number };
   machine_region?: { min_x_mm: number; min_y_mm: number; max_x_mm: number; max_y_mm: number };
+  probe_config?: { safe_z_mm?: number | null; probe_step_mm?: number | null; probe_feed_mm_min?: number | null; retract_mm?: number | null };
   tool_references?: Record<string, unknown>;
 };
 

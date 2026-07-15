@@ -315,9 +315,9 @@ describe("ProjectWorkspace", () => {
 
     expect(await screen.findByText(/Mapa medido físicamente/i)).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /^SIMULADO$/i })).toBeNull();
-    expect(screen.getByRole("button", { name: /Usar área de las operaciones y generar malla/i })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Generar vista previa de malla/i })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /Armar sondeo/i })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /Iniciar sondeo físico/i })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /INICIAR SONDEO AUTOMÁTICO/i })).toBeInTheDocument();
   });
 
   it("acepta 0 válido en X e Y del origen de trabajo", async () => {

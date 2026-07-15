@@ -32,6 +32,34 @@ export type OperationUpdateInput = {
   herramienta?: string | null;
 };
 
+type PhysicalMapPlanPayload = {
+  rows?: number;
+  columns?: number;
+  edge_margin_left_mm?: number;
+  edge_margin_right_mm?: number;
+  edge_margin_bottom_mm?: number;
+  edge_margin_top_mm?: number;
+  exclusions?: Array<{
+    id: string;
+    name: string;
+    shape: "rectangle" | "circle";
+    enabled: boolean;
+    x_min_mm?: number | null;
+    x_max_mm?: number | null;
+    y_min_mm?: number | null;
+    y_max_mm?: number | null;
+    center_x_mm?: number | null;
+    center_y_mm?: number | null;
+    radius_mm?: number | null;
+  }>;
+  max_spacing_mm?: number;
+  margin_mm?: number;
+  safe_z_mm?: number;
+  probe_step_mm?: number;
+  probe_feed_mm_min?: number;
+  retract_mm?: number;
+};
+
 export class ApiError extends Error {
   status: number;
   fieldErrors: Record<string, string>;
@@ -227,7 +255,7 @@ export const api = {
     request<ReferenceSession>(`/api/projects/${projectId}/operations/${operationId}/reference-session/physical-z-reference-from-probe`, {
       method: "POST",
     }),
-  planPhysicalMapFromReference: (projectId: string, operationId: string, payload: { max_spacing_mm?: number; margin_mm?: number; safe_z_mm?: number; probe_step_mm?: number; probe_feed_mm_min?: number; retract_mm?: number }) =>
+  planPhysicalMapFromReference: (projectId: string, operationId: string, payload: PhysicalMapPlanPayload) =>
     request<PhysicalMapResponse>(`/api/projects/${projectId}/operations/${operationId}/physical-map/plan-from-reference`, {
       method: "POST",
       body: JSON.stringify(payload),
@@ -238,6 +266,8 @@ export const api = {
     request<HeightMap>(`/api/projects/${projectId}/operations/${operationId}/physical-map/height-map`),
   executeNextPhysicalMapPoint: (projectId: string, mapId: string) =>
     request<PhysicalMapResponse>(`/api/projects/${projectId}/physical-maps/${mapId}/execute-next`, { method: "POST" }),
+  executeAllPhysicalMapPoints: (projectId: string, mapId: string) =>
+    request<PhysicalMapResponse>(`/api/projects/${projectId}/physical-maps/${mapId}/execute-all`, { method: "POST" }),
   pausePhysicalMap: (projectId: string, mapId: string) =>
     request<PhysicalMapResponse>(`/api/projects/${projectId}/physical-maps/${mapId}/pause`, { method: "POST" }),
   resumePhysicalMap: (projectId: string, mapId: string) =>

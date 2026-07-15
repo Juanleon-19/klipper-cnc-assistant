@@ -6,12 +6,12 @@ import { HeightMapHeatmap } from "./HeightMapHeatmap";
 import { HeightMapPointTable } from "./HeightMapPointTable";
 import { HeightMapSurface3D } from "./HeightMapSurface3D";
 
-const newPlot = vi.fn().mockResolvedValue(undefined);
+const reactPlot = vi.fn().mockResolvedValue(undefined);
 const purge = vi.fn();
 let fullscreenTarget: Element | null = null;
 
 vi.mock("plotly.js-dist-min", () => ({
-  newPlot,
+  react: reactPlot,
   purge,
 }));
 
@@ -136,14 +136,14 @@ describe("HeightMap views", () => {
   });
 
   it("renderiza el heatmap 2D con leyenda compacta y fullscreen", async () => {
-    render(<HeightMapHeatmap material={{ ancho_mm: 80, alto_mm: 60, espesor_mm: 1.6 }} heightMap={heightMap} mode="bruto" toolpathBounds={{ min_x_mm: 5, max_x_mm: 50, min_y_mm: 4, max_y_mm: 40, min_z_mm: -0.1, max_z_mm: 0.02, ancho_mm: 45, alto_mm: 36 }} />);
+    render(<HeightMapHeatmap material={{ ancho_mm: 80, alto_mm: 60, espesor_mm: 1.6 }} heightMap={heightMap} mode="bruto" />);
 
     expect(screen.getByText(/Mapa de alturas 2D/i)).toBeInTheDocument();
     expect(screen.getByText(/X \(mm\)/i)).toBeInTheDocument();
     expect(screen.getByText(/Y \(mm\)/i)).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: /Capas/i }));
     expect(screen.getByLabelText(/Material/i)).toBeInTheDocument();
-    expect(screen.getByLabelText(/Trayectoria/i)).toBeInTheDocument();
+    expect(screen.queryByLabelText(/Trayectoria/i)).not.toBeInTheDocument();
     expect(screen.getByLabelText(/Región/i)).toBeInTheDocument();
     expect(screen.getByLabelText(/Exclusiones/i)).toBeInTheDocument();
     expect(screen.getByLabelText(/Muestras/i)).toBeInTheDocument();
@@ -173,7 +173,7 @@ describe("HeightMap views", () => {
   it("carga la superficie 3D con exageración Z visible", async () => {
     render(<HeightMapSurface3D heightMap={heightMap} mode="plano" />);
 
-    await waitFor(() => expect(newPlot).toHaveBeenCalled());
+    await waitFor(() => expect(reactPlot).toHaveBeenCalled());
     expect(await screen.findByText(/Factor de exageración visible: x8/i)).toBeInTheDocument();
   });
 });

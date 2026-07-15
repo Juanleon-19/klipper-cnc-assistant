@@ -45,19 +45,93 @@ def _tool_diameter(operation: OperacionPCB) -> float | None:
 
 
 @dataclass(frozen=True)
+class PhysicalExclusion:
+    id: str
+    name: str
+    shape: str
+    enabled: bool = True
+    x_min_mm: float | None = None
+    x_max_mm: float | None = None
+    y_min_mm: float | None = None
+    y_max_mm: float | None = None
+    center_x_mm: float | None = None
+    center_y_mm: float | None = None
+    radius_mm: float | None = None
+
+    def __post_init__(self) -> None:
+        if not self.id.strip():
+            raise ApplicationError("La exclusión necesita un identificador.")
+        if self.shape not in {"rectangle", "circle"}:
+            raise ApplicationError("La exclusión debe ser rectangular o circular.")
+        if self.shape == "rectangle":
+            values = (self.x_min_mm, self.x_max_mm, self.y_min_mm, self.y_max_mm)
+            if any(value is None for value in values):
+                raise ApplicationError("La exclusión rectangular necesita x_min, x_max, y_min e y_max.")
+            if float(self.x_min_mm) >= float(self.x_max_mm) or float(self.y_min_mm) >= float(self.y_max_mm):
+                raise ApplicationError("La exclusión rectangular tiene límites inválidos.")
+        if self.shape == "circle":
+            values = (self.center_x_mm, self.center_y_mm, self.radius_mm)
+            if any(value is None for value in values):
+                raise ApplicationError("La exclusión circular necesita centro y radio.")
+            if float(self.radius_mm) <= 0:
+                raise ApplicationError("La exclusión circular necesita un radio positivo.")
+
+    def contains(self, x_mm: float, y_mm: float) -> bool:
+        if not self.enabled:
+            return False
+        if self.shape == "rectangle":
+            return float(self.x_min_mm) <= x_mm <= float(self.x_max_mm) and float(self.y_min_mm) <= y_mm <= float(self.y_max_mm)
+        dx = x_mm - float(self.center_x_mm)
+        dy = y_mm - float(self.center_y_mm)
+        return math.hypot(dx, dy) <= float(self.radius_mm)
+
+    def to_payload(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "name": self.name,
+            "shape": self.shape,
+            "enabled": self.enabled,
+            "x_min_mm": self.x_min_mm,
+            "x_max_mm": self.x_max_mm,
+            "y_min_mm": self.y_min_mm,
+            "y_max_mm": self.y_max_mm,
+            "center_x_mm": self.center_x_mm,
+            "center_y_mm": self.center_y_mm,
+            "radius_mm": self.radius_mm,
+        }
+
+
+@dataclass(frozen=True)
 class PhysicalMeshConfig:
+    rows: int = 7
+    columns: int = 6
+    edge_margin_left_mm: float = 2.0
+    edge_margin_right_mm: float = 2.0
+    edge_margin_bottom_mm: float = 2.0
+    edge_margin_top_mm: float = 2.0
+    exclusions: tuple[PhysicalExclusion, ...] = ()
     max_spacing_mm: float = 10.0
-    margin_mm: float = 1.0
+    margin_mm: float = 0.0
     safe_z_mm: float | None = None
     probe_step_mm: float | None = None
     probe_feed_mm_min: float | None = None
     retract_mm: float | None = None
 
     def __post_init__(self) -> None:
+        if self.rows < 2 or self.columns < 2:
+            raise ApplicationError("La malla física necesita al menos 2 filas y 2 columnas.")
         if self.max_spacing_mm <= 0:
             raise ApplicationError("La separación máxima de malla debe ser positiva.")
         if self.margin_mm < 0:
-            raise ApplicationError("El margen de malla no puede ser negativo.")
+            raise ApplicationError("El margen avanzado de malla no puede ser negativo.")
+        for field, value in (
+            ("retiro izquierdo", self.edge_margin_left_mm),
+            ("retiro derecho", self.edge_margin_right_mm),
+            ("retiro inferior", self.edge_margin_bottom_mm),
+            ("retiro superior", self.edge_margin_top_mm),
+        ):
+            if value < 0:
+                raise ApplicationError(f"El {field} no puede ser negativo.")
         for field, value in (
             ("Z segura", self.safe_z_mm),
             ("paso de sonda", self.probe_step_mm),
@@ -112,12 +186,10 @@ class PhysicalMapService:
             self._save(project_id, str(payload["map_id"]), payload)
             return payload
 
-        operations = self._operations_for_setup_face(project, operation)
-        if not operations:
-            raise ApplicationError("No hay operaciones válidas analizadas para el montaje y cara seleccionados.")
-        local_region = self._union_region(operations, selected_config)
-        grid = self._grid_for_region(local_region, selected_config.max_spacing_mm)
-        samples = self._blank_samples(grid, local_region)
+        operations = self._operations_for_setup_face(project, operation) or (operation,)
+        local_region = self._material_inner_region(project, selected_config)
+        grid = self._grid_for_region(local_region, selected_config.rows, selected_config.columns)
+        samples = self._blank_samples(grid, local_region, selected_config.exclusions)
         height_map = compute_height_map(
             proyecto_id=project_id,
             operacion_id=operation.setup_id,
@@ -128,7 +200,7 @@ class PhysicalMapService:
             etiqueta_simulada=False,
             grid=grid,
             probe_region=local_region,
-            exclusion_zones=(),
+            exclusion_zones=self._rectangular_exclusion_zones(selected_config.exclusions),
             muestras=samples,
             estado="malla planificada",
         )
@@ -214,7 +286,7 @@ class PhysicalMapService:
         })
         points[point_index] = point
         payload["points"] = points
-        payload["status"] = "MESH_COMPLETE" if all(item.get("status") == "MEASURED" for item in points) else "MESH_PROBING"
+        payload["status"] = "MESH_COMPLETE" if all(item.get("status") in {"MEASURED", "EXCLUDED", "SKIPPED"} for item in points) else "MESH_PROBING"
         if payload["status"] == "MESH_COMPLETE":
             payload["completed_at"] = measured_at
         payload["updated_at"] = measured_at
@@ -229,6 +301,24 @@ class PhysicalMapService:
         self._save(project_id, map_id, payload)
         return payload
 
+    def mark_point_failed(self, *, project_id: str, map_id: str, point_index: int, error: str) -> dict[str, Any]:
+        payload = self.get_by_id(project_id, map_id)
+        points = payload["points"]
+        if point_index < 0 or point_index >= len(points):
+            raise ApplicationError("Índice de punto fuera de rango.")
+        point = dict(points[point_index])
+        point["status"] = "FAILED"
+        point["error"] = error
+        point["last_error"] = error
+        point["attempts"] = int(point.get("attempts", 0)) + 1
+        points[point_index] = point
+        payload["points"] = points
+        payload["status"] = "MESH_PAUSED"
+        payload["updated_at"] = _iso_now()
+        payload["height_map"] = self._height_map_payload_from_points(payload)
+        self._save(project_id, map_id, payload)
+        return payload
+
     def _operations_for_setup_face(self, project, operation: OperacionPCB) -> tuple[OperacionPCB, ...]:
         return tuple(
             item
@@ -236,39 +326,94 @@ class PhysicalMapService:
             if item.cara == operation.cara and item.analisis is not None and item.analisis.limites is not None
         )
 
-    def _union_region(self, operations: tuple[OperacionPCB, ...], config: PhysicalMeshConfig) -> ProbeRegion:
-        min_x = min(item.analisis.limites.min_x_mm for item in operations if item.analisis and item.analisis.limites) - config.margin_mm
-        max_x = max(item.analisis.limites.max_x_mm for item in operations if item.analisis and item.analisis.limites) + config.margin_mm
-        min_y = min(item.analisis.limites.min_y_mm for item in operations if item.analisis and item.analisis.limites) - config.margin_mm
-        max_y = max(item.analisis.limites.max_y_mm for item in operations if item.analisis and item.analisis.limites) + config.margin_mm
-        if max_x < min_x or max_y < min_y:
-            raise ApplicationError("La región de malla calculada no es válida.")
+    def _material_inner_region(self, project, config: PhysicalMeshConfig) -> ProbeRegion:
+        material = getattr(project, "material", None)
+        if material is None:
+            raise ApplicationError("El proyecto no tiene dimensiones de material configuradas.")
+        material_width = float(material.ancho_mm)
+        material_height = float(material.alto_mm)
+        min_x = config.edge_margin_left_mm
+        max_x = material_width - config.edge_margin_right_mm
+        min_y = config.edge_margin_bottom_mm
+        max_y = material_height - config.edge_margin_top_mm
+        if min_x >= max_x or min_y >= max_y:
+            raise ApplicationError("El retiro de los bordes deja una región de sondeo inválida. Reduzca los valores o revise las dimensiones del material.")
         return ProbeRegion(min_x_mm=min_x, min_y_mm=min_y, max_x_mm=max_x, max_y_mm=max_y)
 
-    def _grid_for_region(self, region: ProbeRegion, max_spacing: float) -> HeightGrid:
-        columns = max(1, math.ceil(region.ancho_mm / max_spacing) + 1)
-        rows = max(1, math.ceil(region.alto_mm / max_spacing) + 1)
-        step_x = 0.0 if columns == 1 else region.ancho_mm / (columns - 1)
-        step_y = 0.0 if rows == 1 else region.alto_mm / (rows - 1)
+    def _grid_for_region(self, region: ProbeRegion, rows: int, columns: int) -> HeightGrid:
+        step_x = region.ancho_mm / (columns - 1)
+        step_y = region.alto_mm / (rows - 1)
         return HeightGrid(filas=rows, columnas=columns, ancho_mm=region.ancho_mm, alto_mm=region.alto_mm, paso_x_mm=step_x, paso_y_mm=step_y)
 
-    def _blank_samples(self, grid: HeightGrid, region: ProbeRegion) -> list[HeightSample]:
+    def _blank_samples(self, grid: HeightGrid, region: ProbeRegion, exclusions: tuple[PhysicalExclusion, ...]) -> list[HeightSample]:
         samples: list[HeightSample] = []
         for row in range(grid.filas):
             columns = range(grid.columnas) if row % 2 == 0 else range(grid.columnas - 1, -1, -1)
             for column in columns:
+                x_mm = region.min_x_mm + column * grid.paso_x_mm
+                y_mm = region.min_y_mm + row * grid.paso_y_mm
+                exclusion = self._exclusion_for_point(x_mm, y_mm, exclusions)
                 samples.append(HeightSample(
                     id=f"measured_{row}_{column}",
-                    x_mm=region.min_x_mm + (0.0 if grid.columnas == 1 else column * grid.paso_x_mm),
-                    y_mm=region.min_y_mm + (0.0 if grid.filas == 1 else row * grid.paso_y_mm),
+                    x_mm=x_mm,
+                    y_mm=y_mm,
                     z_mm=None,
                     fila=row,
                     columna=column,
                     origen_datos="measured",
-                    estado_calidad=SampleQuality.FALTANTE,
-                    observacion="Pendiente de sondeo físico.",
+                    estado_calidad=SampleQuality.EXCLUIDA if exclusion else SampleQuality.FALTANTE,
+                    observacion=f"Excluido: {exclusion.name}" if exclusion else "Pendiente de sondeo físico.",
+                    incluida=False if exclusion else True,
                 ))
         return samples
+
+
+    def _exclusion_for_point(self, x_mm: float, y_mm: float, exclusions: tuple[PhysicalExclusion, ...]) -> PhysicalExclusion | None:
+        for exclusion in exclusions:
+            if exclusion.contains(x_mm, y_mm):
+                return exclusion
+        return None
+
+    def _rectangular_exclusion_zones(self, exclusions: tuple[PhysicalExclusion, ...]) -> tuple[ExclusionZone, ...]:
+        return tuple(
+            ExclusionZone(
+                id=exclusion.id,
+                nombre=exclusion.name,
+                min_x_mm=float(exclusion.x_min_mm),
+                min_y_mm=float(exclusion.y_min_mm),
+                max_x_mm=float(exclusion.x_max_mm),
+                max_y_mm=float(exclusion.y_max_mm),
+            )
+            for exclusion in exclusions
+            if exclusion.enabled and exclusion.shape == "rectangle"
+        )
+
+    def _rectangular_exclusion_zones_from_payload(self, exclusions: list[dict[str, Any]]) -> tuple[ExclusionZone, ...]:
+        zones: list[ExclusionZone] = []
+        for exclusion in exclusions:
+            if not exclusion.get("enabled", True) or exclusion.get("shape") != "rectangle":
+                continue
+            zones.append(ExclusionZone(
+                id=str(exclusion.get("id") or "exclusion"),
+                nombre=str(exclusion.get("name") or exclusion.get("nombre") or "Exclusión"),
+                min_x_mm=float(exclusion.get("x_min_mm")),
+                min_y_mm=float(exclusion.get("y_min_mm")),
+                max_x_mm=float(exclusion.get("x_max_mm")),
+                max_y_mm=float(exclusion.get("y_max_mm")),
+            ))
+        return tuple(zones)
+
+    def _estimate_time_s(self, points: list[dict[str, Any]], distance_mm: float, config: PhysicalMeshConfig) -> float | None:
+        executable = sum(1 for point in points if point.get("status") != "EXCLUDED")
+        if executable <= 0:
+            return 0.0
+        travel_feed_mm_min = 600.0
+        travel_s = distance_mm / travel_feed_mm_min * 60.0
+        probe_feed = config.probe_feed_mm_min or 60.0
+        retract = config.retract_mm or 1.0
+        probe_step = config.probe_step_mm or 0.05
+        probe_s = executable * max(2.0, (retract + probe_step * 4.0) / probe_feed * 60.0)
+        return travel_s + probe_s
 
     def _payload(self, **kwargs) -> dict[str, Any]:
         height_map: HeightMap = kwargs["height_map"]
@@ -283,9 +428,12 @@ class PhysicalMapService:
         for index, sample in enumerate(height_map.muestras):
             machine_x = origin_x + sample.x_mm
             machine_y = origin_y + sample.y_mm
-            if previous is not None:
-                total_distance += math.dist(previous, (machine_x, machine_y))
-            previous = (machine_x, machine_y)
+            exclusion = self._exclusion_for_point(sample.x_mm, sample.y_mm, config.exclusions)
+            is_excluded = exclusion is not None
+            if not is_excluded:
+                if previous is not None:
+                    total_distance += math.dist(previous, (machine_x, machine_y))
+                previous = (machine_x, machine_y)
             points.append({
                 "index": index,
                 "row": sample.fila,
@@ -300,12 +448,13 @@ class PhysicalMapService:
                 "timestamp": None,
                 "started_at": None,
                 "measured_at": None,
-                "status": "PENDING",
+                "status": "EXCLUDED" if is_excluded else "PENDING",
                 "attempts": 0,
                 "duration": None,
                 "duration_s": None,
                 "last_error": None,
-                "error": None,
+                "error": f"Excluido: {exclusion.name}" if exclusion else None,
+                "exclusion_id": exclusion.id if exclusion else None,
                 "tool_id": _tool_key(operation),
                 "setup_id": operation.setup_id,
             })
@@ -346,7 +495,23 @@ class PhysicalMapService:
             "homed_axes": kwargs["homed_axes"],
             "machine_label": kwargs["machine_label"],
             "session_id": kwargs["session_id"],
-            "mesh_config": {"max_spacing_mm": config.max_spacing_mm, "margin_mm": config.margin_mm},
+            "mesh_config": {
+                "rows": config.rows,
+                "columns": config.columns,
+                "edge_margin_left_mm": config.edge_margin_left_mm,
+                "edge_margin_right_mm": config.edge_margin_right_mm,
+                "edge_margin_bottom_mm": config.edge_margin_bottom_mm,
+                "edge_margin_top_mm": config.edge_margin_top_mm,
+                "max_spacing_mm": config.max_spacing_mm,
+                "margin_mm": config.margin_mm,
+            },
+            "edge_margins": {
+                "left_mm": config.edge_margin_left_mm,
+                "right_mm": config.edge_margin_right_mm,
+                "bottom_mm": config.edge_margin_bottom_mm,
+                "top_mm": config.edge_margin_top_mm,
+            },
+            "exclusions": [exclusion.to_payload() for exclusion in config.exclusions],
             "probe_config": {
                 "safe_z_mm": config.safe_z_mm,
                 "probe_step_mm": config.probe_step_mm,
@@ -367,8 +532,10 @@ class PhysicalMapService:
             },
             "grid": {"rows": height_map.grid.filas, "columns": height_map.grid.columnas, "dx_mm": height_map.grid.paso_x_mm, "dy_mm": height_map.grid.paso_y_mm},
             "point_count": len(points),
+            "excluded_count": sum(1 for point in points if point.get("status") == "EXCLUDED"),
+            "executable_point_count": sum(1 for point in points if point.get("status") != "EXCLUDED"),
             "estimated_distance_mm": total_distance,
-            "estimated_time_s": None,
+            "estimated_time_s": self._estimate_time_s(points, total_distance, config),
             "invalid_points": [],
             "points": points,
             "height_map": self._serialize_height_map(height_map),
@@ -386,20 +553,22 @@ class PhysicalMapService:
             paso_y_mm=grid_payload["dy_mm"],
         )
         region = ProbeRegion(**region_payload)
-        samples = [
-            HeightSample(
+        samples = []
+        for point in payload["points"]:
+            value = point.get("delta_z", point.get("z_measured"))
+            status = point.get("status")
+            samples.append(HeightSample(
                 id=f"measured_{point['row']}_{point['column']}",
                 x_mm=point["x_local"],
                 y_mm=point["y_local"],
-                z_mm=point.get("delta_z", point.get("z_measured")),
+                z_mm=None if status == "EXCLUDED" else value,
                 fila=point["row"],
                 columna=point["column"],
                 origen_datos="measured",
-                estado_calidad=SampleQuality.FALTANTE if point.get("delta_z", point.get("z_measured")) is None else SampleQuality.VALIDA,
+                estado_calidad=SampleQuality.EXCLUIDA if status == "EXCLUDED" else (SampleQuality.FALTANTE if value is None else SampleQuality.VALIDA),
                 observacion=point.get("last_error") or point.get("error"),
-            )
-            for point in payload["points"]
-        ]
+                incluida=status != "EXCLUDED",
+            ))
         height_map = compute_height_map(
             proyecto_id=payload["project_id"],
             operacion_id=payload["setup_id"],
@@ -410,7 +579,7 @@ class PhysicalMapService:
             etiqueta_simulada=False,
             grid=grid,
             probe_region=region,
-            exclusion_zones=(),
+            exclusion_zones=self._rectangular_exclusion_zones_from_payload(payload.get("exclusions") or []),
             muestras=samples,
             estado="medido relativo" if payload["status"] == "MESH_COMPLETE" else "medicion parcial",
         )
@@ -445,7 +614,7 @@ class PhysicalMapService:
 
     def _map_id(self, setup_id: str, operation: OperacionPCB, origin_x: float, origin_y: float, config: PhysicalMeshConfig) -> str:
         stamp = utc_now().strftime("%Y%m%d-%H%M%S")
-        return f"measured/{self._map_prefix(setup_id, operation)}/{stamp}_x{origin_x:.3f}_y{origin_y:.3f}_s{config.max_spacing_mm:.3f}"
+        return f"measured/{self._map_prefix(setup_id, operation)}/{stamp}_x{origin_x:.3f}_y{origin_y:.3f}_r{config.rows}_c{config.columns}_e{config.edge_margin_left_mm:.3f}-{config.edge_margin_right_mm:.3f}-{config.edge_margin_bottom_mm:.3f}-{config.edge_margin_top_mm:.3f}"
 
     def _latest_surface_map(self, project_id: str, operation: OperacionPCB) -> dict[str, Any] | None:
         maps_dir = self.repository.project_dir(project_id) / "maps" / "measured" / self._map_prefix(operation.setup_id, operation)
@@ -471,7 +640,15 @@ class PhysicalMapService:
         if abs(float(payload.get("machine_origin_y", origin_y)) - origin_y) > 0.001:
             return False
         mesh_config = payload.get("mesh_config", {})
-        return abs(float(mesh_config.get("max_spacing_mm", config.max_spacing_mm)) - config.max_spacing_mm) <= 0.001
+        checks = (
+            int(mesh_config.get("rows", config.rows)) == config.rows,
+            int(mesh_config.get("columns", config.columns)) == config.columns,
+            abs(float(mesh_config.get("edge_margin_left_mm", config.edge_margin_left_mm)) - config.edge_margin_left_mm) <= 0.001,
+            abs(float(mesh_config.get("edge_margin_right_mm", config.edge_margin_right_mm)) - config.edge_margin_right_mm) <= 0.001,
+            abs(float(mesh_config.get("edge_margin_bottom_mm", config.edge_margin_bottom_mm)) - config.edge_margin_bottom_mm) <= 0.001,
+            abs(float(mesh_config.get("edge_margin_top_mm", config.edge_margin_top_mm)) - config.edge_margin_top_mm) <= 0.001,
+        )
+        return all(checks)
 
     def _tool_reference(
         self,
@@ -549,6 +726,23 @@ class PhysicalMapService:
             next_point.setdefault("duration", next_point.get("duration_s"))
             migrated_points.append(next_point)
         migrated["points"] = migrated_points
+        mesh_config = migrated.setdefault("mesh_config", {})
+        grid = migrated.get("grid", {})
+        mesh_config.setdefault("rows", grid.get("rows", 2))
+        mesh_config.setdefault("columns", grid.get("columns", 2))
+        mesh_config.setdefault("edge_margin_left_mm", mesh_config.get("margin_mm", 2.0))
+        mesh_config.setdefault("edge_margin_right_mm", mesh_config.get("margin_mm", 2.0))
+        mesh_config.setdefault("edge_margin_bottom_mm", mesh_config.get("margin_mm", 2.0))
+        mesh_config.setdefault("edge_margin_top_mm", mesh_config.get("margin_mm", 2.0))
+        migrated.setdefault("edge_margins", {
+            "left_mm": mesh_config.get("edge_margin_left_mm", 2.0),
+            "right_mm": mesh_config.get("edge_margin_right_mm", 2.0),
+            "bottom_mm": mesh_config.get("edge_margin_bottom_mm", 2.0),
+            "top_mm": mesh_config.get("edge_margin_top_mm", 2.0),
+        })
+        migrated.setdefault("exclusions", [])
+        migrated["excluded_count"] = sum(1 for point in migrated_points if point.get("status") == "EXCLUDED")
+        migrated["executable_point_count"] = sum(1 for point in migrated_points if point.get("status") != "EXCLUDED")
         migrated["height_map"] = self._height_map_payload_from_points(migrated)
         return migrated
 

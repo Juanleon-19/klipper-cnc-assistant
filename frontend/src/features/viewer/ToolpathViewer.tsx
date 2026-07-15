@@ -31,6 +31,7 @@ type ToolpathViewerProps = {
   analysis: OperationAnalysis;
   operationName: string;
   storageKey?: string;
+  machineOrigin?: { x_mm: number; y_mm: number } | null;
 };
 
 type StoredViewerState = {
@@ -79,7 +80,7 @@ function buildFitTransform(mode: ViewerFitMode, material: Material, analysis: Op
   return fitRectWithinViewport(rect, viewport);
 }
 
-export function ToolpathViewer({ material, analysis, operationName, storageKey }: ToolpathViewerProps) {
+export function ToolpathViewer({ material, analysis, operationName, storageKey, machineOrigin = null }: ToolpathViewerProps) {
   const dragRef = useRef<DragState | null>(null);
   const pinchRef = useRef<PinchState | null>(null);
   const fullscreenRef = useRef<HTMLDivElement | null>(null);
@@ -95,6 +96,7 @@ export function ToolpathViewer({ material, analysis, operationName, storageKey }
   const [cursor, setCursor] = useState<{ x: number; y: number } | null>(null);
   const [wideMode, setWideMode] = useState(false);
   const [inspectorOpen, setInspectorOpen] = useState(true);
+  const [coordinateMode, setCoordinateMode] = useState<"pcb" | "cnc">("pcb");
   const hasToolpath = analysis.segmentos_vista_previa.length > 0;
 
   const autoFitMode = useMemo(
@@ -155,6 +157,9 @@ export function ToolpathViewer({ material, analysis, operationName, storageKey }
   const visibleRect = getVisibleWorldRect(transform, viewport);
   const gridStep = chooseGridStep(transform.scale);
   const gridTicks = buildGridTicks(visibleRect, gridStep);
+  const minorGridTicks = buildGridTicks(visibleRect, Math.max(gridStep / 5, 0.1));
+  const displayX = (x: number) => coordinateMode === "cnc" ? x + (machineOrigin?.x_mm ?? 0) : x;
+  const displayY = (y: number) => coordinateMode === "cnc" ? y + (machineOrigin?.y_mm ?? 0) : y;
   const startSegment = analysis.segmentos_vista_previa[0] ?? null;
   const endSegment = analysis.segmentos_vista_previa.length > 0 ? analysis.segmentos_vista_previa[analysis.segmentos_vista_previa.length - 1] : null;
   const warningSegmentIndex = analysis.segmentos_vista_previa.findIndex((segment) => segment.advertencias.length > 0);
@@ -250,7 +255,11 @@ export function ToolpathViewer({ material, analysis, operationName, storageKey }
           </div>
           <div className="stack gap-sm viewer-header__meta">
             <div className="viewer-scale-meta mono-text">Escala {formatNumber(transform.scale, 2)} px/mm</div>
-            <div className="viewer-scale-meta mono-text">Cursor {cursor ? `${formatCoordinate(cursor.x)}, ${formatCoordinate(cursor.y)}` : "-"}</div>
+            <div className="viewer-scale-meta mono-text">Cursor {cursor ? `${formatCoordinate(displayX(cursor.x))}, ${formatCoordinate(displayY(cursor.y))} mm` : "-"}</div>
+            <div className="map-segmented" aria-label="Coordenadas del visor técnico">
+              <button className={`map-segment-button${coordinateMode === "pcb" ? " map-segment-button--active" : ""}`} type="button" onClick={() => setCoordinateMode("pcb")}>Coordenadas PCB</button>
+              <button className={`map-segment-button${coordinateMode === "cnc" ? " map-segment-button--active" : ""}`} type="button" onClick={() => setCoordinateMode("cnc")}>Coordenadas CNC</button>
+            </div>
           </div>
         </div>
 
@@ -356,33 +365,48 @@ export function ToolpathViewer({ material, analysis, operationName, storageKey }
                 <Rect x={0} y={0} width={viewport.width} height={viewport.height} fill={viewerTheme.background} />
 
                 {layers.grid
+                  ? minorGridTicks.x.map((value) => {
+                      const screen = worldToScreen({ x: value, y: 0 }, transform);
+                      return <Line key={`minor-grid-x-${value}`} points={[screen.x, 0, screen.x, viewport.height]} stroke={viewerTheme.gridMinor} strokeWidth={1} opacity={0.35} />;
+                    })
+                  : null}
+                {layers.grid
+                  ? minorGridTicks.y.map((value) => {
+                      const screen = worldToScreen({ x: 0, y: value }, transform);
+                      return <Line key={`minor-grid-y-${value}`} points={[0, screen.y, viewport.width, screen.y]} stroke={viewerTheme.gridMinor} strokeWidth={1} opacity={0.35} />;
+                    })
+                  : null}
+                {layers.grid
                   ? gridTicks.x.map((value) => {
                       const screen = worldToScreen({ x: value, y: 0 }, transform);
-                      const isMajor = Math.round(value / gridStep) % 5 === 0;
-                      return (
-                        <Line
-                          key={`grid-x-${value}`}
-                          points={[screen.x, 0, screen.x, viewport.height]}
-                          stroke={isMajor ? viewerTheme.gridMajor : viewerTheme.gridMinor}
-                          strokeWidth={1}
-                        />
-                      );
+                      return <Line key={`grid-x-${value}`} points={[screen.x, 0, screen.x, viewport.height]} stroke={viewerTheme.gridMajor} strokeWidth={1} />;
                     })
                   : null}
                 {layers.grid
                   ? gridTicks.y.map((value) => {
                       const screen = worldToScreen({ x: 0, y: value }, transform);
-                      const isMajor = Math.round(value / gridStep) % 5 === 0;
-                      return (
-                        <Line
-                          key={`grid-y-${value}`}
-                          points={[0, screen.y, viewport.width, screen.y]}
-                          stroke={isMajor ? viewerTheme.gridMajor : viewerTheme.gridMinor}
-                          strokeWidth={1}
-                        />
-                      );
+                      return <Line key={`grid-y-${value}`} points={[0, screen.y, viewport.width, screen.y]} stroke={viewerTheme.gridMajor} strokeWidth={1} />;
                     })
                   : null}
+                <Rect x={0} y={0} width={viewport.width} height={24} fill="rgba(8, 14, 18, 0.72)" />
+                <Rect x={0} y={0} width={58} height={viewport.height} fill="rgba(8, 14, 18, 0.72)" />
+                {gridTicks.x.map((value) => {
+                  const screen = worldToScreen({ x: value, y: 0 }, transform);
+                  return <Text key={`tick-x-${value}`} x={screen.x + 3} y={5} text={`${formatNumber(displayX(value), Math.abs(gridStep) < 1 ? 1 : 0)} mm`} fill={viewerTheme.axisText} fontSize={10} />;
+                })}
+                {gridTicks.y.map((value) => {
+                  const screen = worldToScreen({ x: 0, y: value }, transform);
+                  return <Text key={`tick-y-${value}`} x={4} y={screen.y - 6} text={`${formatNumber(displayY(value), Math.abs(gridStep) < 1 ? 1 : 0)} mm`} fill={viewerTheme.axisText} fontSize={10} />;
+                })}
+                {(() => {
+                  const origin = worldToScreen({ x: 0, y: 0 }, transform);
+                  return (
+                    <>
+                      <Line points={[origin.x, 0, origin.x, viewport.height]} stroke={viewerTheme.originGcode} strokeWidth={1.4} />
+                      <Line points={[0, origin.y, viewport.width, origin.y]} stroke={viewerTheme.originGcode} strokeWidth={1.4} />
+                    </>
+                  );
+                })()}
 
                 {layers.material ? renderMaterialRect() : null}
                 {layers.bounds ? renderBoundsRect() : null}
@@ -451,8 +475,8 @@ export function ToolpathViewer({ material, analysis, operationName, storageKey }
                   <Circle radius={5} fill={viewerTheme.end} x={worldToScreen({ x: endSegment.hasta.x_mm, y: endSegment.hasta.y_mm }, transform).x} y={worldToScreen({ x: endSegment.hasta.x_mm, y: endSegment.hasta.y_mm }, transform).y} />
                 ) : null}
 
-                <Text x={12} y={10} text="Y" fill={viewerTheme.axisText} fontSize={12} />
-                <Text x={viewport.width - 20} y={viewport.height - 24} text="X" fill={viewerTheme.axisText} fontSize={12} />
+                <Text x={12} y={30} text="Y=0 / eje Y (mm)" fill={viewerTheme.axisText} fontSize={12} />
+                <Text x={viewport.width - 96} y={viewport.height - 24} text="X=0 / eje X (mm)" fill={viewerTheme.axisText} fontSize={12} />
               </Layer>
             </Stage>
 
@@ -461,7 +485,7 @@ export function ToolpathViewer({ material, analysis, operationName, storageKey }
             </div>
             <div className="viewer-stage__overlay viewer-stage__overlay--bottom mono-text">
               <span className="viewer-scale-line" style={{ width: `${Math.min(scaleBarPixels, viewport.width * 0.35)}px` }} />
-              {formatNumber(scaleBarMillimeters, 1)} mm
+              {formatNumber(scaleBarMillimeters, 1)} mm · {coordinateMode === "cnc" ? "Coordenadas CNC" : "Coordenadas PCB"}
             </div>
           </div>
         </div>

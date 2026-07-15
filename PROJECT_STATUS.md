@@ -233,3 +233,12 @@ No se ejecutaron movimientos físicos, no se reinició Klipper/Moonraker y no se
 - En modo físico, Mapa de alturas muestra el flujo medido como principal y deja mapas simulados solo en consulta secundaria.
 - Rediseñado encabezado de mapa con pestañas compactas y visor 2D con ejes/ticks/rejilla/recorrido/inspector.
 - Pruebas backend, frontend, lint, `pip check` y build pasan.
+
+## Actualización malla física por material
+
+- Planificación de malla física cambiada a filas/columnas manuales y retiro configurable desde los bordes del material.
+- El mapa ya no selecciona ni dibuja operaciones; las operaciones quedan en el visor técnico 2D.
+- Restauradas exclusiones rectangulares/circulares para zonas no sondeables.
+- Añadido endpoint de ejecución automática de toda la malla tras una confirmación.
+- Visor 2D actualizado con ticks en mm, ejes, reglas y selector PCB/CNC.
+- Superficie 3D estabilizada para evitar titileo por telemetría irrelevante.

@@ -5,7 +5,7 @@ from fastapi.responses import FileResponse
 from starlette.datastructures import UploadFile
 
 from klipper_cnc_assistant.application import ApplicationError
-from klipper_cnc_assistant.application.physical_map_service import PhysicalMeshConfig
+from klipper_cnc_assistant.application.physical_map_service import PhysicalExclusion, PhysicalMeshConfig
 from klipper_cnc_assistant.heightmap import ExclusionZone, ProbeRegion
 
 from .heightmap_schemas import (
@@ -347,6 +347,13 @@ def build_router() -> APIRouter:
             machine_label=machine_label,
             session_id=session_id,
             config=PhysicalMeshConfig(
+                rows=payload.rows,
+                columns=payload.columns,
+                edge_margin_left_mm=payload.edge_margin_left_mm,
+                edge_margin_right_mm=payload.edge_margin_right_mm,
+                edge_margin_bottom_mm=payload.edge_margin_bottom_mm,
+                edge_margin_top_mm=payload.edge_margin_top_mm,
+                exclusions=tuple(PhysicalExclusion(**exclusion.model_dump()) for exclusion in payload.exclusions),
                 max_spacing_mm=payload.max_spacing_mm,
                 margin_mm=payload.margin_mm,
                 safe_z_mm=payload.safe_z_mm,
@@ -381,6 +388,37 @@ def build_router() -> APIRouter:
             error=None,
         )
         return PhysicalMapResponse(payload=updated)
+
+    @router.post("/projects/{project_id}/physical-maps/{map_id:path}/execute-all", response_model=PhysicalMapResponse)
+    def execute_all_physical_map_points(project_id: str, map_id: str, request: Request) -> PhysicalMapResponse:
+        service = request.app.state.physical_map_service
+        runtime = request.app.state.machine_runtime
+        payload = service.get_by_id(project_id, map_id)
+        if payload.get("status") in {"CANCELLED", "MESH_COMPLETE"}:
+            raise ApplicationError("La malla no está en un estado ejecutable.")
+        service.mark_status(project_id=project_id, map_id=map_id, status="MESH_PROBING")
+        while True:
+            payload = service.get_by_id(project_id, map_id)
+            if payload.get("status") in {"MESH_PAUSED", "CANCELLED", "MESH_COMPLETE"}:
+                return PhysicalMapResponse(payload=payload)
+            try:
+                point = service.next_pending_point(project_id, map_id)
+            except ApplicationError:
+                return PhysicalMapResponse(payload=service.get_by_id(project_id, map_id))
+            try:
+                result = runtime.probe_mesh_point(point)
+            except Exception as error:
+                updated = service.mark_point_failed(project_id=project_id, map_id=map_id, point_index=int(point["index"]), error=str(error))
+                return PhysicalMapResponse(payload=updated)
+            service.record_point(
+                project_id=project_id,
+                map_id=map_id,
+                point_index=int(point["index"]),
+                z_measured=float(result["z_measured"]),
+                status="MEASURED",
+                duration_s=float(result.get("duration_s", 0.0)),
+                error=None,
+            )
 
     @router.post("/projects/{project_id}/physical-maps/{map_id:path}/points/{point_index}", response_model=PhysicalMapResponse)
     def update_physical_map_point(project_id: str, map_id: str, point_index: int, payload: PhysicalMapPointUpdateRequest, request: Request) -> PhysicalMapResponse:

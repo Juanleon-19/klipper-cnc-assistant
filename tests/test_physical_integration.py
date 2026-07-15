@@ -6,7 +6,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from klipper_cnc_assistant.application.compensated_gcode_service import CompensatedGCodeService
-from klipper_cnc_assistant.application.physical_map_service import PhysicalMapService
+from klipper_cnc_assistant.application.physical_map_service import PhysicalExclusion, PhysicalMapService, PhysicalMeshConfig
 from klipper_cnc_assistant.input.serial_driver import HEADER, SerialDriver
 from klipper_cnc_assistant.machine.state import AxisLimits, MachinePosition, MachineState
 from klipper_cnc_assistant.moonraker.telemetry import MoonrakerTelemetry
@@ -121,7 +121,8 @@ class PhysicalIntegrationTest(unittest.TestCase):
             self.assertEqual(plan["source"], "MEASURED")
             self.assertEqual(plan["map_model"], "SURFACE_BY_SETUP_FACE_PLACEMENT")
             self.assertTrue(plan["map_id"].startswith("measured/setup-main/superior/placement-1/"))
-            self.assertLess(plan["local_region"]["min_x_mm"], 2.0)
+            self.assertEqual(plan["local_region"], {"min_x_mm": 2.0, "min_y_mm": 2.0, "max_x_mm": 48.0, "max_y_mm": 38.0})
+            self.assertEqual(plan["grid"], {"rows": 7, "columns": 6, "dx_mm": 9.2, "dy_mm": 6.0})
             updated = service.record_point(project_id=project.id, map_id=plan["map_id"], point_index=0, z_measured=1.2)
             self.assertEqual(updated["points"][0]["status"], "MEASURED")
             self.assertAlmostEqual(updated["points"][0]["delta_z"], -0.03)
@@ -140,6 +141,71 @@ class PhysicalIntegrationTest(unittest.TestCase):
             )
             self.assertEqual(second_reference["map_id"], plan["map_id"])
             self.assertIn("tool-10", second_reference["tool_references"])
+
+    def test_physical_mesh_uses_material_edge_retreat_rows_columns_and_serpentine(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            repository = JsonProjectRepository(Path(temp))
+            project_service = ProjectService(repository)
+            project = project_service.create_project(nombre="PCB", ancho_mm=60, alto_mm=60, espesor_mm=1.6)
+            operation = project_service.add_operation(project_id=project.id, nombre="Aislamiento", tipo="aislamiento", cara="superior", orden=0, tool_id="tool-v", herramienta="V-bit")
+            project_service.upload_operation_gcode(project_id=project.id, operation_id=operation.id, filename="job.nc", content="G21\nG90\nG1 X0 Y0\nG1 X10 Y10\n")
+            project_service.analyze_operation(project.id, operation.id)
+            service = PhysicalMapService(repository)
+            plan = service.capture_reference_and_plan(
+                project_id=project.id, operation_id=operation.id, machine_origin_x=10.0, machine_origin_y=20.0, reference_z=1.0,
+                machine_position={"x_mm": 10.0, "y_mm": 20.0, "z_mm": 1.0}, homed_axes="xyz", machine_label="test", session_id="session",
+                config=PhysicalMeshConfig(rows=7, columns=6, edge_margin_left_mm=2.0, edge_margin_right_mm=2.0, edge_margin_bottom_mm=2.0, edge_margin_top_mm=2.0),
+            )
+            self.assertEqual(plan["local_region"], {"min_x_mm": 2.0, "min_y_mm": 2.0, "max_x_mm": 58.0, "max_y_mm": 58.0})
+            self.assertEqual(plan["point_count"], 42)
+            self.assertAlmostEqual(plan["grid"]["dx_mm"], 11.2)
+            self.assertAlmostEqual(plan["grid"]["dy_mm"], 56 / 6)
+            self.assertEqual((plan["points"][0]["row"], plan["points"][0]["column"], plan["points"][0]["x_local"], plan["points"][0]["y_local"]), (0, 0, 2.0, 2.0))
+            self.assertEqual((plan["points"][5]["row"], plan["points"][5]["column"], plan["points"][5]["x_local"]), (0, 5, 58.0))
+            self.assertEqual((plan["points"][6]["row"], plan["points"][6]["column"], plan["points"][6]["x_local"]), (1, 5, 58.0))
+            self.assertEqual((plan["points"][11]["row"], plan["points"][11]["column"], plan["points"][11]["x_local"]), (1, 0, 2.0))
+
+    def test_physical_mesh_supports_independent_retreats_and_exclusions(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            repository = JsonProjectRepository(Path(temp))
+            project_service = ProjectService(repository)
+            project = project_service.create_project(nombre="PCB", ancho_mm=60, alto_mm=60, espesor_mm=1.6)
+            operation = project_service.add_operation(project_id=project.id, nombre="Taladros", tipo="taladrado", cara="superior", orden=0, tool_id="tool-drill", herramienta="Broca")
+            project_service.upload_operation_gcode(project_id=project.id, operation_id=operation.id, filename="job.nc", content="G21\nG90\nG1 X0 Y0\n")
+            project_service.analyze_operation(project.id, operation.id)
+            service = PhysicalMapService(repository)
+            plan = service.capture_reference_and_plan(
+                project_id=project.id, operation_id=operation.id, machine_origin_x=0.0, machine_origin_y=0.0, reference_z=0.0,
+                machine_position={"x_mm": 0.0, "y_mm": 0.0, "z_mm": 0.0}, homed_axes="xyz", machine_label="test", session_id="session",
+                config=PhysicalMeshConfig(
+                    rows=3, columns=3, edge_margin_left_mm=1.0, edge_margin_right_mm=3.0, edge_margin_bottom_mm=2.0, edge_margin_top_mm=4.0,
+                    exclusions=(
+                        PhysicalExclusion(id="rect", name="Pinza", shape="rectangle", x_min_mm=0.5, x_max_mm=2.0, y_min_mm=1.5, y_max_mm=3.0),
+                        PhysicalExclusion(id="circle", name="Tornillo", shape="circle", center_x_mm=29.0, center_y_mm=29.0, radius_mm=2.0),
+                    ),
+                ),
+            )
+            self.assertEqual(plan["local_region"], {"min_x_mm": 1.0, "min_y_mm": 2.0, "max_x_mm": 57.0, "max_y_mm": 56.0})
+            self.assertEqual(plan["excluded_count"], 2)
+            self.assertEqual(plan["executable_point_count"], 7)
+            excluded = [point for point in plan["points"] if point["status"] == "EXCLUDED"]
+            self.assertEqual(len(excluded), 2)
+            self.assertIn("Excluido", excluded[0]["error"])
+
+    def test_invalid_edge_retreat_blocks_mesh(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            repository = JsonProjectRepository(Path(temp))
+            project_service = ProjectService(repository)
+            project = project_service.create_project(nombre="PCB", ancho_mm=10, alto_mm=10, espesor_mm=1.6)
+            operation = project_service.add_operation(project_id=project.id, nombre="Aislamiento", tipo="aislamiento", cara="superior", orden=0)
+            service = PhysicalMapService(repository)
+            with self.assertRaises(Exception) as context:
+                service.capture_reference_and_plan(
+                    project_id=project.id, operation_id=operation.id, machine_origin_x=0.0, machine_origin_y=0.0, reference_z=0.0,
+                    machine_position={"x_mm": 0.0, "y_mm": 0.0, "z_mm": 0.0}, homed_axes="xyz", machine_label="test", session_id="session",
+                    config=PhysicalMeshConfig(rows=2, columns=2, edge_margin_left_mm=6.0, edge_margin_right_mm=5.0),
+                )
+            self.assertIn("retiro de los bordes", str(context.exception))
 
 
     def test_compensated_gcode_generation_preserves_xy_and_uses_relative_surface(self) -> None:
@@ -161,6 +227,7 @@ class PhysicalIntegrationTest(unittest.TestCase):
                 homed_axes="xyz",
                 machine_label="test",
                 session_id="session",
+                config=PhysicalMeshConfig(edge_margin_left_mm=0.0, edge_margin_right_mm=0.0, edge_margin_bottom_mm=0.0, edge_margin_top_mm=0.0),
             )
             for point in plan["points"]:
                 z = 1.0 + 0.001 * float(point["x_local"]) + 0.002 * float(point["y_local"])

@@ -123,3 +123,11 @@ El frontend consume `CoordinateReference.posicion_captura` como `CapturedPositio
 El visor 2D incorpora ejes X/Y, ticks en mm, rejilla mayor/menor, selector Local/Máquina, región, trayectoria, malla, recorrido serpentino, punto activo e inspector colapsable. Pantalla completa usa barra inferior e inspector flotante.
 
 Build servido verificado por `curl`: `/assets/index-DNVlB1UT.js` y `/assets/index-yhqof53C.css`.
+
+## Mapa físico y visor técnico 2D
+
+En `MACHINE_MODE=physical`, Mapa de alturas muestra directamente `Mapa medido físicamente`; la creación de mapas simulados queda relegada a comparación. El flujo principal permite configurar filas, columnas, retiro de bordes, exclusiones, Z segura, paso, velocidad y retracto, generar vista previa, armar e iniciar `INICIAR SONDEO AUTOMÁTICO`.
+
+La pestaña Mapa de alturas no dibuja operaciones. Solo muestra material, región interior de sondeo, exclusiones, cuadrícula, puntos, recorrido serpentino y superficie. Las trayectorias se muestran en el visor técnico 2D de la pestaña Trayectoria, con selector `Operación seleccionada` / `Todas las operaciones`, ejes X/Y, ticks adaptativos en mm, reglas y selector `Coordenadas PCB` / `Coordenadas CNC`.
+
+La superficie 3D usa `Plotly.react` con `uirevision` estable para evitar remontajes durante polling de máquina. Solo cambia cuando cambian los puntos medidos, el mapa o el modo de superficie.
