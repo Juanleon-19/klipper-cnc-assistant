@@ -1040,7 +1040,8 @@ export function ProjectWorkspace({
           <div className="action-grid action-grid--inline">
             <button className="button button--ghost" type="button" disabled={!canArm || referenceBusy || machine.refreshing} onClick={() => void machine.runMachineAction("probe-request")}>Armar referencia</button>
             <button className="button" type="button" disabled={!canProbe || referenceBusy || machine.refreshing || !selectedOperation} onClick={() => void withPhysicalReferenceAction(async () => {
-              await machine.runMachineAction("probe-confirm");
+              await api.confirmProbe();
+              await machine.refreshRuntime();
               if (!selectedOperation) return;
               await api.capturePhysicalWorkOrigin(project.id, selectedOperation.id);
               return await api.capturePhysicalZReferenceFromProbe(project.id, selectedOperation.id);

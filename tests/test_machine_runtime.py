@@ -311,7 +311,7 @@ class ProbeJogSpy:
         self.machine.update_motion(live_position=(float(snapshot["x"]), float(snapshot["y"]), target), live_velocity=0, source="websocket")
         if distance < 0:
             self.runtime._last_command = ControllerCommand(probe_triggered=True)
-        return {"axis": axis, "target": target, "speed": float(speed)}
+        return {"axis": axis, "current_position": float(snapshot[axis]), "target": target, "speed": float(speed)}
 
 
 class FakeClock:
@@ -909,6 +909,35 @@ class MachineRuntimeTest(unittest.TestCase):
         self.assertEqual(snapshot["state"], "REFERENCE_CAPTURED")
         self.assertEqual(len(runtime._jog.calls), 2)
         self.assertTrue(any("sondeo iniciado desde la pantalla" in event["message"] for event in snapshot["events"]))
+
+    def test_probe_step_accepts_probe_trigger_before_exact_target(self) -> None:
+        machine = MachineState(
+            position=MachinePosition(10, 8, 115),
+            x_limits=AxisLimits(0, 100),
+            y_limits=AxisLimits(0, 100),
+            z_limits=AxisLimits(0, 200),
+            homed_axes="xyz",
+            max_velocity=100,
+            max_accel=500,
+            live_velocity=0,
+        )
+        runtime, _client = physical_runtime_with_machine(machine)
+
+        def update_probe(seconds: float) -> None:
+            if seconds <= 0:
+                return
+            machine.update_motion(live_position=(10, 8, 114.97), live_velocity=0, source="websocket")
+            runtime._last_command = ControllerCommand(probe_triggered=True)
+
+        fake_clock = FakeClock(update_probe)
+        original_time = runtime_module.time
+        runtime_module.time = fake_clock
+        try:
+            runtime._wait_for_axis("z", 114.95, "paso de sonda", start_position=115.0)
+        finally:
+            runtime_module.time = original_time
+
+        self.assertTrue(runtime._last_command.probe_triggered)
 
     def test_reference_probe_retract_uses_same_speed_as_lowering(self) -> None:
         machine = MachineState(

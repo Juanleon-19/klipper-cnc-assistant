@@ -549,7 +549,7 @@ class MachineRuntime:
                 with self._lock:
                     self._last_movement = result
                     self._last_command_text = "probe_lower_step"
-                self._wait_for_axis("z", float(result["target"]), "paso de sonda")
+                self._wait_for_axis("z", float(result["target"]), "paso de sonda", start_position=current_z)
             snapshot = machine.get_motion_snapshot()
             contact_z = float(snapshot["z"])
             retract_available = machine.z_limits.maximum - contact_z
@@ -560,7 +560,7 @@ class MachineRuntime:
             with self._lock:
                 self._last_movement = result
                 self._last_command_text = "probe_retract"
-            self._wait_for_axis("z", float(result["target"]), "retracto de sonda")
+            self._wait_for_axis("z", float(result["target"]), "retracto de sonda", start_position=contact_z)
             probe = ProbeResult(x_mm=start_x, y_mm=start_y, z_mm=contact_z, captured_at=_iso_now())
             with self._lock:
                 self._last_probe_result = probe
@@ -642,7 +642,7 @@ class MachineRuntime:
             with self._lock:
                 self._last_movement = result
                 self._last_command_text = f"{label}_lower_step"
-            self._wait_for_axis("z", float(result["target"]), "paso de sonda")
+            self._wait_for_axis("z", float(result["target"]), "paso de sonda", start_position=float(result["current_position"]))
         snapshot = machine.get_motion_snapshot()
         contact_z = float(snapshot["z"])
         retract_available = machine.z_limits.maximum - contact_z
@@ -1332,19 +1332,46 @@ class MachineRuntime:
             with self._lock:
                 self._last_error = str(error)
 
-    def _wait_for_axis(self, axis: str, target: float, label: str) -> None:
+    def _wait_for_axis(self, axis: str, target: float, label: str, *, start_position: float | None = None) -> None:
         if self._machine is None:
             raise MachineRuntimeError("No hay telemetría de máquina.")
         start = time.monotonic()
+        last_refresh = start
+        probe_step = label == "paso de sonda"
         while time.monotonic() - start <= self.config.move_timeout_s:
             self._assert_safety_for_connection()
+            now = time.monotonic()
+            if now - last_refresh >= 0.25 or self._telemetry_is_stale(now):
+                self._refresh_machine_best_effort()
+                last_refresh = now
             snapshot = self._machine.get_motion_snapshot()
             position = float(snapshot[axis])
             velocity = abs(float(snapshot["velocity"]))
-            if abs(position - target) <= self.config.settle_tolerance_mm and velocity <= self.config.velocity_tolerance_mm_s:
+            moved_enough = start_position is None or abs(position - start_position) > 0.001
+            if abs(position - target) <= self.config.settle_tolerance_mm and velocity <= self.config.velocity_tolerance_mm_s and moved_enough:
                 self._clear_resolved_transport_timeout(label)
                 return
+            if probe_step:
+                with self._lock:
+                    probe_triggered = self._last_command.probe_triggered
+                if probe_triggered and velocity <= self.config.velocity_tolerance_mm_s and moved_enough:
+                    self._clear_resolved_transport_timeout(label)
+                    return
             time.sleep(0.05)
+        self._refresh_machine_best_effort()
+        snapshot = self._machine.get_motion_snapshot()
+        position = float(snapshot[axis])
+        velocity = abs(float(snapshot["velocity"]))
+        moved_enough = start_position is None or abs(position - start_position) > 0.001
+        if abs(position - target) <= self.config.settle_tolerance_mm and velocity <= self.config.velocity_tolerance_mm_s and moved_enough:
+            self._clear_resolved_transport_timeout(label)
+            return
+        if probe_step:
+            with self._lock:
+                probe_triggered = self._last_command.probe_triggered
+            if probe_triggered and velocity <= self.config.velocity_tolerance_mm_s and moved_enough:
+                self._clear_resolved_transport_timeout(label)
+                return
         raise MachineRuntimeError(f"Timeout esperando confirmación de {label}.")
 
     def _safe_z(self, machine) -> float:
