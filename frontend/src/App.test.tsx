@@ -5,7 +5,7 @@ import App from "./App";
 
 const mockFetch = vi.fn();
 
-function seedInitialFetch(projects: unknown[] = [], schemaVersion = "1.5") {
+function seedInitialFetch(projects: unknown[] = [], schemaVersion = "1.6") {
   mockFetch
     .mockResolvedValueOnce({
       ok: true,

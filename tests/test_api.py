@@ -332,4 +332,4 @@ class ApiTest(unittest.TestCase):
         self.assertIn("backend_version", payload)
         self.assertIn("frontend_build", payload)
         self.assertIn("git_commit", payload)
-        self.assertEqual(payload["schema_version"], "1.5")
+        self.assertEqual(payload["schema_version"], "1.6")

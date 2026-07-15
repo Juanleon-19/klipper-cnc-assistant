@@ -29,6 +29,7 @@ from .schemas import (
     OperationCreateRequest,
     OperationMoveRequest,
     OperationUpdateRequest,
+    ProjectPermanentDeleteRequest,
     OperationResponse,
     ProjectCreateRequest,
     ProjectResponse,
@@ -39,6 +40,7 @@ from .schemas import (
     ReferenceWorkOriginRequest,
     ReferenceZRequest,
     SetupCreateRequest,
+    SetupResetRequest,
     SetupResponse,
     SetupUpdateRequest,
     SystemInfoResponse,
@@ -112,6 +114,16 @@ def _reference_session_to_response(payload: dict[str, object]) -> ReferenceSessi
     )
 
 
+def _reject_active_motion(request: Request) -> None:
+    runtime = getattr(request.app.state, "machine_runtime", None)
+    if runtime is None:
+        return
+    snapshot = runtime.snapshot()
+    state = str(snapshot.get("state") or "")
+    if state in {"RUNNING", "MOVING", "PROBING", "REFERENCE_ARMED", "MESH_PROBING"}:
+        raise ApplicationError("No se puede reiniciar o eliminar mientras existe movimiento físico activo. Pause o cancele de forma segura primero.")
+
+
 def build_router() -> APIRouter:
     router = APIRouter(prefix="/api")
 
@@ -165,6 +177,29 @@ def build_router() -> APIRouter:
         project = service.get_project(project_id)
         return project_to_response(project)
 
+    @router.post("/projects/{project_id}/continue", response_model=dict[str, str | None])
+    def continue_project(project_id: str, request: Request) -> dict[str, str | None]:
+        return request.app.state.project_service.continue_project_step(project_id)
+
+    @router.post("/projects/{project_id}/archive", response_model=ProjectResponse)
+    def archive_project(project_id: str, request: Request) -> ProjectResponse:
+        return project_to_response(request.app.state.project_service.archive_project(project_id))
+
+    @router.post("/projects/{project_id}/trash", response_model=ProjectResponse)
+    def trash_project(project_id: str, request: Request) -> ProjectResponse:
+        _reject_active_motion(request)
+        return project_to_response(request.app.state.project_service.trash_project(project_id))
+
+    @router.post("/projects/{project_id}/restore", response_model=ProjectResponse)
+    def restore_project(project_id: str, request: Request) -> ProjectResponse:
+        return project_to_response(request.app.state.project_service.restore_project(project_id))
+
+    @router.delete("/projects/{project_id}/permanent", response_model=dict[str, str])
+    def permanently_delete_project(project_id: str, payload: ProjectPermanentDeleteRequest, request: Request) -> dict[str, str]:
+        _reject_active_motion(request)
+        request.app.state.project_service.permanently_delete_project(project_id, confirm_name=payload.confirm_name)
+        return {"detalle": "Proyecto eliminado permanentemente."}
+
     @router.post("/projects/{project_id}/setups", response_model=SetupResponse, status_code=201)
     def add_setup(project_id: str, payload: SetupCreateRequest, request: Request) -> SetupResponse:
         service = request.app.state.project_service
@@ -182,6 +217,21 @@ def build_router() -> APIRouter:
                 nombre=payload.nombre,
             )
         )
+
+    @router.post("/projects/{project_id}/setups/{setup_id}/reset-reference", response_model=dict[str, object])
+    def reset_setup_reference(project_id: str, setup_id: str, payload: SetupResetRequest, request: Request) -> dict[str, object]:
+        _reject_active_motion(request)
+        return request.app.state.physical_map_service.reset_reference(project_id=project_id, setup_id=setup_id, reason=payload.motivo, user_session=payload.session)
+
+    @router.post("/projects/{project_id}/setups/{setup_id}/reset-map", response_model=dict[str, object])
+    def reset_setup_map(project_id: str, setup_id: str, payload: SetupResetRequest, request: Request) -> dict[str, object]:
+        _reject_active_motion(request)
+        return request.app.state.physical_map_service.reset_map(project_id=project_id, setup_id=setup_id, reason=payload.motivo, user_session=payload.session)
+
+    @router.post("/projects/{project_id}/setups/{setup_id}/reset-preparation", response_model=dict[str, object])
+    def reset_setup_preparation(project_id: str, setup_id: str, payload: SetupResetRequest, request: Request) -> dict[str, object]:
+        _reject_active_motion(request)
+        return request.app.state.physical_map_service.reset_preparation(project_id=project_id, setup_id=setup_id, reason=payload.motivo, user_session=payload.session)
 
     @router.post("/projects/{project_id}/operations", response_model=OperationResponse, status_code=201)
     def add_operation(project_id: str, payload: OperationCreateRequest, request: Request) -> OperationResponse:
@@ -324,6 +374,30 @@ def build_router() -> APIRouter:
         snapshot = runtime.snapshot()
         return _reference_session_to_response(reference_service.capture_physical_z_reference(project_id, operation_id, position=position, machine_label=str(snapshot["moonraker"].get("url") or "physical"), homed_axes=snapshot["klipper"].get("homed_axes"), session_id=snapshot.get("started_at")))
 
+    @router.post("/projects/{project_id}/operations/{operation_id}/physical-map/suggest", response_model=dict[str, object])
+    def suggest_physical_map(project_id: str, operation_id: str, payload: PhysicalMapPlanRequest, request: Request) -> dict[str, object]:
+        service = request.app.state.physical_map_service
+        return service.suggest_mesh_config(
+            project_id=project_id,
+            operation_id=operation_id,
+            config=PhysicalMeshConfig(
+                grid_mode="suggested",
+                rows=payload.rows,
+                columns=payload.columns,
+                edge_margin_left_mm=payload.edge_margin_left_mm,
+                edge_margin_right_mm=payload.edge_margin_right_mm,
+                edge_margin_bottom_mm=payload.edge_margin_bottom_mm,
+                edge_margin_top_mm=payload.edge_margin_top_mm,
+                exclusions=tuple(PhysicalExclusion(**exclusion.model_dump()) for exclusion in payload.exclusions),
+                max_spacing_mm=payload.max_spacing_mm,
+                margin_mm=payload.margin_mm,
+                safe_z_mm=payload.safe_z_mm,
+                probe_step_mm=payload.probe_step_mm,
+                probe_feed_mm_min=payload.probe_feed_mm_min,
+                retract_mm=payload.retract_mm,
+            ),
+        )
+
     @router.post("/projects/{project_id}/operations/{operation_id}/physical-map/plan-from-reference", response_model=PhysicalMapResponse)
     def plan_physical_map_from_reference(project_id: str, operation_id: str, payload: PhysicalMapPlanRequest, request: Request) -> PhysicalMapResponse:
         runtime = request.app.state.machine_runtime
@@ -347,6 +421,7 @@ def build_router() -> APIRouter:
             machine_label=machine_label,
             session_id=session_id,
             config=PhysicalMeshConfig(
+                grid_mode=payload.grid_mode,
                 rows=payload.rows,
                 columns=payload.columns,
                 edge_margin_left_mm=payload.edge_margin_left_mm,

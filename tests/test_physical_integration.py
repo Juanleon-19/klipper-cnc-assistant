@@ -242,5 +242,106 @@ class PhysicalIntegrationTest(unittest.TestCase):
             self.assertTrue(result["relative_path"].startswith("generated/compensated/"))
 
 
+    def _physical_project(self, temp: str):
+        repository = JsonProjectRepository(Path(temp))
+        project_service = ProjectService(repository)
+        project = project_service.create_project(nombre="PCB", ancho_mm=60, alto_mm=60, espesor_mm=1.6)
+        operation = project_service.add_operation(project_id=project.id, nombre="Aislamiento", tipo="aislamiento", cara="superior", orden=0, tool_id="tool-v", herramienta="V-bit")
+        project_service.upload_operation_gcode(project_id=project.id, operation_id=operation.id, filename="job.nc", content="G21\nG90\nG1 X0 Y0\nG1 X10 Y10\n")
+        project_service.analyze_operation(project.id, operation.id)
+        return repository, project_service, project, operation
+
+    def test_manual_mesh_2x2_generates_exact_inner_vertices(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            repository, _project_service, project, operation = self._physical_project(temp)
+            service = PhysicalMapService(repository)
+            plan = service.capture_reference_and_plan(
+                project_id=project.id, operation_id=operation.id, machine_origin_x=0.0, machine_origin_y=0.0, reference_z=0.0,
+                machine_position={"x_mm": 0.0, "y_mm": 0.0, "z_mm": 0.0}, homed_axes="xyz", machine_label="test", session_id="session",
+                config=PhysicalMeshConfig(grid_mode="manual", rows=2, columns=2, edge_margin_left_mm=2, edge_margin_right_mm=2, edge_margin_bottom_mm=2, edge_margin_top_mm=2),
+            )
+            self.assertEqual(plan["point_count"], 4)
+            self.assertEqual(plan["grid"], {"rows": 2, "columns": 2, "dx_mm": 56.0, "dy_mm": 56.0})
+            self.assertEqual([(p["x_local"], p["y_local"]) for p in plan["points"]], [(2.0, 2.0), (58.0, 2.0), (58.0, 58.0), (2.0, 58.0)])
+
+    def test_manual_mesh_3x4_generates_exact_count_and_spacing(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            repository, _project_service, project, operation = self._physical_project(temp)
+            service = PhysicalMapService(repository)
+            plan = service.capture_reference_and_plan(
+                project_id=project.id, operation_id=operation.id, machine_origin_x=0.0, machine_origin_y=0.0, reference_z=0.0,
+                machine_position={"x_mm": 0.0, "y_mm": 0.0, "z_mm": 0.0}, homed_axes="xyz", machine_label="test", session_id="session",
+                config=PhysicalMeshConfig(grid_mode="manual", rows=3, columns=4, edge_margin_left_mm=2, edge_margin_right_mm=2, edge_margin_bottom_mm=2, edge_margin_top_mm=2),
+            )
+            self.assertEqual(plan["point_count"], 12)
+            self.assertAlmostEqual(plan["grid"]["dx_mm"], 56 / 3)
+            self.assertAlmostEqual(plan["grid"]["dy_mm"], 28.0)
+            self.assertEqual(plan["points"][0]["x_local"], 2.0)
+            self.assertEqual(plan["points"][-1]["x_local"], 58.0)
+
+    def test_suggested_mesh_produces_concrete_rows_columns(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            repository, _project_service, project, operation = self._physical_project(temp)
+            service = PhysicalMapService(repository)
+            suggestion = service.suggest_mesh_config(
+                project_id=project.id,
+                operation_id=operation.id,
+                config=PhysicalMeshConfig(grid_mode="suggested", max_spacing_mm=20.0),
+            )
+            self.assertEqual(suggestion["grid_mode"], "suggested")
+            self.assertEqual(suggestion["rows"], 4)
+            self.assertEqual(suggestion["columns"], 4)
+            plan = service.capture_reference_and_plan(
+                project_id=project.id, operation_id=operation.id, machine_origin_x=0.0, machine_origin_y=0.0, reference_z=0.0,
+                machine_position={"x_mm": 0.0, "y_mm": 0.0, "z_mm": 0.0}, homed_axes="xyz", machine_label="test", session_id="session",
+                config=PhysicalMeshConfig(grid_mode="suggested", rows=9, columns=9, max_spacing_mm=20.0),
+            )
+            self.assertEqual(plan["grid"]["rows"], 4)
+            self.assertEqual(plan["grid"]["columns"], 4)
+
+    def test_changing_mesh_archives_partial_previous_map(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            repository, _project_service, project, operation = self._physical_project(temp)
+            service = PhysicalMapService(repository)
+            first = service.capture_reference_and_plan(
+                project_id=project.id, operation_id=operation.id, machine_origin_x=0, machine_origin_y=0, reference_z=0,
+                machine_position={"x_mm": 0, "y_mm": 0, "z_mm": 0}, homed_axes="xyz", machine_label="test", session_id="session",
+                config=PhysicalMeshConfig(grid_mode="manual", rows=3, columns=3),
+            )
+            service.record_point(project_id=project.id, map_id=first["map_id"], point_index=0, z_measured=0.01)
+            second = service.capture_reference_and_plan(
+                project_id=project.id, operation_id=operation.id, machine_origin_x=0, machine_origin_y=0, reference_z=0,
+                machine_position={"x_mm": 0, "y_mm": 0, "z_mm": 0}, homed_axes="xyz", machine_label="test", session_id="session",
+                config=PhysicalMeshConfig(grid_mode="manual", rows=4, columns=4),
+            )
+            self.assertNotEqual(first["map_id"], second["map_id"])
+            self.assertIn("medición parcial", second["configuration_change_warning"])
+            archived = service.get_by_id(project.id, first["map_id"])
+            self.assertIsNotNone(archived["archived_at"])
+
+    def test_reset_map_and_preparation_preserve_operations_and_gcode(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            repository, project_service, project, operation = self._physical_project(temp)
+            service = PhysicalMapService(repository)
+            plan = service.capture_reference_and_plan(
+                project_id=project.id, operation_id=operation.id, machine_origin_x=0, machine_origin_y=0, reference_z=0,
+                machine_position={"x_mm": 0, "y_mm": 0, "z_mm": 0}, homed_axes="xyz", machine_label="test", session_id="session",
+                config=PhysicalMeshConfig(grid_mode="manual", rows=2, columns=2),
+            )
+            setup_id = operation.setup_id
+            service.reset_map(project_id=project.id, setup_id=setup_id)
+            loaded = project_service.get_project(project.id)
+            self.assertEqual(len(loaded.operaciones), 1)
+            self.assertIsNotNone(loaded.operaciones[0].archivo_gcode)
+            self.assertIsNone(loaded.get_setup(setup_id).active_map_id)
+            result = service.reset_preparation(project_id=project.id, setup_id=setup_id)
+            loaded = project_service.get_project(project.id)
+            self.assertEqual(result["previous_placement_revision"], "placement-1")
+            self.assertEqual(loaded.get_setup(setup_id).placement_revision, "placement-2")
+            self.assertIsNone(loaded.get_setup(setup_id).preparacion.origen_trabajo)
+            self.assertIsNone(loaded.get_setup(setup_id).preparacion.referencia_z)
+            self.assertTrue(repository.load_height_map_payload(project.id, plan["map_id"])["archived_at"])
+
+
 if __name__ == "__main__":
     unittest.main()

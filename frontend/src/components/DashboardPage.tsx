@@ -17,6 +17,7 @@ type DashboardPageProps = {
   machineSession: MachineSession | null;
   onCreateProject: () => void;
   onOpenProject: (projectId: string) => void;
+  onContinueProject: (projectId: string) => void;
   onGoToProjects: () => void;
 };
 
@@ -27,11 +28,13 @@ export function DashboardPage({
   machineSession,
   onCreateProject,
   onOpenProject,
+  onContinueProject,
   onGoToProjects,
 }: DashboardPageProps) {
   const pendingOperations = countPendingOperations(projects);
   const warningOperations = countWarningOperations(projects);
   const blockedOperations = countBlockedOperations(projects);
+  const recentProjects = projects.filter((project) => project.status !== "trashed").slice(0, 5);
 
   return (
     <div className="page-stack">
@@ -88,7 +91,8 @@ export function DashboardPage({
                 <div><dt>Actualizado</dt><dd>{formatDate(recentProject.actualizado_en)}</dd></div>
               </dl>
               <div className="hero-actions">
-                <button className="button" type="button" onClick={() => onOpenProject(recentProject.id)}>Abrir espacio de trabajo</button>
+                <button className="button" type="button" onClick={() => onContinueProject(recentProject.id)}>Continuar proyecto</button>
+                <button className="button button--ghost" type="button" onClick={() => onOpenProject(recentProject.id)}>Abrir</button>
               </div>
             </>
           ) : (
@@ -96,6 +100,22 @@ export function DashboardPage({
               <p>Empiece creando un proyecto PCB para configurar operaciones y analizar trayectorias.</p>
             </div>
           )}
+        </article>
+
+
+        <article className="panel dashboard-card dashboard-card--wide">
+          <div className="section-heading">
+            <h3>Proyectos recientes</h3>
+            <button className="button button--ghost" type="button" onClick={onGoToProjects}>Ver todos los proyectos</button>
+          </div>
+          <div className="project-list stack gap-sm">
+            {recentProjects.map((project) => (
+              <button className="project-list__item" key={project.id} type="button" onClick={() => onOpenProject(project.id)}>
+                <div className="project-list__header"><strong>{project.nombre}</strong><StatusBadge tone={toneForStatus(project.estado_general)}>{translateStatus(project.estado_general)}</StatusBadge></div>
+                <dl className="project-list__meta"><div><dt>Última apertura</dt><dd>{project.last_opened_at ? formatDate(project.last_opened_at) : "sin apertura"}</dd></div><div><dt>Operaciones</dt><dd>{project.operaciones.length}</dd></div><div><dt>Material</dt><dd>{project.material.ancho_mm} × {project.material.alto_mm} mm</dd></div></dl>
+              </button>
+            ))}
+          </div>
         </article>
 
         <article className="panel dashboard-card">

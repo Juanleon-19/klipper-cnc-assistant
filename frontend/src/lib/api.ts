@@ -4,12 +4,14 @@ import type {
   HealthResponse,
   HeightMap,
   MachineRuntime,
+  MeshSuggestion,
   PhysicalMapResponse,
   MachineSession,
   Operation,
   OperationAnalysis,
   Project,
   ProjectPayload,
+  ContinueProjectResult,
   ReferenceConfirmation,
   ReferenceSession,
   SystemInfoResponse,
@@ -32,7 +34,8 @@ export type OperationUpdateInput = {
   herramienta?: string | null;
 };
 
-type PhysicalMapPlanPayload = {
+export type PhysicalMapPlanPayload = {
+  grid_mode?: "manual" | "suggested";
   rows?: number;
   columns?: number;
   edge_margin_left_mm?: number;
@@ -172,6 +175,12 @@ export const api = {
   emergencyStopMachine: () => request<MachineRuntime>("/api/machine/emergency", { method: "POST", body: JSON.stringify({ confirm: true }) }),
   listProjects: () => request<Project[]>("/api/projects"),
   getProject: (projectId: string) => request<Project>(`/api/projects/${projectId}`),
+  continueProject: (projectId: string) => request<ContinueProjectResult>(`/api/projects/${projectId}/continue`, { method: "POST" }),
+  archiveProject: (projectId: string) => request<Project>(`/api/projects/${projectId}/archive`, { method: "POST" }),
+  trashProject: (projectId: string) => request<Project>(`/api/projects/${projectId}/trash`, { method: "POST" }),
+  restoreProject: (projectId: string) => request<Project>(`/api/projects/${projectId}/restore`, { method: "POST" }),
+  permanentlyDeleteProject: (projectId: string, confirmName: string) =>
+    request<{ detalle: string }>(`/api/projects/${projectId}/permanent`, { method: "DELETE", body: JSON.stringify({ confirm_name: confirmName }) }),
   createProject: (payload: ProjectPayload) =>
     request<Project>("/api/projects", {
       method: "POST",
@@ -255,11 +264,22 @@ export const api = {
     request<ReferenceSession>(`/api/projects/${projectId}/operations/${operationId}/reference-session/physical-z-reference-from-probe`, {
       method: "POST",
     }),
+  suggestPhysicalMap: (projectId: string, operationId: string, payload: PhysicalMapPlanPayload) =>
+    request<MeshSuggestion>(`/api/projects/${projectId}/operations/${operationId}/physical-map/suggest`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
   planPhysicalMapFromReference: (projectId: string, operationId: string, payload: PhysicalMapPlanPayload) =>
     request<PhysicalMapResponse>(`/api/projects/${projectId}/operations/${operationId}/physical-map/plan-from-reference`, {
       method: "POST",
       body: JSON.stringify(payload),
     }),
+  resetSetupReference: (projectId: string, setupId: string, motivo?: string) =>
+    request<Record<string, unknown>>(`/api/projects/${projectId}/setups/${setupId}/reset-reference`, { method: "POST", body: JSON.stringify({ motivo }) }),
+  resetSetupMap: (projectId: string, setupId: string, motivo?: string) =>
+    request<Record<string, unknown>>(`/api/projects/${projectId}/setups/${setupId}/reset-map`, { method: "POST", body: JSON.stringify({ motivo }) }),
+  resetSetupPreparation: (projectId: string, setupId: string, motivo?: string) =>
+    request<Record<string, unknown>>(`/api/projects/${projectId}/setups/${setupId}/reset-preparation`, { method: "POST", body: JSON.stringify({ motivo }) }),
   getPhysicalMap: (projectId: string, operationId: string) =>
     request<PhysicalMapResponse>(`/api/projects/${projectId}/operations/${operationId}/physical-map`),
   getPhysicalHeightMap: (projectId: string, operationId: string) =>

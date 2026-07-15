@@ -320,6 +320,11 @@ export type Setup = {
   id: string;
   nombre: string;
   orden: number;
+  placement_revision?: string;
+  active_reference_id?: string | null;
+  active_map_id?: string | null;
+  preparation_status?: string;
+  last_prepared_at?: string | null;
 };
 
 export type Operation = {
@@ -350,8 +355,36 @@ export type Project = {
   operaciones: Operation[];
   creado_en: string;
   actualizado_en: string;
+  created_at?: string;
+  updated_at?: string;
+  last_opened_at?: string | null;
+  archived_at?: string | null;
+  trashed_at?: string | null;
+  status?: string;
+  current_setup_id?: string;
   version_esquema: string;
   estado_general: string;
+};
+
+export type ContinueProjectResult = {
+  view: string;
+  operation_id: string | null;
+  reason: string | null;
+};
+
+export type MeshSuggestion = {
+  grid_mode: "suggested";
+  rows: number;
+  columns: number;
+  point_count: number;
+  excluded_count: number;
+  executable_point_count: number;
+  dx_mm: number;
+  dy_mm: number;
+  estimated_distance_mm: number | null;
+  estimated_time_s: number | null;
+  reason: string;
+  local_region: { min_x_mm: number; min_y_mm: number; max_x_mm: number; max_y_mm: number };
 };
 
 
@@ -441,6 +474,12 @@ export type PhysicalMapPayload = Record<string, unknown> & {
   edge_margins?: { left_mm: number; right_mm: number; bottom_mm: number; top_mm: number };
   exclusions?: PhysicalMapExclusion[];
   points?: PhysicalMeshPoint[];
+  grid_mode?: "manual" | "suggested";
+  rows?: number;
+  columns?: number;
+  dx?: number;
+  dy?: number;
+  configuration_change_warning?: string;
   grid?: { rows: number; columns: number; dx_mm: number; dy_mm: number };
   local_region?: { min_x_mm: number; min_y_mm: number; max_x_mm: number; max_y_mm: number };
   machine_region?: { min_x_mm: number; min_y_mm: number; max_x_mm: number; max_y_mm: number };

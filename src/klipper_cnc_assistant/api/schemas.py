@@ -92,6 +92,15 @@ class OperationMoveRequest(BaseModel):
     direccion: str
 
 
+class ProjectPermanentDeleteRequest(BaseModel):
+    confirm_name: str = Field(min_length=1)
+
+
+class SetupResetRequest(BaseModel):
+    motivo: str | None = None
+    session: str | None = None
+
+
 class GCodeUploadRequest(BaseModel):
     nombre_archivo: str = Field(min_length=1)
     contenido: str = Field(min_length=1)
@@ -190,6 +199,11 @@ class SetupResponse(BaseModel):
     id: str
     nombre: str
     orden: int
+    placement_revision: str
+    active_reference_id: str | None
+    active_map_id: str | None
+    preparation_status: str
+    last_prepared_at: str | None
 
 
 class OperationResponse(BaseModel):
@@ -220,6 +234,13 @@ class ProjectResponse(BaseModel):
     operaciones: list[OperationResponse]
     creado_en: str
     actualizado_en: str
+    created_at: str
+    updated_at: str
+    last_opened_at: str | None
+    archived_at: str | None
+    trashed_at: str | None
+    status: str
+    current_setup_id: str
     version_esquema: str
     estado_general: str
 
@@ -320,13 +341,29 @@ def project_to_response(project: ProyectoPCB) -> ProjectResponse:
         operaciones=[operation_to_response(operation) for operation in project.operaciones],
         creado_en=project.creado_en.isoformat(),
         actualizado_en=project.actualizado_en.isoformat(),
+        created_at=project.created_at.isoformat(),
+        updated_at=project.updated_at.isoformat(),
+        last_opened_at=None if project.last_opened_at is None else project.last_opened_at.isoformat(),
+        archived_at=None if project.archived_at is None else project.archived_at.isoformat(),
+        trashed_at=None if project.trashed_at is None else project.trashed_at.isoformat(),
+        status=project.status,
+        current_setup_id=project.current_setup_id,
         version_esquema=project.version_esquema,
         estado_general=project.estado_general,
     )
 
 
 def setup_to_response(setup: MontajePCB) -> SetupResponse:
-    return SetupResponse(id=setup.id, nombre=setup.nombre, orden=setup.orden)
+    return SetupResponse(
+        id=setup.id,
+        nombre=setup.nombre,
+        orden=setup.orden,
+        placement_revision=setup.placement_revision,
+        active_reference_id=setup.active_reference_id,
+        active_map_id=setup.active_map_id,
+        preparation_status=str(setup.preparation_status),
+        last_prepared_at=None if setup.last_prepared_at is None else setup.last_prepared_at.isoformat(),
+    )
 
 
 def operation_to_response(operation: OperacionPCB) -> OperationResponse:

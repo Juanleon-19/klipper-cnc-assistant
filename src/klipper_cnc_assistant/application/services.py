@@ -45,7 +45,7 @@ class ProjectService:
     def list_projects(self) -> list[ProyectoPCB]:
         return sorted(
             self.repository.list_projects(),
-            key=lambda project: project.actualizado_en,
+            key=lambda project: project.last_opened_at or project.actualizado_en,
             reverse=True,
         )
 
@@ -110,7 +110,14 @@ class ProjectService:
         self,
         project_id: str,
     ) -> ProyectoPCB:
-        return self._load_project(project_id)
+        project = self._load_project(project_id)
+        opened = replace(
+            project,
+            last_opened_at=datetime.now(timezone.utc),
+            current_setup_id=project.current_setup_id or project.montajes[0].id,
+        )
+        self.repository.save_project(opened)
+        return opened
 
     def add_setup(
         self,
@@ -354,6 +361,59 @@ class ProjectService:
         content = file_path.read_text(encoding="utf-8")
         return analyze_gcode_text(content)
 
+    def archive_project(self, project_id: str) -> ProyectoPCB:
+        project = self._load_project(project_id)
+        now = datetime.now(timezone.utc)
+        updated = replace(project, status="archived", archived_at=now, trashed_at=None, actualizado_en=now)
+        self.repository.save_project(updated)
+        self._audit(updated, "archive_project")
+        return updated
+
+    def trash_project(self, project_id: str) -> ProyectoPCB:
+        project = self._load_project(project_id)
+        now = datetime.now(timezone.utc)
+        updated = replace(project, status="trashed", trashed_at=now, actualizado_en=now)
+        self.repository.save_project(updated)
+        self._audit(updated, "trash_project")
+        return updated
+
+    def restore_project(self, project_id: str) -> ProyectoPCB:
+        project = self._load_project(project_id)
+        now = datetime.now(timezone.utc)
+        updated = replace(project, status="active", archived_at=None, trashed_at=None, actualizado_en=now)
+        self.repository.save_project(updated)
+        self._audit(updated, "restore_project")
+        return updated
+
+    def permanently_delete_project(self, project_id: str, *, confirm_name: str) -> None:
+        project = self._load_project(project_id)
+        if confirm_name != project.nombre:
+            raise ApplicationError("Para eliminar permanentemente debe escribir exactamente el nombre del proyecto.")
+        self._audit(project, "permanently_delete_project")
+        self.repository.delete_project_storage(project_id)
+
+    def continue_project_step(self, project_id: str) -> dict[str, str | None]:
+        project = self._load_project(project_id)
+        if not project.operaciones:
+            return {"view": "archivo", "operation_id": None, "reason": "sin operaciones"}
+        operation = next((item for item in project.operaciones if not item.archivo_gcode), None)
+        if operation is not None:
+            return {"view": "archivo", "operation_id": operation.id, "reason": "sin G-code"}
+        operation = next((item for item in project.operaciones if item.analisis is None or item.analisis.analisis_desactualizado), None)
+        if operation is not None:
+            return {"view": "trayectoria", "operation_id": operation.id, "reason": "sin analisis vigente"}
+        operation = project.operaciones[0]
+        setup = project.get_setup(operation.setup_id)
+        if setup.preparacion.origen_trabajo is None or setup.preparacion.referencia_z is None:
+            return {"view": "referencia", "operation_id": operation.id, "reason": "sin referencia"}
+        if setup.active_map_id is None and setup.preparacion.mapa_disponible_en is None:
+            return {"view": "mapa", "operation_id": operation.id, "reason": "sin mapa"}
+        generated_dir = self.repository.project_dir(project.id) / "generated" / "compensated"
+        generated = list(generated_dir.glob("*_compensated.gcode")) if generated_dir.exists() else []
+        if not generated:
+            return {"view": "validacion", "operation_id": operation.id, "reason": "sin compensacion"}
+        return {"view": "ejecucion", "operation_id": operation.id, "reason": "listo para ejecutar"}
+
     def storage_available(self) -> bool:
         return self.repository.storage_available()
 
@@ -445,6 +505,13 @@ class ProjectService:
                 "El archivo G-code excede el tamano maximo permitido."
             )
 
+    def _audit(self, project: ProyectoPCB, action: str) -> None:
+        audit_file = self.repository.base_dir / "audit.log"
+        audit_file.parent.mkdir(parents=True, exist_ok=True)
+        with audit_file.open("a", encoding="utf-8") as handle:
+            handle.write(f"{datetime.now(timezone.utc).isoformat()} project={project.id} name={project.nombre} action={action} status={project.status}\n")
+
+
     def _decode_uploaded_content(self, content_bytes: bytes) -> str:
         self._validate_upload_size(len(content_bytes))
         try:
@@ -468,8 +535,9 @@ class MachineSessionService:
 
     def get_status(self) -> MachineSessionStatus:
         home_realizado = self.referencia_maquina_confirmada_en is not None
+        physical = self.machine_mode == "fisico"
         return MachineSessionStatus(
-            estado="simulada_lista_para_preparacion",
+            estado=("fisica_lista_para_preparacion" if physical else "simulada_lista_para_preparacion"),
             home_realizado=home_realizado,
             referencia_maquina_confirmada_en=self.referencia_maquina_confirmada_en,
             z_en_altura_segura=True,
@@ -481,7 +549,7 @@ class MachineSessionService:
                 "crear proyecto",
                 "cargar gcode",
                 "analizar gcode",
-                "confirmar referencias en simulacion",
+                "preparacion fisica" if physical else "confirmar referencias en simulacion",
             ),
             z_puede_bajar_durante=(
                 "captura del cero",

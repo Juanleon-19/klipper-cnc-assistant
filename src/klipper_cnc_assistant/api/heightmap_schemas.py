@@ -142,6 +142,7 @@ class PhysicalMapExclusionRequest(BaseModel):
 
 
 class PhysicalMapPlanRequest(BaseModel):
+    grid_mode: str = "manual"
     rows: int = Field(default=7, ge=2)
     columns: int = Field(default=6, ge=2)
     edge_margin_left_mm: float = Field(default=2.0, ge=0)

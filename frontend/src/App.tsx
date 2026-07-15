@@ -29,7 +29,7 @@ type NavItem = {
   icon: string;
 };
 
-const FRONTEND_SCHEMA_VERSION = "1.5";
+const FRONTEND_SCHEMA_VERSION = "1.6";
 const FRONTEND_BUILD = "0.1.0";
 
 const navItems: NavItem[] = [
@@ -91,6 +91,7 @@ export default function App() {
   const recentProject = useMemo(() => getRecentProject(projects), [projects]);
   const appIncompatible = Boolean(systemInfo && systemInfo.schema_version !== FRONTEND_SCHEMA_VERSION);
   const initialWorkspaceView = useMemo(() => getInitialWorkspaceView(), []);
+  const [workspaceViewOverride, setWorkspaceViewOverride] = useState<WorkspaceView | undefined>(initialWorkspaceView);
 
   useEffect(() => {
     if (isDesktop) {
@@ -335,6 +336,81 @@ export default function App() {
     }
   };
 
+
+  const handleContinueProject = async (projectId: string) => {
+    setBusyKey(`project:continue:${projectId}`);
+    setError("");
+    try {
+      const next = await api.continueProject(projectId);
+      if (next.view === "archivo" || next.view === "trayectoria" || next.view === "referencia" || next.view === "mapa" || next.view === "validacion" || next.view === "ejecucion") {
+        setWorkspaceViewOverride(next.view);
+      }
+      setSelectedProjectId(projectId);
+      handleSelectView("proyectos");
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : "No fue posible continuar el proyecto.");
+    } finally {
+      setBusyKey(null);
+    }
+  };
+
+  const handleArchiveProject = async (projectId: string) => {
+    setBusyKey(`project:archive:${projectId}`);
+    setError("");
+    try {
+      const updated = await api.archiveProject(projectId);
+      setProjects((current) => current.map((item) => item.id === projectId ? updated : item));
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : "No fue posible archivar el proyecto.");
+    } finally {
+      setBusyKey(null);
+    }
+  };
+
+  const handleTrashProject = async (project: Project) => {
+    const confirmed = window.confirm(`El proyecto se moverá a la Papelera junto con sus montajes, operaciones, mapas y archivos generados. Podrá restaurarlo posteriormente.\n\nProyecto: ${project.nombre}`);
+    if (!confirmed) return;
+    setBusyKey(`project:trash:${project.id}`);
+    setError("");
+    try {
+      const updated = await api.trashProject(project.id);
+      setProjects((current) => current.map((item) => item.id === project.id ? updated : item));
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : "No fue posible mover el proyecto a Papelera.");
+    } finally {
+      setBusyKey(null);
+    }
+  };
+
+  const handleRestoreProject = async (projectId: string) => {
+    setBusyKey(`project:restore:${projectId}`);
+    setError("");
+    try {
+      const updated = await api.restoreProject(projectId);
+      setProjects((current) => current.map((item) => item.id === projectId ? updated : item));
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : "No fue posible restaurar el proyecto.");
+    } finally {
+      setBusyKey(null);
+    }
+  };
+
+  const handlePermanentlyDeleteProject = async (project: Project) => {
+    const typed = window.prompt(`Para eliminar permanentemente escriba el nombre del proyecto:\n${project.nombre}`);
+    if (typed !== project.nombre) return;
+    setBusyKey(`project:delete:${project.id}`);
+    setError("");
+    try {
+      await api.permanentlyDeleteProject(project.id, typed);
+      setProjects((current) => current.filter((item) => item.id !== project.id));
+      setSelectedProjectId((current) => current === project.id ? null : current);
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : "No fue posible eliminar permanentemente el proyecto.");
+    } finally {
+      setBusyKey(null);
+    }
+  };
+
   const refreshSystem = useCallback(async () => {
     setRefreshingSystem(true);
     setError("");
@@ -504,8 +580,10 @@ export default function App() {
               onCreateProject={() => handleSelectView("nuevo")}
               onOpenProject={(projectId) => {
                 setSelectedProjectId(projectId);
+                setWorkspaceViewOverride(undefined);
                 handleSelectView("proyectos");
               }}
+              onContinueProject={handleContinueProject}
               onGoToProjects={() => handleSelectView("proyectos")}
             />
           ) : null}
@@ -521,9 +599,15 @@ export default function App() {
                 selectedProjectId={selectedProjectId}
                 onSelect={(projectId) => {
                   setSelectedProjectId(projectId);
+                  setWorkspaceViewOverride(undefined);
                   setSidebarOpen(false);
                 }}
                 onCreateProject={() => handleSelectView("nuevo")}
+                onContinueProject={handleContinueProject}
+                onArchiveProject={handleArchiveProject}
+                onTrashProject={handleTrashProject}
+                onRestoreProject={handleRestoreProject}
+                onPermanentlyDeleteProject={handlePermanentlyDeleteProject}
               />
               <ProjectWorkspace
                 project={selectedProject}
@@ -539,7 +623,7 @@ export default function App() {
                 onRemoveFile={handleRemoveFile}
                 onAnalyze={handleAnalyze}
                 onUploadFile={handleUploadFile}
-                initialView={initialWorkspaceView}
+                initialView={workspaceViewOverride}
               />
             </div>
           ) : null}

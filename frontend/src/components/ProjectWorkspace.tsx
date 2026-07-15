@@ -18,6 +18,7 @@ import type {
   ProjectPayload,
   ReferenceSession,
   PhysicalMapPayload,
+  MeshSuggestion,
   ReferenceStep,
   CapturedPosition,
   CoordinateReference,
@@ -179,6 +180,8 @@ export function ProjectWorkspace({
   const zReferenceRefs = useRef<Record<"x_mm" | "y_mm" | "z_mm", HTMLInputElement | null>>({ x_mm: null, y_mm: null, z_mm: null });
   const machine = useMachineStatus();
   const [safeZInput, setSafeZInput] = useState("10");
+  const [gridDefinitionMode, setGridDefinitionMode] = useState<"suggested" | "manual">("manual");
+  const [meshSuggestion, setMeshSuggestion] = useState<MeshSuggestion | null>(null);
   const [meshRowsInput, setMeshRowsInput] = useState("7");
   const [meshColumnsInput, setMeshColumnsInput] = useState("6");
   const [useUniformEdgeRetreat, setUseUniformEdgeRetreat] = useState(true);
@@ -1008,6 +1011,14 @@ export function ProjectWorkspace({
     }
   };
 
+  const invalidateMeshPreview = () => {
+    setMeshArmed(false);
+    setMeshSuggestion(null);
+    setMeshValidationMessage(physicalMap?.points?.some((point) => point.status === "MEASURED")
+      ? "Existe una medición parcial. Cambiar la cuadrícula creará una nueva versión de malla. Los puntos medidos anteriores se conservarán en el historial, pero no pertenecerán a la nueva cuadrícula."
+      : "");
+  };
+
   const physicalFailedPoints = physicalMap?.points?.filter((point) => point.status === "FAILED" || point.status === "RETRY_REQUIRED").length ?? 0;
   const physicalMapId = typeof physicalMap?.map_id === "string" ? physicalMap.map_id : "";
 
@@ -1123,32 +1134,75 @@ export function ProjectWorkspace({
             {!machine.isPhysical ? <div className="alert alert--warning">Modo físico requerido para medir un mapa real.</div> : null}
             {!referenceSession?.origen_trabajo ? <div className="alert alert--warning">No puede iniciar la malla: falta capturar el origen X/Y.</div> : null}
             {!referenceSession?.referencia_z ? <div className="alert alert--warning">No puede iniciar la malla: falta referencia Z medida.</div> : null}
+            <div className="subpanel subpanel--soft">
+              <div className="section-heading section-heading--stacked">
+                <div><p className="eyebrow">Definición de cuadrícula</p><h4>Modo explícito</h4></div>
+                <div className="map-segmented" aria-label="Definición de cuadrícula">
+                  <button className={`map-segment-button${gridDefinitionMode === "suggested" ? " map-segment-button--active" : ""}`} type="button" onClick={() => { setGridDefinitionMode("suggested"); invalidateMeshPreview(); }}>Sugerida automáticamente</button>
+                  <button className={`map-segment-button${gridDefinitionMode === "manual" ? " map-segment-button--active" : ""}`} type="button" onClick={() => { setGridDefinitionMode("manual"); invalidateMeshPreview(); }}>Filas y columnas</button>
+                </div>
+              </div>
+              {gridDefinitionMode === "manual" ? (
+                <div className="form-grid form-grid--dense">
+                  <label>Filas<input value={meshRowsInput} inputMode="numeric" onChange={(event) => { setMeshRowsInput(event.target.value); invalidateMeshPreview(); }} /></label>
+                  <label>Columnas<input value={meshColumnsInput} inputMode="numeric" onChange={(event) => { setMeshColumnsInput(event.target.value); invalidateMeshPreview(); }} /></label>
+                  <div className="metric-box"><span>Separación X</span><strong>{formatMillimeters(columns > 1 ? probeWidth / (columns - 1) : null, 3)}</strong></div>
+                  <div className="metric-box"><span>Separación Y</span><strong>{formatMillimeters(rows > 1 ? probeHeight / (rows - 1) : null, 3)}</strong></div>
+                  <div className="metric-box"><span>Puntos totales</span><strong>{plannedPoints}</strong></div>
+                </div>
+              ) : (
+                <div className="stack gap-sm">
+                  <label>Separación objetivo recomendada (mm)<input value={meshSpacingInput} inputMode="decimal" onChange={(event) => { setMeshSpacingInput(event.target.value); invalidateMeshPreview(); }} /></label>
+                  {meshSuggestion ? <div className="info-grid info-grid--double compact-grid">
+                    <div className="metric-box"><span>Filas sugeridas</span><strong>{meshSuggestion.rows}</strong></div>
+                    <div className="metric-box"><span>Columnas sugeridas</span><strong>{meshSuggestion.columns}</strong></div>
+                    <div className="metric-box"><span>Puntos totales</span><strong>{meshSuggestion.point_count}</strong></div>
+                    <div className="metric-box"><span>Separación X resultante</span><strong>{formatMillimeters(meshSuggestion.dx_mm, 3)}</strong></div>
+                    <div className="metric-box"><span>Separación Y resultante</span><strong>{formatMillimeters(meshSuggestion.dy_mm, 3)}</strong></div>
+                    <div className="metric-box"><span>Tiempo estimado</span><strong>{typeof meshSuggestion.estimated_time_s === "number" ? `${meshSuggestion.estimated_time_s.toFixed(1)} s` : "-"}</strong></div>
+                  </div> : <p className="muted">Genere una propuesta antes de aceptarla o previsualizarla.</p>}
+                  {meshSuggestion ? <p className="muted">{meshSuggestion.reason}</p> : null}
+                  <div className="action-grid action-grid--inline">
+                    <button className="button button--ghost" type="button" disabled={!selectedOperation || heightMapBusy} onClick={async () => {
+                      if (!selectedOperation) return;
+                      setHeightMapBusy(true);
+                      setWorkspaceError("");
+                      try {
+                        const suggestion = await api.suggestPhysicalMap(project.id, selectedOperation.id, { grid_mode: "suggested", rows, columns, edge_margin_left_mm: edgeLeft, edge_margin_right_mm: edgeRight, edge_margin_bottom_mm: edgeBottom, edge_margin_top_mm: edgeTop, exclusions: meshExclusions, max_spacing_mm: parsePositive(meshSpacingInput), margin_mm: 0, safe_z_mm: parsePositive(safeZInput), probe_step_mm: parsePositive(probeStepInput), probe_feed_mm_min: parsePositive(probeSpeedInput), retract_mm: parsePositive(probeRetractInput) });
+                        setMeshSuggestion(suggestion);
+                        setMeshRowsInput(String(suggestion.rows));
+                        setMeshColumnsInput(String(suggestion.columns));
+                      } catch (error) {
+                        setWorkspaceError(error instanceof Error ? error.message : "No fue posible generar la propuesta de malla.");
+                      } finally {
+                        setHeightMapBusy(false);
+                      }
+                    }}>Ver propuesta</button>
+                    <button className="button" type="button" disabled={!meshSuggestion} onClick={() => { if (!meshSuggestion) return; setMeshRowsInput(String(meshSuggestion.rows)); setMeshColumnsInput(String(meshSuggestion.columns)); setMeshValidationMessage("Propuesta automática aceptada. Regenerar vista previa antes de confirmar sondeo."); }}>Aceptar sugerencia</button>
+                  </div>
+                </div>
+              )}
+            </div>
             <div className="form-grid form-grid--dense">
-              <label>Filas<input value={meshRowsInput} inputMode="numeric" onChange={(event) => { setMeshRowsInput(event.target.value); setMeshArmed(false); }} /></label>
-              <label>Columnas<input value={meshColumnsInput} inputMode="numeric" onChange={(event) => { setMeshColumnsInput(event.target.value); setMeshArmed(false); }} /></label>
-              <label>Z segura de traslado (mm)<input value={safeZInput} inputMode="decimal" onChange={(event) => { setSafeZInput(event.target.value); setMeshArmed(false); }} /></label>
-              <label>Paso de sonda (mm)<input value={probeStepInput} inputMode="decimal" onChange={(event) => { setProbeStepInput(event.target.value); setMeshArmed(false); }} /></label>
-              <label>Velocidad de sonda (mm/min)<input value={probeSpeedInput} inputMode="decimal" onChange={(event) => { setProbeSpeedInput(event.target.value); setMeshArmed(false); }} /></label>
-              <label>Retracto (mm)<input value={probeRetractInput} inputMode="decimal" onChange={(event) => { setProbeRetractInput(event.target.value); setMeshArmed(false); }} /></label>
+              <label>Z segura de traslado (mm)<input value={safeZInput} inputMode="decimal" onChange={(event) => { setSafeZInput(event.target.value); invalidateMeshPreview(); }} /></label>
+              <label>Paso de sonda (mm)<input value={probeStepInput} inputMode="decimal" onChange={(event) => { setProbeStepInput(event.target.value); invalidateMeshPreview(); }} /></label>
+              <label>Velocidad de sonda (mm/min)<input value={probeSpeedInput} inputMode="decimal" onChange={(event) => { setProbeSpeedInput(event.target.value); invalidateMeshPreview(); }} /></label>
+              <label>Retracto (mm)<input value={probeRetractInput} inputMode="decimal" onChange={(event) => { setProbeRetractInput(event.target.value); invalidateMeshPreview(); }} /></label>
             </div>
             <div className="subpanel subpanel--soft">
-              <div className="section-heading"><h4>Retiro del borde del material</h4><label className="inline-check"><input type="checkbox" checked={useUniformEdgeRetreat} onChange={(event) => { setUseUniformEdgeRetreat(event.target.checked); setMeshArmed(false); }} /> Usar el mismo retiro en todos los bordes</label></div>
+              <div className="section-heading"><h4>Retiro del borde del material</h4><label className="inline-check"><input type="checkbox" checked={useUniformEdgeRetreat} onChange={(event) => { setUseUniformEdgeRetreat(event.target.checked); invalidateMeshPreview(); }} /> Usar el mismo retiro en todos los bordes</label></div>
               {useUniformEdgeRetreat ? (
-                <label>Retiro uniforme (mm)<input value={uniformEdgeRetreatInput} inputMode="decimal" onChange={(event) => { setUniformEdgeRetreatInput(event.target.value); setMeshArmed(false); }} /></label>
+                <label>Retiro uniforme (mm)<input value={uniformEdgeRetreatInput} inputMode="decimal" onChange={(event) => { setUniformEdgeRetreatInput(event.target.value); invalidateMeshPreview(); }} /></label>
               ) : (
                 <div className="form-grid form-grid--dense">
-                  <label>Retiro izquierdo (mm)<input value={edgeRetreatLeftInput} inputMode="decimal" onChange={(event) => { setEdgeRetreatLeftInput(event.target.value); setMeshArmed(false); }} /></label>
-                  <label>Retiro derecho (mm)<input value={edgeRetreatRightInput} inputMode="decimal" onChange={(event) => { setEdgeRetreatRightInput(event.target.value); setMeshArmed(false); }} /></label>
-                  <label>Retiro inferior (mm)<input value={edgeRetreatBottomInput} inputMode="decimal" onChange={(event) => { setEdgeRetreatBottomInput(event.target.value); setMeshArmed(false); }} /></label>
-                  <label>Retiro superior (mm)<input value={edgeRetreatTopInput} inputMode="decimal" onChange={(event) => { setEdgeRetreatTopInput(event.target.value); setMeshArmed(false); }} /></label>
+                  <label>Retiro izquierdo (mm)<input value={edgeRetreatLeftInput} inputMode="decimal" onChange={(event) => { setEdgeRetreatLeftInput(event.target.value); invalidateMeshPreview(); }} /></label>
+                  <label>Retiro derecho (mm)<input value={edgeRetreatRightInput} inputMode="decimal" onChange={(event) => { setEdgeRetreatRightInput(event.target.value); invalidateMeshPreview(); }} /></label>
+                  <label>Retiro inferior (mm)<input value={edgeRetreatBottomInput} inputMode="decimal" onChange={(event) => { setEdgeRetreatBottomInput(event.target.value); invalidateMeshPreview(); }} /></label>
+                  <label>Retiro superior (mm)<input value={edgeRetreatTopInput} inputMode="decimal" onChange={(event) => { setEdgeRetreatTopInput(event.target.value); invalidateMeshPreview(); }} /></label>
                 </div>
               )}
               <p className="muted">La región sondeable comienza hacia el interior de la PCB. No modifica el tamaño real del material ni recentra el G-code.</p>
             </div>
-            <details className="subpanel subpanel--soft">
-              <summary>Configuración avanzada</summary>
-              <label>Separación máxima automática (mm)<input value={meshSpacingInput} inputMode="decimal" onChange={(event) => setMeshSpacingInput(event.target.value)} /></label>
-            </details>
             <div className="subpanel subpanel--soft">
               <div className="section-heading"><h4>Zonas no sondeables</h4><div className="segmented"><button className={newExclusionShape === "rectangle" ? "active" : ""} type="button" onClick={() => setNewExclusionShape("rectangle")}>Rectangular</button><button className={newExclusionShape === "circle" ? "active" : ""} type="button" onClick={() => setNewExclusionShape("circle")}>Circular</button></div></div>
               <button className="button button--ghost" type="button" onClick={addExclusion}>Añadir exclusión</button>
@@ -1157,14 +1211,15 @@ export function ProjectWorkspace({
                   <label>Nombre<input value={exclusion.name} onChange={(event) => updateExclusion(exclusion.id, { name: event.target.value })} /></label>
                   <label className="inline-check"><input type="checkbox" checked={exclusion.enabled} onChange={(event) => updateExclusion(exclusion.id, { enabled: event.target.checked })} /> Activa</label>
                   {exclusion.shape === "rectangle" ? <div className="form-grid form-grid--dense"><label>X min<input value={exclusion.x_min_mm ?? ""} onChange={(event) => updateExclusion(exclusion.id, { x_min_mm: parseNonNegative(event.target.value) ?? 0 })} /></label><label>X max<input value={exclusion.x_max_mm ?? ""} onChange={(event) => updateExclusion(exclusion.id, { x_max_mm: parseNonNegative(event.target.value) ?? 0 })} /></label><label>Y min<input value={exclusion.y_min_mm ?? ""} onChange={(event) => updateExclusion(exclusion.id, { y_min_mm: parseNonNegative(event.target.value) ?? 0 })} /></label><label>Y max<input value={exclusion.y_max_mm ?? ""} onChange={(event) => updateExclusion(exclusion.id, { y_max_mm: parseNonNegative(event.target.value) ?? 0 })} /></label></div> : <div className="form-grid form-grid--dense"><label>Centro X<input value={exclusion.center_x_mm ?? ""} onChange={(event) => updateExclusion(exclusion.id, { center_x_mm: parseNonNegative(event.target.value) ?? 0 })} /></label><label>Centro Y<input value={exclusion.center_y_mm ?? ""} onChange={(event) => updateExclusion(exclusion.id, { center_y_mm: parseNonNegative(event.target.value) ?? 0 })} /></label><label>Radio<input value={exclusion.radius_mm ?? ""} onChange={(event) => updateExclusion(exclusion.id, { radius_mm: parsePositive(event.target.value) ?? 1 })} /></label></div>}
-                  <button className="button button--ghost button--danger" type="button" onClick={() => { setMeshExclusions((current) => current.filter((item) => item.id !== exclusion.id)); setMeshArmed(false); }}>Eliminar</button>
+                  <button className="button button--ghost button--danger" type="button" onClick={() => { setMeshExclusions((current) => current.filter((item) => item.id !== exclusion.id)); invalidateMeshPreview(); }}>Eliminar</button>
                 </div>
               ))}</div> : <p className="muted">Sin exclusiones adicionales. Use esta sección para pinzas, tornillos u obstáculos.</p>}
             </div>
             <div className="info-grid info-grid--double compact-grid">
               <div className="metric-box"><span>Material</span><strong>{formatMillimeters(project.material.ancho_mm, 3)} × {formatMillimeters(project.material.alto_mm, 3)}</strong></div>
               <div className="metric-box"><span>Retiro del borde</span><strong>{useUniformEdgeRetreat ? `${formatMillimeters(uniformRetreat, 3)} por lado` : `I ${formatMillimeters(edgeLeft, 3)} · D ${formatMillimeters(edgeRight, 3)} · Inf ${formatMillimeters(edgeBottom, 3)} · Sup ${formatMillimeters(edgeTop, 3)}`}</strong></div>
-              <div className="metric-box"><span>Región de sondeo</span><strong>{formatMillimeters(probeWidth, 3)} × {formatMillimeters(probeHeight, 3)}</strong></div>
+              <div className="metric-box"><span>Región sondeable</span><strong>X {formatMillimeters(edgeLeft, 3)} a {formatMillimeters(project.material.ancho_mm - edgeRight, 3)} · Y {formatMillimeters(edgeBottom, 3)} a {formatMillimeters(project.material.alto_mm - edgeTop, 3)}</strong></div>
+              <div className="metric-box"><span>Modo</span><strong>{gridDefinitionMode === "suggested" ? "Automático" : "Manual"}</strong></div>
               <div className="metric-box"><span>Filas / columnas</span><strong>{rows} × {columns}</strong></div>
               <div className="metric-box"><span>Puntos totales</span><strong>{physicalMap?.point_count ?? plannedPoints}</strong></div>
               <div className="metric-box"><span>Excluidos</span><strong>{excludedPoints}</strong></div>
@@ -1182,8 +1237,8 @@ export function ProjectWorkspace({
             <div className="action-grid">
               <button className="button" type="button" disabled={heightMapBusy || !selectedOperation || !physicalReady || probeWidth <= 0 || probeHeight <= 0} onClick={() => void withPhysicalMapAction(async () => {
                 if (!selectedOperation) return null;
-                const result = await api.planPhysicalMapFromReference(project.id, selectedOperation.id, { rows, columns, edge_margin_left_mm: edgeLeft, edge_margin_right_mm: edgeRight, edge_margin_bottom_mm: edgeBottom, edge_margin_top_mm: edgeTop, exclusions: meshExclusions, max_spacing_mm: parsePositive(meshSpacingInput), margin_mm: 0, safe_z_mm: parsePositive(safeZInput), probe_step_mm: parsePositive(probeStepInput), probe_feed_mm_min: parsePositive(probeSpeedInput), retract_mm: parsePositive(probeRetractInput) });
-                setActiveMapTab("mapa2d"); setMeshArmed(false); setMeshValidationMessage("Vista previa generada desde el material. Revise retiro, exclusiones, puntos y recorrido antes de armar."); return result.payload;
+                const result = await api.planPhysicalMapFromReference(project.id, selectedOperation.id, { grid_mode: gridDefinitionMode, rows, columns, edge_margin_left_mm: edgeLeft, edge_margin_right_mm: edgeRight, edge_margin_bottom_mm: edgeBottom, edge_margin_top_mm: edgeTop, exclusions: meshExclusions, max_spacing_mm: parsePositive(meshSpacingInput), margin_mm: 0, safe_z_mm: parsePositive(safeZInput), probe_step_mm: parsePositive(probeStepInput), probe_feed_mm_min: parsePositive(probeSpeedInput), retract_mm: parsePositive(probeRetractInput) });
+                setActiveMapTab("mapa2d"); setMeshArmed(false); setMeshValidationMessage(result.payload.configuration_change_warning ?? "Vista previa generada desde el material. Revise retiro, exclusiones, puntos y recorrido antes de armar."); return result.payload;
               })}>Generar vista previa de malla</button>
               <button className="button button--ghost" type="button" disabled={!physicalMapId} onClick={() => setMeshValidationMessage(physicalFailedPoints > 0 ? `La malla tiene ${physicalFailedPoints} punto(s) fallidos o pendientes de reintento.` : "Cobertura geométrica revisada. No se extrapola fuera de la región interior ni sobre exclusiones.")}>Validar límites</button>
               <button className="button button--ghost" type="button" disabled={!physicalMapId || physicalMap?.status === "MESH_COMPLETE"} onClick={() => { setMeshArmed(true); setMeshValidationMessage("Sondeo armado. Una sola confirmación ejecutará todos los puntos ejecutables de la malla."); }}>Armar sondeo</button>
@@ -1212,6 +1267,41 @@ export function ProjectWorkspace({
         {!heightMap ? <div className="panel empty-state"><p>{machine.isPhysical ? "Genere la vista previa de malla para ver región, puntos y recorrido." : "Configure la región sondeable, genere un mapa simulado o importe mediciones."}</p></div> : null}
       </div>
     );
+  };
+
+
+  const resetPreparation = async (scope: "reference" | "map" | "preparation") => {
+    if (!selectedSetup) return;
+    const completeMessage = "Esta acción eliminará las referencias y el mapa activos del montaje. Los G-codes originales, operaciones y mediciones históricas se conservarán. Después deberá repetir homing, origen, referencia y malla.";
+    const mapMessage = "Reiniciar solo mapa archivará el mapa activo, conservará origen X/Y y referencias válidas, y exigirá una nueva malla.";
+    const referenceMessage = "Reiniciar solo referencia invalidará origen X/Y, referencias Z, mapa y compensaciones dependientes.";
+    const confirmed = window.confirm(scope === "preparation" ? completeMessage : scope === "map" ? mapMessage : referenceMessage);
+    if (!confirmed) return;
+    setReferenceBusy(true);
+    setWorkspaceError("");
+    try {
+      if (scope === "map") {
+        await api.resetSetupMap(project.id, selectedSetup.id);
+      } else if (scope === "reference") {
+        await api.resetSetupReference(project.id, selectedSetup.id);
+      } else {
+        await api.resetSetupPreparation(project.id, selectedSetup.id);
+      }
+      setPhysicalMap(null);
+      setHeightMap(null);
+      setCompensationPreview(null);
+      setGeneratedGCode(null);
+      setMeshArmed(false);
+      setMeshSuggestion(null);
+      if (selectedOperation) {
+        setReferenceSession(await api.getReferenceSession(project.id, selectedOperation.id));
+      }
+      setMeshValidationMessage(scope === "map" ? "Mapa activo reiniciado. G-codes y operaciones siguen presentes." : "Preparación reiniciada. Referencias y mapa activos desaparecieron.");
+    } catch (error) {
+      setWorkspaceError(error instanceof Error ? error.message : "No fue posible reiniciar la preparación.");
+    } finally {
+      setReferenceBusy(false);
+    }
   };
 
   const runExecutionAction = async (action: "preflight" | "upload" | "confirm-file" | "confirm-tool" | "confirm-spindle" | "start" | "pause" | "resume" | "cancel") => {
@@ -1368,6 +1458,15 @@ export function ProjectWorkspace({
             <button className="button button--ghost" type="button" onClick={() => setEditingProject((current) => !current)}>
               {editingProject ? "Cerrar edición" : "Editar proyecto"}
             </button>
+            <details className="inline-actions-menu">
+              <summary className="button button--ghost">Más acciones</summary>
+              <div className="inline-actions-menu__content">
+                <strong>Reiniciar...</strong>
+                <button className="button button--ghost" type="button" disabled={referenceBusy || !selectedSetup} onClick={() => void resetPreparation("reference")} title="Reiniciar solo referencia">Solo origen/Z</button>
+                <button className="button button--ghost" type="button" disabled={referenceBusy || !selectedSetup} onClick={() => void resetPreparation("map")}>Reiniciar solo mapa</button>
+                <button className="button button--ghost button--danger" type="button" disabled={referenceBusy || !selectedSetup} onClick={() => void resetPreparation("preparation")}>Reiniciar preparación</button>
+              </div>
+            </details>
           </div>
         </div>
         <div className="hero-grid hero-grid--project">

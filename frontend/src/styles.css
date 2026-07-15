@@ -2246,3 +2246,39 @@ button {
   gap: 0.45rem;
   margin: 0;
 }
+
+
+.inline-actions-menu {
+  position: relative;
+  display: inline-block;
+}
+
+.inline-actions-menu > summary {
+  list-style: none;
+  cursor: pointer;
+}
+
+.inline-actions-menu > summary::-webkit-details-marker {
+  display: none;
+}
+
+.inline-actions-menu__content {
+  position: absolute;
+  right: 0;
+  z-index: 20;
+  display: grid;
+  min-width: 230px;
+  gap: 0.45rem;
+  padding: 0.7rem;
+  margin-top: 0.45rem;
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  background: var(--surface-strong);
+  box-shadow: var(--shadow-lg);
+}
+
+.inline-actions-menu__content strong {
+  font-size: 0.8rem;
+  color: var(--text-soft);
+  text-transform: uppercase;
+}

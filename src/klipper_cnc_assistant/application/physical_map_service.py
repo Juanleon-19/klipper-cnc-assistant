@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import math
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import Any
 
 from klipper_cnc_assistant.application.errors import ApplicationError, NotFoundError
-from klipper_cnc_assistant.domain import OperacionPCB, ProjectValidationError
+from klipper_cnc_assistant.domain import OperationPreparation, OperacionPCB, PreparationState, ProjectValidationError
 from klipper_cnc_assistant.heightmap import (
     ExclusionZone,
     HeightGrid,
@@ -103,6 +103,7 @@ class PhysicalExclusion:
 
 @dataclass(frozen=True)
 class PhysicalMeshConfig:
+    grid_mode: str = "manual"
     rows: int = 7
     columns: int = 6
     edge_margin_left_mm: float = 2.0
@@ -118,6 +119,8 @@ class PhysicalMeshConfig:
     retract_mm: float | None = None
 
     def __post_init__(self) -> None:
+        if self.grid_mode not in {"manual", "suggested"}:
+            raise ApplicationError("El modo de malla debe ser manual o suggested.")
         if self.rows < 2 or self.columns < 2:
             raise ApplicationError("La malla física necesita al menos 2 filas y 2 columnas.")
         if self.max_spacing_mm <= 0:
@@ -153,6 +156,44 @@ class PhysicalMapService:
     def __init__(self, repository: JsonProjectRepository) -> None:
         self.repository = repository
 
+    def suggest_mesh_config(
+        self,
+        *,
+        project_id: str,
+        operation_id: str,
+        config: PhysicalMeshConfig | None = None,
+    ) -> dict[str, Any]:
+        project = self._load_project(project_id)
+        operation = project.get_operation(operation_id)
+        selected = config or PhysicalMeshConfig(grid_mode="suggested")
+        region = self._material_inner_region(project, selected)
+        target = selected.max_spacing_mm
+        columns = max(2, math.ceil(region.ancho_mm / target) + 1)
+        rows = max(2, math.ceil(region.alto_mm / target) + 1)
+        grid = self._grid_for_region(region, rows, columns)
+        samples = self._blank_samples(grid, region, selected.exclusions)
+        points = [sample for sample in samples if sample.incluida]
+        distance = self._estimate_serpentine_distance(points, 0.0, 0.0)
+        reason = (
+            f"Se eligieron {rows} filas y {columns} columnas para cubrir la región sondeable "
+            f"{region.ancho_mm:.3f} x {region.alto_mm:.3f} mm con separación objetivo {target:.3f} mm, "
+            "respetando retiro de borde y exclusiones."
+        )
+        return {
+            "grid_mode": "suggested",
+            "rows": rows,
+            "columns": columns,
+            "point_count": rows * columns,
+            "excluded_count": len(samples) - len(points),
+            "executable_point_count": len(points),
+            "dx_mm": grid.paso_x_mm,
+            "dy_mm": grid.paso_y_mm,
+            "estimated_distance_mm": distance,
+            "estimated_time_s": self._estimate_time_s([], distance, replace(selected, rows=rows, columns=columns)),
+            "reason": reason,
+            "local_region": {"min_x_mm": region.min_x_mm, "min_y_mm": region.min_y_mm, "max_x_mm": region.max_x_mm, "max_y_mm": region.max_y_mm},
+        }
+
     def capture_reference_and_plan(
         self,
         *,
@@ -170,6 +211,9 @@ class PhysicalMapService:
         project = self._load_project(project_id)
         operation = project.get_operation(operation_id)
         selected_config = config or PhysicalMeshConfig()
+        if selected_config.grid_mode == "suggested":
+            suggestion = self.suggest_mesh_config(project_id=project_id, operation_id=operation_id, config=selected_config)
+            selected_config = replace(selected_config, rows=int(suggestion["rows"]), columns=int(suggestion["columns"]))
 
         existing = self._latest_surface_map(project_id, operation)
         if existing and self._compatible_surface_map(existing, operation, machine_origin_x, machine_origin_y, selected_config):
@@ -185,6 +229,13 @@ class PhysicalMapService:
             payload["updated_at"] = _iso_now()
             self._save(project_id, str(payload["map_id"]), payload)
             return payload
+
+        previous_partial_message = None
+        if existing and not self._compatible_surface_map(existing, operation, machine_origin_x, machine_origin_y, selected_config):
+            measured = sum(1 for point in existing.get("points", []) if point.get("status") == "MEASURED")
+            if measured:
+                previous_partial_message = "Existe una medición parcial. Cambiar la cuadrícula creará una nueva versión de malla. Los puntos medidos anteriores se conservarán en el historial, pero no pertenecerán a la nueva cuadrícula."
+            self._archive_payload(project_id, existing, replaced_by=None)
 
         operations = self._operations_for_setup_face(project, operation) or (operation,)
         local_region = self._material_inner_region(project, selected_config)
@@ -221,8 +272,12 @@ class PhysicalMapService:
             config=selected_config,
             height_map=height_map,
             status="MESH_PLANNED",
+            placement_revision=project.get_setup(operation.setup_id).placement_revision,
         )
+        if previous_partial_message:
+            payload["configuration_change_warning"] = previous_partial_message
         self._save(project_id, map_id, payload)
+        self._mark_setup_map_active(project_id, operation.setup_id, map_id)
         return payload
 
     def get_active(self, project_id: str, operation_id: str) -> dict[str, Any]:
@@ -403,8 +458,18 @@ class PhysicalMapService:
             ))
         return tuple(zones)
 
+    def _estimate_serpentine_distance(self, samples: list[HeightSample], origin_x: float, origin_y: float) -> float:
+        total = 0.0
+        previous: tuple[float, float] | None = None
+        for sample in samples:
+            current = (origin_x + sample.x_mm, origin_y + sample.y_mm)
+            if previous is not None:
+                total += math.dist(previous, current)
+            previous = current
+        return total
+
     def _estimate_time_s(self, points: list[dict[str, Any]], distance_mm: float, config: PhysicalMeshConfig) -> float | None:
-        executable = sum(1 for point in points if point.get("status") != "EXCLUDED")
+        executable = sum(1 for point in points if point.get("status") != "EXCLUDED") if points else config.rows * config.columns
         if executable <= 0:
             return 0.0
         travel_feed_mm_min = 600.0
@@ -473,7 +538,10 @@ class PhysicalMapService:
             "project_id": kwargs["project_id"],
             "setup_id": operation.setup_id,
             "face": operation.cara,
-            "placement_revision": "placement-1",
+            "placement_revision": kwargs.get("placement_revision", "placement-1"),
+            "version": 1,
+            "archived_at": None,
+            "replaced_by": None,
             "tool_id": _tool_key(operation),
             "tool_name": operation.herramienta,
             "tool_diameter": _tool_diameter(operation),
@@ -496,6 +564,7 @@ class PhysicalMapService:
             "machine_label": kwargs["machine_label"],
             "session_id": kwargs["session_id"],
             "mesh_config": {
+                "grid_mode": config.grid_mode,
                 "rows": config.rows,
                 "columns": config.columns,
                 "edge_margin_left_mm": config.edge_margin_left_mm,
@@ -530,6 +599,11 @@ class PhysicalMapService:
                 "max_x_mm": origin_x + height_map.probe_region.max_x_mm,
                 "max_y_mm": origin_y + height_map.probe_region.max_y_mm,
             },
+            "grid_mode": config.grid_mode,
+            "rows": height_map.grid.filas,
+            "columns": height_map.grid.columnas,
+            "dx": height_map.grid.paso_x_mm,
+            "dy": height_map.grid.paso_y_mm,
             "grid": {"rows": height_map.grid.filas, "columns": height_map.grid.columnas, "dx_mm": height_map.grid.paso_x_mm, "dy_mm": height_map.grid.paso_y_mm},
             "point_count": len(points),
             "excluded_count": sum(1 for point in points if point.get("status") == "EXCLUDED"),
@@ -621,14 +695,22 @@ class PhysicalMapService:
         if not maps_dir.exists():
             return None
         files = sorted(maps_dir.glob("*/height_map.json"), key=lambda item: item.stat().st_mtime, reverse=True)
-        return None if not files else self._load_file(files[0])
+        for file in files:
+            payload = self._load_file(file)
+            if payload.get("archived_at") is None and payload.get("status") != "ARCHIVED":
+                return payload
+        return None
 
     def _latest_legacy_tool_map(self, project_id: str, operation: OperacionPCB) -> dict[str, Any] | None:
         maps_dir = self.repository.project_dir(project_id) / "maps" / "measured" / self._legacy_map_prefix(operation.setup_id, operation)
         if not maps_dir.exists():
             return None
         files = sorted(maps_dir.glob("*/height_map.json"), key=lambda item: item.stat().st_mtime, reverse=True)
-        return None if not files else self._load_file(files[0])
+        for file in files:
+            payload = self._load_file(file)
+            if payload.get("archived_at") is None and payload.get("status") != "ARCHIVED":
+                return payload
+        return None
 
     def _compatible_surface_map(self, payload: dict[str, Any], operation: OperacionPCB, origin_x: float, origin_y: float, config: PhysicalMeshConfig) -> bool:
         if payload.get("schema_version") != "surface-map-v2":
@@ -643,6 +725,7 @@ class PhysicalMapService:
         checks = (
             int(mesh_config.get("rows", config.rows)) == config.rows,
             int(mesh_config.get("columns", config.columns)) == config.columns,
+            str(mesh_config.get("grid_mode", "manual")) == config.grid_mode,
             abs(float(mesh_config.get("edge_margin_left_mm", config.edge_margin_left_mm)) - config.edge_margin_left_mm) <= 0.001,
             abs(float(mesh_config.get("edge_margin_right_mm", config.edge_margin_right_mm)) - config.edge_margin_right_mm) <= 0.001,
             abs(float(mesh_config.get("edge_margin_bottom_mm", config.edge_margin_bottom_mm)) - config.edge_margin_bottom_mm) <= 0.001,
@@ -745,6 +828,84 @@ class PhysicalMapService:
         migrated["executable_point_count"] = sum(1 for point in migrated_points if point.get("status") != "EXCLUDED")
         migrated["height_map"] = self._height_map_payload_from_points(migrated)
         return migrated
+
+    def reset_map(self, *, project_id: str, setup_id: str, reason: str | None = None, user_session: str | None = None) -> dict[str, Any]:
+        project = self._load_project(project_id)
+        setup = project.get_setup(setup_id)
+        if setup.active_map_id:
+            active = self.get_by_id(project_id, setup.active_map_id)
+            self._archive_payload(project_id, active, replaced_by=None)
+        updated_setup = replace(
+            setup,
+            active_map_id=None,
+            preparation_status=PreparationState.REFERENCIA_Z_CONFIRMADA,
+            preparacion=replace(
+                setup.preparacion,
+                region_sondeable_configurada_en=None,
+                mapa_disponible_en=None,
+                mapa_validado_en=None,
+                compensacion_previsualizada_en=None,
+                motivo_invalidacion=reason or "Mapa activo reiniciado. Debe configurar y confirmar una nueva malla.",
+            ),
+        )
+        self.repository.save_project(project.replace_setup(updated_setup))
+        return {"status": "map_reset", "setup_id": setup_id, "placement_revision": setup.placement_revision, "reason": reason, "user_session": user_session}
+
+    def reset_reference(self, *, project_id: str, setup_id: str, reason: str | None = None, user_session: str | None = None) -> dict[str, Any]:
+        project = self._load_project(project_id)
+        setup = project.get_setup(setup_id)
+        if setup.active_map_id:
+            active = self.get_by_id(project_id, setup.active_map_id)
+            self._archive_payload(project_id, active, replaced_by=None)
+        next_revision = self._next_revision(setup.placement_revision)
+        updated_setup = replace(
+            setup,
+            placement_revision=next_revision,
+            active_reference_id=None,
+            active_map_id=None,
+            preparation_status=PreparationState.SIN_INICIAR,
+            last_prepared_at=None,
+            preparacion=OperationPreparation(motivo_invalidacion=reason or "Referencia reiniciada. Debe repetir origen X/Y, referencia Z y malla."),
+        )
+        self.repository.save_project(project.replace_setup(updated_setup))
+        return {"status": "reference_reset", "setup_id": setup_id, "previous_placement_revision": setup.placement_revision, "placement_revision": next_revision, "reason": reason, "user_session": user_session}
+
+    def reset_preparation(self, *, project_id: str, setup_id: str, reason: str | None = None, user_session: str | None = None) -> dict[str, Any]:
+        return self.reset_reference(project_id=project_id, setup_id=setup_id, reason=reason or "Preparación completa reiniciada.", user_session=user_session)
+
+    def _next_revision(self, current: str) -> str:
+        try:
+            number = int(str(current).rsplit("-", 1)[-1])
+        except ValueError:
+            number = 1
+        return f"placement-{number + 1}"
+
+    def _archive_payload(self, project_id: str, payload: dict[str, Any], replaced_by: str | None) -> None:
+        archived = dict(payload)
+        archived["archived_at"] = archived.get("archived_at") or _iso_now()
+        archived["replaced_by"] = replaced_by
+        archived["status"] = "ARCHIVED" if archived.get("status") not in {"MESH_COMPLETE"} else archived.get("status")
+        self._save(project_id, str(archived["map_id"]), archived)
+
+    def _mark_setup_map_active(self, project_id: str, setup_id: str, map_id: str) -> None:
+        project = self._load_project(project_id)
+        setup = project.get_setup(setup_id)
+        now = utc_now()
+        updated_setup = replace(
+            setup,
+            active_map_id=map_id,
+            preparation_status=PreparationState.MAPA_DISPONIBLE,
+            last_prepared_at=now,
+            preparacion=replace(
+                setup.preparacion,
+                region_sondeable_configurada_en=now,
+                mapa_disponible_en=now,
+                mapa_validado_en=None,
+                compensacion_previsualizada_en=None,
+                motivo_invalidacion=None,
+            ),
+        )
+        self.repository.save_project(project.replace_setup(updated_setup))
 
     def _save(self, project_id: str, map_id: str, payload: dict[str, Any]) -> None:
         self.repository.save_height_map_payload(project_id, map_id, payload)

@@ -7,7 +7,7 @@ from enum import StrEnum
 from .errors import ProjectValidationError
 
 
-PROJECT_SCHEMA_VERSION = "1.5"
+PROJECT_SCHEMA_VERSION = "1.6"
 
 
 def utc_now() -> datetime:
@@ -195,6 +195,11 @@ class MontajePCB:
     nombre: str
     orden: int
     preparacion: OperationPreparation = field(default_factory=OperationPreparation)
+    placement_revision: str = "placement-1"
+    active_reference_id: str | None = None
+    active_map_id: str | None = None
+    preparation_status: str = PreparationState.SIN_INICIAR
+    last_prepared_at: datetime | None = None
 
     def __post_init__(self) -> None:
         if not self.id.strip():
@@ -203,6 +208,8 @@ class MontajePCB:
             raise ProjectValidationError("El montaje debe tener un nombre.")
         if self.orden < 0:
             raise ProjectValidationError("El orden del montaje no puede ser negativo.")
+        if not self.placement_revision.strip():
+            raise ProjectValidationError("La revisión de colocación del montaje no puede estar vacía.")
 
 
 @dataclass(frozen=True)
@@ -399,6 +406,11 @@ class ProyectoPCB:
     operaciones: tuple[OperacionPCB, ...] = ()
     creado_en: datetime = field(default_factory=utc_now)
     actualizado_en: datetime = field(default_factory=utc_now)
+    last_opened_at: datetime | None = None
+    archived_at: datetime | None = None
+    trashed_at: datetime | None = None
+    status: str = "active"
+    current_setup_id: str = "setup-main"
     version_esquema: str = PROJECT_SCHEMA_VERSION
     configuracion_alineacion: ConfiguracionAlineacion = field(
         default_factory=ConfiguracionAlineacion
@@ -413,6 +425,8 @@ class ProyectoPCB:
             raise ProjectValidationError(
                 "El proyecto debe tener un nombre."
             )
+        if self.current_setup_id and self.current_setup_id not in {setup.id for setup in self.montajes}:
+            object.__setattr__(self, "current_setup_id", self.montajes[0].id)
         self._validate_setups()
         self._validate_operations()
 
@@ -455,7 +469,19 @@ class ProyectoPCB:
                 )
 
     @property
+    def created_at(self) -> datetime:
+        return self.creado_en
+
+    @property
+    def updated_at(self) -> datetime:
+        return self.actualizado_en
+
+    @property
     def estado_general(self) -> str:
+        if self.trashed_at is not None or self.status == "trashed":
+            return "papelera"
+        if self.archived_at is not None or self.status == "archived":
+            return "archivado"
         if not self.operaciones:
             return "sin configurar"
         estados = {operacion.estado for operacion in self.operaciones}

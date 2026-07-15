@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import shutil
 from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
@@ -103,13 +104,30 @@ class JsonProjectRepository:
             payload.get("version_esquema") != PROJECT_SCHEMA_VERSION
             or not payload.get("montajes")
             or any("setup_id" not in item for item in payload.get("operaciones", []))
+            or "status" not in payload
+            or "current_setup_id" not in payload
+            or any("placement_revision" not in item for item in payload.get("montajes", []))
         )
 
     def project_dir(
         self,
         project_id: str,
     ) -> Path:
-        return self.projects_dir / project_id
+        if not project_id or project_id in {".", ".."} or "/" in project_id or "\\" in project_id:
+            raise RuntimeError("Identificador de proyecto inválido.")
+        target = (self.projects_dir / project_id).resolve()
+        root = self.projects_dir.resolve()
+        if target != root and root not in target.parents:
+            raise RuntimeError("La ruta del proyecto sale del directorio de proyectos.")
+        return target
+
+    def delete_project_storage(self, project_id: str) -> None:
+        target = self.project_dir(project_id).resolve()
+        root = self.projects_dir.resolve()
+        if target == root or root not in target.parents:
+            raise RuntimeError("La eliminación permanente quedó bloqueada por seguridad de ruta.")
+        if target.exists():
+            shutil.rmtree(target)
 
     def storage_available(self) -> bool:
         try:
@@ -210,7 +228,10 @@ class JsonProjectRepository:
         relative_path: str,
     ) -> Path:
         project_dir = self.project_dir(project_id)
-        target = project_dir / relative_path
+        relative = Path(relative_path)
+        if relative.is_absolute() or ".." in relative.parts:
+            raise RuntimeError("La ruta solicitada sale del directorio del proyecto.")
+        target = project_dir / relative
         resolved = target.resolve()
         project_root = project_dir.resolve()
         if resolved != project_root and project_root not in resolved.parents:
@@ -257,6 +278,13 @@ class JsonProjectRepository:
             "operaciones": [self._serialize_operation(operation) for operation in project.operaciones],
             "creado_en": project.creado_en.isoformat(),
             "actualizado_en": project.actualizado_en.isoformat(),
+            "created_at": project.created_at.isoformat(),
+            "updated_at": project.updated_at.isoformat(),
+            "last_opened_at": None if project.last_opened_at is None else project.last_opened_at.isoformat(),
+            "archived_at": None if project.archived_at is None else project.archived_at.isoformat(),
+            "trashed_at": None if project.trashed_at is None else project.trashed_at.isoformat(),
+            "status": project.status,
+            "current_setup_id": project.current_setup_id,
             "version_esquema": project.version_esquema,
         }
 
@@ -266,6 +294,11 @@ class JsonProjectRepository:
             "nombre": setup.nombre,
             "orden": setup.orden,
             "preparacion": self._serialize_preparation(setup.preparacion),
+            "placement_revision": setup.placement_revision,
+            "active_reference_id": setup.active_reference_id,
+            "active_map_id": setup.active_map_id,
+            "preparation_status": str(setup.preparation_status),
+            "last_prepared_at": None if setup.last_prepared_at is None else setup.last_prepared_at.isoformat(),
         }
 
     def _serialize_operation(
@@ -424,6 +457,11 @@ class JsonProjectRepository:
                     nombre=item["nombre"],
                     orden=item["orden"],
                     preparacion=self._deserialize_preparation(item.get("preparacion")),
+                    placement_revision=item.get("placement_revision", "placement-1"),
+                    active_reference_id=item.get("active_reference_id"),
+                    active_map_id=item.get("active_map_id"),
+                    preparation_status=item.get("preparation_status", "sin_iniciar"),
+                    last_prepared_at=self._parse_datetime(item.get("last_prepared_at")),
                 )
                 for item in setup_payloads
             )
@@ -455,8 +493,13 @@ class JsonProjectRepository:
                 self._deserialize_operation(item, default_setup_id=default_setup_id)
                 for item in operation_payloads
             ),
-            creado_en=datetime.fromisoformat(payload["creado_en"]),
-            actualizado_en=datetime.fromisoformat(payload["actualizado_en"]),
+            creado_en=datetime.fromisoformat(payload.get("creado_en") or payload.get("created_at")),
+            actualizado_en=datetime.fromisoformat(payload.get("actualizado_en") or payload.get("updated_at")),
+            last_opened_at=self._parse_datetime(payload.get("last_opened_at")),
+            archived_at=self._parse_datetime(payload.get("archived_at")),
+            trashed_at=self._parse_datetime(payload.get("trashed_at")),
+            status=payload.get("status", "active"),
+            current_setup_id=payload.get("current_setup_id", default_setup_id),
             version_esquema=PROJECT_SCHEMA_VERSION,
             configuracion_alineacion=ConfiguracionAlineacion(
                 doble_cara=alignment_data.get("doble_cara", False),
@@ -645,4 +688,11 @@ class JsonProjectRepository:
     ) -> Path:
         project_dir = self.project_dir(project_id)
         self._ensure_project_layout(project_dir)
-        return project_dir / "maps" / operation_id / "height_map.json"
+        relative = Path("maps") / operation_id / "height_map.json"
+        if relative.is_absolute() or ".." in relative.parts:
+            raise RuntimeError("La ruta del mapa sale del directorio del proyecto.")
+        target = (project_dir / relative).resolve()
+        root = project_dir.resolve()
+        if target != root and root not in target.parents:
+            raise RuntimeError("La ruta del mapa sale del directorio del proyecto.")
+        return target

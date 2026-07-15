@@ -27,6 +27,11 @@ const apiMock = vi.hoisted(() => ({
   getPhysicalHeightMap: vi.fn(),
   planPhysicalMapFromReference: vi.fn(),
   executeNextPhysicalMapPoint: vi.fn(),
+  executeAllPhysicalMapPoints: vi.fn(),
+  suggestPhysicalMap: vi.fn(),
+  resetSetupReference: vi.fn(),
+  resetSetupMap: vi.fn(),
+  resetSetupPreparation: vi.fn(),
   pausePhysicalMap: vi.fn(),
   resumePhysicalMap: vi.fn(),
   cancelPhysicalMap: vi.fn(),
@@ -247,6 +252,45 @@ describe("ProjectWorkspace", () => {
     apiMock.getReferenceSession.mockResolvedValue(referenceSession);
     apiMock.getPhysicalMap.mockRejectedValue(new Error("No existe mapa físico medido para este montaje y cara."));
     apiMock.getPhysicalHeightMap.mockResolvedValue(heightMap);
+    apiMock.planPhysicalMapFromReference.mockResolvedValue({
+      payload: {
+        map_id: "measured/manual-2x2",
+        status: "MESH_PLANNED",
+        source: "MEASURED",
+        point_count: 4,
+        grid_mode: "manual",
+        rows: 2,
+        columns: 2,
+        dx: 76,
+        dy: 56,
+        grid: { rows: 2, columns: 2, dx_mm: 76, dy_mm: 56 },
+        local_region: { min_x_mm: 2, min_y_mm: 2, max_x_mm: 78, max_y_mm: 58 },
+        machine_region: { min_x_mm: 62, min_y_mm: 90.75, max_x_mm: 138, max_y_mm: 146.75 },
+        points: [
+          { index: 0, row: 0, column: 0, x_local: 2, y_local: 2, x_machine: 62, y_machine: 90.75, status: "PENDING" },
+          { index: 1, row: 0, column: 1, x_local: 78, y_local: 2, x_machine: 138, y_machine: 90.75, status: "PENDING" },
+          { index: 2, row: 1, column: 1, x_local: 78, y_local: 58, x_machine: 138, y_machine: 146.75, status: "PENDING" },
+          { index: 3, row: 1, column: 0, x_local: 2, y_local: 58, x_machine: 62, y_machine: 146.75, status: "PENDING" },
+        ],
+      },
+    });
+    apiMock.suggestPhysicalMap.mockResolvedValue({
+      grid_mode: "suggested",
+      rows: 3,
+      columns: 4,
+      point_count: 12,
+      excluded_count: 0,
+      executable_count: 12,
+      dx_mm: 25.3333333333,
+      dy_mm: 28,
+      estimated_distance_mm: 240,
+      estimated_time_s: 48,
+      reason: "Se ajusta a la separación objetivo dentro de la región sondeable.",
+      local_region: { min_x_mm: 2, min_y_mm: 2, max_x_mm: 78, max_y_mm: 58 },
+    });
+    apiMock.resetSetupReference.mockResolvedValue({ ...project.montajes[0], preparation_status: "sin_iniciar" });
+    apiMock.resetSetupMap.mockResolvedValue({ ...project.montajes[0], active_map_id: null, preparation_status: "referencia_lista" });
+    apiMock.resetSetupPreparation.mockResolvedValue({ ...project.montajes[0], placement_revision: "placement-2", preparation_status: "sin_iniciar" });
     apiMock.generatedFileUrl.mockImplementation((_projectId: string, relativePath: string) => `/api/projects/proj_1/generated/${relativePath}`);
     apiMock.confirmWorkOrigin.mockResolvedValue(referenceSession);
     apiMock.confirmZReference.mockResolvedValue(referenceSession);
@@ -319,6 +363,63 @@ describe("ProjectWorkspace", () => {
     expect(screen.getByRole("button", { name: /Armar sondeo/i })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /INICIAR SONDEO AUTOMÁTICO/i })).toBeInTheDocument();
   });
+
+
+
+  it("permite configurar malla manual 2x2 y previsualiza exactamente cuatro puntos interiores", async () => {
+    renderWorkspace(physicalMachine);
+    fireEvent.click(screen.getByRole("button", { name: /Mapa de alturas/i }));
+    expect(await screen.findByText(/Mapa medido físicamente/i)).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText(/^Filas$/i), { target: { value: "2" } });
+    fireEvent.change(screen.getByLabelText(/^Columnas$/i), { target: { value: "2" } });
+    expect(screen.getAllByText(/Separación X/i).length).toBeGreaterThan(0);
+    expect(screen.getAllByText("4").length).toBeGreaterThan(0);
+
+    fireEvent.click(screen.getByRole("button", { name: /Generar vista previa de malla/i }));
+
+    await waitFor(() => expect(apiMock.planPhysicalMapFromReference).toHaveBeenCalledWith(
+      "proj_1",
+      "op_1",
+      expect.objectContaining({ grid_mode: "manual", rows: 2, columns: 2, edge_margin_left_mm: 2, edge_margin_right_mm: 2 })
+    ));
+    expect(await screen.findByText(/Vista previa generada/i)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("tab", { name: /Puntos/i }));
+    expect(await screen.findByText(/Punto #1/i)).toBeInTheDocument();
+    expect(screen.getByText(/Punto #4/i)).toBeInTheDocument();
+    expect(screen.queryByText(/Punto #5/i)).toBeNull();
+    expect(screen.getByText(/PCB X\/Y: 2.000 mm \/ 2.000 mm/i)).toBeInTheDocument();
+    expect(screen.getByText(/PCB X\/Y: 78.000 mm \/ 58.000 mm/i)).toBeInTheDocument();
+  });
+
+  it("muestra propuesta automática, permite aceptarla y reiniciar solo el mapa", async () => {
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+    renderWorkspace(physicalMachine);
+    fireEvent.click(screen.getByRole("button", { name: /Mapa de alturas/i }));
+    expect(await screen.findByText(/Mapa medido físicamente/i)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /Sugerida automáticamente/i }));
+    fireEvent.click(screen.getByRole("button", { name: /Ver propuesta/i }));
+    expect(await screen.findByText(/Filas sugeridas/i)).toBeInTheDocument();
+    expect(screen.getByText(/Se ajusta a la separación objetivo/i)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /Aceptar sugerencia/i }));
+    expect(screen.getByText(/Propuesta automática aceptada/i)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /Generar vista previa de malla/i }));
+    await waitFor(() => expect(apiMock.planPhysicalMapFromReference).toHaveBeenLastCalledWith(
+      "proj_1",
+      "op_1",
+      expect.objectContaining({ grid_mode: "suggested", rows: 3, columns: 4 })
+    ));
+
+    fireEvent.click(screen.getByText(/Más acciones/i));
+    fireEvent.click(screen.getByRole("button", { name: /Reiniciar solo mapa/i }));
+    await waitFor(() => expect(apiMock.resetSetupMap).toHaveBeenCalledWith("proj_1", "setup-main"));
+    expect(confirmSpy).toHaveBeenCalledWith(expect.stringContaining("conservará origen X/Y"));
+    confirmSpy.mockRestore();
+  });
+
 
   it("acepta 0 válido en X e Y del origen de trabajo", async () => {
     renderWorkspace();
