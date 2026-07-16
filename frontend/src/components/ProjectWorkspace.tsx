@@ -1068,6 +1068,16 @@ export function ProjectWorkspace({
     </div>
   );
 
+  const remeasurePhysicalReference = async () => {
+    if (!project || !selectedOperation) return;
+    await withPhysicalReferenceAction(async () => {
+      await api.confirmProbe();
+      await machine.refreshRuntime();
+      await api.capturePhysicalWorkOrigin(project.id, selectedOperation.id);
+      return await api.capturePhysicalZReferenceFromProbe(project.id, selectedOperation.id);
+    });
+  };
+
   const renderPhysicalReference = () => {
     const runtime = machine.runtime;
     const position = runtime?.klipper?.position as Record<string, unknown> | null | undefined;
@@ -1090,8 +1100,8 @@ export function ProjectWorkspace({
     const canConnect = machine.isPhysical && machine.runtimeState === "DISCONNECTED";
     const canInitialize = machine.isPhysical && ["DIAGNOSTIC", "READY_FOR_HOME", "HOMED", "ERROR", "CANCELLED"].includes(machine.runtimeState);
     const canEnableJog = machine.isPhysical && machine.runtimeState === "WAITING_FOR_XY_REFERENCE";
-    const canArm = machine.isPhysical && machine.runtimeState === "WAITING_FOR_XY_REFERENCE";
-    const canProbe = machine.isPhysical && ["WAITING_FOR_XY_REFERENCE", "REFERENCE_ARMED"].includes(machine.runtimeState);
+    const canArm = machine.isPhysical && ["WAITING_FOR_XY_REFERENCE", "REFERENCE_CAPTURED"].includes(machine.runtimeState);
+    const canProbe = machine.isPhysical && ["WAITING_FOR_XY_REFERENCE", "REFERENCE_ARMED", "REFERENCE_CAPTURED"].includes(machine.runtimeState);
     return (
       <div className="stack gap-md">
         <article className="panel">
@@ -1207,16 +1217,11 @@ export function ProjectWorkspace({
 
         <article className="panel">
           <div className="section-heading"><h3>4. Medir referencia</h3></div>
-          <p className="muted">Puede armar la referencia para usar el botón externo o lanzar el sondeo directamente desde pantalla. La aplicación captura X/Y actuales, baja Z por pasos discretos, detecta contacto, retrae y guarda origen X/Y más referencia Z `MEASURED`.</p>
+          <p className="muted">Puede armar la referencia para usar el botón externo o lanzar el sondeo directamente desde pantalla. Si la primera toma quedó mal, use "Volver a medir referencia" para repetir el mismo flujo seguro y sobrescribir la referencia Z activa con una nueva captura física.</p>
           <div className="action-grid action-grid--inline">
             <button className="button button--ghost" type="button" disabled={!canArm || referenceBusy || machine.refreshing} onClick={() => void machine.runMachineAction("probe-request")}>Armar referencia</button>
-            <button className="button" type="button" disabled={!canProbe || referenceBusy || machine.refreshing || !selectedOperation} onClick={() => void withPhysicalReferenceAction(async () => {
-              await api.confirmProbe();
-              await machine.refreshRuntime();
-              if (!selectedOperation) return;
-              await api.capturePhysicalWorkOrigin(project.id, selectedOperation.id);
-              return await api.capturePhysicalZReferenceFromProbe(project.id, selectedOperation.id);
-            })}>Sondear referencia ahora</button>
+            <button className="button" type="button" disabled={!canProbe || referenceBusy || machine.refreshing || !selectedOperation} onClick={() => void remeasurePhysicalReference()}>Sondear referencia ahora</button>
+            <button className="button button--ghost" type="button" disabled={!canProbe || referenceBusy || machine.refreshing || !selectedOperation} onClick={() => void remeasurePhysicalReference()}>Volver a medir referencia</button>
             <button className="button button--ghost" type="button" disabled={!machine.isPhysical || machine.refreshing} onClick={() => void machine.runMachineAction("cancel")}>Cancelar</button>
           </div>
           <div className="info-grid info-grid--double compact-grid">

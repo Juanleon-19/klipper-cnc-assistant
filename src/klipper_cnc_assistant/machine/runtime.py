@@ -496,7 +496,7 @@ class MachineRuntime:
     def request_probe(self) -> dict[str, Any]:
         self._require_physical_ready()
         with self._lock:
-            if self._state not in {MachineRuntimeState.WAITING_FOR_XY_REFERENCE, MachineRuntimeState.REFERENCE_ARMED}:
+            if self._state not in {MachineRuntimeState.WAITING_FOR_XY_REFERENCE, MachineRuntimeState.REFERENCE_ARMED, MachineRuntimeState.REFERENCE_CAPTURED}:
                 raise MachineRuntimeError("La referencia solo puede armarse después de homing, Z segura y movimiento al centro.")
             self._probe_requested = True
             self._manual_enabled = False
@@ -511,7 +511,7 @@ class MachineRuntime:
             raise MachineRuntimeError("Ya hay un movimiento u operación física activa.")
         try:
             with self._lock:
-                if self._state == MachineRuntimeState.WAITING_FOR_XY_REFERENCE:
+                if self._state in {MachineRuntimeState.WAITING_FOR_XY_REFERENCE, MachineRuntimeState.REFERENCE_CAPTURED}:
                     self._probe_requested = True
                     self._state = MachineRuntimeState.REFERENCE_ARMED
                     self._event("info", "REFERENCE_ARMED: sondeo iniciado desde la pantalla.")

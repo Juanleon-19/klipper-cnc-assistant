@@ -525,6 +525,23 @@ describe("ProjectWorkspace", () => {
     await waitFor(() => expect(apiMock.capturePhysicalZReferenceFromProbe).toHaveBeenCalledWith(project.id, project.operaciones[0].id));
   });
 
+  it("permite volver a medir la referencia cuando ya existe una captura previa", async () => {
+    vi.mocked(physicalMachine.refreshRuntime).mockClear();
+    const capturedMachine = { ...physicalMachine, runtimeState: "REFERENCE_CAPTURED", runtime: { ...physicalMachine.runtime, state: "REFERENCE_CAPTURED" } };
+    renderWorkspace(capturedMachine);
+
+    fireEvent.click(screen.getByRole("button", { name: /^Referencia$/i }));
+    const remeasureButton = await screen.findByRole("button", { name: /Volver a medir referencia/i });
+    expect(remeasureButton).toBeEnabled();
+
+    fireEvent.click(remeasureButton);
+
+    await waitFor(() => expect(apiMock.confirmProbe).toHaveBeenCalled());
+    await waitFor(() => expect(capturedMachine.refreshRuntime).toHaveBeenCalled());
+    await waitFor(() => expect(apiMock.capturePhysicalWorkOrigin).toHaveBeenCalledWith(project.id, project.operaciones[0].id));
+    await waitFor(() => expect(apiMock.capturePhysicalZReferenceFromProbe).toHaveBeenCalledWith(project.id, project.operaciones[0].id));
+  });
+
   it("no persiste origen ni referencia Z si probe-confirm falla", async () => {
     apiMock.confirmProbe.mockRejectedValueOnce(new Error("Timeout esperando confirmación de paso de sonda."));
     vi.mocked(physicalMachine.refreshRuntime).mockClear();
