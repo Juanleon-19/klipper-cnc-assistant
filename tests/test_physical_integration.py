@@ -464,6 +464,36 @@ class PhysicalIntegrationTest(unittest.TestCase):
             self.assertIn("POINT_COMPLETE", {event.get("next_state") for event in log["events"]})
             self.assertTrue(worker.wait_until_idle(timeout_s=1.0))
 
+    def test_reference_session_accepts_map_ready_active_map_without_reasking_validation(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            repository, _project_service, project, operation = self._physical_project(temp)
+            service = PhysicalMapService(repository)
+            plan = service.capture_reference_and_plan(
+                project_id=project.id,
+                operation_id=operation.id,
+                machine_origin_x=100.0,
+                machine_origin_y=200.0,
+                reference_z=1.0,
+                machine_position={"x_mm": 100.0, "y_mm": 200.0, "z_mm": 1.0},
+                homed_axes="xyz",
+                machine_label="test",
+                session_id="session",
+                config=PhysicalMeshConfig(grid_mode="manual", rows=2, columns=2, edge_margin_left_mm=0.0, edge_margin_right_mm=0.0, edge_margin_bottom_mm=0.0, edge_margin_top_mm=0.0),
+            )
+            for point in plan["points"]:
+                plan = service.record_point(project_id=project.id, map_id=plan["map_id"], point_index=int(point["index"]), z_measured=1.0)
+
+            payload = service.get_by_id(project.id, plan["map_id"])
+            payload["status"] = "MAP_READY"
+            repository.save_height_map_payload(project.id, plan["map_id"], payload)
+
+            machine_session = MachineSessionService()
+            machine_session.machine_mode = "fisico"
+            session = ReferenceSessionService(repository, HeightMapService(repository), machine_session, service).get_session(project.id, operation.id)
+            self.assertTrue(session["lista_para_compensacion"])
+            self.assertEqual(session["bloqueos_compensacion"], [])
+            self.assertIn("Cobertura validada", "\n".join(str(step["detalle"]) for step in session["pasos"]))
+
     def _physical_project(self, temp: str):
         repository = JsonProjectRepository(Path(temp))
         project_service = ProjectService(repository)

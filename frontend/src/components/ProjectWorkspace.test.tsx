@@ -605,6 +605,43 @@ describe("ProjectWorkspace", () => {
     expect(await screen.findByText(/^MESH_COMPLETE$/i)).toBeInTheDocument();
   });
 
+  it("hidrata el mapa físico completo al abrir el workspace y habilita 2D/3D sin re-sondear", async () => {
+    apiMock.getHeightMap.mockRejectedValue(new Error("No existe mapa de alturas para esta operación."));
+    apiMock.getReferenceSession.mockResolvedValue(referenceSession);
+    apiMock.getPhysicalMap.mockResolvedValue({
+      payload: {
+        map_id: "measured/manual-2x2",
+        status: "MESH_COMPLETE",
+        source: "MEASURED",
+        map_ready_state: "MAP_READY",
+        point_count: 4,
+        grid_mode: "manual",
+        rows: 2,
+        columns: 2,
+        dx: 76,
+        dy: 56,
+        grid: { rows: 2, columns: 2, dx_mm: 76, dy_mm: 56 },
+        local_region: { min_x_mm: 2, min_y_mm: 2, max_x_mm: 78, max_y_mm: 58 },
+        points: [
+          { index: 0, role: "REFERENCE", row: 0, column: 0, x_local: 2, y_local: 2, x_machine: 62, y_machine: 90.75, status: "MEASURED", z_measured: 0, delta_z: 0 },
+          { index: 1, row: 0, column: 1, x_local: 78, y_local: 2, x_machine: 138, y_machine: 90.75, status: "MEASURED", z_measured: 0.01, delta_z: 0.01 },
+          { index: 2, row: 1, column: 1, x_local: 78, y_local: 58, x_machine: 138, y_machine: 146.75, status: "MEASURED", z_measured: 0.02, delta_z: 0.02 },
+          { index: 3, row: 1, column: 0, x_local: 2, y_local: 58, x_machine: 62, y_machine: 146.75, status: "MEASURED", z_measured: -0.01, delta_z: -0.01 },
+        ],
+        validation: { status: "VALID", sufficient: true, validated_at: new Date().toISOString() },
+      },
+    });
+
+    renderWorkspace(physicalMachine);
+    fireEvent.click(screen.getByRole("button", { name: /Mapa de alturas/i }));
+
+    await waitFor(() => expect(apiMock.getPhysicalHeightMap).toHaveBeenCalledWith("proj_1", "op_1"));
+    expect(await screen.findByText(/Heatmap mock · 4 puntos · medido/i)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("tab", { name: /Superficie 3D/i }));
+    expect(await screen.findByText(/Surface 3D mock/i)).toBeInTheDocument();
+  });
+
   it("muestra propuesta automática, permite aceptarla y reiniciar solo el mapa", async () => {
     const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
     renderWorkspace(physicalMachine);

@@ -281,14 +281,8 @@ export function ProjectWorkspace({
     const run = async () => {
       setWorkspaceError("");
       try {
-        const [referencePayload, maybeMap, maybePhysicalMap] = await Promise.all([
+        const [referencePayload, maybePhysicalMap] = await Promise.all([
           api.getReferenceSession(project.id, selectedOperation.id),
-          api.getHeightMap(project.id, selectedOperation.id).catch((error) => {
-            if (error instanceof Error && error.message.toLowerCase().includes("no existe")) {
-              return null;
-            }
-            throw error;
-          }),
           api.getPhysicalMap(project.id, selectedOperation.id).then((result) => result.payload).catch((error) => {
             if (error instanceof Error && error.message.toLowerCase().includes("no existe")) {
               return null;
@@ -296,16 +290,32 @@ export function ProjectWorkspace({
             return null;
           }),
         ]);
+        let maybeMap: HeightMap | null = null;
+        if (machine.isPhysical) {
+          if (maybePhysicalMap?.status === "MESH_COMPLETE") {
+            maybeMap = await api.getPhysicalHeightMap(project.id, selectedOperation.id).catch(() => null);
+          }
+        } else {
+          maybeMap = await api.getHeightMap(project.id, selectedOperation.id).catch((error) => {
+            if (error instanceof Error && error.message.toLowerCase().includes("no existe")) {
+              return null;
+            }
+            throw error;
+          });
+        }
         setReferenceSession(referencePayload);
         setPhysicalMap(maybePhysicalMap);
         setHeightMap(maybeMap);
+        if (machine.isPhysical && maybePhysicalMap?.status === "MESH_COMPLETE") {
+          setMapSource("MEASURED");
+        }
       } catch (error) {
         setWorkspaceError(error instanceof Error ? error.message : "No fue posible cargar el espacio de trabajo técnico.");
       }
     };
 
     void run();
-  }, [project, selectedOperation]);
+  }, [machine.isPhysical, project, selectedOperation]);
 
   useEffect(() => {
     if (!project || !selectedOperation || !physicalMap?.map_id) {

@@ -467,7 +467,12 @@ class ReferenceSessionService:
             return None
 
     def _is_complete_measured_map(self, physical_map: dict[str, Any]) -> bool:
-        return physical_map.get("source") == "MEASURED" and physical_map.get("status") == "MESH_COMPLETE"
+        if physical_map.get("source") != "MEASURED":
+            return False
+        if physical_map.get("status") == "MESH_COMPLETE":
+            return True
+        validation = physical_map.get("validation") or {}
+        return physical_map.get("map_ready_state") == "MAP_READY" and validation.get("status") in {"VALID", "INVALID"}
 
     def _homed_axes_valid(self, homed_axes: object) -> bool:
         return set("xyz").issubset(set(str(homed_axes or "").lower()))
