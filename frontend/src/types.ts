@@ -540,3 +540,116 @@ export type ExecutionActionResult = {
   detail: string | null;
   preflight?: ExecutionPreflight | null;
 };
+
+
+export type JobOperationPlan = {
+  operation_id: string;
+  order: number;
+  order_label: string;
+  name: string;
+  type: string;
+  tool_id: string | null;
+  tool_name: string;
+  tool_key: string;
+  tool_changed: boolean;
+  map_status: string;
+  coverage_status: string;
+  coverage_detail: string | null;
+  reference_status: string;
+  generated_file: string | null;
+  generated_file_name: string | null;
+  generated_metadata_path?: string | null;
+  compensation_status: string;
+  preflight_status: string;
+  execution_status: string;
+  blocking: boolean;
+  blocking_reasons: string[];
+};
+
+export type JobPlan = {
+  schema_version: string;
+  plan_id: string;
+  project_id: string;
+  setup_id: string;
+  face: string;
+  placement_revision: string;
+  active_map_id: string | null;
+  active_map?: PhysicalMapPayload | null;
+  operations: JobOperationPlan[];
+  summary: {
+    operations_total: number;
+    operations_ready: number;
+    generated_files: number;
+    tool_changes: number;
+    distinct_tools: number;
+    blocked_operations: number;
+  };
+  manifest_path: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type JobRunOperation = {
+  operation_id: string;
+  order: number;
+  order_label: string;
+  name: string;
+  type: string;
+  tool_id: string | null;
+  tool_name: string;
+  tool_key: string;
+  tool_changed: boolean;
+  reference_status: string;
+  generated_file: string | null;
+  generated_file_name: string | null;
+  execution_status: string;
+  started_at: string | null;
+  completed_at: string | null;
+  error: string | null;
+  progress: number | null;
+  installation_revision?: string | null;
+  remote_file?: string | null;
+  machine_status?: Record<string, unknown> | null;
+};
+
+export type JobRun = {
+  schema_version: string;
+  run_id: string;
+  plan_id: string;
+  project_id: string;
+  setup_id: string;
+  face: string;
+  placement_revision: string;
+  active_map_id: string | null;
+  state: string;
+  ready: boolean;
+  checks: ExecutionCheck[];
+  started_at: string | null;
+  completed_at: string | null;
+  updated_at: string;
+  current_operation_index: number;
+  current_operation_id: string | null;
+  current_tool_key: string | null;
+  next_action: string;
+  available_actions: string[];
+  operations: JobRunOperation[];
+  summary: {
+    operations_total: number;
+    operations_completed: number;
+    tool_changes_required: number;
+    tool_changes_completed: number;
+  };
+  timeline: Array<Record<string, unknown>>;
+  events: Array<{ timestamp: string; level: string; message: string }>;
+  manifest_path: string | null;
+};
+
+export type JobHistoryEntry = {
+  run_id: string;
+  state: string;
+  started_at: string | null;
+  completed_at: string | null;
+  tool_changes_completed: number;
+  operations_completed: number;
+  manifest_path: string | null;
+};

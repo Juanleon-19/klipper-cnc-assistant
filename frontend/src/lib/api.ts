@@ -14,6 +14,9 @@ import type {
   ContinueProjectResult,
   ExecutionActionResult,
   ExecutionPreflight,
+  JobHistoryEntry,
+  JobPlan,
+  JobRun,
   ReferenceConfirmation,
   ReferenceSession,
   SystemInfoResponse,
@@ -359,6 +362,22 @@ export const api = {
     }),
   generatedFileUrl: (projectId: string, relativePath: string) =>
     `/api/projects/${projectId}/generated/${relativePath}`,
+  getJobPlan: (projectId: string, setupId: string, face: string) =>
+    request<JobPlan>(`/api/projects/${projectId}/job-plan?setup_id=${encodeURIComponent(setupId)}&face=${encodeURIComponent(face)}`),
+  createJobPlan: (projectId: string, setupId: string, face: string) =>
+    request<JobPlan>(`/api/projects/${projectId}/job-plan`, { method: "POST", body: JSON.stringify({ setup_id: setupId, face }) }),
+  generateProjectCompensation: (projectId: string, setupId: string, face: string) =>
+    request<JobPlan>(`/api/projects/${projectId}/job-plan/generate`, { method: "POST", body: JSON.stringify({ setup_id: setupId, face }) }),
+  getJobRun: (projectId: string, setupId: string, face: string) =>
+    request<JobRun>(`/api/projects/${projectId}/job-run?setup_id=${encodeURIComponent(setupId)}&face=${encodeURIComponent(face)}`),
+  prepareJobRun: (projectId: string, setupId: string, face: string) =>
+    request<JobRun>(`/api/projects/${projectId}/job-run/prepare`, { method: "POST", body: JSON.stringify({ setup_id: setupId, face }) }),
+  startJobRun: (projectId: string, setupId: string, face: string) =>
+    request<JobRun>(`/api/projects/${projectId}/job-run/start`, { method: "POST", body: JSON.stringify({ setup_id: setupId, face }) }),
+  runJobAction: (projectId: string, setupId: string, face: string, action: string) =>
+    request<JobRun>(`/api/projects/${projectId}/job-run/action`, { method: "POST", body: JSON.stringify({ setup_id: setupId, face, action }) }),
+  getJobHistory: (projectId: string, setupId: string, face: string) =>
+    request<JobHistoryEntry[]>(`/api/projects/${projectId}/job-history?setup_id=${encodeURIComponent(setupId)}&face=${encodeURIComponent(face)}`),
   executionPreflight: (projectId: string, operationId: string) =>
     request<ExecutionPreflight>(`/api/projects/${projectId}/operations/${operationId}/execution/preflight`, { method: "POST" }),
   executionAction: (projectId: string, operationId: string, action: string) =>

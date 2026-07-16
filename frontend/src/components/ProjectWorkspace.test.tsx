@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { MachineContext, type MachineContextValue } from "../context/MachineContext";
 import { ApiError } from "../lib/api";
-import type { HeightMap, Project, ReferenceSession } from "../types";
+import type { HeightMap, JobPlan, JobRun, Project, ReferenceSession } from "../types";
 import { ProjectWorkspace } from "./ProjectWorkspace";
 
 const apiMock = vi.hoisted(() => ({
@@ -39,6 +39,14 @@ const apiMock = vi.hoisted(() => ({
   resumePhysicalMap: vi.fn(),
   cancelPhysicalMap: vi.fn(),
   generateCompensatedGCode: vi.fn(),
+  getJobPlan: vi.fn(),
+  createJobPlan: vi.fn(),
+  generateProjectCompensation: vi.fn(),
+  getJobRun: vi.fn(),
+  prepareJobRun: vi.fn(),
+  startJobRun: vi.fn(),
+  runJobAction: vi.fn(),
+  getJobHistory: vi.fn(),
   executionPreflight: vi.fn(),
   executionAction: vi.fn(),
   generatedFileUrl: vi.fn(),
@@ -53,6 +61,34 @@ vi.mock("../lib/api", async () => {
     ...actual,
     api: apiMock,
   };
+  it("muestra el plan multioperación en Compensación y permite generar todas las compensaciones", async () => {
+    renderWorkspace(physicalMachine);
+
+    fireEvent.click(screen.getByRole("button", { name: /Compensación/i }));
+
+    expect(await screen.findByText(/Plan multioperación/i)).toBeInTheDocument();
+    expect(screen.getAllByText(/001/).length).toBeGreaterThan(0);
+    expect(screen.getByText(/Taladrado 0.8/i)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /Generar compensación del proyecto/i }));
+
+    await waitFor(() => expect(apiMock.generateProjectCompensation).toHaveBeenCalledWith(project.id, project.montajes[0].id, "superior"));
+  });
+
+  it("muestra la línea de tiempo multioperación en Ejecución y permite preparar el trabajo", async () => {
+    renderWorkspace(physicalMachine);
+
+    fireEvent.click(screen.getByRole("button", { name: /^Ejecución$/i }));
+
+    expect(await screen.findByText(/Línea de tiempo multioperación/i)).toBeInTheDocument();
+    expect(screen.getAllByText(/Fresado superior/i).length).toBeGreaterThan(0);
+    expect(screen.getByText(/Broca 0.8 mm/i)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /Preparar trabajo/i }));
+
+    await waitFor(() => expect(apiMock.prepareJobRun).toHaveBeenCalledWith(project.id, project.montajes[0].id, "superior"));
+  });
+
 });
 
 vi.mock("../features/viewer/ToolpathViewer", () => ({
@@ -66,6 +102,99 @@ vi.mock("../features/heightmap/HeightMapHeatmap", () => ({
 vi.mock("../features/heightmap/HeightMapSurface3D", () => ({
   HeightMapSurface3D: () => <div>Surface 3D mock</div>,
 }));
+
+
+const jobPlan: JobPlan = {
+  schema_version: "job-plan-v1",
+  plan_id: "job-plan/setup-main/superior",
+  project_id: "proj_1",
+  setup_id: "setup-main",
+  face: "superior",
+  placement_revision: "placement-1",
+  active_map_id: "map-1",
+  operations: [
+    {
+      operation_id: "op_1",
+      order: 0,
+      order_label: "001",
+      name: "Fresado superior",
+      type: "aislamiento",
+      tool_id: "vbit-30",
+      tool_name: "V-bit 30°",
+      tool_key: "vbit-30",
+      tool_changed: false,
+      map_status: "LISTO",
+      coverage_status: "VALIDA",
+      coverage_detail: null,
+      reference_status: "LISTA",
+      generated_file: "generated/compensated/op_1_compensated.gcode",
+      generated_file_name: "001_fresado_superior_compensado.nc",
+      generated_metadata_path: "generated/compensated/op_1_compensated.json",
+      compensation_status: "COMPENSADO",
+      preflight_status: "PENDIENTE",
+      execution_status: "PENDING",
+      blocking: false,
+      blocking_reasons: [],
+    },
+    {
+      operation_id: "op_2",
+      order: 1,
+      order_label: "002",
+      name: "Taladrado 0.8",
+      type: "taladrado",
+      tool_id: "drill-08",
+      tool_name: "Broca 0.8 mm",
+      tool_key: "drill-08",
+      tool_changed: true,
+      map_status: "LISTO",
+      coverage_status: "VALIDA",
+      coverage_detail: null,
+      reference_status: "REQUIERE_REFERENCIA",
+      generated_file: "generated/compensated/op_2_compensated.gcode",
+      generated_file_name: "002_taladrado_08_compensado.nc",
+      generated_metadata_path: "generated/compensated/op_2_compensated.json",
+      compensation_status: "COMPENSADO",
+      preflight_status: "PENDIENTE",
+      execution_status: "PENDING",
+      blocking: false,
+      blocking_reasons: [],
+    },
+  ],
+  summary: { operations_total: 2, operations_ready: 2, generated_files: 2, tool_changes: 1, distinct_tools: 2, blocked_operations: 0 },
+  manifest_path: "reports/jobs/setup-main/superior/job_manifest.json",
+  created_at: new Date().toISOString(),
+  updated_at: new Date().toISOString(),
+};
+
+const jobRun: JobRun = {
+  schema_version: "job-run-v1",
+  run_id: "job-run/setup-main/superior/1",
+  plan_id: jobPlan.plan_id,
+  project_id: "proj_1",
+  setup_id: "setup-main",
+  face: "superior",
+  placement_revision: "placement-1",
+  active_map_id: "map-1",
+  state: "JOB_READY",
+  ready: true,
+  checks: [{ name: "mapa_activo", ok: true, detail: "Mapa físico activo del montaje." }],
+  started_at: null,
+  completed_at: null,
+  updated_at: new Date().toISOString(),
+  current_operation_index: 0,
+  current_operation_id: "op_1",
+  current_tool_key: "vbit-30",
+  next_action: "Iniciar trabajo",
+  available_actions: ["pause", "cancel"],
+  operations: [
+    { operation_id: "op_1", order: 0, order_label: "001", name: "Fresado superior", type: "aislamiento", tool_id: "vbit-30", tool_name: "V-bit 30°", tool_key: "vbit-30", tool_changed: false, reference_status: "LISTA", generated_file: "generated/compensated/op_1_compensated.gcode", generated_file_name: "001_fresado_superior_compensado.nc", execution_status: "PENDING", started_at: null, completed_at: null, error: null, progress: 0 },
+    { operation_id: "op_2", order: 1, order_label: "002", name: "Taladrado 0.8", type: "taladrado", tool_id: "drill-08", tool_name: "Broca 0.8 mm", tool_key: "drill-08", tool_changed: true, reference_status: "REQUIERE_REFERENCIA", generated_file: "generated/compensated/op_2_compensated.gcode", generated_file_name: "002_taladrado_08_compensado.nc", execution_status: "PENDING", started_at: null, completed_at: null, error: null, progress: 0 },
+  ],
+  summary: { operations_total: 2, operations_completed: 0, tool_changes_required: 1, tool_changes_completed: 0 },
+  timeline: [],
+  events: [{ timestamp: new Date().toISOString(), level: "info", message: "Trabajo listo para iniciar." }],
+  manifest_path: jobPlan.manifest_path,
+};
 
 const referenceSession: ReferenceSession = {
   estado: "mapa_validado",
@@ -335,6 +464,14 @@ describe("ProjectWorkspace", () => {
     apiMock.resetSetupMap.mockResolvedValue({ ...project.montajes[0], active_map_id: null, preparation_status: "referencia_lista" });
     apiMock.resetSetupPreparation.mockResolvedValue({ ...project.montajes[0], placement_revision: "placement-2", preparation_status: "sin_iniciar" });
     apiMock.generatedFileUrl.mockImplementation((_projectId: string, relativePath: string) => `/api/projects/proj_1/generated/${relativePath}`);
+    apiMock.getJobPlan.mockResolvedValue(jobPlan);
+    apiMock.createJobPlan.mockResolvedValue(jobPlan);
+    apiMock.generateProjectCompensation.mockResolvedValue(jobPlan);
+    apiMock.getJobRun.mockResolvedValue(jobRun);
+    apiMock.prepareJobRun.mockResolvedValue(jobRun);
+    apiMock.startJobRun.mockResolvedValue({ ...jobRun, state: "JOB_STARTING" });
+    apiMock.runJobAction.mockResolvedValue({ ...jobRun, state: "WAITING_TOOL_CHANGE", next_action: "Confirmar cambio de herramienta" });
+    apiMock.getJobHistory.mockResolvedValue([{ run_id: jobRun.run_id, state: jobRun.state, started_at: null, completed_at: null, tool_changes_completed: 0, operations_completed: 0, manifest_path: jobRun.manifest_path }]);
     apiMock.confirmWorkOrigin.mockResolvedValue(referenceSession);
     apiMock.confirmZReference.mockResolvedValue(referenceSession);
     apiMock.capturePhysicalWorkOrigin.mockResolvedValue(referenceSession);
@@ -869,4 +1006,32 @@ describe("ProjectWorkspace", () => {
     expect(await screen.findByText("Esta operación todavía no tiene G-code.")).toBeInTheDocument();
     expect(screen.getAllByText(/Taladrado 1,0 mm/).length).toBeGreaterThan(0);
   });
+  it("muestra el plan multioperación en Compensación y permite generar todas las compensaciones", async () => {
+    renderWorkspace(physicalMachine);
+
+    fireEvent.click(screen.getByRole("button", { name: /Compensación/i }));
+
+    expect(await screen.findByText(/Plan multioperación/i)).toBeInTheDocument();
+    expect(screen.getAllByText(/001/).length).toBeGreaterThan(0);
+    expect(screen.getByText(/Taladrado 0.8/i)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /Generar compensación del proyecto/i }));
+
+    await waitFor(() => expect(apiMock.generateProjectCompensation).toHaveBeenCalledWith(project.id, project.montajes[0].id, "superior"));
+  });
+
+  it("muestra la línea de tiempo multioperación en Ejecución y permite preparar el trabajo", async () => {
+    renderWorkspace(physicalMachine);
+
+    fireEvent.click(screen.getByRole("button", { name: /^Ejecución$/i }));
+
+    expect(await screen.findByText(/Línea de tiempo multioperación/i)).toBeInTheDocument();
+    expect(screen.getAllByText(/Fresado superior/i).length).toBeGreaterThan(0);
+    expect(screen.getByText(/Broca 0.8 mm/i)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /Preparar trabajo/i }));
+
+    await waitFor(() => expect(apiMock.prepareJobRun).toHaveBeenCalledWith(project.id, project.montajes[0].id, "superior"));
+  });
+
 });

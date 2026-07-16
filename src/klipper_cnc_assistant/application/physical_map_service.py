@@ -395,6 +395,9 @@ class PhysicalMapService:
                 payload = self._migrate_legacy_payload(payload, project.get_operation(operation_id))
         return self._ensure_completed_map_finalized(project_id, payload)
 
+    def height_map_from_payload(self, payload: dict[str, Any]) -> HeightMap:
+        return self._height_map_from_payload(payload)
+
     def next_pending_point(self, project_id: str, map_id: str) -> dict[str, Any]:
         payload = self.get_by_id(project_id, map_id)
         for point in payload["points"]:
@@ -547,6 +550,57 @@ class PhysicalMapService:
         payload["updated_at"] = _iso_now()
         self._save(project_id, map_id, payload)
         return payload
+
+    def invalidate_tool_reference(self, *, project_id: str, map_id: str, operation_id: str) -> dict[str, Any]:
+        payload = self.get_by_id(project_id, map_id)
+        project = self._load_project(project_id)
+        operation = project.get_operation(operation_id)
+        refs = dict(payload.get("tool_references") or {})
+        key = _tool_key(operation)
+        reference = dict(refs.get(key) or {})
+        reference["valid"] = False
+        reference["invalidated_at"] = _iso_now()
+        refs[key] = reference
+        payload["tool_references"] = refs
+        payload["updated_at"] = _iso_now()
+        self._save(project_id, map_id, payload)
+        return payload
+
+    def record_tool_reference(
+        self,
+        *,
+        project_id: str,
+        map_id: str,
+        operation_id: str,
+        position: dict[str, float],
+        machine_label: str | None,
+        homed_axes: str | None,
+        session_id: str | None,
+        installation_id: str | None = None,
+    ) -> dict[str, Any]:
+        payload = self.get_by_id(project_id, map_id)
+        project = self._load_project(project_id)
+        operation = project.get_operation(operation_id)
+        updated = self._with_tool_reference(
+            payload,
+            operation=operation,
+            reference_z=float(position["z_mm"]),
+            machine_position=position,
+            homed_axes=homed_axes,
+            machine_label=machine_label,
+            session_id=session_id,
+        )
+        refs = dict(updated.get("tool_references") or {})
+        key = _tool_key(operation)
+        reference = dict(refs.get(key) or {})
+        if installation_id:
+            reference["installation_id"] = installation_id
+        reference["valid"] = True
+        refs[key] = reference
+        updated["tool_references"] = refs
+        updated["updated_at"] = _iso_now()
+        self._save(project_id, map_id, updated)
+        return updated
 
     def execution_log(self, *, project_id: str, map_id: str) -> dict[str, Any]:
         payload = self.get_by_id(project_id, map_id)

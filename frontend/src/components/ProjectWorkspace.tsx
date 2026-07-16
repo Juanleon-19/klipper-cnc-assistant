@@ -29,6 +29,9 @@ import type {
   ExecutionActionResult,
   ExecutionCheck,
   ExecutionPreflight,
+  JobHistoryEntry,
+  JobPlan,
+  JobRun,
 } from "../types";
 import { ProjectForm } from "./ProjectForm";
 import { StatusBadge } from "./StatusBadge";
@@ -224,6 +227,9 @@ export function ProjectWorkspace({
   const [meshValidationMessage, setMeshValidationMessage] = useState("");
   const [executionState, setExecutionState] = useState<"PREFLIGHT" | "READY_TO_EXECUTE" | "UPLOADING" | "RUNNING" | "PAUSED" | "CANCELLED" | "COMPLETED">("PREFLIGHT");
   const [executionEvent, setExecutionEvent] = useState("Sin acciones de ejecución todavía.");
+  const [jobPlan, setJobPlan] = useState<JobPlan | null>(null);
+  const [jobRun, setJobRun] = useState<JobRun | null>(null);
+  const [jobHistory, setJobHistory] = useState<JobHistoryEntry[]>([]);
   const [machineSettingsInput, setMachineSettingsInput] = useState({
     reference_prep_z_mm: "115",
     reference_prep_z_feed_mm_min: "180",
@@ -285,6 +291,8 @@ export function ProjectWorkspace({
     },
     [project, selectedOperation, selectedSetup]
   );
+
+  const activeJobFace = useMemo(() => selectedOperation?.cara ?? processOperations[0]?.cara ?? null, [processOperations, selectedOperation]);
 
   useEffect(() => {
     if (!project) {
@@ -414,6 +422,77 @@ export function ProjectWorkspace({
       cancelled = true;
     };
   }, [heightMap, machine.isPhysical, physicalMap, project, selectedOperation]);
+
+
+  useEffect(() => {
+    if (!project || !selectedSetup || !activeJobFace) {
+      setJobPlan(null);
+      setJobRun(null);
+      setJobHistory([]);
+      return;
+    }
+    let cancelled = false;
+    const loadJobState = async () => {
+      try {
+        const [plan, run, history] = await Promise.all([
+          api.getJobPlan(project.id, selectedSetup.id, activeJobFace),
+          api.getJobRun(project.id, selectedSetup.id, activeJobFace),
+          api.getJobHistory(project.id, selectedSetup.id, activeJobFace),
+        ]);
+        if (cancelled) {
+          return;
+        }
+        setJobPlan(plan);
+        setJobRun(run);
+        setJobHistory(history);
+      } catch {
+        if (!cancelled) {
+          setJobPlan(null);
+          setJobRun(null);
+          setJobHistory([]);
+        }
+      }
+    };
+    void loadJobState();
+    return () => {
+      cancelled = true;
+    };
+  }, [activeJobFace, project, selectedSetup]);
+
+  useEffect(() => {
+    if (!project || !selectedSetup || !activeJobFace || !jobRun) {
+      return;
+    }
+    if (!["JOB_STARTING", "OPERATION_UPLOADING", "OPERATION_RUNNING", "MOVING_TO_TOOL_CHANGE_SAFE_Z", "MOVING_TO_TOOL_CHANGE_XY", "RETURNING_TO_REFERENCE_SAFE_Z", "RETURNING_TO_REFERENCE_XY", "PROBING_TOOL_REFERENCE", "COMPENSATING_NEXT_OPERATIONS", "NEXT_OPERATION_READY"].includes(jobRun.state)) {
+      return;
+    }
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const [run, plan, history] = await Promise.all([
+          api.getJobRun(project.id, selectedSetup.id, activeJobFace),
+          api.getJobPlan(project.id, selectedSetup.id, activeJobFace),
+          api.getJobHistory(project.id, selectedSetup.id, activeJobFace),
+        ]);
+        if (cancelled) {
+          return;
+        }
+        setJobRun(run);
+        setJobPlan(plan);
+        setJobHistory(history);
+      } catch {
+        // conserve last visible state
+      }
+    };
+    const timer = window.setInterval(() => {
+      void poll();
+    }, 1000);
+    void poll();
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [activeJobFace, jobRun, project, selectedSetup]);
 
   useEffect(() => {
     if (!referenceSession) {
@@ -1715,8 +1794,217 @@ export function ProjectWorkspace({
     }
   };
 
+
+  const refreshJobState = async () => {
+    if (!project || !selectedSetup || !activeJobFace) {
+      return;
+    }
+    const [plan, run, history] = await Promise.all([
+      api.getJobPlan(project.id, selectedSetup.id, activeJobFace),
+      api.getJobRun(project.id, selectedSetup.id, activeJobFace),
+      api.getJobHistory(project.id, selectedSetup.id, activeJobFace),
+    ]);
+    setJobPlan(plan);
+    setJobRun(run);
+    setJobHistory(history);
+  };
+
+  const generateProjectCompensation = async () => {
+    if (!project || !selectedSetup || !activeJobFace) {
+      return;
+    }
+    setReferenceBusy(true);
+    setWorkspaceError("");
+    try {
+      const plan = await api.generateProjectCompensation(project.id, selectedSetup.id, activeJobFace);
+      setJobPlan(plan);
+      const [run, history] = await Promise.all([
+        api.getJobRun(project.id, selectedSetup.id, activeJobFace),
+        api.getJobHistory(project.id, selectedSetup.id, activeJobFace),
+      ]);
+      setJobRun(run);
+      setJobHistory(history);
+      setExecutionEvent(`Compensación del proyecto generada para ${plan.summary.generated_files} proceso(s).`);
+    } catch (error) {
+      setWorkspaceError(error instanceof Error ? error.message : "No fue posible generar la compensación del proyecto.");
+    } finally {
+      setReferenceBusy(false);
+    }
+  };
+
+  const prepareJobRun = async () => {
+    if (!project || !selectedSetup || !activeJobFace) {
+      return;
+    }
+    setReferenceBusy(true);
+    setWorkspaceError("");
+    try {
+      const run = await api.prepareJobRun(project.id, selectedSetup.id, activeJobFace);
+      setJobRun(run);
+      await refreshJobState();
+    } catch (error) {
+      setWorkspaceError(error instanceof Error ? error.message : "No fue posible preparar el trabajo.");
+    } finally {
+      setReferenceBusy(false);
+    }
+  };
+
+  const startJobRun = async () => {
+    if (!project || !selectedSetup || !activeJobFace) {
+      return;
+    }
+    setReferenceBusy(true);
+    setWorkspaceError("");
+    try {
+      const run = await api.startJobRun(project.id, selectedSetup.id, activeJobFace);
+      setJobRun(run);
+      await refreshJobState();
+    } catch (error) {
+      setWorkspaceError(error instanceof Error ? error.message : "No fue posible iniciar el trabajo multioperación.");
+    } finally {
+      setReferenceBusy(false);
+    }
+  };
+
+  const runJobAction = async (action: string) => {
+    if (!project || !selectedSetup || !activeJobFace) {
+      return;
+    }
+    setReferenceBusy(true);
+    setWorkspaceError("");
+    try {
+      const run = await api.runJobAction(project.id, selectedSetup.id, activeJobFace, action);
+      setJobRun(run);
+      await refreshJobState();
+      if (selectedOperation) {
+        void api.getReferenceSession(project.id, selectedOperation.id).then(setReferenceSession).catch(() => undefined);
+        void api.getPhysicalMap(project.id, selectedOperation.id).then((result) => setPhysicalMap(result.payload)).catch(() => undefined);
+      }
+    } catch (error) {
+      setWorkspaceError(error instanceof Error ? error.message : "No fue posible actualizar el trabajo multioperación.");
+    } finally {
+      setReferenceBusy(false);
+    }
+  };
+
+  const renderJobCompensationPanel = () => {
+    if (!selectedSetup || !activeJobFace) {
+      return null;
+    }
+    return (
+      <article className="panel">
+        <div className="section-heading section-heading--stacked">
+          <div>
+            <p className="eyebrow">Compensación del proyecto</p>
+            <h3>Plan multioperación — {translateFace(activeJobFace)}</h3>
+          </div>
+          <div className="toolbar-inline">
+            <button className="button button--ghost" type="button" disabled={referenceBusy} onClick={() => void refreshJobState()}>Actualizar plan</button>
+            <button className="button" type="button" disabled={referenceBusy} onClick={() => void generateProjectCompensation()}>Generar compensación del proyecto</button>
+          </div>
+        </div>
+        {jobPlan ? (
+          <>
+            <div className="info-grid info-grid--double compact-grid">
+              <div className="metric-box"><span>Operaciones</span><strong>{jobPlan.summary.operations_total}</strong></div>
+              <div className="metric-box"><span>Listas</span><strong>{jobPlan.summary.operations_ready}</strong></div>
+              <div className="metric-box"><span>Archivos generados</span><strong>{jobPlan.summary.generated_files}</strong></div>
+              <div className="metric-box"><span>Cambios de herramienta</span><strong>{jobPlan.summary.tool_changes}</strong></div>
+              <div className="metric-box"><span>Herramientas distintas</span><strong>{jobPlan.summary.distinct_tools}</strong></div>
+              <div className="metric-box"><span>Bloqueadas</span><strong>{jobPlan.summary.blocked_operations}</strong></div>
+            </div>
+            <div className="table-scroll">
+              <table className="data-table">
+                <thead>
+                  <tr>
+                    <th>Orden</th>
+                    <th>Operación</th>
+                    <th>Herramienta</th>
+                    <th>Mapa</th>
+                    <th>Cobertura</th>
+                    <th>Referencia Z</th>
+                    <th>G-code</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {jobPlan.operations.map((item) => (
+                    <tr key={item.operation_id}>
+                      <td>{item.order_label}</td>
+                      <td>
+                        <strong>{item.name}</strong>
+                        {item.blocking_reasons.length > 0 ? <div className="muted">{item.blocking_reasons[0]}</div> : null}
+                      </td>
+                      <td>{item.tool_name}</td>
+                      <td>{item.map_status}</td>
+                      <td>{item.coverage_status}{item.coverage_detail ? <div className="muted">{item.coverage_detail}</div> : null}</td>
+                      <td>{item.reference_status}</td>
+                      <td>{item.generated_file_name ?? "pendiente"}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            {jobPlan.manifest_path ? <p className="muted">Manifiesto actual: {jobPlan.manifest_path}</p> : null}
+          </>
+        ) : <p className="muted">Cree el plan del montaje/cara actual para ver todas las operaciones compensables.</p>}
+      </article>
+    );
+  };
+
+  const renderJobExecutionPanel = () => {
+    if (!selectedSetup || !activeJobFace) {
+      return null;
+    }
+    const currentOperation = jobRun?.current_operation_id ? jobRun.operations.find((item) => item.operation_id === jobRun.current_operation_id) ?? null : null;
+    const actionLabels: Record<string, string> = {
+      start: "Iniciar trabajo",
+      pause: "Pausar",
+      resume: "Reanudar",
+      cancel: "Cancelar proyecto",
+      'confirm-tool-change': "Confirmar cambio de herramienta",
+      'measure-reference': "Medir referencia",
+      continue: "Continuar",
+    };
+    return (
+      <article className="panel">
+        <div className="section-heading section-heading--stacked">
+          <div>
+            <p className="eyebrow">Ejecución del proyecto</p>
+            <h3>Línea de tiempo multioperación — {translateFace(activeJobFace)}</h3>
+          </div>
+          <StatusBadge tone={jobRun?.state === "JOB_COMPLETE" ? "success" : jobRun?.state === "JOB_ERROR" ? "danger" : jobRun?.state === "WAITING_TOOL_CHANGE" ? "warning" : "info"}>{jobRun?.state ?? "JOB_DRAFT"}</StatusBadge>
+        </div>
+        <div className="info-grid info-grid--double compact-grid">
+          <div className="metric-box"><span>Operación actual</span><strong>{currentOperation?.name ?? "pendiente"}</strong></div>
+          <div className="metric-box"><span>Herramienta actual</span><strong>{currentOperation?.tool_name ?? "pendiente"}</strong></div>
+          <div className="metric-box"><span>Progreso general</span><strong>{jobRun ? `${jobRun.summary.operations_completed}/${jobRun.summary.operations_total}` : "0/0"}</strong></div>
+          <div className="metric-box"><span>Cambios de herramienta</span><strong>{jobRun ? `${jobRun.summary.tool_changes_completed}/${jobRun.summary.tool_changes_required}` : "0/0"}</strong></div>
+          <div className="metric-box"><span>Mapa activo</span><strong>{jobPlan?.active_map_id ?? "pendiente"}</strong></div>
+          <div className="metric-box"><span>Siguiente acción</span><strong>{jobRun?.next_action ?? "Prepare el trabajo"}</strong></div>
+        </div>
+        <div className="action-grid">
+          <button className="button button--ghost" type="button" disabled={referenceBusy} onClick={() => void prepareJobRun()}>Preparar trabajo</button>
+          <button className="button" type="button" disabled={referenceBusy || Boolean(jobRun?.ready === false)} onClick={() => void startJobRun()}>Iniciar trabajo</button>
+          {(jobRun?.available_actions ?? []).map((action) => (
+            <button key={action} className={`button${action === "cancel" ? " button--ghost button--danger" : " button--ghost"}`} type="button" disabled={referenceBusy} onClick={() => void runJobAction(action)}>{actionLabels[action] ?? action}</button>
+          ))}
+        </div>
+        {jobRun?.checks?.length ? <ul className="compact-check-list">{jobRun.checks.map((check, index) => <li key={String(check.name ?? index)} data-ok={Boolean(check.ok)}>{String(check.name)}: {String(check.detail)}</li>)}</ul> : null}
+        {jobRun?.operations?.length ? <div className="point-card-grid">{jobRun.operations.map((item) => <div className="mesh-point-card" key={item.operation_id}><strong>{item.order_label} — {item.name}</strong><span>Herramienta: {item.tool_name}</span><span>Estado: {item.execution_status}</span><span>Referencia Z: {item.reference_status}</span><span>Archivo: {item.generated_file_name ?? "pendiente"}</span><span>Progreso: {typeof item.progress === "number" ? `${(item.progress * 100).toFixed(1)} %` : "-"}</span>{item.error ? <span>Error: {item.error}</span> : null}</div>)}</div> : null}
+        {jobRun?.events?.length ? <div className="machine-event-list">{jobRun.events.slice(-8).map((event) => <div className="machine-event" key={`${event.timestamp}-${event.message}`}><strong>{event.level}</strong><span>{event.message}</span></div>)}</div> : null}
+        {jobHistory.length > 0 ? (
+          <div className="stack gap-sm">
+            <div className="section-heading"><h4>Historial de ejecuciones</h4></div>
+            <div className="point-card-grid">{jobHistory.slice(0, 6).map((entry) => <div className="mesh-point-card" key={entry.run_id}><strong>{entry.state}</strong><span>Inicio: {entry.started_at ? formatDate(entry.started_at) : "-"}</span><span>Fin: {entry.completed_at ? formatDate(entry.completed_at) : "-"}</span><span>Operaciones: {entry.operations_completed}</span><span>Cambios de herramienta: {entry.tool_changes_completed}</span>{entry.manifest_path ? <span>Manifiesto: {entry.manifest_path}</span> : null}</div>)}</div>
+          </div>
+        ) : null}
+      </article>
+    );
+  };
+
   const renderEjecucion = () => (
     <div className="stack gap-md">
+      {renderJobExecutionPanel()}
       <article className="panel">
         <div className="section-heading section-heading--stacked">
           <div>
@@ -1796,6 +2084,7 @@ export function ProjectWorkspace({
 
   const renderValidacion = () => (
     <div className="stack gap-md">
+      {renderJobCompensationPanel()}
       <article className="panel">
         <div className="section-heading section-heading--stacked">
           <div>

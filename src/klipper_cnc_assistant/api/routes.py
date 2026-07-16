@@ -667,6 +667,38 @@ def build_router() -> APIRouter:
         target = request.app.state.compensated_gcode_service.resolve_generated_file(project_id, file_path)
         return FileResponse(target, media_type="text/plain", filename=target.name)
 
+    @router.get("/projects/{project_id}/job-plan", response_model=dict[str, object])
+    def get_job_plan(project_id: str, setup_id: str, face: str, request: Request) -> dict[str, object]:
+        return request.app.state.job_service.get_plan(project_id=project_id, setup_id=setup_id, face=face)
+
+    @router.post("/projects/{project_id}/job-plan", response_model=dict[str, object])
+    def create_job_plan(project_id: str, payload: dict[str, str], request: Request) -> dict[str, object]:
+        return request.app.state.job_service.get_plan(project_id=project_id, setup_id=str(payload["setup_id"]), face=str(payload["face"]))
+
+    @router.post("/projects/{project_id}/job-plan/generate", response_model=dict[str, object])
+    def generate_job_plan(project_id: str, payload: dict[str, str], request: Request) -> dict[str, object]:
+        return request.app.state.job_service.generate_project_compensation(project_id=project_id, setup_id=str(payload["setup_id"]), face=str(payload["face"]))
+
+    @router.get("/projects/{project_id}/job-run", response_model=dict[str, object])
+    def get_job_run(project_id: str, setup_id: str, face: str, request: Request) -> dict[str, object]:
+        return request.app.state.job_service.get_run(project_id=project_id, setup_id=setup_id, face=face)
+
+    @router.post("/projects/{project_id}/job-run/prepare", response_model=dict[str, object])
+    def prepare_job_run(project_id: str, payload: dict[str, str], request: Request) -> dict[str, object]:
+        return request.app.state.job_service.prepare_run(project_id=project_id, setup_id=str(payload["setup_id"]), face=str(payload["face"]))
+
+    @router.post("/projects/{project_id}/job-run/start", response_model=dict[str, object])
+    def start_job_run(project_id: str, payload: dict[str, str], request: Request) -> dict[str, object]:
+        return request.app.state.job_service.start_run(project_id=project_id, setup_id=str(payload["setup_id"]), face=str(payload["face"]))
+
+    @router.post("/projects/{project_id}/job-run/action", response_model=dict[str, object])
+    def job_run_action(project_id: str, payload: dict[str, str], request: Request) -> dict[str, object]:
+        return request.app.state.job_service.run_action(project_id=project_id, setup_id=str(payload["setup_id"]), face=str(payload["face"]), action=str(payload["action"]))
+
+    @router.get("/projects/{project_id}/job-history", response_model=list[dict[str, object]])
+    def get_job_history(project_id: str, setup_id: str, face: str, request: Request) -> list[dict[str, object]]:
+        return request.app.state.job_service.history(project_id=project_id, setup_id=setup_id, face=face)
+
 
     @router.post("/projects/{project_id}/operations/{operation_id}/execution/preflight", response_model=dict[str, object])
     def execution_preflight(project_id: str, operation_id: str, request: Request) -> dict[str, object]:

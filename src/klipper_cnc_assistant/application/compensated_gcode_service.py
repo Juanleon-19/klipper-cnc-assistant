@@ -42,7 +42,7 @@ class CompensatedGCodeService:
         self.repository = repository
         self.physical_map_service = physical_map_service
 
-    def generate(self, project_id: str, operation_id: str, *, max_segment_mm: float | None = None) -> dict[str, Any]:
+    def generate(self, project_id: str, operation_id: str, *, max_segment_mm: float | None = None, require_tool_reference: bool = True) -> dict[str, Any]:
         project = self._load_project(project_id)
         operation = project.get_operation(operation_id)
         if operation.analisis is None:
@@ -51,7 +51,7 @@ class CompensatedGCodeService:
             raise ApplicationError("La operación no tiene archivo G-code original asociado.")
 
         physical_map = self.physical_map_service.get_active(project_id, operation_id)
-        self._validate_map_for_operation(physical_map, operation)
+        self._validate_map_for_operation(physical_map, operation, require_tool_reference=require_tool_reference)
         height_map = self._height_map_from_payload(physical_map["height_map"])
         coverage = build_coverage_report(
             height_map=height_map,
@@ -123,7 +123,7 @@ class CompensatedGCodeService:
             raise NotFoundError("El archivo compensado solicitado no existe.")
         return target
 
-    def _validate_map_for_operation(self, physical_map: dict[str, Any], operation: OperacionPCB) -> None:
+    def _validate_map_for_operation(self, physical_map: dict[str, Any], operation: OperacionPCB, *, require_tool_reference: bool = True) -> None:
         if physical_map.get("schema_version") != "surface-map-v2":
             raise ApplicationError("El mapa medido usa un modelo anterior. Abra el mapa físico para migrarlo antes de compensar.")
         if physical_map.get("setup_id") != operation.setup_id or physical_map.get("face") != operation.cara:
@@ -131,7 +131,7 @@ class CompensatedGCodeService:
         if physical_map.get("status") != "MESH_COMPLETE":
             raise ApplicationError("Mapa incompleto: termine o recupere el sondeo antes de compensar.")
         reference = (physical_map.get("tool_references") or {}).get(_tool_key(operation))
-        if not reference or not reference.get("valid"):
+        if require_tool_reference and (not reference or not reference.get("valid")):
             raise ApplicationError("Referencia Z inválida o ausente para la herramienta requerida por esta operación.")
         if operation.id not in set(physical_map.get("operation_ids") or []):
             raise ApplicationError("La operación no está cubierta por el mapa medido activo.")
