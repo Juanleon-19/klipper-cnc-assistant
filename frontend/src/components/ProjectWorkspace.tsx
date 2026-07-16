@@ -10,8 +10,6 @@ import { ApiError, api, type OperationInput, type OperationUpdateInput } from ".
 import { parseFiniteNumber } from "../lib/numbers";
 import { toneForStatus, translateFace, translateOperationType, translateStatus } from "../lib/ui";
 import type {
-  CompensationPreview,
-  CompensatedGCodeResult,
   HeightMap,
   Operation,
   Project,
@@ -26,9 +24,6 @@ import type {
   PhysicalMeshPoint,
   Bounds,
   OperationAnalysis,
-  ExecutionActionResult,
-  ExecutionCheck,
-  ExecutionPreflight,
   JobHistoryEntry,
   JobPlan,
   JobRun,
@@ -54,7 +49,7 @@ type ProjectWorkspaceProps = {
   initialView?: WorkspaceView;
 };
 
-export type WorkspaceView = "archivo" | "trayectoria" | "referencia" | "mapa" | "validacion" | "ejecucion";
+export type WorkspaceView = "archivo" | "trayectoria" | "referencia" | "mapa" | "ejecucion";
 type MapTab = "mapa2d" | "superficie3d" | "puntos" | "configuracion";
 type HeightMode = "bruto" | "plano" | "residuo";
 type HeightMapSource = "SIMULATED" | "MEASURED";
@@ -188,11 +183,6 @@ export function ProjectWorkspace({
   const [physicalMap, setPhysicalMap] = useState<PhysicalMapPayload | null>(null);
   const [physicalMapHistory, setPhysicalMapHistory] = useState<Array<Record<string, unknown>>>([]);
   const [referenceSession, setReferenceSession] = useState<ReferenceSession | null>(null);
-  const [compensationPreview, setCompensationPreview] = useState<CompensationPreview | null>(null);
-  const [generatedGCode, setGeneratedGCode] = useState<CompensatedGCodeResult | null>(null);
-  const [generatedProcessFiles, setGeneratedProcessFiles] = useState<Record<string, CompensatedGCodeResult>>({});
-  const [executionChecks, setExecutionChecks] = useState<ExecutionCheck[]>([]);
-  const [executionOperationId, setExecutionOperationId] = useState<string | null>(null);
   const [heightMapBusy, setHeightMapBusy] = useState(false);
   const [referenceBusy, setReferenceBusy] = useState(false);
   const [workspaceError, setWorkspaceError] = useState("");
@@ -225,8 +215,6 @@ export function ProjectWorkspace({
   const [showAllTrajectoryOperations, setShowAllTrajectoryOperations] = useState(false);
   const [meshArmed, setMeshArmed] = useState(false);
   const [meshValidationMessage, setMeshValidationMessage] = useState("");
-  const [executionState, setExecutionState] = useState<"PREFLIGHT" | "READY_TO_EXECUTE" | "UPLOADING" | "RUNNING" | "PAUSED" | "CANCELLED" | "COMPLETED">("PREFLIGHT");
-  const [executionEvent, setExecutionEvent] = useState("Sin acciones de ejecución todavía.");
   const [jobPlan, setJobPlan] = useState<JobPlan | null>(null);
   const [jobRun, setJobRun] = useState<JobRun | null>(null);
   const [jobHistory, setJobHistory] = useState<JobHistoryEntry[]>([]);
@@ -311,10 +299,6 @@ export function ProjectWorkspace({
       setHeightMap(null);
       setPhysicalMap(null);
       setReferenceSession(null);
-      setCompensationPreview(null);
-      setGeneratedGCode(null);
-      setGeneratedProcessFiles({});
-      setGeneratedGCode(null);
       return;
     }
 
@@ -523,7 +507,11 @@ export function ProjectWorkspace({
       return;
     }
     const stored = window.localStorage.getItem(workspaceViewStorageKey(project.id, selectedOperation.id));
-    if (stored === "archivo" || stored === "trayectoria" || stored === "referencia" || stored === "mapa" || stored === "validacion" || stored === "ejecucion") {
+    if (stored === "validacion") {
+      setActiveView("ejecucion");
+      return;
+    }
+    if (stored === "archivo" || stored === "trayectoria" || stored === "referencia" || stored === "mapa" || stored === "ejecucion") {
       setActiveView(stored);
       return;
     }
@@ -588,7 +576,6 @@ export function ProjectWorkspace({
       if (project && selectedOperation) {
         setReferenceSession(await api.getReferenceSession(project.id, selectedOperation.id));
       }
-      setCompensationPreview(null);
     } catch (error) {
       setWorkspaceError(error instanceof Error ? error.message : "No fue posible actualizar el mapa de alturas.");
     } finally {
@@ -602,7 +589,6 @@ export function ProjectWorkspace({
     try {
       const nextSession = await action();
       setReferenceSession(nextSession);
-      setCompensationPreview(null);
     } catch (error) {
       if (error instanceof ApiError && options?.onApiFieldError) {
         options.onApiFieldError(error);
@@ -624,8 +610,6 @@ export function ProjectWorkspace({
       } else if (project && selectedOperation) {
         setReferenceSession(await api.getReferenceSession(project.id, selectedOperation.id));
       }
-      setCompensationPreview(null);
-      setGeneratedGCode(null);
     } catch (error) {
       setWorkspaceError(error instanceof Error ? error.message : "No fue posible completar la acción física de referencia.");
     } finally {
@@ -804,7 +788,7 @@ export function ProjectWorkspace({
       setActiveView("mapa");
       return;
     }
-    setActiveView("validacion");
+    setActiveView("ejecucion");
   };
 
   const workflowStatus = (complete: boolean, started = false) => complete ? "completado" : started ? "en progreso" : "pendiente";
@@ -986,50 +970,6 @@ export function ProjectWorkspace({
             </div>
           </>
         ) : <p className="muted">Seleccione una operación para gestionar su archivo y análisis.</p>}
-      </article>
-      <article className="panel">
-        <div className="section-heading section-heading--stacked">
-          <div>
-            <p className="eyebrow">Procesos CNC</p>
-            <h3>Operaciones del montaje activo</h3>
-          </div>
-          <div className="toolbar-inline">
-            <button className="button" type="button" disabled={referenceBusy || processOperations.length === 0} onClick={() => void generateAllCompensatedForProcesses()}>Compensar todos los procesos</button>
-            <button className="button button--ghost" type="button" disabled={!machine.isPhysical || machine.refreshing} onClick={() => void machine.runMachineAction("tool-change-position")}>Ir a cambio de herramienta</button>
-          </div>
-        </div>
-        {processOperations.length ? <div className="point-card-grid">{processOperations.map((operation, index) => {
-          const previous = index > 0 ? processOperations[index - 1] : null;
-          const toolChanged = previous ? (previous.tool_id || previous.herramienta) !== (operation.tool_id || operation.herramienta) : false;
-          const generated = generatedProcessFiles[operation.id] ?? (selectedOperation?.id === operation.id ? generatedGCode : null);
-          return <div className="mesh-point-card" key={operation.id}>
-            <strong>Proceso {index + 1} - {operation.nombre}</strong>
-            <span>Herramienta: {operation.herramienta ?? operation.tool_id ?? "sin herramienta"}</span>
-            <span>Orden: {operation.orden}</span>
-            <span>{toolChanged ? "Requiere cambio de herramienta" : index === 0 ? "Herramienta inicial" : "Continúa con la misma herramienta"}</span>
-            <span>Archivo compensado: {generated?.relative_path ?? "pendiente"}</span>
-            <div className="action-grid action-grid--inline">
-              <button className="button button--ghost" type="button" disabled={referenceBusy} onClick={() => void (async () => {
-                setReferenceBusy(true);
-                setWorkspaceError("");
-                try {
-                  const result = await api.generateCompensatedGCode(project!.id, operation.id);
-                  setGeneratedProcessFiles((current) => ({ ...current, [operation.id]: result }));
-                  if (selectedOperation?.id === operation.id) {
-                    setGeneratedGCode(result);
-                  }
-                } catch (error) {
-                  setWorkspaceError(error instanceof Error ? error.message : "No fue posible generar el G-code compensado del proceso.");
-                } finally {
-                  setReferenceBusy(false);
-                }
-              })()}>Compensar</button>
-              <button className="button button--ghost" type="button" disabled={!machine.isPhysical || machine.refreshing} onClick={() => void captureToolReferenceForOperation(operation.id)}>Sondear referencia herramienta</button>
-              <button className="button button--ghost" type="button" disabled={referenceBusy} onClick={() => void runExecutionAction("preflight", operation.id)}>Preflight</button>
-              <button className="button button--ghost" type="button" disabled={referenceBusy} onClick={() => void runExecutionAction("upload", operation.id)}>Subir</button>
-              <button className="button button--ghost" type="button" disabled={referenceBusy} onClick={() => void runExecutionAction("start", operation.id)}>Ejecutar</button>
-            </div>
-          </div>;})}</div> : <p className="muted">No hay procesos analizados en este montaje.</p>}
       </article>
     </div>
   );
@@ -1379,8 +1319,6 @@ export function ProjectWorkspace({
       if (project && selectedOperation) {
         void api.getPhysicalMapHistory(project.id, selectedOperation.id).then(setPhysicalMapHistory).catch(() => undefined);
       }
-      setCompensationPreview(null);
-      setGeneratedGCode(null);
     } catch (error) {
       setWorkspaceError(error instanceof Error ? error.message : "No fue posible actualizar el mapa físico medido.");
     } finally {
@@ -1685,8 +1623,6 @@ export function ProjectWorkspace({
       }
       setPhysicalMap(null);
       setHeightMap(null);
-      setCompensationPreview(null);
-      setGeneratedGCode(null);
       setMeshArmed(false);
       setMeshSuggestion(null);
       await machine.refreshRuntime();
@@ -1701,98 +1637,6 @@ export function ProjectWorkspace({
     }
   };
 
-  const runExecutionAction = async (action: "preflight" | "upload" | "confirm-file" | "confirm-tool" | "confirm-spindle" | "start" | "pause" | "resume" | "cancel", operationId?: string) => {
-    if (!project) {
-      return;
-    }
-    const targetOperationId = operationId ?? selectedOperation?.id;
-    if (!targetOperationId) {
-      return;
-    }
-    setReferenceBusy(true);
-    setWorkspaceError("");
-    try {
-      if (action === "preflight") {
-        const preflight: ExecutionPreflight = await api.executionPreflight(project.id, targetOperationId);
-        setExecutionChecks(preflight.checks ?? []);
-        setExecutionState(preflight.ready ? "READY_TO_EXECUTE" : "PREFLIGHT");
-        setExecutionOperationId(targetOperationId);
-        setExecutionEvent(preflight.generated_file ?? preflight.state ?? "Preflight revisado.");
-        return;
-      }
-      const result: ExecutionActionResult = await api.executionAction(project.id, targetOperationId, action);
-      if (result.preflight?.checks) {
-        setExecutionChecks(result.preflight.checks);
-      }
-      setExecutionOperationId(targetOperationId);
-      setExecutionState((result.state ?? executionState) as "PREFLIGHT" | "READY_TO_EXECUTE" | "UPLOADING" | "RUNNING" | "PAUSED" | "CANCELLED" | "COMPLETED");
-      setExecutionEvent(result.detail ?? `Acción ${action} registrada.`);
-    } catch (error) {
-      setWorkspaceError(error instanceof Error ? error.message : "No fue posible actualizar la ejecución del proceso.");
-      if (selectedOperation) {
-        void api.getReferenceSession(project.id, selectedOperation.id).then(setReferenceSession).catch(() => undefined);
-      }
-    } finally {
-      setReferenceBusy(false);
-    }
-  };
-
-  const generateAllCompensatedForProcesses = async () => {
-    if (!project || processOperations.length === 0) {
-      return;
-    }
-    setReferenceBusy(true);
-    setWorkspaceError("");
-    const nextFiles: Record<string, CompensatedGCodeResult> = {};
-    try {
-      for (const operation of processOperations) {
-        const result = await api.generateCompensatedGCode(project.id, operation.id);
-        nextFiles[operation.id] = result;
-        if (selectedOperation?.id === operation.id) {
-          setGeneratedGCode(result);
-        }
-      }
-      setGeneratedProcessFiles((current) => ({ ...current, ...nextFiles }));
-      setExecutionEvent(`Se generaron ${Object.keys(nextFiles).length} archivo(s) compensados para el montaje activo.`);
-      if (selectedOperation) {
-        const session = await api.getReferenceSession(project.id, selectedOperation.id);
-        setReferenceSession(session);
-      }
-    } catch (error) {
-      setWorkspaceError(error instanceof Error ? error.message : "No fue posible compensar todos los procesos del montaje.");
-      if (selectedOperation) {
-        void api.getReferenceSession(project.id, selectedOperation.id).then(setReferenceSession).catch(() => undefined);
-      }
-    } finally {
-      setReferenceBusy(false);
-    }
-  };
-
-  const captureToolReferenceForOperation = async (operationId: string) => {
-    if (!project) {
-      return;
-    }
-    setReferenceBusy(true);
-    setWorkspaceError("");
-    try {
-      const session = await api.capturePhysicalZReferenceFromProbe(project.id, operationId);
-      if (selectedOperation?.id === operationId) {
-        setReferenceSession(session);
-      } else if (selectedOperation) {
-        const refreshed = await api.getReferenceSession(project.id, selectedOperation.id);
-        setReferenceSession(refreshed);
-      }
-      const refreshedMap = await api.getPhysicalMap(project.id, operationId).then((result) => result.payload).catch(() => null);
-      if (refreshedMap) {
-        setPhysicalMap(refreshedMap);
-      }
-      setExecutionEvent(`Referencia Z medida para la herramienta del proceso ${operationId}.`);
-    } catch (error) {
-      setWorkspaceError(error instanceof Error ? error.message : "No fue posible medir la referencia Z de la herramienta.");
-    } finally {
-      setReferenceBusy(false);
-    }
-  };
 
 
   const refreshJobState = async () => {
@@ -1824,7 +1668,6 @@ export function ProjectWorkspace({
       ]);
       setJobRun(run);
       setJobHistory(history);
-      setExecutionEvent(`Compensación del proyecto generada para ${plan.summary.generated_files} proceso(s).`);
     } catch (error) {
       setWorkspaceError(error instanceof Error ? error.message : "No fue posible generar la compensación del proyecto.");
     } finally {
@@ -1895,8 +1738,8 @@ export function ProjectWorkspace({
       <article className="panel">
         <div className="section-heading section-heading--stacked">
           <div>
-            <p className="eyebrow">Compensación del proyecto</p>
-            <h3>Plan multioperación — {translateFace(activeJobFace)}</h3>
+            <p className="eyebrow">1. Compensación del proyecto</p>
+            <h3>Plan multioperación listo para ejecución — {translateFace(activeJobFace)}</h3>
           </div>
           <div className="toolbar-inline">
             <button className="button button--ghost" type="button" disabled={referenceBusy} onClick={() => void refreshJobState()}>Actualizar plan</button>
@@ -1944,6 +1787,7 @@ export function ProjectWorkspace({
                 </tbody>
               </table>
             </div>
+            <p className="muted">Orden real: compensar todas las operaciones, ejecutar la primera, ir a cambio de herramienta cuando corresponda, confirmar, medir la nueva Z en X0/Y0, recompensar lo pendiente y continuar automáticamente.</p>
             {jobPlan.manifest_path ? <p className="muted">Manifiesto actual: {jobPlan.manifest_path}</p> : null}
           </>
         ) : <p className="muted">Cree el plan del montaje/cara actual para ver todas las operaciones compensables.</p>}
@@ -1969,8 +1813,8 @@ export function ProjectWorkspace({
       <article className="panel">
         <div className="section-heading section-heading--stacked">
           <div>
-            <p className="eyebrow">Ejecución del proyecto</p>
-            <h3>Línea de tiempo multioperación — {translateFace(activeJobFace)}</h3>
+            <p className="eyebrow">2. Ejecución del proyecto</p>
+            <h3>Secuencia automática por operaciones — {translateFace(activeJobFace)}</h3>
           </div>
           <StatusBadge tone={jobRun?.state === "JOB_COMPLETE" ? "success" : jobRun?.state === "JOB_ERROR" ? "danger" : jobRun?.state === "WAITING_TOOL_CHANGE" ? "warning" : "info"}>{jobRun?.state ?? "JOB_DRAFT"}</StatusBadge>
         </div>
@@ -1989,7 +1833,7 @@ export function ProjectWorkspace({
             <button key={action} className={`button${action === "cancel" ? " button--ghost button--danger" : " button--ghost"}`} type="button" disabled={referenceBusy} onClick={() => void runJobAction(action)}>{actionLabels[action] ?? action}</button>
           ))}
         </div>
-        {jobRun?.checks?.length ? <ul className="compact-check-list">{jobRun.checks.map((check, index) => <li key={String(check.name ?? index)} data-ok={Boolean(check.ok)}>{String(check.name)}: {String(check.detail)}</li>)}</ul> : null}
+        <p className="muted">El backend ejecuta una sola secuencia: primera operación, cambio de herramienta seguro, confirmación del operador, nueva referencia Z, recompensación de lo pendiente y continuación hasta finalizar.</p>{jobRun?.checks?.length ? <ul className="compact-check-list">{jobRun.checks.map((check, index) => <li key={String(check.name ?? index)} data-ok={Boolean(check.ok)}>{String(check.name)}: {String(check.detail)}</li>)}</ul> : null}
         {jobRun?.operations?.length ? <div className="point-card-grid">{jobRun.operations.map((item) => <div className="mesh-point-card" key={item.operation_id}><strong>{item.order_label} — {item.name}</strong><span>Herramienta: {item.tool_name}</span><span>Estado: {item.execution_status}</span><span>Referencia Z: {item.reference_status}</span><span>Archivo: {item.generated_file_name ?? "pendiente"}</span><span>Progreso: {typeof item.progress === "number" ? `${(item.progress * 100).toFixed(1)} %` : "-"}</span>{item.error ? <span>Error: {item.error}</span> : null}</div>)}</div> : null}
         {jobRun?.events?.length ? <div className="machine-event-list">{jobRun.events.slice(-8).map((event) => <div className="machine-event" key={`${event.timestamp}-${event.message}`}><strong>{event.level}</strong><span>{event.message}</span></div>)}</div> : null}
         {jobHistory.length > 0 ? (
@@ -2004,181 +1848,8 @@ export function ProjectWorkspace({
 
   const renderEjecucion = () => (
     <div className="stack gap-md">
-      {renderJobExecutionPanel()}
-      <article className="panel">
-        <div className="section-heading section-heading--stacked">
-          <div>
-            <p className="eyebrow">Ejecución controlada</p>
-            <h3>Preflight Moonraker/Klipper</h3>
-          </div>
-          <StatusBadge tone={executionState === "READY_TO_EXECUTE" ? "success" : executionState === "CANCELLED" ? "warning" : "info"}>{executionState}</StatusBadge>
-        </div>
-        <div className="info-grid info-grid--double compact-grid">
-          <div className="metric-box"><span>Modo</span><strong>{machine.modeLabel}</strong></div>
-          <div className="metric-box"><span>Runtime</span><strong>{machine.connected ? "conectado" : "desconectado"}</strong></div>
-          <div className="metric-box"><span>Klipper</span><strong>{machine.klipperReady ? "ready" : "no ready"}</strong></div>
-          <div className="metric-box"><span>Homing</span><strong>{machine.homedAxes || "pendiente"}</strong></div>
-          <div className="metric-box"><span>Mapa</span><strong>{physicalMap?.status ?? "pendiente"}</strong></div>
-          <div className="metric-box"><span>Archivo compensado</span><strong>{(executionOperationId ? generatedProcessFiles[executionOperationId]?.relative_path : generatedProcessFiles[selectedOperation?.id ?? ""]?.relative_path) ?? generatedGCode?.relative_path ?? "pendiente"}</strong></div>
-        </div>
-        <p className="muted">Último evento: {executionEvent}</p>{executionChecks.length > 0 ? <ul className="compact-check-list">{executionChecks.map((check, index) => <li key={String(check.name ?? index)} data-ok={Boolean(check.ok)}>{String(check.name ?? "check")}: {String(check.detail ?? "")}</li>)}</ul> : null}
-        <div className="action-grid">
-          <button className="button" type="button" disabled={referenceBusy || !selectedOperation} onClick={() => void runExecutionAction("preflight")}>Ejecutar preflight</button>
-          <button className="button button--ghost" type="button" disabled={referenceBusy || !selectedOperation} onClick={() => void runExecutionAction("upload")}>Subir archivo a Moonraker</button>
-          <button className="button button--ghost" type="button" disabled={referenceBusy || !selectedOperation} onClick={() => void runExecutionAction("confirm-file")}>Confirmar archivo</button>
-          <button className="button button--ghost" type="button" disabled={referenceBusy || !selectedOperation} onClick={() => void runExecutionAction("confirm-tool")}>Confirmar herramienta</button>
-          <button className="button button--ghost" type="button" disabled={referenceBusy || !selectedOperation} onClick={() => void runExecutionAction("confirm-spindle")}>Confirmar spindle</button>
-          <button className="button" type="button" disabled={referenceBusy || !selectedOperation} onClick={() => void runExecutionAction("start")}>Iniciar ejecución supervisada</button>
-          <button className="button button--ghost" type="button" disabled={referenceBusy || !selectedOperation} onClick={() => void runExecutionAction("pause")}>Pausar</button>
-          <button className="button button--ghost" type="button" disabled={referenceBusy || !selectedOperation} onClick={() => void runExecutionAction("resume")}>Reanudar</button>
-          <button className="button button--ghost button--danger" type="button" disabled={referenceBusy || !selectedOperation} onClick={() => void runExecutionAction("cancel")}>Cancelar</button>
-          <button className="button button--danger" type="button" disabled={!machine.isPhysical || machine.refreshing} onClick={() => { if (window.confirm("Enviar M112 a Klipper?")) void machine.runMachineAction("emergency"); }}>Emergencia M112</button>
-        </div>
-      </article>
-      <article className="panel">
-        <div className="section-heading section-heading--stacked">
-          <div>
-            <p className="eyebrow">Procesos CNC</p>
-            <h3>Operaciones del montaje activo</h3>
-          </div>
-          <div className="toolbar-inline">
-            <button className="button" type="button" disabled={referenceBusy || processOperations.length === 0} onClick={() => void generateAllCompensatedForProcesses()}>Compensar todos los procesos</button>
-            <button className="button button--ghost" type="button" disabled={!machine.isPhysical || machine.refreshing} onClick={() => void machine.runMachineAction("tool-change-position")}>Ir a cambio de herramienta</button>
-          </div>
-        </div>
-        {processOperations.length ? <div className="point-card-grid">{processOperations.map((operation, index) => {
-          const previous = index > 0 ? processOperations[index - 1] : null;
-          const toolChanged = previous ? (previous.tool_id || previous.herramienta) !== (operation.tool_id || operation.herramienta) : false;
-          const generated = generatedProcessFiles[operation.id] ?? (selectedOperation?.id === operation.id ? generatedGCode : null);
-          return <div className="mesh-point-card" key={operation.id}>
-            <strong>Proceso {index + 1} - {operation.nombre}</strong>
-            <span>Herramienta: {operation.herramienta ?? operation.tool_id ?? "sin herramienta"}</span>
-            <span>Orden: {operation.orden}</span>
-            <span>{toolChanged ? "Requiere cambio de herramienta" : index === 0 ? "Herramienta inicial" : "Continúa con la misma herramienta"}</span>
-            <span>Archivo compensado: {generated?.relative_path ?? "pendiente"}</span>
-            <div className="action-grid action-grid--inline">
-              <button className="button button--ghost" type="button" disabled={referenceBusy} onClick={() => void (async () => {
-                setReferenceBusy(true);
-                setWorkspaceError("");
-                try {
-                  const result = await api.generateCompensatedGCode(project!.id, operation.id);
-                  setGeneratedProcessFiles((current) => ({ ...current, [operation.id]: result }));
-                  if (selectedOperation?.id === operation.id) {
-                    setGeneratedGCode(result);
-                  }
-                } catch (error) {
-                  setWorkspaceError(error instanceof Error ? error.message : "No fue posible generar el G-code compensado del proceso.");
-                } finally {
-                  setReferenceBusy(false);
-                }
-              })()}>Compensar</button>
-              <button className="button button--ghost" type="button" disabled={!machine.isPhysical || machine.refreshing} onClick={() => void captureToolReferenceForOperation(operation.id)}>Sondear referencia herramienta</button>
-              <button className="button button--ghost" type="button" disabled={referenceBusy} onClick={() => void runExecutionAction("preflight", operation.id)}>Preflight</button>
-              <button className="button button--ghost" type="button" disabled={referenceBusy} onClick={() => void runExecutionAction("upload", operation.id)}>Subir</button>
-              <button className="button button--ghost" type="button" disabled={referenceBusy} onClick={() => void runExecutionAction("start", operation.id)}>Ejecutar</button>
-            </div>
-          </div>;})}</div> : <p className="muted">No hay procesos analizados en este montaje.</p>}
-      </article>
-    </div>
-  );
-
-  const renderValidacion = () => (
-    <div className="stack gap-md">
       {renderJobCompensationPanel()}
-      <article className="panel">
-        <div className="section-heading section-heading--stacked">
-          <div>
-            <p className="eyebrow">Validación</p>
-            <h3>Previsualización matemática de compensación</h3>
-          </div>
-          <p className="muted">Bloqueada si faltan referencias o el mapa no está validado. La generación real conserva X/Y y aplica Z += delta_superficie.</p>
-        </div>
-        {!referenceSession?.lista_para_compensacion ? (
-          <div className="alert alert--warning">
-            {(referenceSession?.bloqueos_compensacion ?? []).join(" ") || "La preparación aún no está lista para compensación."}
-          </div>
-        ) : null}
-        <button
-          className="button"
-          type="button"
-          disabled={referenceBusy || !selectedOperation || !referenceSession?.lista_para_compensacion}
-          onClick={async () => {
-            if (!selectedOperation) {
-              return;
-            }
-            setReferenceBusy(true);
-            setWorkspaceError("");
-            try {
-              const result = await api.getCompensationPreview(project.id, selectedOperation.id);
-              setReferenceSession(result.session);
-              setCompensationPreview(result.preview);
-            } catch (error) {
-              setWorkspaceError(error instanceof Error ? error.message : "No fue posible calcular la previsualización de compensación.");
-              void api.getReferenceSession(project.id, selectedOperation.id).then(setReferenceSession).catch(() => undefined);
-            } finally {
-              setReferenceBusy(false);
-            }
-          }}
-        >
-          Previsualizar compensación
-        </button>
-        <button
-          className="button button--ghost"
-          type="button"
-          disabled={referenceBusy || !selectedOperation}
-          onClick={async () => {
-            if (!selectedOperation) return;
-            setReferenceBusy(true);
-            setWorkspaceError("");
-            try {
-              const result = await api.generateCompensatedGCode(project.id, selectedOperation.id);
-              setGeneratedGCode(result);
-              setGeneratedProcessFiles((current) => ({ ...current, [selectedOperation.id]: result }));
-              void api.getReferenceSession(project.id, selectedOperation.id).then(setReferenceSession).catch(() => undefined);
-            } catch (error) {
-              setWorkspaceError(error instanceof Error ? error.message : "No fue posible generar el G-code compensado.");
-              void api.getReferenceSession(project.id, selectedOperation.id).then(setReferenceSession).catch(() => undefined);
-            } finally {
-              setReferenceBusy(false);
-            }
-          }}
-        >
-          Generar G-code compensado
-        </button>
-        {generatedGCode ? (
-          <p className="muted">Archivo generado: <a href={api.generatedFileUrl(project.id, generatedGCode.relative_path)}>{generatedGCode.relative_path}</a></p>
-        ) : null}
-      </article>
-
-      {compensationPreview ? (
-        <>
-          <article className="panel">
-            <div className="info-grid info-grid--double compact-grid">
-              <div className="metric-box"><span>Z original mín</span><strong>{formatMillimeters(compensationPreview.resumen_z_original.min_mm, 4)}</strong></div>
-              <div className="metric-box"><span>Z original máx</span><strong>{formatMillimeters(compensationPreview.resumen_z_original.max_mm, 4)}</strong></div>
-              <div className="metric-box"><span>Z simulada mín</span><strong>{formatMillimeters(compensationPreview.resumen_z_compensada.min_mm, 4)}</strong></div>
-              <div className="metric-box"><span>Z simulada máx</span><strong>{formatMillimeters(compensationPreview.resumen_z_compensada.max_mm, 4)}</strong></div>
-              <div className="metric-box"><span>Puntos fuera de dominio</span><strong>{compensationPreview.puntos_fuera_dominio}</strong></div>
-              <div className="metric-box"><span>Subdivisiones virtuales</span><strong>{compensationPreview.puntos_virtuales_agregados}</strong></div>
-            </div>
-            <p className="muted">{compensationPreview.convencion_matematica}</p>
-          </article>
-          <article className="panel">
-            <div className="section-heading"><h3>Comparación de trayectoria</h3></div>
-            <div className="stack gap-sm">
-              {compensationPreview.segmentos.slice(0, 12).map((segment, index) => (
-                <div className="subpanel subpanel--soft" key={`${segment.numero_linea}-${index}`}>
-                  <strong>{segment.tipo_movimiento}</strong>
-                  <p className="mono-text">Línea {segment.numero_linea ?? "-"} · estado {segment.estado} · distancia {formatMillimeters(segment.distancia_mm, 3)}</p>
-                  <p className="mono-text">
-                    {segment.puntos[0] ? `Inicio Z original ${formatMillimeters(segment.puntos[0].z_original_mm, 4)} · Z simulada ${formatMillimeters(segment.puntos[0].z_compensada_mm, 4)}` : "Sin puntos"}
-                  </p>
-                </div>
-              ))}
-            </div>
-          </article>
-        </>
-      ) : null}
+      {renderJobExecutionPanel()}
     </div>
   );
 
@@ -2269,8 +1940,7 @@ export function ProjectWorkspace({
           <button className={`toolbar-pill${activeView === "trayectoria" ? " toolbar-pill--active" : ""}`} type="button" onClick={() => setActiveView("trayectoria")}>Trayectoria</button>
           <button className={`toolbar-pill${activeView === "referencia" ? " toolbar-pill--active" : ""}`} type="button" onClick={() => setActiveView("referencia")}>Referencia</button>
           <button className={`toolbar-pill${activeView === "mapa" ? " toolbar-pill--active" : ""}`} type="button" onClick={() => setActiveView("mapa")}>Mapa de alturas</button>
-          <button className={`toolbar-pill${activeView === "validacion" ? " toolbar-pill--active" : ""}`} type="button" onClick={() => setActiveView("validacion")}>Compensación</button>
-          <button className={`toolbar-pill${activeView === "ejecucion" ? " toolbar-pill--active" : ""}`} type="button" onClick={() => setActiveView("ejecucion")}>Ejecución</button>
+                    <button className={`toolbar-pill${activeView === "ejecucion" ? " toolbar-pill--active" : ""}`} type="button" onClick={() => setActiveView("ejecucion")}>Ejecución</button>
         </div>
       </article>
 
@@ -2281,8 +1951,7 @@ export function ProjectWorkspace({
         {activeView === "trayectoria" ? renderTrayectoria() : null}
         {activeView === "referencia" ? renderReferencia() : null}
         {activeView === "mapa" ? renderMapa() : null}
-        {activeView === "validacion" ? renderValidacion() : null}
-      {activeView === "ejecucion" ? renderEjecucion() : null}
+              {activeView === "ejecucion" ? renderEjecucion() : null}
       </section>
     </div>
   );

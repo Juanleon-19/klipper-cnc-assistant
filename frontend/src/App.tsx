@@ -51,7 +51,8 @@ function getInitialView(): View {
 
 function getInitialWorkspaceView(): WorkspaceView | undefined {
   const value = getQueryValue("workspace");
-  return value === "archivo" || value === "trayectoria" || value === "referencia" || value === "mapa" || value === "validacion" || value === "ejecucion" ? value : undefined;
+  if (value === "validacion") return "ejecucion";
+  return value === "archivo" || value === "trayectoria" || value === "referencia" || value === "mapa" || value === "ejecucion" ? value : undefined;
 }
 
 function useViewportWidth() {
@@ -342,7 +343,9 @@ export default function App() {
     setError("");
     try {
       const next = await api.continueProject(projectId);
-      if (next.view === "archivo" || next.view === "trayectoria" || next.view === "referencia" || next.view === "mapa" || next.view === "validacion" || next.view === "ejecucion") {
+      if (next.view === "validacion") {
+        setWorkspaceViewOverride("ejecucion");
+      } else if (next.view === "archivo" || next.view === "trayectoria" || next.view === "referencia" || next.view === "mapa" || next.view === "ejecucion") {
         setWorkspaceViewOverride(next.view);
       }
       setSelectedProjectId(projectId);

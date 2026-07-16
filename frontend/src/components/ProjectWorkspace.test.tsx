@@ -61,34 +61,6 @@ vi.mock("../lib/api", async () => {
     ...actual,
     api: apiMock,
   };
-  it("muestra el plan multioperación en Compensación y permite generar todas las compensaciones", async () => {
-    renderWorkspace(physicalMachine);
-
-    fireEvent.click(screen.getByRole("button", { name: /Compensación/i }));
-
-    expect(await screen.findByText(/Plan multioperación/i)).toBeInTheDocument();
-    expect(screen.getAllByText(/001/).length).toBeGreaterThan(0);
-    expect(screen.getByText(/Taladrado 0.8/i)).toBeInTheDocument();
-
-    fireEvent.click(screen.getByRole("button", { name: /Generar compensación del proyecto/i }));
-
-    await waitFor(() => expect(apiMock.generateProjectCompensation).toHaveBeenCalledWith(project.id, project.montajes[0].id, "superior"));
-  });
-
-  it("muestra la línea de tiempo multioperación en Ejecución y permite preparar el trabajo", async () => {
-    renderWorkspace(physicalMachine);
-
-    fireEvent.click(screen.getByRole("button", { name: /^Ejecución$/i }));
-
-    expect(await screen.findByText(/Línea de tiempo multioperación/i)).toBeInTheDocument();
-    expect(screen.getAllByText(/Fresado superior/i).length).toBeGreaterThan(0);
-    expect(screen.getByText(/Broca 0.8 mm/i)).toBeInTheDocument();
-
-    fireEvent.click(screen.getByRole("button", { name: /Preparar trabajo/i }));
-
-    await waitFor(() => expect(apiMock.prepareJobRun).toHaveBeenCalledWith(project.id, project.montajes[0].id, "superior"));
-  });
-
 });
 
 vi.mock("../features/viewer/ToolpathViewer", () => ({
@@ -927,8 +899,8 @@ describe("ProjectWorkspace", () => {
     renderWorkspace();
 
     await waitFor(() => expect(screen.getAllByRole("button", { name: /^Archivo$/i }).length).toBeGreaterThan(0));
-    fireEvent.click(screen.getByRole("button", { name: /Compensación/i }));
-    expect(screen.getByRole("button", { name: /Previsualizar compensación/i })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /^Ejecución$/i }));
+    expect(screen.getByRole("button", { name: /Generar compensación del proyecto/i })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /Exportar/i })).toBeNull();
     expect(screen.queryByText(/Descargar G-code/i)).toBeNull();
   });
@@ -1006,31 +978,19 @@ describe("ProjectWorkspace", () => {
     expect(await screen.findByText("Esta operación todavía no tiene G-code.")).toBeInTheDocument();
     expect(screen.getAllByText(/Taladrado 1,0 mm/).length).toBeGreaterThan(0);
   });
-  it("muestra el plan multioperación en Compensación y permite generar todas las compensaciones", async () => {
-    renderWorkspace(physicalMachine);
-
-    fireEvent.click(screen.getByRole("button", { name: /Compensación/i }));
-
-    expect(await screen.findByText(/Plan multioperación/i)).toBeInTheDocument();
-    expect(screen.getAllByText(/001/).length).toBeGreaterThan(0);
-    expect(screen.getByText(/Taladrado 0.8/i)).toBeInTheDocument();
-
-    fireEvent.click(screen.getByRole("button", { name: /Generar compensación del proyecto/i }));
-
-    await waitFor(() => expect(apiMock.generateProjectCompensation).toHaveBeenCalledWith(project.id, project.montajes[0].id, "superior"));
-  });
-
-  it("muestra la línea de tiempo multioperación en Ejecución y permite preparar el trabajo", async () => {
+  it("muestra la ejecución unificada con compensación del proyecto y preparación del trabajo", async () => {
     renderWorkspace(physicalMachine);
 
     fireEvent.click(screen.getByRole("button", { name: /^Ejecución$/i }));
 
-    expect(await screen.findByText(/Línea de tiempo multioperación/i)).toBeInTheDocument();
-    expect(screen.getAllByText(/Fresado superior/i).length).toBeGreaterThan(0);
-    expect(screen.getByText(/Broca 0.8 mm/i)).toBeInTheDocument();
+    expect(await screen.findByText(/Plan multioperación listo para ejecución/i)).toBeInTheDocument();
+    expect(screen.getByText(/Secuencia automática por operaciones/i)).toBeInTheDocument();
+    expect(screen.getAllByText(/Taladrado 0.8/i).length).toBeGreaterThan(0);
+
+    fireEvent.click(screen.getByRole("button", { name: /Generar compensación del proyecto/i }));
+    await waitFor(() => expect(apiMock.generateProjectCompensation).toHaveBeenCalledWith(project.id, project.montajes[0].id, "superior"));
 
     fireEvent.click(screen.getByRole("button", { name: /Preparar trabajo/i }));
-
     await waitFor(() => expect(apiMock.prepareJobRun).toHaveBeenCalledWith(project.id, project.montajes[0].id, "superior"));
   });
 
