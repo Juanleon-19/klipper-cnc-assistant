@@ -520,3 +520,23 @@ export type CompensatedGCodeResult = {
   metadata: Record<string, unknown>;
   preview: Record<string, unknown>;
 };
+
+export type ExecutionCheck = {
+  name: string;
+  ok: boolean;
+  detail: string;
+};
+
+export type ExecutionPreflight = {
+  state: string;
+  ready: boolean;
+  checks: ExecutionCheck[];
+  generated_file: string | null;
+};
+
+export type ExecutionActionResult = {
+  state: string;
+  action: string;
+  detail: string | null;
+  preflight?: ExecutionPreflight | null;
+};

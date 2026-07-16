@@ -526,6 +526,41 @@ class PhysicalIntegrationTest(unittest.TestCase):
             self.assertEqual(session["bloqueos_compensacion"], [])
             self.assertIn("Cobertura validada", "\n".join(str(step["detalle"]) for step in session["pasos"]))
 
+    def test_reference_session_reports_exact_invalid_coverage_reason_for_physical_map(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            repository = JsonProjectRepository(Path(temp))
+            project_service = ProjectService(repository)
+            project = project_service.create_project(nombre="PCB", ancho_mm=60, alto_mm=60, espesor_mm=1.6)
+            operation = project_service.add_operation(project_id=project.id, nombre="Aislamiento", tipo="aislamiento", cara="superior", orden=0, tool_id="tool-v", herramienta="V-bit")
+            project_service.upload_operation_gcode(project_id=project.id, operation_id=operation.id, filename="job.nc", content="G21\nG90\nG1 X2.859 Y4.905 Z-0.100 F120\nG1 X20 Y20 Z-0.100 F120\n")
+            project_service.analyze_operation(project.id, operation.id)
+            service = PhysicalMapService(repository)
+            plan = service.capture_reference_and_plan(
+                project_id=project.id,
+                operation_id=operation.id,
+                machine_origin_x=100.0,
+                machine_origin_y=200.0,
+                reference_z=1.0,
+                machine_position={"x_mm": 100.0, "y_mm": 200.0, "z_mm": 1.0},
+                homed_axes="xyz",
+                machine_label="test",
+                session_id="session",
+                config=PhysicalMeshConfig(grid_mode="manual", rows=2, columns=2, edge_margin_left_mm=10.0, edge_margin_right_mm=10.0, edge_margin_bottom_mm=10.0, edge_margin_top_mm=10.0),
+            )
+            for point in plan["points"]:
+                plan = service.record_point(project_id=project.id, map_id=plan["map_id"], point_index=int(point["index"]), z_measured=1.0)
+
+            machine_session = MachineSessionService()
+            machine_session.machine_mode = "fisico"
+            session = ReferenceSessionService(repository, HeightMapService(repository), machine_session, service).get_session(project.id, operation.id)
+            self.assertFalse(session["lista_para_compensacion"])
+            joined = " ".join(session["bloqueos_compensacion"])
+            self.assertIn("La cobertura del mapa físico es insuficiente", joined)
+            self.assertIn("Primer punto fuera", joined)
+            self.assertIn("X=0.000", joined)
+            self.assertIn("distancia=14.142 mm", joined)
+            self.assertNotIn("Falta validación de cobertura del mapa físico.", joined)
+
     def _physical_project(self, temp: str):
         repository = JsonProjectRepository(Path(temp))
         project_service = ProjectService(repository)

@@ -361,7 +361,7 @@ describe("ProjectWorkspace", () => {
     renderWorkspace();
 
     await waitFor(() => expect(apiMock.getReferenceSession).toHaveBeenCalled());
-    fireEvent.click(screen.getByRole("button", { name: /Referencia/i }));
+    fireEvent.click(screen.getByRole("button", { name: /^Referencia$/i }));
     expect(await screen.findByText(/Flujo simulado de preparación/i)).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: /Mapa de alturas/i }));
@@ -372,7 +372,7 @@ describe("ProjectWorkspace", () => {
   it("lee y muestra la posición capturada estructurada de la referencia física", async () => {
     renderWorkspace(physicalMachine);
 
-    fireEvent.click(screen.getByRole("button", { name: /Referencia/i }));
+    fireEvent.click(screen.getByRole("button", { name: /^Referencia$/i }));
 
     expect(await screen.findByText(/Referencia X\/Y\/Z medida/i)).toBeInTheDocument();
     expect(screen.queryByText(/Flujo simulado de preparación/i)).toBeNull();
@@ -384,7 +384,7 @@ describe("ProjectWorkspace", () => {
     vi.mocked(physicalMachine.runMachineAction).mockClear();
     renderWorkspace(physicalMachine);
 
-    fireEvent.click(screen.getByRole("button", { name: /Referencia/i }));
+    fireEvent.click(screen.getByRole("button", { name: /^Referencia$/i }));
 
     expect(await screen.findByText(/Home, Z de preparación y centro/i)).toBeInTheDocument();
     expect(screen.getAllByText(/Z de preparación/i).length).toBeGreaterThan(0);
@@ -404,7 +404,7 @@ describe("ProjectWorkspace", () => {
     vi.mocked(physicalMachine.refreshRuntime).mockClear();
     renderWorkspace(physicalMachine);
 
-    fireEvent.click(screen.getByRole("button", { name: /Referencia/i }));
+    fireEvent.click(screen.getByRole("button", { name: /^Referencia$/i }));
     const probeButton = await screen.findByRole("button", { name: /Sondear referencia ahora/i });
     expect(probeButton).toBeEnabled();
 
@@ -421,7 +421,7 @@ describe("ProjectWorkspace", () => {
     vi.mocked(physicalMachine.refreshRuntime).mockClear();
     renderWorkspace(physicalMachine);
 
-    fireEvent.click(screen.getByRole("button", { name: /Referencia/i }));
+    fireEvent.click(screen.getByRole("button", { name: /^Referencia$/i }));
     fireEvent.click(await screen.findByRole("button", { name: /Sondear referencia ahora/i }));
 
     await waitFor(() => expect(apiMock.confirmProbe).toHaveBeenCalled());
@@ -449,7 +449,7 @@ describe("ProjectWorkspace", () => {
     vi.mocked(physicalMachine.refreshRuntime).mockClear();
     renderWorkspace(physicalMachine);
 
-    fireEvent.click(screen.getByRole("button", { name: /Referencia/i }));
+    fireEvent.click(screen.getByRole("button", { name: /^Referencia$/i }));
     expect(await screen.findByText(/Configuración avanzada de movimiento/i)).toBeInTheDocument();
 
     fireEvent.change(screen.getByLabelText(/Velocidad Z de preparación/i), { target: { value: "90" } });
@@ -601,7 +601,7 @@ describe("ProjectWorkspace", () => {
     await waitFor(() => expect(apiMock.executeAllPhysicalMapPoints).toHaveBeenCalledWith("proj_1", "measured/manual-2x2"));
     await waitFor(() => expect(apiMock.getPhysicalMap).toHaveBeenCalledTimes(2));
     await waitFor(() => expect(apiMock.getPhysicalHeightMap).toHaveBeenCalledWith("proj_1", "op_1"));
-    await waitFor(() => expect(apiMock.getReferenceSession).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(apiMock.getReferenceSession).toHaveBeenCalledTimes(3));
     expect(await screen.findByText(/^MESH_COMPLETE$/i)).toBeInTheDocument();
   });
 
@@ -642,6 +642,40 @@ describe("ProjectWorkspace", () => {
     expect(await screen.findByText(/Surface 3D mock/i)).toBeInTheDocument();
   });
 
+  it("hidrata un mapa físico MAP_READY sin requerir recargar la página", async () => {
+    apiMock.getHeightMap.mockRejectedValue(new Error("No existe mapa de alturas para esta operación."));
+    apiMock.getReferenceSession.mockResolvedValue(referenceSession);
+    apiMock.getPhysicalMap.mockResolvedValue({
+      payload: {
+        map_id: "measured/manual-2x2",
+        status: "MAP_READY",
+        source: "MEASURED",
+        map_ready_state: "MAP_READY",
+        point_count: 4,
+        grid_mode: "manual",
+        rows: 2,
+        columns: 2,
+        dx: 76,
+        dy: 56,
+        grid: { rows: 2, columns: 2, dx_mm: 76, dy_mm: 56 },
+        local_region: { min_x_mm: 2, min_y_mm: 2, max_x_mm: 78, max_y_mm: 58 },
+        points: [
+          { index: 0, role: "REFERENCE", row: 0, column: 0, x_local: 2, y_local: 2, x_machine: 62, y_machine: 90.75, status: "MEASURED", z_measured: 0, delta_z: 0 },
+          { index: 1, row: 0, column: 1, x_local: 78, y_local: 2, x_machine: 138, y_machine: 90.75, status: "MEASURED", z_measured: 0.01, delta_z: 0.01 },
+          { index: 2, row: 1, column: 1, x_local: 78, y_local: 58, x_machine: 138, y_machine: 146.75, status: "MEASURED", z_measured: 0.02, delta_z: 0.02 },
+          { index: 3, row: 1, column: 0, x_local: 2, y_local: 58, x_machine: 62, y_machine: 146.75, status: "MEASURED", z_measured: -0.01, delta_z: -0.01 },
+        ],
+        validation: { status: "VALID", sufficient: true, validated_at: new Date().toISOString() },
+      },
+    });
+
+    renderWorkspace(physicalMachine);
+    fireEvent.click(screen.getByRole("button", { name: /Mapa de alturas/i }));
+
+    await waitFor(() => expect(apiMock.getPhysicalHeightMap).toHaveBeenCalledWith("proj_1", "op_1"));
+    expect(await screen.findByText(/Heatmap mock · 4 puntos · medido/i)).toBeInTheDocument();
+  });
+
   it("muestra propuesta automática, permite aceptarla y reiniciar solo el mapa", async () => {
     const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
     renderWorkspace(physicalMachine);
@@ -672,7 +706,7 @@ describe("ProjectWorkspace", () => {
 
   it("acepta 0 válido en X e Y del origen de trabajo", async () => {
     renderWorkspace();
-    fireEvent.click(screen.getByRole("button", { name: /Referencia/i }));
+    fireEvent.click(screen.getByRole("button", { name: /^Referencia$/i }));
     const originHeading = await screen.findByText(/2. Origen de trabajo X\/Y/i);
     const originPanel = originHeading.closest("article");
     expect(originPanel).not.toBeNull();
@@ -687,7 +721,7 @@ describe("ProjectWorkspace", () => {
 
   it("acepta 0 válido en Z y números decimales", async () => {
     renderWorkspace();
-    fireEvent.click(screen.getByRole("button", { name: /Referencia/i }));
+    fireEvent.click(screen.getByRole("button", { name: /^Referencia$/i }));
     const zHeading = await screen.findByText(/3. Referencia Z/i);
     const zPanel = zHeading.closest("article");
     expect(zPanel).not.toBeNull();
@@ -708,7 +742,7 @@ describe("ProjectWorkspace", () => {
       new ApiError("Solicitud invalida. z_mm: debe ser un numero valido.", 422, { z_mm: "Solicitud invalida. z_mm: debe ser un numero valido." })
     );
     renderWorkspace();
-    fireEvent.click(screen.getByRole("button", { name: /Referencia/i }));
+    fireEvent.click(screen.getByRole("button", { name: /^Referencia$/i }));
     const zHeading = await screen.findByText(/3. Referencia Z/i);
     const zPanel = zHeading.closest("article");
     expect(zPanel).not.toBeNull();
@@ -730,7 +764,7 @@ describe("ProjectWorkspace", () => {
 
   it("copia X/Y del origen de trabajo hacia la referencia Z cuando se activa la opción", async () => {
     renderWorkspace();
-    fireEvent.click(screen.getByRole("button", { name: /Referencia/i }));
+    fireEvent.click(screen.getByRole("button", { name: /^Referencia$/i }));
     const originPanel = (await screen.findByText(/2. Origen de trabajo X\/Y/i)).closest("article") as HTMLElement;
     const zPanel = (await screen.findByText(/3. Referencia Z/i)).closest("article") as HTMLElement;
     const originScope = within(originPanel);

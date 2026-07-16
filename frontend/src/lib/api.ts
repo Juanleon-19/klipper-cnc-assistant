@@ -12,6 +12,8 @@ import type {
   Project,
   ProjectPayload,
   ContinueProjectResult,
+  ExecutionActionResult,
+  ExecutionPreflight,
   ReferenceConfirmation,
   ReferenceSession,
   SystemInfoResponse,
@@ -358,9 +360,9 @@ export const api = {
   generatedFileUrl: (projectId: string, relativePath: string) =>
     `/api/projects/${projectId}/generated/${relativePath}`,
   executionPreflight: (projectId: string, operationId: string) =>
-    request<Record<string, unknown>>(`/api/projects/${projectId}/operations/${operationId}/execution/preflight`, { method: "POST" }),
+    request<ExecutionPreflight>(`/api/projects/${projectId}/operations/${operationId}/execution/preflight`, { method: "POST" }),
   executionAction: (projectId: string, operationId: string, action: string) =>
-    request<Record<string, unknown>>(`/api/projects/${projectId}/operations/${operationId}/execution/${action}`, { method: "POST" }),
+    request<ExecutionActionResult>(`/api/projects/${projectId}/operations/${operationId}/execution/${action}`, { method: "POST" }),
   deleteHeightMap: (projectId: string, operationId: string) =>
     request<{ detalle: string }>(`/api/projects/${projectId}/operations/${operationId}/height-map`, {
       method: "DELETE",

@@ -26,6 +26,9 @@ import type {
   PhysicalMeshPoint,
   Bounds,
   OperationAnalysis,
+  ExecutionActionResult,
+  ExecutionCheck,
+  ExecutionPreflight,
 } from "../types";
 import { ProjectForm } from "./ProjectForm";
 import { StatusBadge } from "./StatusBadge";
@@ -136,6 +139,19 @@ function toneForReferenceStep(step: ReferenceStep): "success" | "warning" | "dan
   return "neutral";
 }
 
+function isPhysicalMapReady(payload: PhysicalMapPayload | null | undefined): payload is PhysicalMapPayload {
+  if (!payload) {
+    return false;
+  }
+  if (payload.source !== "MEASURED") {
+    return false;
+  }
+  if (payload.status === "MESH_COMPLETE" || payload.status === "MAP_READY") {
+    return true;
+  }
+  return payload.map_ready_state === "MAP_READY";
+}
+
 export function ProjectWorkspace({
   project,
   busyKey,
@@ -171,6 +187,9 @@ export function ProjectWorkspace({
   const [referenceSession, setReferenceSession] = useState<ReferenceSession | null>(null);
   const [compensationPreview, setCompensationPreview] = useState<CompensationPreview | null>(null);
   const [generatedGCode, setGeneratedGCode] = useState<CompensatedGCodeResult | null>(null);
+  const [generatedProcessFiles, setGeneratedProcessFiles] = useState<Record<string, CompensatedGCodeResult>>({});
+  const [executionChecks, setExecutionChecks] = useState<ExecutionCheck[]>([]);
+  const [executionOperationId, setExecutionOperationId] = useState<string | null>(null);
   const [heightMapBusy, setHeightMapBusy] = useState(false);
   const [referenceBusy, setReferenceBusy] = useState(false);
   const [workspaceError, setWorkspaceError] = useState("");
@@ -255,6 +274,18 @@ export function ProjectWorkspace({
     [project, selectedSetupId]
   );
 
+  const processOperations = useMemo(
+    () => {
+      if (!project || !selectedSetup) {
+        return [] as Operation[];
+      }
+      return [...project.operaciones]
+        .filter((operation) => operation.setup_id === selectedSetup.id && (!selectedOperation || operation.cara === selectedOperation.cara))
+        .sort((left, right) => left.orden - right.orden);
+    },
+    [project, selectedOperation, selectedSetup]
+  );
+
   useEffect(() => {
     if (!project) {
       setSelectedSetupId(null);
@@ -274,6 +305,7 @@ export function ProjectWorkspace({
       setReferenceSession(null);
       setCompensationPreview(null);
       setGeneratedGCode(null);
+      setGeneratedProcessFiles({});
       setGeneratedGCode(null);
       return;
     }
@@ -292,7 +324,7 @@ export function ProjectWorkspace({
         ]);
         let maybeMap: HeightMap | null = null;
         if (machine.isPhysical) {
-          if (maybePhysicalMap?.status === "MESH_COMPLETE") {
+          if (isPhysicalMapReady(maybePhysicalMap)) {
             maybeMap = await api.getPhysicalHeightMap(project.id, selectedOperation.id).catch(() => null);
           }
         } else {
@@ -306,7 +338,7 @@ export function ProjectWorkspace({
         setReferenceSession(referencePayload);
         setPhysicalMap(maybePhysicalMap);
         setHeightMap(maybeMap);
-        if (machine.isPhysical && maybePhysicalMap?.status === "MESH_COMPLETE") {
+        if (machine.isPhysical && isPhysicalMapReady(maybePhysicalMap)) {
           setMapSource("MEASURED");
         }
       } catch (error) {
@@ -336,7 +368,7 @@ export function ProjectWorkspace({
         }
         setPhysicalMap(nextMap);
         setMapSource("MEASURED");
-        if (nextMap.status === "MESH_COMPLETE") {
+        if (isPhysicalMapReady(nextMap)) {
           const [measured, refreshedReference] = await Promise.all([
             api.getPhysicalHeightMap(project.id, selectedOperation.id),
             api.getReferenceSession(project.id, selectedOperation.id),
@@ -367,6 +399,21 @@ export function ProjectWorkspace({
       window.clearInterval(timer);
     };
   }, [project, selectedOperation, physicalMap?.map_id, physicalMap?.status, physicalMap?.execution]);
+
+  useEffect(() => {
+    if (!project || !selectedOperation || !machine.isPhysical || !physicalMap?.map_id || !isPhysicalMapReady(physicalMap) || heightMap) {
+      return;
+    }
+    let cancelled = false;
+    void api.getPhysicalHeightMap(project.id, selectedOperation.id).then((measured) => {
+      if (!cancelled) {
+        setHeightMap(measured);
+      }
+    }).catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [heightMap, machine.isPhysical, physicalMap, project, selectedOperation]);
 
   useEffect(() => {
     if (!referenceSession) {
@@ -861,6 +908,50 @@ export function ProjectWorkspace({
           </>
         ) : <p className="muted">Seleccione una operación para gestionar su archivo y análisis.</p>}
       </article>
+      <article className="panel">
+        <div className="section-heading section-heading--stacked">
+          <div>
+            <p className="eyebrow">Procesos CNC</p>
+            <h3>Operaciones del montaje activo</h3>
+          </div>
+          <div className="toolbar-inline">
+            <button className="button" type="button" disabled={referenceBusy || processOperations.length === 0} onClick={() => void generateAllCompensatedForProcesses()}>Compensar todos los procesos</button>
+            <button className="button button--ghost" type="button" disabled={!machine.isPhysical || machine.refreshing} onClick={() => void machine.runMachineAction("tool-change-position")}>Ir a cambio de herramienta</button>
+          </div>
+        </div>
+        {processOperations.length ? <div className="point-card-grid">{processOperations.map((operation, index) => {
+          const previous = index > 0 ? processOperations[index - 1] : null;
+          const toolChanged = previous ? (previous.tool_id || previous.herramienta) !== (operation.tool_id || operation.herramienta) : false;
+          const generated = generatedProcessFiles[operation.id] ?? (selectedOperation?.id === operation.id ? generatedGCode : null);
+          return <div className="mesh-point-card" key={operation.id}>
+            <strong>Proceso {index + 1} - {operation.nombre}</strong>
+            <span>Herramienta: {operation.herramienta ?? operation.tool_id ?? "sin herramienta"}</span>
+            <span>Orden: {operation.orden}</span>
+            <span>{toolChanged ? "Requiere cambio de herramienta" : index === 0 ? "Herramienta inicial" : "Continúa con la misma herramienta"}</span>
+            <span>Archivo compensado: {generated?.relative_path ?? "pendiente"}</span>
+            <div className="action-grid action-grid--inline">
+              <button className="button button--ghost" type="button" disabled={referenceBusy} onClick={() => void (async () => {
+                setReferenceBusy(true);
+                setWorkspaceError("");
+                try {
+                  const result = await api.generateCompensatedGCode(project!.id, operation.id);
+                  setGeneratedProcessFiles((current) => ({ ...current, [operation.id]: result }));
+                  if (selectedOperation?.id === operation.id) {
+                    setGeneratedGCode(result);
+                  }
+                } catch (error) {
+                  setWorkspaceError(error instanceof Error ? error.message : "No fue posible generar el G-code compensado del proceso.");
+                } finally {
+                  setReferenceBusy(false);
+                }
+              })()}>Compensar</button>
+              <button className="button button--ghost" type="button" disabled={!machine.isPhysical || machine.refreshing} onClick={() => void captureToolReferenceForOperation(operation.id)}>Sondear referencia herramienta</button>
+              <button className="button button--ghost" type="button" disabled={referenceBusy} onClick={() => void runExecutionAction("preflight", operation.id)}>Preflight</button>
+              <button className="button button--ghost" type="button" disabled={referenceBusy} onClick={() => void runExecutionAction("upload", operation.id)}>Subir</button>
+              <button className="button button--ghost" type="button" disabled={referenceBusy} onClick={() => void runExecutionAction("start", operation.id)}>Ejecutar</button>
+            </div>
+          </div>;})}</div> : <p className="muted">No hay procesos analizados en este montaje.</p>}
+      </article>
     </div>
   );
 
@@ -1190,7 +1281,7 @@ export function ProjectWorkspace({
         setPhysicalMap(result);
         setMapSource("MEASURED");
       }
-      if (project && selectedOperation && nextMap?.status === "MESH_COMPLETE") {
+      if (project && selectedOperation && isPhysicalMapReady(nextMap)) {
         const [measured, refreshedReference] = await Promise.all([
           api.getPhysicalHeightMap(project.id, selectedOperation.id),
           api.getReferenceSession(project.id, selectedOperation.id),
@@ -1200,8 +1291,11 @@ export function ProjectWorkspace({
         setMapSource("MEASURED");
         setActiveMapTab("mapa2d");
         setMeshValidationMessage("Malla completada. Cobertura validada automáticamente; la compensación ya puede generarse si no existen otros bloqueos.");
-      } else if (result) {
-        setHeightMap(null);
+      } else if (project && selectedOperation) {
+        void api.getReferenceSession(project.id, selectedOperation.id).then(setReferenceSession).catch(() => undefined);
+        if (result) {
+          setHeightMap(null);
+        }
       }
       if (project && selectedOperation) {
         void api.getPhysicalMapHistory(project.id, selectedOperation.id).then(setPhysicalMapHistory).catch(() => undefined);
@@ -1253,6 +1347,13 @@ export function ProjectWorkspace({
     const plannedPoints = rows * columns;
     const executablePoints = physicalMap?.executable_point_count ?? physicalMap?.points?.filter((point) => point.status !== "EXCLUDED").length ?? plannedPoints;
     const excludedPoints = physicalMap?.excluded_count ?? physicalMap?.points?.filter((point) => point.status === "EXCLUDED").length ?? 0;
+    const processBounds = combineOperationBounds(processOperations.filter((operation) => Boolean(operation.analisis)));
+    const regionCoversProcesses = !processBounds || (
+      edgeLeft <= processBounds.min_x_mm + 0.001
+      && project.material.ancho_mm - edgeRight >= processBounds.max_x_mm - 0.001
+      && edgeBottom <= processBounds.min_y_mm + 0.001
+      && project.material.alto_mm - edgeTop >= processBounds.max_y_mm - 0.001
+    );
     const hasReferencePoint = (physicalMap?.points ?? []).some((point) => point.role === "REFERENCE");
     const filteredPhysicalPoints = (physicalMap?.points ?? []).filter((point) => {
       if (pointFilter === "ALL") return true;
@@ -1335,7 +1436,7 @@ export function ProjectWorkspace({
           <article className="panel">
             <div className="section-heading section-heading--stacked">
               <div><p className="eyebrow">Malla física del material</p><h3>Configuración y sondeo automático</h3></div>
-              <StatusBadge tone={physicalMap?.status === "MESH_COMPLETE" ? "success" : physicalMap ? "info" : "neutral"}>{physicalMap?.status ?? "sin mapa medido"}</StatusBadge>
+              <StatusBadge tone={isPhysicalMapReady(physicalMap) ? "success" : physicalMap ? "info" : "neutral"}>{String(physicalMap?.status ?? physicalMap?.map_ready_state ?? "sin mapa medido")}</StatusBadge>
             </div>
             {!machine.isPhysical ? <div className="alert alert--warning">Modo físico requerido para medir un mapa real.</div> : null}
             {!referenceSession?.origen_trabajo ? <div className="alert alert--warning">No puede iniciar la malla: falta capturar el origen X/Y.</div> : null}
@@ -1397,6 +1498,9 @@ export function ProjectWorkspace({
             </div>
             <div className="subpanel subpanel--soft">
               <div className="section-heading"><h4>Retiro del borde del material</h4><label className="inline-check"><input type="checkbox" checked={useUniformEdgeRetreat} onChange={(event) => { setUseUniformEdgeRetreat(event.target.checked); invalidateMeshPreview(); }} /> Usar el mismo retiro en todos los bordes</label></div>
+              <div className="action-grid action-grid--inline">
+                <button className="button button--ghost" type="button" disabled={!processBounds} onClick={applyRegionFromOperations}>Área desde operaciones</button>
+              </div>
               {useUniformEdgeRetreat ? (
                 <label>Retiro uniforme (mm)<input value={uniformEdgeRetreatInput} inputMode="decimal" onChange={(event) => { setUniformEdgeRetreatInput(event.target.value); invalidateMeshPreview(); }} /></label>
               ) : (
@@ -1439,6 +1543,7 @@ export function ProjectWorkspace({
               <div className="metric-box"><span>Retracto</span><strong>{formatMillimeters(parsePositive(probeRetractInput), 3)}</strong></div>
             </div>
             {probeWidth <= 0 || probeHeight <= 0 ? <div className="alert alert--warning">El retiro de los bordes deja una región de sondeo inválida. Reduzca los valores o revise las dimensiones del material.</div> : null}
+            {!regionCoversProcesses && processBounds ? <div className="alert alert--warning">La región sondeable actual no cubre todas las trayectorias del montaje. Use "Área desde operaciones" o reduzca los retiros del borde.</div> : null}
             {meshValidationMessage ? <div className="alert alert--info">{meshValidationMessage}</div> : null}
             <div className="action-grid">
               <button className="button" type="button" disabled={heightMapBusy || !selectedOperation || probeWidth <= 0 || probeHeight <= 0} onClick={() => void withPhysicalMapAction(async () => {
@@ -1452,7 +1557,7 @@ export function ProjectWorkspace({
               })}>1. Generar vista previa de malla</button>
               <button className="button" type="button" disabled={!physicalMapId} onClick={() => setMeshValidationMessage(physicalFailedPoints > 0 ? `La malla tiene ${physicalFailedPoints} punto(s) fallidos o pendientes de reintento.` : "Cobertura geométrica revisada. No se extrapola fuera de la región interior ni sobre exclusiones.")}>2. Validar límites</button>
               <button className="button" type="button" disabled={!physicalMapId || physicalMap?.status === "MESH_COMPLETE"} onClick={() => { setMeshArmed(true); setMeshValidationMessage("Sondeo armado. Una sola confirmación ejecutará todos los puntos ejecutables de la malla."); }}>3. Armar sondeo</button>
-              <button className="button" type="button" disabled={heightMapBusy || !physicalMapId || !meshArmed || physicalMap?.status === "MESH_COMPLETE"} onClick={() => void withPhysicalMapAction(async () => (await api.executeAllPhysicalMapPoints(project.id, physicalMapId)).payload)}>4. Iniciar sondeo automático</button>
+              <button className="button" type="button" disabled={heightMapBusy || !physicalMapId || !meshArmed || isPhysicalMapReady(physicalMap)} onClick={() => void withPhysicalMapAction(async () => (await api.executeAllPhysicalMapPoints(project.id, physicalMapId)).payload)}>4. Iniciar sondeo automático</button>
               <button className="button button--ghost" type="button" disabled={!physicalMapId} onClick={() => void withPhysicalMapAction(async () => {
                 if (!physicalMapId) return null;
                 const result = await api.repeatPhysicalMap(project.id, physicalMapId);
@@ -1473,6 +1578,7 @@ export function ProjectWorkspace({
 
         {activeMapTab === "mapa2d" && (heightMap || physicalMap) ? <HeightMapHeatmap material={project.material} heightMap={heightMap} mode={heightMode} meshPoints={physicalMap?.points ?? physicalMap?.local_points ?? []} exclusions={physicalMap?.exclusions ?? meshExclusions} probeRegion={physicalMap?.local_region ?? physicalMap?.probe_region ?? heightMap?.probe_region ?? null} coordinateMode={coordinateMode} machineOrigin={typeof physicalMap?.machine_origin_x === "number" && typeof physicalMap?.machine_origin_y === "number" ? { x_mm: physicalMap.machine_origin_x, y_mm: physicalMap.machine_origin_y } : null} previewMessage={physicalMap?.warnings?.[0] ?? null} /> : null}
         {activeMapTab === "superficie3d" && heightMap ? <HeightMapSurface3D heightMap={heightMap} mode={heightMode} /> : null}
+        {activeMapTab === "superficie3d" && !heightMap && isPhysicalMapReady(physicalMap) ? <article className="panel empty-state"><p>Cargando superficie 3D del mapa medido...</p></article> : null}
         {activeMapTab === "puntos" ? (
           <article className="panel"><div className="section-heading section-heading--stacked"><div><p className="eyebrow">Puntos de malla</p><h3>Lecturas y estados</h3></div><div className="map-segmented" aria-label="Filtro de puntos">{(["ALL", "PENDING", "MEASURED", "EXCLUDED", "FAILED"] as const).map((filter) => <button key={filter} className={`map-segment-button${pointFilter === filter ? " map-segment-button--active" : ""}`} type="button" onClick={() => setPointFilter(filter)}>{filter === "ALL" ? "Todos" : filter === "PENDING" ? "Pendientes" : filter === "MEASURED" ? "Medidos" : filter === "EXCLUDED" ? "Excluidos" : "Fallidos"}</button>)}</div></div>{filteredPhysicalPoints.length ? <div className="point-card-grid">{filteredPhysicalPoints.map((point: PhysicalMeshPoint) => <div className="mesh-point-card" key={point.index}><strong>{point.role === "REFERENCE" ? "Punto #0 — Referencia X0/Y0" : `Punto #${hasReferencePoint ? point.index : point.index + 1}`}</strong><span>Fila {typeof point.row === "number" && point.row >= 0 ? point.row + 1 : "-"}</span><span>Columna {typeof point.column === "number" && point.column >= 0 ? point.column + 1 : "-"}</span><span>PCB X/Y: {formatMillimeters(point.x_local, 3)} / {formatMillimeters(point.y_local, 3)}</span><span>CNC X/Y: {formatMillimeters(point.x_machine ?? null, 3)} / {formatMillimeters(point.y_machine ?? null, 3)}</span><span>Z medida: {formatMillimeters(point.z_measured_abs ?? point.z_measured ?? null, 3)}</span><span>Delta Z: {formatMillimeters(point.delta_z ?? null, 3)}</span><span>Estado: {formatPointStatus(point.status)}</span><span>Intentos: {point.attempts ?? 0}</span><span>Duración: {typeof point.duration_s === "number" ? `${point.duration_s.toFixed(3)} s` : "-"}</span>{point.error || point.last_error ? <span>Error: {point.error ?? point.last_error}</span> : null}</div>)}</div> : <p className="muted">Genere la vista previa de malla para ver los puntos.</p>}</article>
         ) : null}
@@ -1527,15 +1633,119 @@ export function ProjectWorkspace({
     }
   };
 
-  const runExecutionAction = async (action: "preflight" | "upload" | "confirm-file" | "confirm-tool" | "confirm-spindle" | "start" | "pause" | "resume" | "cancel") => {
-    if (action === "preflight") {
-      setExecutionState(physicalMap?.status === "MESH_COMPLETE" && generatedGCode ? "READY_TO_EXECUTE" : "PREFLIGHT");
-      setExecutionEvent("Preflight revisado desde la aplicación. No se enviaron movimientos.");
+  const runExecutionAction = async (action: "preflight" | "upload" | "confirm-file" | "confirm-tool" | "confirm-spindle" | "start" | "pause" | "resume" | "cancel", operationId?: string) => {
+    if (!project) {
       return;
     }
-    const nextState = action === "upload" ? "UPLOADING" : action === "start" ? "RUNNING" : action === "pause" ? "PAUSED" : action === "cancel" ? "CANCELLED" : executionState;
-    setExecutionState(nextState);
-    setExecutionEvent(`Acción ${action} registrada para ejecución supervisada. No se inició mecanizado durante desarrollo.`);
+    const targetOperationId = operationId ?? selectedOperation?.id;
+    if (!targetOperationId) {
+      return;
+    }
+    setReferenceBusy(true);
+    setWorkspaceError("");
+    try {
+      if (action === "preflight") {
+        const preflight: ExecutionPreflight = await api.executionPreflight(project.id, targetOperationId);
+        setExecutionChecks(preflight.checks ?? []);
+        setExecutionState(preflight.ready ? "READY_TO_EXECUTE" : "PREFLIGHT");
+        setExecutionOperationId(targetOperationId);
+        setExecutionEvent(preflight.generated_file ?? preflight.state ?? "Preflight revisado.");
+        return;
+      }
+      const result: ExecutionActionResult = await api.executionAction(project.id, targetOperationId, action);
+      if (result.preflight?.checks) {
+        setExecutionChecks(result.preflight.checks);
+      }
+      setExecutionOperationId(targetOperationId);
+      setExecutionState((result.state ?? executionState) as "PREFLIGHT" | "READY_TO_EXECUTE" | "UPLOADING" | "RUNNING" | "PAUSED" | "CANCELLED" | "COMPLETED");
+      setExecutionEvent(result.detail ?? `Acción ${action} registrada.`);
+    } catch (error) {
+      setWorkspaceError(error instanceof Error ? error.message : "No fue posible actualizar la ejecución del proceso.");
+      if (selectedOperation) {
+        void api.getReferenceSession(project.id, selectedOperation.id).then(setReferenceSession).catch(() => undefined);
+      }
+    } finally {
+      setReferenceBusy(false);
+    }
+  };
+
+  const generateAllCompensatedForProcesses = async () => {
+    if (!project || processOperations.length === 0) {
+      return;
+    }
+    setReferenceBusy(true);
+    setWorkspaceError("");
+    const nextFiles: Record<string, CompensatedGCodeResult> = {};
+    try {
+      for (const operation of processOperations) {
+        const result = await api.generateCompensatedGCode(project.id, operation.id);
+        nextFiles[operation.id] = result;
+        if (selectedOperation?.id === operation.id) {
+          setGeneratedGCode(result);
+        }
+      }
+      setGeneratedProcessFiles((current) => ({ ...current, ...nextFiles }));
+      setExecutionEvent(`Se generaron ${Object.keys(nextFiles).length} archivo(s) compensados para el montaje activo.`);
+      if (selectedOperation) {
+        const session = await api.getReferenceSession(project.id, selectedOperation.id);
+        setReferenceSession(session);
+      }
+    } catch (error) {
+      setWorkspaceError(error instanceof Error ? error.message : "No fue posible compensar todos los procesos del montaje.");
+      if (selectedOperation) {
+        void api.getReferenceSession(project.id, selectedOperation.id).then(setReferenceSession).catch(() => undefined);
+      }
+    } finally {
+      setReferenceBusy(false);
+    }
+  };
+
+  const captureToolReferenceForOperation = async (operationId: string) => {
+    if (!project) {
+      return;
+    }
+    setReferenceBusy(true);
+    setWorkspaceError("");
+    try {
+      const session = await api.capturePhysicalZReferenceFromProbe(project.id, operationId);
+      if (selectedOperation?.id === operationId) {
+        setReferenceSession(session);
+      } else if (selectedOperation) {
+        const refreshed = await api.getReferenceSession(project.id, selectedOperation.id);
+        setReferenceSession(refreshed);
+      }
+      const refreshedMap = await api.getPhysicalMap(project.id, operationId).then((result) => result.payload).catch(() => null);
+      if (refreshedMap) {
+        setPhysicalMap(refreshedMap);
+      }
+      setExecutionEvent(`Referencia Z medida para la herramienta del proceso ${operationId}.`);
+    } catch (error) {
+      setWorkspaceError(error instanceof Error ? error.message : "No fue posible medir la referencia Z de la herramienta.");
+    } finally {
+      setReferenceBusy(false);
+    }
+  };
+
+  const applyRegionFromOperations = () => {
+    if (!selectedOperation || processOperations.length === 0) {
+      return;
+    }
+    const combined = combineOperationBounds(processOperations);
+    if (!combined) {
+      setWorkspaceError("No hay límites analizados para calcular la región desde las operaciones.");
+      return;
+    }
+    const nextLeft = Math.max(0, combined.min_x_mm);
+    const nextRight = Math.max(0, project.material.ancho_mm - combined.max_x_mm);
+    const nextBottom = Math.max(0, combined.min_y_mm);
+    const nextTop = Math.max(0, project.material.alto_mm - combined.max_y_mm);
+    setUseUniformEdgeRetreat(false);
+    setEdgeRetreatLeftInput(nextLeft.toFixed(3));
+    setEdgeRetreatRightInput(nextRight.toFixed(3));
+    setEdgeRetreatBottomInput(nextBottom.toFixed(3));
+    setEdgeRetreatTopInput(nextTop.toFixed(3));
+    setMeshValidationMessage(`Región ajustada desde las operaciones del montaje: X ${nextLeft.toFixed(3)}..${combined.max_x_mm.toFixed(3)} mm, Y ${nextBottom.toFixed(3)}..${combined.max_y_mm.toFixed(3)} mm.`);
+    invalidateMeshPreview();
   };
 
   const renderEjecucion = () => (
@@ -1554,9 +1764,9 @@ export function ProjectWorkspace({
           <div className="metric-box"><span>Klipper</span><strong>{machine.klipperReady ? "ready" : "no ready"}</strong></div>
           <div className="metric-box"><span>Homing</span><strong>{machine.homedAxes || "pendiente"}</strong></div>
           <div className="metric-box"><span>Mapa</span><strong>{physicalMap?.status ?? "pendiente"}</strong></div>
-          <div className="metric-box"><span>Archivo compensado</span><strong>{generatedGCode?.relative_path ?? "pendiente"}</strong></div>
+          <div className="metric-box"><span>Archivo compensado</span><strong>{(executionOperationId ? generatedProcessFiles[executionOperationId]?.relative_path : generatedProcessFiles[selectedOperation?.id ?? ""]?.relative_path) ?? generatedGCode?.relative_path ?? "pendiente"}</strong></div>
         </div>
-        <p className="muted">Último evento: {executionEvent}</p>
+        <p className="muted">Último evento: {executionEvent}</p>{executionChecks.length > 0 ? <ul className="compact-check-list">{executionChecks.map((check, index) => <li key={String(check.name ?? index)} data-ok={Boolean(check.ok)}>{String(check.name ?? "check")}: {String(check.detail ?? "")}</li>)}</ul> : null}
         <div className="action-grid">
           <button className="button" type="button" disabled={referenceBusy || !selectedOperation} onClick={() => void runExecutionAction("preflight")}>Ejecutar preflight</button>
           <button className="button button--ghost" type="button" disabled={referenceBusy || !selectedOperation} onClick={() => void runExecutionAction("upload")}>Subir archivo a Moonraker</button>
@@ -1569,6 +1779,50 @@ export function ProjectWorkspace({
           <button className="button button--ghost button--danger" type="button" disabled={referenceBusy || !selectedOperation} onClick={() => void runExecutionAction("cancel")}>Cancelar</button>
           <button className="button button--danger" type="button" disabled={!machine.isPhysical || machine.refreshing} onClick={() => { if (window.confirm("Enviar M112 a Klipper?")) void machine.runMachineAction("emergency"); }}>Emergencia M112</button>
         </div>
+      </article>
+      <article className="panel">
+        <div className="section-heading section-heading--stacked">
+          <div>
+            <p className="eyebrow">Procesos CNC</p>
+            <h3>Operaciones del montaje activo</h3>
+          </div>
+          <div className="toolbar-inline">
+            <button className="button" type="button" disabled={referenceBusy || processOperations.length === 0} onClick={() => void generateAllCompensatedForProcesses()}>Compensar todos los procesos</button>
+            <button className="button button--ghost" type="button" disabled={!machine.isPhysical || machine.refreshing} onClick={() => void machine.runMachineAction("tool-change-position")}>Ir a cambio de herramienta</button>
+          </div>
+        </div>
+        {processOperations.length ? <div className="point-card-grid">{processOperations.map((operation, index) => {
+          const previous = index > 0 ? processOperations[index - 1] : null;
+          const toolChanged = previous ? (previous.tool_id || previous.herramienta) !== (operation.tool_id || operation.herramienta) : false;
+          const generated = generatedProcessFiles[operation.id] ?? (selectedOperation?.id === operation.id ? generatedGCode : null);
+          return <div className="mesh-point-card" key={operation.id}>
+            <strong>Proceso {index + 1} - {operation.nombre}</strong>
+            <span>Herramienta: {operation.herramienta ?? operation.tool_id ?? "sin herramienta"}</span>
+            <span>Orden: {operation.orden}</span>
+            <span>{toolChanged ? "Requiere cambio de herramienta" : index === 0 ? "Herramienta inicial" : "Continúa con la misma herramienta"}</span>
+            <span>Archivo compensado: {generated?.relative_path ?? "pendiente"}</span>
+            <div className="action-grid action-grid--inline">
+              <button className="button button--ghost" type="button" disabled={referenceBusy} onClick={() => void (async () => {
+                setReferenceBusy(true);
+                setWorkspaceError("");
+                try {
+                  const result = await api.generateCompensatedGCode(project!.id, operation.id);
+                  setGeneratedProcessFiles((current) => ({ ...current, [operation.id]: result }));
+                  if (selectedOperation?.id === operation.id) {
+                    setGeneratedGCode(result);
+                  }
+                } catch (error) {
+                  setWorkspaceError(error instanceof Error ? error.message : "No fue posible generar el G-code compensado del proceso.");
+                } finally {
+                  setReferenceBusy(false);
+                }
+              })()}>Compensar</button>
+              <button className="button button--ghost" type="button" disabled={!machine.isPhysical || machine.refreshing} onClick={() => void captureToolReferenceForOperation(operation.id)}>Sondear referencia herramienta</button>
+              <button className="button button--ghost" type="button" disabled={referenceBusy} onClick={() => void runExecutionAction("preflight", operation.id)}>Preflight</button>
+              <button className="button button--ghost" type="button" disabled={referenceBusy} onClick={() => void runExecutionAction("upload", operation.id)}>Subir</button>
+              <button className="button button--ghost" type="button" disabled={referenceBusy} onClick={() => void runExecutionAction("start", operation.id)}>Ejecutar</button>
+            </div>
+          </div>;})}</div> : <p className="muted">No hay procesos analizados en este montaje.</p>}
       </article>
     </div>
   );
@@ -1604,6 +1858,7 @@ export function ProjectWorkspace({
               setCompensationPreview(result.preview);
             } catch (error) {
               setWorkspaceError(error instanceof Error ? error.message : "No fue posible calcular la previsualización de compensación.");
+              void api.getReferenceSession(project.id, selectedOperation.id).then(setReferenceSession).catch(() => undefined);
             } finally {
               setReferenceBusy(false);
             }
@@ -1622,8 +1877,11 @@ export function ProjectWorkspace({
             try {
               const result = await api.generateCompensatedGCode(project.id, selectedOperation.id);
               setGeneratedGCode(result);
+              setGeneratedProcessFiles((current) => ({ ...current, [selectedOperation.id]: result }));
+              void api.getReferenceSession(project.id, selectedOperation.id).then(setReferenceSession).catch(() => undefined);
             } catch (error) {
               setWorkspaceError(error instanceof Error ? error.message : "No fue posible generar el G-code compensado.");
+              void api.getReferenceSession(project.id, selectedOperation.id).then(setReferenceSession).catch(() => undefined);
             } finally {
               setReferenceBusy(false);
             }

@@ -456,6 +456,7 @@ class ReferenceSessionService:
             "region_sondeable_configurada_en": region_at,
             "mapa_disponible_en": map_at,
             "mapa_validado_en": validation_at,
+            "motivo_invalidacion": setup.preparacion.motivo_invalidacion,
         }
 
     def _active_physical_map(self, project_id: str, operation) -> dict[str, Any] | None:
@@ -626,7 +627,28 @@ class ReferenceSessionService:
         elif not self._is_complete_measured_map(physical_map):
             blocks.append("El mapa físico aún no está completo.")
         if context.get("mapa_validado_en") is None:
-            blocks.append("Falta validación de cobertura del mapa físico.")
+            validation = (physical_map or {}).get("validation") or {}
+            if validation.get("status") == "INVALID":
+                issues = validation.get("blocking_outside_points")
+                first_issue = None
+                raw_issues = validation.get("issues") or []
+                if isinstance(raw_issues, list) and raw_issues:
+                    first_issue = raw_issues[0]
+                suffix = ""
+                if isinstance(issues, int) and issues > 0:
+                    suffix = f" {issues} punto(s) de trayectoria quedan fuera del dominio medido."
+                if isinstance(first_issue, dict):
+                    suffix += (
+                        f" Primer punto fuera: línea/segmento {first_issue.get('segment_index', '-')}, "
+                        f"X={float(first_issue.get('x_mm', 0.0)):.3f}, "
+                        f"Y={float(first_issue.get('y_mm', 0.0)):.3f}, "
+                        f"distancia={float(first_issue.get('distance_mm', 0.0)):.3f} mm."
+                    )
+                blocks.append("La cobertura del mapa físico es insuficiente para compensar todas las trayectorias." + suffix)
+            elif context.get("motivo_invalidacion"):
+                blocks.append(str(context["motivo_invalidacion"]))
+            else:
+                blocks.append("Falta validación de cobertura del mapa físico.")
         return blocks
 
     def _map_step_status_from_values(self, map_at, machine_reference_confirmed: bool, origin, z_reference, validation_at) -> tuple[str, str]:
@@ -644,6 +666,16 @@ class ReferenceSessionService:
                 return "pendiente", "La validación requiere un mapa disponible."
             validation = (physical_map or {}).get("validation") or {}
             if validation.get("status") == "INVALID":
+                raw_issues = validation.get("issues") or []
+                if isinstance(raw_issues, list) and raw_issues and isinstance(raw_issues[0], dict):
+                    first = raw_issues[0]
+                    return "invalidado", (
+                        "La cobertura del mapa físico no cubre todas las trayectorias. "
+                        f"Primer punto fuera: línea/segmento {first.get('segment_index', '-')}, "
+                        f"X={float(first.get('x_mm', 0.0)):.3f}, "
+                        f"Y={float(first.get('y_mm', 0.0)):.3f}, "
+                        f"distancia={float(first.get('distance_mm', 0.0)):.3f} mm."
+                    )
                 return "invalidado", "La cobertura del mapa físico no cubre todas las trayectorias."
             if invalidation:
                 return "invalidado", invalidation

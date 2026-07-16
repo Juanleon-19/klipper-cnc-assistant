@@ -687,13 +687,16 @@ def build_router() -> APIRouter:
         add("homing", set("xyz").issubset(set(homed_axes)), f"homed_axes={homed_axes}" if homed_axes else "Falta homing XYZ.")
         try:
             physical_map = physical_service.get_active(project_id, operation_id)
-            map_ok = physical_map.get("status") == "MESH_COMPLETE"
+            validation = physical_map.get("validation") or {}
+            map_ok = bool(physical_map.get("source") == "MEASURED" and (physical_map.get("status") in {"MESH_COMPLETE", "MAP_READY"} or physical_map.get("map_ready_state") == "MAP_READY"))
+            validation_ok = bool(validation.get("status") == "VALID" and validation.get("sufficient") is True)
             tool_references = physical_map.get("tool_references") or {}
             requested_key = operation.tool_id or operation.herramienta or "sin-herramienta"
-            reference_ok = bool(tool_references.get(requested_key))
+            requested_reference = tool_references.get(requested_key) if isinstance(tool_references, dict) else None
+            reference_ok = isinstance(requested_reference, dict) and bool(requested_reference.get("valid"))
             if not reference_ok:
                 for reference in tool_references.values():
-                    if not isinstance(reference, dict):
+                    if not isinstance(reference, dict) or not reference.get("valid"):
                         continue
                     if operation.tool_id and reference.get("tool_id") == operation.tool_id:
                         reference_ok = True
@@ -701,7 +704,22 @@ def build_router() -> APIRouter:
                     if operation.herramienta and reference.get("tool_name") == operation.herramienta:
                         reference_ok = True
                         break
-            add("mapa_medido", map_ok, str(physical_map.get("status")))
+            validation_detail = "Cobertura validada."
+            if validation.get("status") == "INVALID":
+                issues = validation.get("issues") or []
+                if isinstance(issues, list) and issues and isinstance(issues[0], dict):
+                    first = issues[0]
+                    validation_detail = (
+                        "Mapa insuficiente para la trayectoria. "
+                        f"Primer punto fuera: línea/segmento {first.get('segment_index', '-')}, "
+                        f"X={float(first.get('x_mm', 0.0)):.3f}, "
+                        f"Y={float(first.get('y_mm', 0.0)):.3f}, "
+                        f"distancia={float(first.get('distance_mm', 0.0)):.3f} mm."
+                    )
+                else:
+                    validation_detail = "La cobertura del mapa físico no cubre todas las trayectorias."
+            add("mapa_medido", map_ok, str(physical_map.get("status") or physical_map.get("map_ready_state") or "sin mapa"))
+            add("cobertura_mapa", validation_ok, validation_detail)
             add("referencia_herramienta", reference_ok, "Referencia Z de herramienta disponible." if reference_ok else f"Falta referencia Z para la herramienta {requested_key}.")
         except Exception as error:
             add("mapa_medido", False, str(error))
