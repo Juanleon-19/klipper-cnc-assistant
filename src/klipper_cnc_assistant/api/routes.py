@@ -689,7 +689,7 @@ def build_router() -> APIRouter:
             physical_map = physical_service.get_active(project_id, operation_id)
             validation = physical_map.get("validation") or {}
             map_ok = bool(physical_map.get("source") == "MEASURED" and (physical_map.get("status") in {"MESH_COMPLETE", "MAP_READY"} or physical_map.get("map_ready_state") == "MAP_READY"))
-            validation_ok = bool(validation.get("status") == "VALID" and validation.get("sufficient") is True)
+            validation_ok = bool(validation.get("validated_at"))
             tool_references = physical_map.get("tool_references") or {}
             requested_key = operation.tool_id or operation.herramienta or "sin-herramienta"
             requested_reference = tool_references.get(requested_key) if isinstance(tool_references, dict) else None

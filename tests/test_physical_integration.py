@@ -553,13 +553,16 @@ class PhysicalIntegrationTest(unittest.TestCase):
             machine_session = MachineSessionService()
             machine_session.machine_mode = "fisico"
             session = ReferenceSessionService(repository, HeightMapService(repository), machine_session, service).get_session(project.id, operation.id)
-            self.assertFalse(session["lista_para_compensacion"])
-            joined = " ".join(session["bloqueos_compensacion"])
-            self.assertIn("La cobertura del mapa físico es insuficiente", joined)
-            self.assertIn("Primer punto fuera", joined)
-            self.assertIn("X=0.000", joined)
-            self.assertIn("distancia=14.142 mm", joined)
-            self.assertNotIn("Falta validación de cobertura del mapa físico.", joined)
+            self.assertTrue(session["lista_para_compensacion"])
+            self.assertEqual(session["bloqueos_compensacion"], [])
+            generator = CompensatedGCodeService(repository, service)
+            with self.assertRaises(ApplicationError) as error:
+                generator.generate(project.id, operation.id)
+            message = str(error.exception)
+            self.assertIn("Mapa insuficiente", message)
+            self.assertIn("Primer punto fuera", message)
+            self.assertIn("X=0.000", message)
+            self.assertIn("distancia=14.142 mm", message)
 
     def _physical_project(self, temp: str):
         repository = JsonProjectRepository(Path(temp))

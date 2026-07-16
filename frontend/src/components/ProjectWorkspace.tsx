@@ -1347,13 +1347,6 @@ export function ProjectWorkspace({
     const plannedPoints = rows * columns;
     const executablePoints = physicalMap?.executable_point_count ?? physicalMap?.points?.filter((point) => point.status !== "EXCLUDED").length ?? plannedPoints;
     const excludedPoints = physicalMap?.excluded_count ?? physicalMap?.points?.filter((point) => point.status === "EXCLUDED").length ?? 0;
-    const processBounds = combineOperationBounds(processOperations.filter((operation) => Boolean(operation.analisis)));
-    const regionCoversProcesses = !processBounds || (
-      edgeLeft <= processBounds.min_x_mm + 0.001
-      && project.material.ancho_mm - edgeRight >= processBounds.max_x_mm - 0.001
-      && edgeBottom <= processBounds.min_y_mm + 0.001
-      && project.material.alto_mm - edgeTop >= processBounds.max_y_mm - 0.001
-    );
     const hasReferencePoint = (physicalMap?.points ?? []).some((point) => point.role === "REFERENCE");
     const filteredPhysicalPoints = (physicalMap?.points ?? []).filter((point) => {
       if (pointFilter === "ALL") return true;
@@ -1498,9 +1491,6 @@ export function ProjectWorkspace({
             </div>
             <div className="subpanel subpanel--soft">
               <div className="section-heading"><h4>Retiro del borde del material</h4><label className="inline-check"><input type="checkbox" checked={useUniformEdgeRetreat} onChange={(event) => { setUseUniformEdgeRetreat(event.target.checked); invalidateMeshPreview(); }} /> Usar el mismo retiro en todos los bordes</label></div>
-              <div className="action-grid action-grid--inline">
-                <button className="button button--ghost" type="button" disabled={!processBounds} onClick={applyRegionFromOperations}>Área desde operaciones</button>
-              </div>
               {useUniformEdgeRetreat ? (
                 <label>Retiro uniforme (mm)<input value={uniformEdgeRetreatInput} inputMode="decimal" onChange={(event) => { setUniformEdgeRetreatInput(event.target.value); invalidateMeshPreview(); }} /></label>
               ) : (
@@ -1543,7 +1533,6 @@ export function ProjectWorkspace({
               <div className="metric-box"><span>Retracto</span><strong>{formatMillimeters(parsePositive(probeRetractInput), 3)}</strong></div>
             </div>
             {probeWidth <= 0 || probeHeight <= 0 ? <div className="alert alert--warning">El retiro de los bordes deja una región de sondeo inválida. Reduzca los valores o revise las dimensiones del material.</div> : null}
-            {!regionCoversProcesses && processBounds ? <div className="alert alert--warning">La región sondeable actual no cubre todas las trayectorias del montaje. Use "Área desde operaciones" o reduzca los retiros del borde.</div> : null}
             {meshValidationMessage ? <div className="alert alert--info">{meshValidationMessage}</div> : null}
             <div className="action-grid">
               <button className="button" type="button" disabled={heightMapBusy || !selectedOperation || probeWidth <= 0 || probeHeight <= 0} onClick={() => void withPhysicalMapAction(async () => {
@@ -1724,28 +1713,6 @@ export function ProjectWorkspace({
     } finally {
       setReferenceBusy(false);
     }
-  };
-
-  const applyRegionFromOperations = () => {
-    if (!selectedOperation || processOperations.length === 0) {
-      return;
-    }
-    const combined = combineOperationBounds(processOperations);
-    if (!combined) {
-      setWorkspaceError("No hay límites analizados para calcular la región desde las operaciones.");
-      return;
-    }
-    const nextLeft = Math.max(0, combined.min_x_mm);
-    const nextRight = Math.max(0, project.material.ancho_mm - combined.max_x_mm);
-    const nextBottom = Math.max(0, combined.min_y_mm);
-    const nextTop = Math.max(0, project.material.alto_mm - combined.max_y_mm);
-    setUseUniformEdgeRetreat(false);
-    setEdgeRetreatLeftInput(nextLeft.toFixed(3));
-    setEdgeRetreatRightInput(nextRight.toFixed(3));
-    setEdgeRetreatBottomInput(nextBottom.toFixed(3));
-    setEdgeRetreatTopInput(nextTop.toFixed(3));
-    setMeshValidationMessage(`Región ajustada desde las operaciones del montaje: X ${nextLeft.toFixed(3)}..${combined.max_x_mm.toFixed(3)} mm, Y ${nextBottom.toFixed(3)}..${combined.max_y_mm.toFixed(3)} mm.`);
-    invalidateMeshPreview();
   };
 
   const renderEjecucion = () => (

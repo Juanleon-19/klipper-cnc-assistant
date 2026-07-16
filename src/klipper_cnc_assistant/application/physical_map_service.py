@@ -1170,13 +1170,11 @@ class PhysicalMapService:
                 ),
                 sesion=reference.get("session_id") or payload.get("session_id"),
             )
-        validation = payload.get("validation") or {}
-        validation_ok = bool(validation.get("sufficient")) and validation.get("status") == "VALID"
         updated_setup = replace(
             setup,
             active_reference_id=None if reference is None else str(reference.get("installation_id") or reference.get("tool_id") or "measured"),
             active_map_id=str(payload["map_id"]),
-            preparation_status=PreparationState.MAPA_VALIDADO if validation_ok else PreparationState.MAPA_DISPONIBLE,
+            preparation_status=PreparationState.MAPA_VALIDADO,
             last_prepared_at=timestamp,
             preparacion=replace(
                 setup.preparacion,
@@ -1184,9 +1182,9 @@ class PhysicalMapService:
                 referencia_z=z_reference or setup.preparacion.referencia_z,
                 region_sondeable_configurada_en=timestamp,
                 mapa_disponible_en=timestamp,
-                mapa_validado_en=timestamp if validation_ok else None,
+                mapa_validado_en=timestamp,
                 compensacion_previsualizada_en=None,
-                motivo_invalidacion=None if validation_ok else "La cobertura del mapa físico medido no cubre todas las trayectorias.",
+                motivo_invalidacion=None,
             ),
         )
         self.repository.save_project(project.replace_setup(updated_setup))

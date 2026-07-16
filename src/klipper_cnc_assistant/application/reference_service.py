@@ -446,7 +446,7 @@ class ReferenceSessionService:
             region_at = region_at or completed_at
             map_at = map_at or completed_at
             validation = complete_map.get("validation") or {}
-            if validation.get("status") == "VALID" and validation.get("sufficient") is True:
+            if validation.get("status") in {"VALID", "INVALID"}:
                 validation_at = validation_at or self._parse_datetime(validation.get("validated_at")) or completed_at
         return {
             "physical_map": complete_map,
@@ -664,25 +664,15 @@ class ReferenceSessionService:
         if validation_at is None:
             if map_at is None:
                 return "pendiente", "La validación requiere un mapa disponible."
-            validation = (physical_map or {}).get("validation") or {}
-            if validation.get("status") == "INVALID":
-                raw_issues = validation.get("issues") or []
-                if isinstance(raw_issues, list) and raw_issues and isinstance(raw_issues[0], dict):
-                    first = raw_issues[0]
-                    return "invalidado", (
-                        "La cobertura del mapa físico no cubre todas las trayectorias. "
-                        f"Primer punto fuera: línea/segmento {first.get('segment_index', '-')}, "
-                        f"X={float(first.get('x_mm', 0.0)):.3f}, "
-                        f"Y={float(first.get('y_mm', 0.0)):.3f}, "
-                        f"distancia={float(first.get('distance_mm', 0.0)):.3f} mm."
-                    )
-                return "invalidado", "La cobertura del mapa físico no cubre todas las trayectorias."
             if invalidation:
                 return "invalidado", invalidation
             return "pendiente", "La validación del mapa sigue pendiente."
         if not machine_reference_confirmed or origin is None or z_reference is None:
-            return "disponible", "Validación registrada, pero la compensación sigue bloqueada por referencias pendientes."
-        return "confirmado", "Cobertura validada."
+            return "disponible", "Mapa físico finalizado; la compensación sigue bloqueada por referencias pendientes."
+        validation = (physical_map or {}).get("validation") or {}
+        if validation.get("status") == "VALID":
+            return "confirmado", "Cobertura validada."
+        return "confirmado", "Mapa físico finalizado y registrado."
 
     def _build_compensation_blocks(self, preparation, machine_reference_confirmed: bool) -> list[str]:
         blocks: list[str] = []

@@ -65,7 +65,7 @@ class CompensatedGCodeService:
                 detail = f" Primer punto fuera: línea/segmento {first.segment_index}, X={first.x_mm:.3f}, Y={first.y_mm:.3f}, distancia={first.distance_mm:.3f} mm."
             raise ApplicationError(
                 "Mapa insuficiente: hay puntos de trayectoria fuera del dominio medido. "
-                "Use 'Área desde operaciones' o amplíe la región antes de compensar." + detail
+                "Amplíe la región medida antes de compensar." + detail
             )
 
         original = self.repository.read_project_file(project_id, operation.archivo_gcode)
