@@ -254,6 +254,32 @@ class HeightMapBackendTest(unittest.TestCase):
         self.assertFalse(clearly_outside.inside)
         self.assertGreater(clearly_outside.distance_mm, 1.0)
 
+    def test_coverage_report_ignores_initial_non_cutting_move_outside_domain(self) -> None:
+        gcode = "G21\nG90\nG0 Z5.0\nG0 X0 Y0\nG0 X20 Y20\nG1 X20 Y20 Z-0.1 F100\nG1 X30 Y20 Z-0.1 F100\n"
+        self.project_service.upload_operation_gcode(
+            project_id=self.project.id,
+            operation_id=self.operation.id,
+            filename="entry.nc",
+            content=gcode,
+        )
+        operation = self.project_service.analyze_operation(self.project.id, self.operation.id)
+        current = self.height_map_service.generate_simulated_map(
+            project_id=self.project.id,
+            operation_id=self.operation.id,
+            filas=3,
+            columnas=3,
+            superficie_simulada="inclinada",
+            repeticion_simulacion=1,
+            probe_region=ProbeRegion(**self._probe_region()),
+            exclusion_zones=(),
+        )
+        report = build_coverage_report(
+            height_map=current,
+            operations=((operation.id, operation.nombre, operation.analisis),),
+        )
+        self.assertTrue(report.sufficient)
+        self.assertEqual(report.points_outside, 0)
+
     def test_coverage_report_identifies_operation_and_arc_points_outside_domain(self) -> None:
         gcode = "G21\nG90\nG1 X20 Y20 Z-0.1 F100\nG2 X75 Y20 I20 J0 Z-0.1 F100\n"
         self.project_service.upload_operation_gcode(

@@ -5,7 +5,7 @@ import math
 from klipper_cnc_assistant.domain import OperationAnalysis, PreviewPoint
 
 from .analysis import interpolate_height
-from .coverage import DOMAIN_TOLERANCE_MM, build_coverage_report
+from .coverage import DOMAIN_TOLERANCE_MM, build_coverage_report, segment_uses_surface_map
 from .models import HeightMap
 
 
@@ -34,14 +34,15 @@ def build_compensation_preview(
         virtual_points += max(0, len(sampled_points) - len(segment.puntos or (segment.desde, segment.hasta)))
         preview_points: list[dict[str, object]] = []
         segment_outside = False
+        uses_surface = segment_uses_surface_map(segment)
         for point in sampled_points:
-            result = interpolate_height(height_map, x_mm=point.x_mm, y_mm=point.y_mm, mode="bruto")
-            if result.estado == "fuera de dominio":
+            result = interpolate_height(height_map, x_mm=point.x_mm, y_mm=point.y_mm, mode="bruto") if uses_surface else None
+            if result is not None and result.estado == "fuera de dominio":
                 outside_points += 1
                 segment_outside = True
             if segment.z_mm is not None:
                 original_z_values.append(segment.z_mm)
-            correction_mm = None if result.valor_mm is None else result.valor_mm - reference_z_mm
+            correction_mm = None if result is None or result.valor_mm is None else result.valor_mm - reference_z_mm
             compensated_z_mm = None if correction_mm is None or segment.z_mm is None else segment.z_mm + correction_mm
             if compensated_z_mm is not None:
                 compensated_z_values.append(compensated_z_mm)
@@ -50,11 +51,11 @@ def build_compensation_preview(
                     "x_mm": point.x_mm,
                     "y_mm": point.y_mm,
                     "z_original_mm": segment.z_mm,
-                    "z_superficie_mm": result.valor_mm,
+                    "z_superficie_mm": None if result is None else result.valor_mm,
                     "correccion_mm": correction_mm,
                     "z_compensada_mm": compensated_z_mm,
-                    "estado": result.estado if segment.z_mm is not None else "sin_z_original",
-                    "observacion": result.observacion,
+                    "estado": "sin_compensacion_superficie" if not uses_surface else result.estado if segment.z_mm is not None else "sin_z_original",
+                    "observacion": None if result is None else result.observacion,
                 }
             )
         segments.append(
@@ -62,7 +63,7 @@ def build_compensation_preview(
                 "tipo": segment.tipo,
                 "tipo_movimiento": segment.tipo_movimiento,
                 "numero_linea": segment.numero_linea,
-                "estado": "fuera de dominio" if segment_outside else "ok" if segment.z_mm is not None else "sin_z_original",
+                "estado": "sin_compensacion_superficie" if not uses_surface else "fuera de dominio" if segment_outside else "ok" if segment.z_mm is not None else "sin_z_original",
                 "distancia_mm": segment.distancia_mm,
                 "puntos": preview_points,
             }

@@ -305,6 +305,38 @@ class PhysicalIntegrationTest(unittest.TestCase):
             self.assertTrue(result["relative_path"].startswith("generated/compensated/"))
 
 
+    def test_compensation_allows_initial_travel_outside_domain_when_cutting_path_is_covered(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            repository = JsonProjectRepository(Path(temp))
+            project_service = ProjectService(repository)
+            project = project_service.create_project(nombre="PCB", ancho_mm=60, alto_mm=60, espesor_mm=1.6)
+            operation = project_service.add_operation(project_id=project.id, nombre="Aislamiento", tipo="aislamiento", cara="superior", orden=0, tool_id="tool-v", herramienta="V-bit")
+            original = "G21\nG90\nG0 Z5.000\nG0 X0 Y0\nG0 X20 Y20\nG1 X20 Y20 Z-0.100 F120\nG1 X30 Y20 Z-0.100 F120\n"
+            project_service.upload_operation_gcode(project_id=project.id, operation_id=operation.id, filename="job.nc", content=original)
+            project_service.analyze_operation(project.id, operation.id)
+            service = PhysicalMapService(repository)
+            plan = service.capture_reference_and_plan(
+                project_id=project.id,
+                operation_id=operation.id,
+                machine_origin_x=100.0,
+                machine_origin_y=200.0,
+                reference_z=1.0,
+                machine_position={"x_mm": 100.0, "y_mm": 200.0, "z_mm": 1.0},
+                homed_axes="xyz",
+                machine_label="test",
+                session_id="session",
+                config=PhysicalMeshConfig(grid_mode="manual", rows=3, columns=3, edge_margin_left_mm=10.0, edge_margin_right_mm=10.0, edge_margin_bottom_mm=10.0, edge_margin_top_mm=10.0),
+            )
+            for point in plan["points"]:
+                z = 1.0 + 0.001 * float(point["x_local"]) + 0.002 * float(point["y_local"])
+                plan = service.record_point(project_id=project.id, map_id=plan["map_id"], point_index=int(point["index"]), z_measured=z)
+
+            generator = CompensatedGCodeService(repository, service)
+            result = generator.generate(project.id, operation.id)
+            generated = repository.read_project_file(project.id, result["relative_path"])
+            self.assertIn("G1 X0.00000 Y0.00000 Z5.00000", generated)
+            self.assertIn("X20.00000 Y20.00000 Z-0.04000", generated)
+
     def test_completed_physical_mesh_feeds_compensation_without_simulated_blockers(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             repository = JsonProjectRepository(Path(temp))

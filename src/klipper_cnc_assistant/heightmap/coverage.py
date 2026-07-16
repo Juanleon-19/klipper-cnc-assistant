@@ -76,6 +76,16 @@ def check_domain(height_map: HeightMap, x_mm: float, y_mm: float, *, tolerance_m
     return DomainCheck(x_mm=x_mm, y_mm=y_mm, inside=True, distance_mm=0.0, reason=None)
 
 
+def segment_uses_surface_map(segment: object) -> bool:
+    movement = str(getattr(segment, "tipo_movimiento", "") or "")
+    z_mm = getattr(segment, "z_mm", None)
+    if movement == "desplazamiento_rapido":
+        return False
+    if z_mm is None:
+        return False
+    return float(z_mm) < 0.0
+
+
 def build_coverage_report(
     *,
     height_map: HeightMap,
@@ -90,6 +100,8 @@ def build_coverage_report(
 
     for operation_id, operation_name, analysis in operations:
         for segment_index, segment in enumerate(analysis.segmentos_vista_previa):
+            if not segment_uses_surface_map(segment):
+                continue
             points = segment.puntos or (segment.desde, segment.hasta)
             for point_index, point in enumerate(points):
                 check = check_domain(height_map, point.x_mm, point.y_mm, tolerance_mm=tolerance_mm)

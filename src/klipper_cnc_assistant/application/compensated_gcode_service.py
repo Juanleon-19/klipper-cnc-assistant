@@ -11,7 +11,7 @@ from typing import Any
 from klipper_cnc_assistant.application.errors import ApplicationError, NotFoundError
 from klipper_cnc_assistant.domain import OperacionPCB, ProjectValidationError
 from klipper_cnc_assistant.heightmap import HeightGrid, HeightMap, HeightSample, ProbeRegion, SampleQuality, interpolate_height
-from klipper_cnc_assistant.heightmap.coverage import DOMAIN_TOLERANCE_MM, build_coverage_report
+from klipper_cnc_assistant.heightmap.coverage import DOMAIN_TOLERANCE_MM, build_coverage_report, segment_uses_surface_map
 from klipper_cnc_assistant.storage import JsonProjectRepository
 
 
@@ -151,9 +151,13 @@ class CompensatedGCodeService:
         for segment in operation.analisis.segmentos_vista_previa:
             points = segment.puntos or (segment.desde, segment.hasta)
             sampled = self._sample_points(points, max_segment_mm)
+            uses_surface = segment_uses_surface_map(segment)
             for point in sampled[1:] if len(sampled) > 1 else sampled:
                 if segment.z_mm is None:
                     lines.append(self._format_move(point.x_mm, point.y_mm, None, segment.avance_mm_min))
+                    continue
+                if not uses_surface:
+                    lines.append(self._format_move(point.x_mm, point.y_mm, segment.z_mm, segment.avance_mm_min))
                     continue
                 interpolation = interpolate_height(height_map, x_mm=point.x_mm, y_mm=point.y_mm, mode="bruto")
                 if interpolation.valor_mm is None:
