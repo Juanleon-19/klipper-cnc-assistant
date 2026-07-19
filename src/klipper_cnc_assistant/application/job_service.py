@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import threading
 import time
 from dataclasses import dataclass
@@ -565,7 +566,7 @@ class JobService:
             raise ApplicationError("No existen operaciones activas para este montaje/cara.")
         active_map = self._load_active_map(context.project_id, operations[0].id)
         coverage_by_operation = self._coverage_by_operation(active_map, operations)
-        generated_by_operation = self._latest_generated_by_operation(context.project_id, operations)
+        generated_by_operation = self._latest_generated_by_operation(context.project_id, operations, active_map)
         if generated_results:
             generated_by_operation.update({key: value for key, value in generated_results.items() if "relative_path" in value})
         operation_rows: list[dict[str, Any]] = []
@@ -782,23 +783,75 @@ class JobService:
             "metadata_path": row.get("generated_metadata_path"),
         }
 
-    def _latest_generated_by_operation(self, project_id: str, operations: list[OperacionPCB]) -> dict[str, dict[str, Any]]:
+    def _latest_generated_by_operation(
+        self,
+        project_id: str,
+        operations: list[OperacionPCB],
+        active_map: dict[str, Any] | None,
+    ) -> dict[str, dict[str, Any]]:
+        """Return only artifacts bound to the current source, map and tool Z.
+
+        A generated file is an execution artifact, not a cache. Selecting by
+        mtime alone could execute a toolpath built before a board/map/reference
+        change, so every candidate is verified against immutable metadata.
+        """
         generated_dir = self.repository.project_dir(project_id) / "generated" / "compensated"
         if not generated_dir.exists():
             return {}
         results: dict[str, dict[str, Any]] = {}
         for operation in operations:
-            candidates = sorted(generated_dir.glob(f"{operation.id}_*_compensated.gcode"), key=lambda item: item.stat().st_mtime, reverse=True)
-            if not candidates:
-                continue
-            file_path = candidates[0]
-            metadata_candidates = sorted(generated_dir.glob(f"{operation.id}_*_compensated.json"), key=lambda item: item.stat().st_mtime, reverse=True)
-            metadata_path = metadata_candidates[0] if metadata_candidates else None
-            results[operation.id] = {
-                "relative_path": self._relative_to_project(project_id, file_path),
-                "metadata_path": None if metadata_path is None else self._relative_to_project(project_id, metadata_path),
-            }
+            candidates = sorted(
+                generated_dir.glob(f"{operation.id}_*_compensated.gcode"),
+                key=lambda item: item.stat().st_mtime,
+                reverse=True,
+            )
+            for file_path in candidates:
+                metadata_path = file_path.with_suffix(".json")
+                if not metadata_path.exists():
+                    continue
+                try:
+                    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError):
+                    continue
+                if not self._generated_artifact_is_current(project_id, operation, active_map, file_path, metadata):
+                    continue
+                results[operation.id] = {
+                    "relative_path": self._relative_to_project(project_id, file_path),
+                    "metadata_path": self._relative_to_project(project_id, metadata_path),
+                    "plan_hash": metadata.get("generated_hash"),
+                }
+                break
         return results
+
+    def _generated_artifact_is_current(
+        self,
+        project_id: str,
+        operation: OperacionPCB,
+        active_map: dict[str, Any] | None,
+        file_path: Path,
+        metadata: dict[str, Any],
+    ) -> bool:
+        if active_map is None or metadata.get("operation_id") != operation.id:
+            return False
+        if metadata.get("map_id") != active_map.get("map_id"):
+            return False
+        active_map_hash = hashlib.sha256(json.dumps(active_map, sort_keys=True).encode("utf-8")).hexdigest()
+        if metadata.get("map_hash") != active_map_hash:
+            return False
+        try:
+            original = self.repository.read_project_file(project_id, operation.archivo_gcode or "")
+        except Exception:
+            return False
+        if metadata.get("original_hash") != hashlib.sha256(original.encode("utf-8")).hexdigest():
+            return False
+        if metadata.get("generated_hash") != hashlib.sha256(file_path.read_bytes()).hexdigest():
+            return False
+        reference = (active_map.get("tool_references") or {}).get(_tool_key(operation))
+        if isinstance(reference, dict) and reference.get("valid"):
+            actual_z = (metadata.get("reference_frame") or {}).get("surface_reference_z_mm")
+            if actual_z is None or abs(float(actual_z) - float(reference["reference_z"])) > 1e-9:
+                return False
+        return True
 
     def _load_active_map(self, project_id: str, operation_id: str) -> dict[str, Any] | None:
         try:

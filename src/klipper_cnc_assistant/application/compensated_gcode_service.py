@@ -35,6 +35,50 @@ class GeneratedGCodeResult:
     preview: dict[str, Any]
 
 
+@dataclass(frozen=True)
+class PcbCoordinates:
+    x_mm: float
+    y_mm: float
+
+
+@dataclass(frozen=True)
+class MachineCoordinates:
+    x_mm: float
+    y_mm: float
+    z_mm: float | None
+
+
+@dataclass(frozen=True)
+class ReferenceFrame:
+    machine_origin_x_mm: float
+    machine_origin_y_mm: float
+    surface_reference_z_mm: float
+
+    def pcb_to_machine(self, point: PcbCoordinates) -> MachineCoordinates:
+        return MachineCoordinates(self.machine_origin_x_mm + point.x_mm, self.machine_origin_y_mm + point.y_mm, None)
+
+
+@dataclass(frozen=True)
+class CompensatedMachineCoordinates:
+    machine: MachineCoordinates
+    surface_z_machine_mm: float | None
+    delta_z_mm: float | None
+
+
+def compensate_cut_point(*, pcb: PcbCoordinates, programmed_z_mm: float | None, surface_map: HeightMap, reference_frame: ReferenceFrame, uses_surface_map: bool) -> CompensatedMachineCoordinates:
+    machine = reference_frame.pcb_to_machine(pcb)
+    if programmed_z_mm is None:
+        return CompensatedMachineCoordinates(machine, None, None)
+    if not uses_surface_map:
+        return CompensatedMachineCoordinates(MachineCoordinates(machine.x_mm, machine.y_mm, reference_frame.surface_reference_z_mm + programmed_z_mm), reference_frame.surface_reference_z_mm, 0.0)
+    interpolation = interpolate_height(surface_map, x_mm=pcb.x_mm, y_mm=pcb.y_mm, mode="bruto")
+    if interpolation.valor_mm is None:
+        raise ApplicationError(f"No se puede compensar X={pcb.x_mm:.3f}, Y={pcb.y_mm:.3f}. {interpolation.observacion or interpolation.estado}")
+    delta_z = float(interpolation.valor_mm)
+    surface_z = reference_frame.surface_reference_z_mm + delta_z
+    return CompensatedMachineCoordinates(MachineCoordinates(machine.x_mm, machine.y_mm, surface_z + programmed_z_mm), surface_z, delta_z)
+
+
 class CompensatedGCodeService:
     ALGORITHM_VERSION = "compensated-gcode-v1"
 
@@ -72,7 +116,8 @@ class CompensatedGCodeService:
         original_hash = hashlib.sha256(original.encode("utf-8")).hexdigest()
         sample_spacing = self._sample_spacing_mm(height_map)
         segment_limit = max_segment_mm or max(0.25, sample_spacing / 2.0)
-        lines, preview = self._build_compensated_lines(operation, height_map, segment_limit)
+        reference_frame = self._reference_frame(physical_map, operation)
+        lines, preview = self._build_compensated_lines(operation, height_map, segment_limit, reference_frame)
         output = "\n".join(lines) + "\n"
         map_hash = hashlib.sha256(json.dumps(physical_map, sort_keys=True).encode("utf-8")).hexdigest()
 
@@ -99,8 +144,14 @@ class CompensatedGCodeService:
             "generated_hash": hashlib.sha256(output.encode("utf-8")).hexdigest(),
             "algorithm_version": self.ALGORITHM_VERSION,
             "max_segment_mm": segment_limit,
+            "reference_frame": reference_frame.__dict__,
+            "movement_trace": preview["trace"],
+            "compensation_delta_min_mm": preview["delta_z_min_mm"],
+            "compensation_delta_max_mm": preview["delta_z_max_mm"],
+            "segments_before": len(operation.analisis.segmentos_vista_previa),
+            "segments_after": preview["emitted_points"],
             "warnings": preview["warnings"],
-            "convention": "x_compensado=x_original, y_compensado=y_original, z_compensado=z_original+delta_superficie(x,y)",
+            "convention": "machine_xy=pcb_xy+machine_origin; cutting_z=reference_z+surface_delta+programmed_z; safe_z=reference_z+programmed_z",
         }
         (project_dir / relative_path).write_text(output, encoding="utf-8")
         (project_dir / metadata_path).write_text(json.dumps(metadata, ensure_ascii=True, indent=2, sort_keys=True), encoding="utf-8")
@@ -136,45 +187,77 @@ class CompensatedGCodeService:
         if operation.id not in set(physical_map.get("operation_ids") or []):
             raise ApplicationError("La operación no está cubierta por el mapa medido activo.")
 
-    def _build_compensated_lines(self, operation: OperacionPCB, height_map: HeightMap, max_segment_mm: float) -> tuple[list[str], dict[str, Any]]:
+    def _reference_frame(self, physical_map: dict[str, Any], operation: OperacionPCB) -> ReferenceFrame:
+        reference = (physical_map.get("tool_references") or {}).get(_tool_key(operation))
+        surface_reference_z = physical_map.get("reference_z") if not isinstance(reference, dict) or not reference.get("valid") else reference.get("reference_z")
+        if surface_reference_z is None:
+            raise ApplicationError("Referencia Z inválida o ausente para generar el plan compensado.")
+        return ReferenceFrame(
+            machine_origin_x_mm=float(physical_map["machine_origin_x"]),
+            machine_origin_y_mm=float(physical_map["machine_origin_y"]),
+            surface_reference_z_mm=float(surface_reference_z),
+        )
+
+    def _build_compensated_lines(self, operation: OperacionPCB, height_map: HeightMap, max_segment_mm: float, reference_frame: ReferenceFrame) -> tuple[list[str], dict[str, Any]]:
         lines = [
-            "; Klipper CNC Assistant - G-code compensado",
+            "; Klipper CNC Assistant - plan compensado inmutable",
             f"; Operacion: {operation.nombre} ({operation.id})",
             f"; Algoritmo: {self.ALGORITHM_VERSION}",
-            "; Convencion: X/Y se conservan, Z += delta_superficie(x,y)",
+            f"; PCB -> CNC: X+{reference_frame.machine_origin_x_mm:.5f} Y+{reference_frame.machine_origin_y_mm:.5f}; Zref={reference_frame.surface_reference_z_mm:.5f}",
+            "; Corte: Z_maquina=Zref+delta_superficie+Z_programada",
+            "; Viaje seguro: Z_maquina=Zref+Z_programada",
             "G21",
             "G90",
         ]
         warnings: list[str] = []
-        compensated_z: list[float] = []
-        emitted_points = 0
-        for segment in operation.analisis.segmentos_vista_previa:
+        z_values: list[float] = []
+        deltas: list[float] = []
+        trace: list[dict[str, Any]] = []
+        for segment_index, segment in enumerate(operation.analisis.segmentos_vista_previa):
             points = segment.puntos or (segment.desde, segment.hasta)
             sampled = self._sample_points(points, max_segment_mm)
             uses_surface = segment_uses_surface_map(segment)
-            for point in sampled[1:] if len(sampled) > 1 else sampled:
-                if segment.z_mm is None:
-                    lines.append(self._format_move(point.x_mm, point.y_mm, None, segment.avance_mm_min))
-                    continue
-                if not uses_surface:
-                    lines.append(self._format_move(point.x_mm, point.y_mm, segment.z_mm, segment.avance_mm_min))
-                    continue
-                interpolation = interpolate_height(height_map, x_mm=point.x_mm, y_mm=point.y_mm, mode="bruto")
-                if interpolation.valor_mm is None:
-                    raise ApplicationError(
-                        f"No se puede compensar línea {segment.numero_linea}: X={point.x_mm:.3f}, Y={point.y_mm:.3f}. {interpolation.observacion or interpolation.estado}"
-                    )
-                z_comp = segment.z_mm + interpolation.valor_mm
-                compensated_z.append(z_comp)
-                emitted_points += 1
-                lines.append(self._format_move(point.x_mm, point.y_mm, z_comp, segment.avance_mm_min))
-        if not compensated_z:
-            warnings.append("No se encontraron movimientos con Z explícita para compensar.")
+            selected = sampled[1:] if len(sampled) > 1 else sampled
+            for point in selected:
+                compensated = compensate_cut_point(
+                    pcb=PcbCoordinates(point.x_mm, point.y_mm),
+                    programmed_z_mm=segment.z_mm,
+                    surface_map=height_map,
+                    reference_frame=reference_frame,
+                    uses_surface_map=uses_surface,
+                )
+                final = compensated.machine
+                lines.append(self._format_move(final.x_mm, final.y_mm, final.z_mm, segment.avance_mm_min))
+                if final.z_mm is not None:
+                    z_values.append(final.z_mm)
+                if compensated.delta_z_mm is not None:
+                    deltas.append(compensated.delta_z_mm)
+                trace.append({
+                    "plan_index": len(trace),
+                    "line_number": segment.numero_linea,
+                    "motion": segment.tipo,
+                    "movement_type": segment.tipo_movimiento,
+                    "pcb_x_mm": point.x_mm,
+                    "pcb_y_mm": point.y_mm,
+                    "machine_x_mm": final.x_mm,
+                    "machine_y_mm": final.y_mm,
+                    "programmed_z_mm": segment.z_mm,
+                    "surface_z_machine_mm": compensated.surface_z_machine_mm,
+                    "delta_z_mm": compensated.delta_z_mm,
+                    "final_z_mm": final.z_mm,
+                    "feed_mm_min": segment.avance_mm_min,
+                    "uses_surface_map": uses_surface,
+                })
+        if not z_values:
+            warnings.append("No se encontraron movimientos con Z explícita.")
         return lines, {
-            "emitted_points": emitted_points,
+            "emitted_points": len(trace),
             "warnings": warnings,
-            "z_compensated_min_mm": min(compensated_z) if compensated_z else None,
-            "z_compensated_max_mm": max(compensated_z) if compensated_z else None,
+            "z_compensated_min_mm": min(z_values) if z_values else None,
+            "z_compensated_max_mm": max(z_values) if z_values else None,
+            "delta_z_min_mm": min(deltas) if deltas else None,
+            "delta_z_max_mm": max(deltas) if deltas else None,
+            "trace": trace,
         }
 
     def _format_move(self, x_mm: float, y_mm: float, z_mm: float | None, feed_mm_min: float | None) -> str:

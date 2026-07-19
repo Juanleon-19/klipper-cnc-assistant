@@ -162,6 +162,11 @@ class JobServiceTest(unittest.TestCase):
         self.assertTrue(plan["operations"][2]["tool_changed"])
         manifest = self.repository.project_dir(self.project_id) / plan["manifest_path"]
         self.assertTrue(manifest.exists())
+        generated = self.repository.project_dir(self.project_id) / plan["operations"][0]["generated_file"]
+        output = generated.read_text(encoding="utf-8")
+        self.assertIn("X120.00000 Y110.00000", output)
+        self.assertIn("Z4.", output)
+        self.assertNotIn("X20.00000 Y10.00000 Z-0.05000", output)
 
     def test_job_run_executes_all_operations_with_two_tool_changes(self) -> None:
         self.job_service.generate_project_compensation(project_id=self.project_id, setup_id=self.setup_id, face="superior")
