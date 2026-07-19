@@ -16,6 +16,10 @@ const byte PIN_Y = A1;
 
 const byte PIN_JOYSTICK = 2;
 const byte PIN_BUTTON   = 3;
+/*
+ * Sonda CNC: herramienta/fresa/chuck a GND y placa de cobre aislada a D4.
+ * Con INPUT_PULLUP, LOW significa contacto. No conectar D4 al spindle.
+ */
 const byte PIN_PROBE    = 4;
 
 const byte HEADER = 0xAA;
@@ -27,7 +31,8 @@ const uint32_t PACKET_INTERVAL_MS = 20UL;
 
 /*
  * D4 usa INPUT_PULLUP: LOW significa contacto y HIGH significa OPEN.
- * El filtro es bidireccional y no conserva contactos históricos.
+ * Filtra activación durante 20 ms y liberación durante 40 ms; no conserva
+ * contactos históricos.
  */
 const uint32_t PROBE_TRIGGER_FILTER_MS = 20UL;
 const uint32_t PROBE_RELEASE_FILTER_MS = 40UL;

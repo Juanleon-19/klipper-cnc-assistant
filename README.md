@@ -85,6 +85,15 @@ SERIAL_STARTUP_DELAY=2
 ```
 
 Hay dos instancias Moonraker detectadas en la máquina local; por seguridad no se elige una automáticamente. Configure URL y WebSocket de forma explícita.
+## Sonda física CNC
+
+La conexión física validada de la sonda está documentada en
+[docs/probe-wiring.md](docs/probe-wiring.md). La herramienta, fresa o chuck se
+conecta a GND del Arduino y la placa de cobre aislada se conecta a D4. **No
+conecte D4 directamente al spindle ni a la herramienta.** Antes de ejecutar
+una malla, valide repetidamente la transición `OPEN → TRIGGERED → OPEN`.
+
+
 
 ## Instalación del backend
 
