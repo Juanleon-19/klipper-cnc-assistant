@@ -62,7 +62,9 @@ class FakeMeshRuntime:
         self.fail_first = fail_first
         self.failed_once = False
 
-    def probe_mesh_point(self, point: dict, probe_config: dict | None = None) -> dict:
+    def probe_mesh_point(self, point: dict, probe_config: dict | None = None, progress_callback=None) -> dict:
+        if progress_callback is not None:
+            progress_callback("POINT_MOVE_XY", {"x_mm": point.get("x_machine"), "y_mm": point.get("y_machine")})
         self.calls.append(int(point["index"]))
         self.probe_configs.append(probe_config)
         if self.fail_first and not self.failed_once:
@@ -474,13 +476,16 @@ class PhysicalIntegrationTest(unittest.TestCase):
             runtime = FakeMeshRuntime(fail_first=True)
             started = worker.start_all(project_id=project.id, map_id=plan["map_id"], runtime=runtime)
             self.assertEqual(started["status"], "MESH_PROBING")
-            deadline = time.monotonic() + 3.0
+            self.assertTrue(worker.wait_until_idle(timeout_s=3.0))
+            paused = service.get_by_id(project.id, plan["map_id"])
+            self.assertEqual(paused["status"], "MESH_PAUSED")
+            self.assertEqual(paused["points"][1]["status"], "FAILED")
+            self.assertEqual(runtime.calls, [1])
+            retried = service.retry_failed_point(project_id=project.id, map_id=plan["map_id"], point_index=1)
+            self.assertEqual(retried["points"][1]["status"], "RETRY_REQUIRED")
+            worker.resume(project_id=project.id, map_id=plan["map_id"], runtime=runtime)
+            self.assertTrue(worker.wait_until_idle(timeout_s=3.0))
             completed = service.get_by_id(project.id, plan["map_id"])
-            while time.monotonic() < deadline:
-                completed = service.get_by_id(project.id, plan["map_id"])
-                if completed["status"] == "MESH_COMPLETE":
-                    break
-                time.sleep(0.01)
             self.assertEqual(completed["status"], "MESH_COMPLETE")
             self.assertEqual(sum(1 for point in completed["points"] if point["status"] == "MEASURED"), 4)
             self.assertEqual(sorted(set(runtime.calls)), [1, 2, 3])
@@ -492,6 +497,7 @@ class PhysicalIntegrationTest(unittest.TestCase):
             self.assertTrue(all(config and float(config["reference_z_mm"]) == 1.0 for config in runtime.probe_configs))
             log = service.execution_log(project_id=project.id, map_id=plan["map_id"])
             self.assertEqual(log["execution"]["worker_active"], False)
+            self.assertIn("POINT_FAILED", {event.get("next_state") for event in log["events"]})
             self.assertIn("POINT_RETRY", {event.get("next_state") for event in log["events"]})
             self.assertIn("POINT_COMPLETE", {event.get("next_state") for event in log["events"]})
             self.assertTrue(worker.wait_until_idle(timeout_s=1.0))

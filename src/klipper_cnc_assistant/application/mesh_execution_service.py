@@ -34,7 +34,8 @@ class MeshExecutionService:
 
     def __init__(self, physical_map_service: PhysicalMapService, *, max_point_retries: int = 2) -> None:
         self.physical_map_service = physical_map_service
-        self.max_point_retries = max_point_retries
+        # Los reintentos requieren decisión explícita del operador; nunca son implícitos.
+        self.max_point_retries = 0
         self._lock = threading.Lock()
         self._threads: dict[tuple[str, str], threading.Thread] = {}
         self._cancel_requests: dict[tuple[str, str], threading.Event] = {}
@@ -153,7 +154,8 @@ class MeshExecutionService:
         point_index = int(point["index"])
         attempts = int(point.get("attempts", 0))
         target = {"x_mm": point.get("x_machine"), "y_mm": point.get("y_machine"), "point_index": point_index}
-        while attempts <= self.max_point_retries:
+        # Cada inicio o reintento explícito ejecuta exactamente un intento.
+        while attempts < int(point.get("attempts", 0)) + 1:
             attempts += 1
             self.physical_map_service.update_execution_state(
                 project_id=project_id,
@@ -178,7 +180,20 @@ class MeshExecutionService:
                     target=target,
                     last_event=f"Punto {point_index + 1}: operación física exclusiva iniciada.",
                 )
-                result = runtime.probe_mesh_point(point, probe_config=probe_config)
+                def progress(state: str, detail: dict[str, Any]) -> None:
+                    observed_now = self._observed_from_runtime(runtime)
+                    self.physical_map_service.update_execution_state(
+                        project_id=project_id, map_id=map_id, worker_active=True, point_state=state,
+                        point_index=point_index, retry_count=attempts - 1, command=str(detail.get("command") or state),
+                        target={**target, **detail}, observed=observed_now,
+                        last_event=f"Punto {point_index + 1}: {state}.",
+                    )
+                try:
+                    result = runtime.probe_mesh_point(point, probe_config=probe_config, progress_callback=progress)
+                except TypeError as error:
+                    if "progress_callback" not in str(error):
+                        raise
+                    result = runtime.probe_mesh_point(point, probe_config=probe_config)
                 observed = self._observed_from_runtime(runtime)
                 self.physical_map_service.update_execution_state(
                     project_id=project_id,
@@ -215,6 +230,16 @@ class MeshExecutionService:
                 return
             except Exception as error:
                 observed = self._observed_from_runtime(runtime)
+                with self._lock:
+                    cancelled = bool(self._cancel_requests.get((project_id, map_id)) and self._cancel_requests[(project_id, map_id)].is_set())
+                if cancelled:
+                    self.physical_map_service.mark_status(project_id=project_id, map_id=map_id, status="CANCELLED")
+                    self.physical_map_service.update_execution_state(
+                        project_id=project_id, map_id=map_id, worker_active=False, point_state="CANCELLED",
+                        point_index=point_index, error=str(error), target=target, observed=observed,
+                        last_event="Malla cancelada por el operador; no se iniciará otro paso.",
+                    )
+                    return
                 if attempts <= self.max_point_retries:
                     self.physical_map_service.update_execution_state(
                         project_id=project_id,

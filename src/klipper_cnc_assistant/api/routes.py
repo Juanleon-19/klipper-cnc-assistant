@@ -536,6 +536,18 @@ def build_router() -> APIRouter:
         )
         return PhysicalMapResponse(payload=updated)
 
+    @router.post("/projects/{project_id}/physical-maps/{map_id:path}/points/{point_index}/retry", response_model=PhysicalMapResponse)
+    def retry_physical_map_point(project_id: str, map_id: str, point_index: int, request: Request) -> PhysicalMapResponse:
+        _reject_active_motion(request)
+        payload = request.app.state.physical_map_service.retry_failed_point(project_id, map_id, point_index)
+        return PhysicalMapResponse(payload=payload)
+
+    @router.post("/projects/{project_id}/physical-maps/{map_id:path}/points/{point_index}/skip", response_model=PhysicalMapResponse)
+    def skip_physical_map_point(project_id: str, map_id: str, point_index: int, request: Request) -> PhysicalMapResponse:
+        _reject_active_motion(request)
+        payload = request.app.state.physical_map_service.skip_failed_point(project_id, map_id, point_index)
+        return PhysicalMapResponse(payload=payload)
+
     @router.post("/projects/{project_id}/physical-maps/{map_id:path}/pause", response_model=PhysicalMapResponse)
     def pause_physical_map(project_id: str, map_id: str, request: Request) -> PhysicalMapResponse:
         return PhysicalMapResponse(payload=request.app.state.physical_map_service.mark_status(project_id=project_id, map_id=map_id, status="MESH_PAUSED"))
@@ -551,7 +563,7 @@ def build_router() -> APIRouter:
 
     @router.post("/projects/{project_id}/physical-maps/{map_id:path}/cancel", response_model=PhysicalMapResponse)
     def cancel_physical_map(project_id: str, map_id: str, request: Request) -> PhysicalMapResponse:
-        return PhysicalMapResponse(payload=request.app.state.physical_map_service.mark_status(project_id=project_id, map_id=map_id, status="CANCELLED"))
+        return PhysicalMapResponse(payload=request.app.state.mesh_execution_service.cancel(project_id=project_id, map_id=map_id, runtime=request.app.state.machine_runtime))
 
     @router.get("/projects/{project_id}/operations/{operation_id}/physical-map/height-map", response_model=HeightMapResponse)
     def get_physical_map_as_height_map(project_id: str, operation_id: str, request: Request) -> HeightMapResponse:

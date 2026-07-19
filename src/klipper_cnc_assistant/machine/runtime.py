@@ -578,7 +578,7 @@ class MachineRuntime:
         finally:
             self._movement_lock.release()
 
-    def probe_mesh_point(self, point: dict[str, Any], probe_config: dict[str, Any] | None = None) -> dict[str, Any]:
+    def probe_mesh_point(self, point: dict[str, Any], probe_config: dict[str, Any] | None = None, progress_callback: Callable[[str, dict[str, Any]], None] | None = None) -> dict[str, Any]:
         self._require_physical_ready()
         self._cancel_requested.clear()
         if not self._movement_lock.acquire(blocking=False):
@@ -595,14 +595,18 @@ class MachineRuntime:
             if machine is None:
                 raise MachineRuntimeError("No hay estado de máquina descubierto.")
             safe_z = self._mesh_safe_z(machine, probe_config=probe_config)
+            self._notify_probe_progress(progress_callback, "POINT_MOVE_SAFE_Z", safe_z_mm=safe_z)
             self._move_absolute(z=safe_z, label="mesh_z_segura")
+            self._notify_probe_progress(progress_callback, "POINT_MOVE_XY", x_mm=float(point["x_machine"]), y_mm=float(point["y_machine"]))
             self._move_absolute(x=float(point["x_machine"]), y=float(point["y_machine"]), label=f"mesh_xy_{point['index']}")
             probe_feed_mm_min = self._probe_config_float(probe_config, "probe_feed_mm_min")
+            self._notify_probe_progress(progress_callback, "POINT_VERIFY_PROBE_OPEN")
             probe = self._probe_current_position(
                 label=f"mesh_probe_{point['index']}",
                 probe_step_mm=self._probe_config_float(probe_config, "probe_step_mm"),
                 probe_speed_mm_s=None if probe_feed_mm_min is None else probe_feed_mm_min / 60.0,
                 retract_mm=self._probe_config_float(probe_config, "retract_mm"),
+                progress_callback=progress_callback,
             )
             with self._lock:
                 self._state = MachineRuntimeState.MESH_READY
@@ -628,6 +632,7 @@ class MachineRuntime:
         probe_step_mm: float | None = None,
         probe_speed_mm_s: float | None = None,
         retract_mm: float | None = None,
+        progress_callback: Callable[[str, dict[str, Any]], None] | None = None,
     ) -> ProbeResult:
         self._assert_safety_for_motion()
         self._refresh_machine()
@@ -647,9 +652,7 @@ class MachineRuntime:
         start_x = float(start["x"])
         start_y = float(start["y"])
         while True:
-            if self._cancel_requested.is_set():
-                raise MachineRuntimeError("Sondeo cancelado por el operador.")
-        while True:
+            self._raise_if_cancelled()
             with self._lock:
                 if self._last_command.probe_triggered:
                     break
@@ -659,6 +662,7 @@ class MachineRuntime:
             if remaining <= self.config.settle_tolerance_mm:
                 raise MachineRuntimeError("Se alcanzó el límite mínimo Z sin contacto de sonda.")
             step = min(step_size, remaining)
+            self._notify_probe_progress(progress_callback, "POINT_LOWER_STEP", step_mm=step, feed_mm_min=probe_speed * 60.0)
             result = jog.move_relative("z", -step, probe_speed)
             with self._lock:
                 self._last_movement = result
@@ -666,10 +670,12 @@ class MachineRuntime:
             self._wait_for_axis("z", float(result["target"]), "paso de sonda", start_position=current_z)
         snapshot = machine.get_motion_snapshot()
         contact_z = float(snapshot["z"])
+        self._notify_probe_progress(progress_callback, "POINT_CONTACT_DETECTED", z_mm=contact_z)
         retract_available = machine.z_limits.maximum - contact_z
         if retract_available <= self.config.settle_tolerance_mm:
             raise MachineRuntimeError("No hay margen Z para retraer después del contacto.")
         retract = min(retract_distance, retract_available)
+        self._notify_probe_progress(progress_callback, "POINT_RETRACT", retract_mm=retract, feed_mm_min=probe_speed * 60.0)
         result = jog.move_relative("z", retract, probe_speed)
         with self._lock:
             self._last_movement = result
@@ -679,13 +685,24 @@ class MachineRuntime:
 
     def cancel_operation(self) -> dict[str, Any]:
         self._cancel_requested.set()
-    def cancel_operation(self) -> dict[str, Any]:
         with self._lock:
             self._probe_requested = False
             self._manual_enabled = False
             self._state = MachineRuntimeState.READY_FOR_HOME if self._client is not None else MachineRuntimeState.DISCONNECTED
             self._event("warning", "Operación física cancelada por el operador.")
         return self.snapshot()
+
+    def _raise_if_cancelled(self) -> None:
+        if self._cancel_requested.is_set():
+            raise MachineRuntimeError("Sondeo cancelado por el operador.")
+
+    def _notify_probe_progress(self, callback: Callable[[str, dict[str, Any]], None] | None, state: str, **detail: Any) -> None:
+        if callback is None:
+            return
+        try:
+            callback(state, detail)
+        except Exception:
+            pass
 
     def emergency_stop(self) -> dict[str, Any]:
         with self._lock:
@@ -1051,6 +1068,7 @@ class MachineRuntime:
                 raise MachineRuntimeError(f"{label}: {axis}={value:.3f} mm fuera de límites Klipper {minimum:.3f}..{maximum:.3f} mm.")
 
     def _move_absolute(self, *, x: float | None = None, y: float | None = None, z: float | None = None, label: str, feed_mm_min: float = 600.0) -> None:
+        self._raise_if_cancelled()
         self._validate_machine_target(x=x, y=y, z=z, label=label)
         if self._machine is None:
             raise MachineRuntimeError("No hay telemetría de máquina.")
@@ -1187,6 +1205,7 @@ class MachineRuntime:
         consecutive_away_samples = 0
         last_refresh = start
         while time.monotonic() - start <= operation_timeout_s:
+            self._raise_if_cancelled()
             self._assert_safety_for_connection()
             now = time.monotonic()
             if now - last_refresh >= 0.25:
@@ -1362,6 +1381,7 @@ class MachineRuntime:
         last_refresh = start
         probe_step = label == "paso de sonda"
         while time.monotonic() - start <= self.config.move_timeout_s:
+            self._raise_if_cancelled()
             self._assert_safety_for_connection()
             now = time.monotonic()
             if now - last_refresh >= 0.25 or self._telemetry_is_stale(now):
