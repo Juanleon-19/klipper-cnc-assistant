@@ -135,6 +135,14 @@ class MeshExecutionService:
                 snapshot = snapshot_fn() if snapshot_fn is not None else {}
                 safety = snapshot.get("safety") if isinstance(snapshot, dict) else {}
                 if isinstance(safety, dict) and safety.get("telemetry_recent") is False:
+                    refresh_state = getattr(runtime, "refresh_observed_state", None)
+                    if refresh_state is not None:
+                        try:
+                            snapshot = refresh_state()
+                            safety = snapshot.get("safety") if isinstance(snapshot, dict) else {}
+                        except Exception:
+                            pass
+                if isinstance(safety, dict) and safety.get("telemetry_recent") is False:
                     self.physical_map_service.mark_status(project_id=project_id, map_id=map_id, status="MESH_PAUSED")
                     self.physical_map_service.update_execution_state(
                         project_id=project_id, map_id=map_id, worker_active=False, point_state="MESH_PAUSED",

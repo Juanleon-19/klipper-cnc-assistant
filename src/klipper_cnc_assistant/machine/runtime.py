@@ -791,6 +791,12 @@ class MachineRuntime:
                 self._last_command_text = "M112"
         return self.snapshot()
 
+    def refresh_observed_state(self) -> dict[str, Any]:
+        """Refresh Klipper state over HTTP; this never sends G-code."""
+        self._require_physical_ready()
+        self._refresh_machine()
+        return self.snapshot()
+
     def capture_current_position(self) -> dict[str, float]:
         self._require_physical_ready()
         machine = self._machine
