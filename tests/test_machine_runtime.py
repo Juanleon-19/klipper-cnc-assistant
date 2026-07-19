@@ -49,6 +49,7 @@ def config(mode: MachineMode = MachineMode.SIMULATED, **overrides) -> MachineRun
         move_settle_margin_s=10.0,
         no_progress_timeout_s=60.0,
         settle_timeout_s=5.0,
+        probe_open_stable_ms=50.0,
         stable_samples=2,
         probe_step_mm=0.05,
         probe_lower_speed_mm_s=1.0,
@@ -348,6 +349,8 @@ def physical_runtime_with_machine(machine: MachineState, cfg: MachineRuntimeConf
     runtime._driver = type("Driver", (), {"diagnostics": FakeDiagnostics()})()
     runtime._serial_thread = FakeThread()
     runtime._last_packet_at = time.monotonic()
+    runtime._probe_raw_since = time.monotonic() - 0.1
+    runtime._probe_filtered_since = time.monotonic() - 0.1
     runtime._last_telemetry_at = time.monotonic()
     return runtime, client
 
@@ -369,6 +372,87 @@ class MachineRuntimeTest(unittest.TestCase):
         self.assertFalse(probe["filtered_triggered"])
         self.assertIsNone(snapshot["last_error"])
         self.assertTrue(snapshot["last_probe_failure"]["filtered_at_failure"])
+
+    def test_live_probe_stability_uses_logical_transition_not_last_packet(self) -> None:
+        machine = MachineState(position=MachinePosition(0, 0, 10), x_limits=AxisLimits(0, 100), y_limits=AxisLimits(0, 100), z_limits=AxisLimits(0, 200), homed_axes="xyz", max_velocity=100, max_accel=500, live_velocity=0)
+        runtime, _client = physical_runtime_with_machine(machine)
+        clock = FakeClock()
+        runtime._reset_live_probe_stability()
+        original_time = runtime_module.time
+        runtime_module.time = clock
+        try:
+            def receive(probe: bool) -> dict[str, object]:
+                packet = ControllerPacket(direction="CENTER", joystick_button=False, external_button=False, probe=probe, x=512, y=512)
+                runtime._handle_controller_packet(packet, CommandMapper().map(packet))
+                return runtime.get_live_probe_state()
+
+            first_open = receive(False)
+            self.assertEqual(first_open["stable_for_ms"], 0.0)
+            open_changed_at = first_open["changed_at_monotonic"]
+            for _ in range(10):
+                clock.now += 0.02
+                open_state = receive(False)
+            self.assertAlmostEqual(float(open_state["stable_for_ms"]), 200.0)
+            self.assertEqual(open_state["changed_at_monotonic"], open_changed_at)
+
+            clock.now += 0.01
+            triggered = receive(True)
+            self.assertEqual(triggered["stable_for_ms"], 0.0)
+            for _ in range(10):
+                clock.now += 0.02
+                triggered = receive(True)
+            self.assertAlmostEqual(float(triggered["stable_for_ms"]), 200.0)
+
+            clock.now += 0.01
+            released = receive(False)
+            self.assertEqual(released["stable_for_ms"], 0.0)
+            for _ in range(10):
+                clock.now += 0.02
+                released = receive(False)
+            self.assertAlmostEqual(float(released["stable_for_ms"]), 200.0)
+            runtime._last_probe_failure = {"filtered_at_failure": True}
+            self.assertAlmostEqual(float(runtime.get_live_probe_state()["stable_for_ms"]), 200.0)
+            runtime._reset_live_probe_stability()
+            reset = receive(False)
+            self.assertEqual(reset["stable_for_ms"], 0.0)
+            clock.now += 0.2
+            after_reconnect = receive(False)
+            self.assertAlmostEqual(float(after_reconnect["stable_for_ms"]), 200.0)
+            self.assertAlmostEqual(float(after_reconnect["changed_at_monotonic"]), clock.now - 0.2)
+        finally:
+            runtime_module.time = original_time
+
+    def test_probe_precheck_reports_each_condition_and_accepts_stable_open(self) -> None:
+        machine = MachineState(position=MachinePosition(0, 0, 10), x_limits=AxisLimits(0, 100), y_limits=AxisLimits(0, 100), z_limits=AxisLimits(0, 200), homed_axes="xyz", max_velocity=100, max_accel=500, live_velocity=0)
+        runtime, _client = physical_runtime_with_machine(machine, cfg=config(MachineMode.PHYSICAL, probe_open_stable_ms=2000.0))
+        runtime._reset_live_probe_stability()
+        clock = FakeClock()
+        original_time = runtime_module.time
+        runtime_module.time = clock
+        try:
+            packet = ControllerPacket(direction="CENTER", joystick_button=False, external_button=False, probe=False, x=512, y=512)
+            runtime._handle_controller_packet(packet, CommandMapper().map(packet))
+            with self.assertRaisesRegex(MachineRuntimeError, "stable_ok=False"):
+                runtime._require_fresh_open_probe(after_sequence=0, stage="POINT_VERIFY_PROBE_OPEN")
+            clock.now += 0.2
+            runtime.config = replace(runtime.config, probe_open_stable_ms=50.0)
+            detail = runtime._require_fresh_open_probe(after_sequence=0, stage="POINT_VERIFY_PROBE_OPEN_AFTER_RETRACT")
+        finally:
+            runtime_module.time = original_time
+        self.assertTrue(detail["open_ok"])
+        self.assertTrue(detail["fresh_ok"])
+        self.assertTrue(detail["stable_ok"])
+        self.assertEqual(detail["required_stable_ms"], 50.0)
+
+    def test_stale_live_position_is_never_classified_live(self) -> None:
+        machine = MachineState(position=MachinePosition(0, 0, 10), x_limits=AxisLimits(0, 100), y_limits=AxisLimits(0, 100), z_limits=AxisLimits(0, 200), homed_axes="xyz", max_velocity=100, max_accel=500, live_velocity=0)
+        runtime, _client = physical_runtime_with_machine(machine)
+        machine.update_motion(live_position=(0, 0, 10), live_velocity=0, source="websocket")
+        machine.live_position_updated_at = time.monotonic() - 52.63
+        runtime._telemetry_state = "LIVE"
+        runtime._last_websocket_message_at = time.monotonic()
+        self.assertEqual(runtime._telemetry_status(), "STALE")
+        self.assertTrue(runtime._telemetry_is_stale(time.monotonic()))
 
     def test_mesh_retry_readiness_uses_live_open_probe_and_rejects_stale_position(self) -> None:
         machine = MachineState(position=MachinePosition(0, 0, 10), x_limits=AxisLimits(0, 100), y_limits=AxisLimits(0, 100), z_limits=AxisLimits(0, 200), homed_axes="xyz", max_velocity=100, max_accel=500, live_velocity=0)

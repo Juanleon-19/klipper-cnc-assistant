@@ -1106,6 +1106,12 @@ export function ProjectWorkspace({
     const controller = runtime?.controller ?? {};
     const arduino = runtime?.arduino ?? {};
     const probeLive = runtime?.probe_live ?? {};
+    const probeRaw = probeLive.raw_value === true;
+    const probeFiltered = probeLive.filtered_triggered === true;
+    const probeOpenOk = !probeRaw && !probeFiltered && probeLive.display_state === "OPEN";
+    const probeFreshOk = probeLive.fresh === true;
+    const probeStableMs = typeof probeLive.stable_for_ms === "number" ? probeLive.stable_for_ms : null;
+    const probeRequiredStableMs = typeof probeLive.required_stable_ms === "number" ? probeLive.required_stable_ms : null;
     const lastProbeFailure = runtime?.last_probe_failure ?? null;
     const moonraker = runtime?.moonraker ?? {};
     const activeOperation = runtime?.active_operation ?? null;
@@ -1162,8 +1168,10 @@ export function ProjectWorkspace({
             <div><dt>Botón externo</dt><dd>{controller.external_button ? "pulsado" : "reposo"}</dd></div>
             <div><dt>Sonda actual</dt><dd>{String(probeLive.display_state ?? (controller.probe ? "TRIGGERED" : "OPEN"))}</dd></div>
             <div><dt>Probe raw / filtrada</dt><dd>{String(probeLive.raw_value ?? controller.probe ?? false)} / {String(probeLive.filtered_triggered ?? controller.probe ?? false)}</dd></div>
-            <div><dt>Edad / estable</dt><dd>{typeof probeLive.packet_age_s === "number" ? `${(probeLive.packet_age_s * 1000).toFixed(0)} ms` : "-"} / {typeof probeLive.stable_for_ms === "number" ? `${probeLive.stable_for_ms.toFixed(0)} ms` : "-"}</dd></div>
-            <div><dt>Telemetría</dt><dd>{String(moonraker.telemetry_state ?? "DISCONNECTED")} · {typeof position?.live_position_age_s === "number" ? `${position.live_position_age_s.toFixed(2)} s` : "sin posición"}</dd></div>
+            <div><dt>Edad del paquete</dt><dd>{typeof probeLive.packet_age_s === "number" ? `${(probeLive.packet_age_s * 1000).toFixed(0)} ms` : "-"}</dd></div>
+            <div><dt>Estable / mínimo</dt><dd>{probeStableMs === null ? "-" : `${probeStableMs.toFixed(0)} ms`} / {probeRequiredStableMs === null ? "-" : `${probeRequiredStableMs.toFixed(0)} ms`}</dd></div>
+            <div><dt>Precheck</dt><dd>OPEN {probeOpenOk ? "✓" : "✗"} · FRESH {probeFreshOk ? "✓" : "✗"} · STABLE {probeStableMs !== null && probeRequiredStableMs !== null && probeStableMs >= probeRequiredStableMs ? "✓" : "✗"}</dd></div>
+            <div><dt>Telemetría</dt><dd>{String(moonraker.telemetry_state ?? "DISCONNECTED")} · posición viva {typeof position?.live_position_age_s === "number" ? `${position.live_position_age_s.toFixed(2)} s` : "sin posición"}</dd></div>
             <div><dt>Operación activa</dt><dd>{activeOperation ? `${String(activeOperation.operation_type)} #${String(activeOperation.generation)}` : "ninguna"}</dd></div>
           </dl>
           {lastProbeFailure ? <div className="alert alert--warning">Último fallo de sonda (histórico): {String(lastProbeFailure.error ?? "-")}</div> : null}
