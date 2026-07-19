@@ -540,7 +540,8 @@ class MachineRuntimeTest(unittest.TestCase):
 
         def discovery(_client):
             if client.z_command_sent:
-                machine.update_motion(live_position=(0, 0, 115), live_velocity=0)
+                observed = machine.get_motion_snapshot()
+                machine.update_motion(live_position=(float(observed["x"]), float(observed["y"]), 115), live_velocity=0)
             return machine
 
         runtime = MachineRuntime(config(MachineMode.PHYSICAL), discovery=discovery)
@@ -849,6 +850,38 @@ class MachineRuntimeTest(unittest.TestCase):
         self.assertIn("X50.000000", client.scripts[2])
         self.assertAlmostEqual(machine.get_motion_snapshot()["z"], 115.0, places=3)
 
+    def test_initialize_uses_absolute_preparation_z_after_high_home_not_mesh_safe_z(self) -> None:
+        class HomeAtHighZClient(MotionClient):
+            def send_gcode(self, script: str, *, timeout: float | None = None) -> dict[str, object]:
+                if "G28" in script:
+                    self.scripts.append(script)
+                    self.machine.update_toolhead(position=(0, 0, 130), homed_axes="xyz")
+                    self.machine.update_motion(live_position=(0, 0, 130), live_velocity=0)
+                    return {"result": "ok"}
+                return super().send_gcode(script, timeout=timeout)
+
+        machine = MachineState(
+            position=MachinePosition(0, 0, 10), x_limits=AxisLimits(0, 100), y_limits=AxisLimits(0, 80),
+            z_limits=AxisLimits(0, 200), homed_axes="", max_velocity=100, max_accel=500, live_velocity=0,
+        )
+        runtime, _client = physical_runtime_with_machine(machine, cfg=config(MachineMode.PHYSICAL, safe_z_mm=4.0, reference_prep_z_mm=115.0))
+        client = HomeAtHighZClient(machine)
+        runtime._client = client
+
+        snapshot = runtime.initialize()
+
+        self.assertEqual(snapshot["state"], "WAITING_FOR_XY_REFERENCE")
+        self.assertEqual(len(client.scripts), 3)
+        self.assertEqual(client.scripts[0], "G28")
+        self.assertIn("G1 Z115.000000 F180.000", client.scripts[1])
+        self.assertNotIn("Z4.000000", client.scripts[1])
+        self.assertIn("G1 X50.000000 Y40.000000", client.scripts[2])
+        self.assertEqual(machine.get_motion_snapshot()["z"], 115.0)
+        steps = [step["name"] for step in snapshot["initialization_steps"]]
+        self.assertLess(steps.index("PREPARATION_Z_DONE"), steps.index("PREPARATION_CENTER_START"))
+        self.assertIn("PREPARATION_HOME_DONE", steps)
+        self.assertIn("PREPARATION_CENTER_DONE", steps)
+
     def test_incomplete_reference_z_times_out_with_observed_position(self) -> None:
         cfg = config(
             MachineMode.PHYSICAL,
@@ -877,6 +910,8 @@ class MachineRuntimeTest(unittest.TestCase):
 
         self.assertEqual(len(client.scripts), 2)
         self.assertIn("Z115.000000", client.scripts[1])
+        self.assertTrue(runtime._movement_lock.acquire(blocking=False))
+        runtime._movement_lock.release()
 
     def test_initialize_rejects_reference_z_outside_klipper_limits(self) -> None:
         machine = MachineState(

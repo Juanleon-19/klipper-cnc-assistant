@@ -1100,6 +1100,9 @@ export function ProjectWorkspace({
     const livePosition = position?.live_position as Record<string, unknown> | null | undefined;
     const commandedPosition = position?.commanded_position as Record<string, unknown> | null | undefined;
     const lastMovement = runtime?.last_movement as Record<string, unknown> | null | undefined;
+    const preparationSteps = runtime?.initialization_steps ?? [];
+    const preparationStage = preparationSteps.length ? preparationSteps[preparationSteps.length - 1] : null;
+    const movementTarget = lastMovement?.target as Record<string, unknown> | null | undefined;
     const controller = runtime?.controller ?? {};
     const arduino = runtime?.arduino ?? {};
     const preparation = runtime?.preparation ?? {};
@@ -1170,7 +1173,9 @@ export function ProjectWorkspace({
             <div className="metric-box"><span>Z comandada</span><strong>{formatMillimeters(typeof commandedPosition?.z === "number" ? commandedPosition.z : null, 3)}</strong></div>
             <div className="metric-box"><span>Velocidad observada</span><strong>{typeof position?.velocity === "number" ? `${position.velocity.toFixed(3)} mm/s` : "-"}</strong></div>
             <div className="metric-box"><span>Fuente de posición</span><strong>{String(position?.source ?? "-")}</strong></div>
-            <div className="metric-box"><span>Objetivo</span><strong>X {formatMillimeters(centerX, 3)} · Y {formatMillimeters(centerY, 3)} · Z {formatMillimeters(referencePrepZ, 3)}</strong></div>
+            <div className="metric-box"><span>Objetivo configurado</span><strong>X {formatMillimeters(centerX, 3)} · Y {formatMillimeters(centerY, 3)} · Z {formatMillimeters(referencePrepZ, 3)}</strong></div>
+            <div className="metric-box"><span>Etapa actual</span><strong>{String(preparationStage?.name ?? "pendiente")}</strong></div>
+            <div className="metric-box"><span>Objetivo enviado</span><strong>X {formatMillimeters(typeof movementTarget?.x === "number" ? movementTarget.x : null, 3)} · Y {formatMillimeters(typeof movementTarget?.y === "number" ? movementTarget.y : null, 3)} · Z {formatMillimeters(typeof movementTarget?.z === "number" ? movementTarget.z : null, 3)}</strong></div>
             <div className="metric-box"><span>Timeout calculado</span><strong>{typeof lastMovement?.timeout_s === "number" ? `${lastMovement.timeout_s.toFixed(1)} s` : "-"}</strong></div>
             <div className="metric-box"><span>Z viva anterior</span><strong>{formatMillimeters(typeof lastMovement?.previous_live_z === "number" ? lastMovement.previous_live_z : null, 3)}</strong></div>
             <div className="metric-box"><span>Z viva actual</span><strong>{formatMillimeters(typeof lastMovement?.current_live_z === "number" ? lastMovement.current_live_z : null, 3)}</strong></div>

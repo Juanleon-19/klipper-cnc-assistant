@@ -3,6 +3,7 @@ from __future__ import annotations
 import _thread
 import asyncio
 import json
+import logging
 import math
 import threading
 import time
@@ -22,6 +23,9 @@ from klipper_cnc_assistant.moonraker.client import MoonrakerClient, MoonrakerErr
 from klipper_cnc_assistant.moonraker.telemetry import MoonrakerTelemetry
 
 from .config import MachineMode, MachineRuntimeConfig
+
+
+logger = logging.getLogger(__name__)
 
 
 class MachineRuntimeState(StrEnum):
@@ -431,15 +435,22 @@ class MachineRuntime:
         return self.snapshot()
 
     def initialize(self, target_z_mm: float | None = None) -> dict[str, Any]:
+        """Prepare the machine in strict HOME → configured absolute Z → center order."""
         self._require_physical_ready()
         if not self._movement_lock.acquire(blocking=False):
             raise MachineRuntimeError("Ya hay un movimiento u operación física activa.")
+        started = time.monotonic()
+        center_x: float | None = None
+        center_y: float | None = None
+        configured_z = self.config.reference_prep_z_mm if target_z_mm is None else float(target_z_mm)
         try:
             with self._lock:
                 self._state = MachineRuntimeState.HOMING
                 self._manual_enabled = False
                 self._diagnostic_input_only = True
                 self._initialization_steps = []
+            self._step("PREPARATION_HOME_START", "ok", "Homing solicitado antes de la preparación.")
+            self._log_preparation_transition("PREPARATION_HOME_START", target_z=configured_z, center_x=center_x, center_y=center_y, started=started)
             self._step("verificar_modo_fisico", "ok", "Modo físico confirmado.")
             self._assert_safety_for_connection()
             self._step("verificar_conexion", "ok", "Moonraker y Klipper están conectados.")
@@ -447,27 +458,27 @@ class MachineRuntime:
             self._wait_for_serial_recent()
             self._step("verificar_arduino", "ok", "Arduino con paquetes válidos recientes.")
 
-            target_z_mm = self.config.reference_prep_z_mm if target_z_mm is None else float(target_z_mm)
             self._send_script("G28", label="homing")
             self._step("homing_solicitado", "ok", "G28 enviado; la finalización se confirma por toolhead.homed_axes y velocidad cero.")
             self._wait_for_homing({"x", "y", "z"})
+            # This is a mandatory post-home HTTP observation, not cached state.
             self._refresh_machine()
             machine = self._machine
             if machine is None:
                 raise MachineRuntimeError("No hay estado de máquina descubierto.")
+            homed_snapshot = machine.get_motion_snapshot()
             missing = sorted(axis for axis in ("x", "y", "z") if not machine.axis_is_homed(axis))
             if missing:
                 raise MachineRuntimeError("Homing incompleto; faltan ejes: " + ", ".join(axis.upper() for axis in missing) + ".")
             with self._lock:
                 self._state = MachineRuntimeState.HOMED
             self._step("homing_confirmado", "ok", f"Klipper reporta homed_axes={machine.homed_axes}.")
+            self._step("PREPARATION_HOME_DONE", "ok", f"Home confirmado con Z observada={float(homed_snapshot["z"]):.3f} mm.")
+            self._log_preparation_transition("PREPARATION_HOME_DONE", target_z=configured_z, center_x=center_x, center_y=center_y, observed=homed_snapshot, started=started)
 
-            current_snapshot = machine.get_motion_snapshot()
-            self._validate_machine_target(z=target_z_mm, label="Z de preparación")
-            if target_z_mm < float(current_snapshot["z"]):
-                raise MachineRuntimeError(
-                    f"Z de preparación {target_z_mm:.3f} mm queda por debajo de la Z actual {float(current_snapshot['z']):.3f} mm. No se puede confirmar que subir Z aleje la herramienta de la PCB."
-                )
+            # preparation_z is an absolute machine coordinate.  It is intentionally
+            # independent of mesh safe-Z, probing clearance, retract and PCB reference Z.
+            self._validate_machine_target(z=configured_z, label="Z de preparación")
             center_x = (machine.x_limits.minimum + machine.x_limits.maximum) / 2.0
             center_y = (machine.y_limits.minimum + machine.y_limits.maximum) / 2.0
             self._validate_machine_target(x=center_x, y=center_y, label="centro de máquina")
@@ -476,22 +487,39 @@ class MachineRuntime:
 
             with self._lock:
                 self._state = MachineRuntimeState.MOVING_TO_SAFE_Z
-            self._move_absolute(z=target_z_mm, label="z_preparacion_referencia", feed_mm_min=self.config.reference_prep_z_feed_mm_min)
-            self._step("z_segura_confirmada", "ok", f"Z de traslado segura alcanzada: {target_z_mm:.3f} mm.")
+            self._step("PREPARATION_Z_START", "ok", f"Moviendo únicamente Z a la coordenada absoluta configurada {configured_z:.3f} mm.")
+            self._log_preparation_transition("PREPARATION_Z_START", target_z=configured_z, center_x=center_x, center_y=center_y, observed=homed_snapshot, started=started)
+            self._move_absolute(z=configured_z, label="z_preparacion_referencia", feed_mm_min=self.config.reference_prep_z_feed_mm_min)
+            self._refresh_machine()
+            z_snapshot = machine.get_motion_snapshot()
+            if abs(float(z_snapshot["z"]) - configured_z) > self.config.settle_tolerance_mm:
+                raise MachineRuntimeError(f"Z de preparación no alcanzada: objetivo {configured_z:.3f} mm, observada {float(z_snapshot["z"]):.3f} mm.")
+            self._step("z_segura_confirmada", "ok", f"Z de preparación alcanzada: {configured_z:.3f} mm.")
+            self._step("PREPARATION_Z_DONE", "ok", f"Z observada={float(z_snapshot["z"]):.3f} mm; X/Y continúan bloqueados hasta esta confirmación.")
+            self._log_preparation_transition("PREPARATION_Z_DONE", target_z=configured_z, center_x=center_x, center_y=center_y, observed=z_snapshot, started=started)
 
             with self._lock:
                 self._state = MachineRuntimeState.MOVING_TO_CENTER
+            self._step("PREPARATION_CENTER_START", "ok", f"Moviendo X/Y al centro X={center_x:.3f} Y={center_y:.3f}.")
+            self._log_preparation_transition("PREPARATION_CENTER_START", target_z=configured_z, center_x=center_x, center_y=center_y, observed=z_snapshot, started=started)
             self._move_absolute(x=center_x, y=center_y, label="xy_centro", feed_mm_min=REFERENCE_PREP_XY_FEED_MM_MIN)
             self._refresh_machine()
-            self._step("centro_confirmado", "ok", f"Máquina preparada en X={center_x:.3f} Y={center_y:.3f} Z={target_z_mm:.3f} mm.")
+            center_snapshot = machine.get_motion_snapshot()
+            if abs(float(center_snapshot["x"]) - center_x) > self.config.settle_tolerance_mm or abs(float(center_snapshot["y"]) - center_y) > self.config.settle_tolerance_mm:
+                raise MachineRuntimeError(f"Centro no alcanzado: objetivo X={center_x:.3f} Y={center_y:.3f}; observada X={float(center_snapshot["x"]):.3f} Y={float(center_snapshot["y"]):.3f}.")
+            self._step("centro_confirmado", "ok", f"Máquina preparada en X={center_x:.3f} Y={center_y:.3f} Z={configured_z:.3f} mm.")
+            self._step("PREPARATION_CENTER_DONE", "ok", f"Centro confirmado X={float(center_snapshot["x"]):.3f} Y={float(center_snapshot["y"]):.3f}.")
+            self._log_preparation_transition("PREPARATION_CENTER_DONE", target_z=configured_z, center_x=center_x, center_y=center_y, observed=center_snapshot, started=started)
             with self._lock:
                 self._state = MachineRuntimeState.WAITING_FOR_XY_REFERENCE
                 self._event("info", "Inicialización física completada; posicione X/Y del origen 0,0 y arme la referencia.")
             return self.snapshot()
         except Exception as error:
+            self._log_preparation_transition("PREPARATION_FAILED", target_z=configured_z, center_x=center_x, center_y=center_y, error=str(error), started=started)
             with self._lock:
                 self._state = MachineRuntimeState.ERROR
                 self._last_error = str(error)
+                self._step("PREPARATION_FAILED", "error", str(error))
                 self._step("abortar", "error", str(error))
                 self._event("error", str(error))
             raise
@@ -1149,6 +1177,8 @@ class MachineRuntime:
         for axis, value, minimum, maximum in checks:
             if value is None:
                 continue
+            if not math.isfinite(value):
+                raise MachineRuntimeError(f"{label}: {axis} debe ser un valor numérico finito.")
             if value < minimum or value > maximum:
                 raise MachineRuntimeError(f"{label}: {axis}={value:.3f} mm fuera de límites Klipper {minimum:.3f}..{maximum:.3f} mm.")
 
@@ -1438,6 +1468,7 @@ class MachineRuntime:
             raise MachineRuntimeError("No hay telemetría de máquina.")
         start = time.monotonic()
         while time.monotonic() - start <= self.config.home_timeout_s:
+            self._raise_if_cancelled()
             self._assert_safety_for_connection()
             self._refresh_machine_best_effort()
             snapshot = self._machine.get_motion_snapshot()
@@ -1617,6 +1648,17 @@ class MachineRuntime:
         if not safety["telemetry_recent"] or not safety["serial_recent"]:
             return MachineHealth.WARNING
         return MachineHealth.HEALTHY
+
+    def _log_preparation_transition(self, event: str, *, target_z: float, center_x: float | None, center_y: float | None, observed: dict[str, Any] | None = None, error: str | None = None, started: float | None = None) -> None:
+        observed = observed or (self._machine.get_motion_snapshot() if self._machine is not None else {})
+        with self._lock:
+            telemetry_age = None if self._last_telemetry_at is None else time.monotonic() - self._last_telemetry_at
+            homed_axes = None if self._machine is None else self._machine.homed_axes
+        logger.info(
+            "%s target_z=%s observed_z=%s center_x=%s center_y=%s homed_axes=%s telemetry_age_s=%s elapsed_s=%.3f error=%s",
+            event, target_z, observed.get("z"), center_x, center_y, homed_axes, telemetry_age,
+            0.0 if started is None else time.monotonic() - started, error,
+        )
 
     def _step(self, name: str, status: str, detail: str) -> None:
         with self._lock:
