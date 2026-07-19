@@ -527,7 +527,7 @@ describe("ProjectWorkspace", () => {
 
   it("permite volver a medir la referencia cuando ya existe una captura previa", async () => {
     vi.mocked(physicalMachine.refreshRuntime).mockClear();
-    const capturedMachine = { ...physicalMachine, runtimeState: "REFERENCE_CAPTURED", runtime: { ...physicalMachine.runtime, state: "REFERENCE_CAPTURED" } };
+    const capturedMachine: MachineContextValue = { ...physicalMachine, runtimeState: "REFERENCE_CAPTURED", runtime: { ...physicalMachine.runtime, state: "REFERENCE_CAPTURED" } as NonNullable<MachineContextValue["runtime"]> };
     renderWorkspace(capturedMachine);
 
     fireEvent.click(screen.getByRole("button", { name: /^Referencia$/i }));

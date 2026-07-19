@@ -120,6 +120,23 @@ def _is_cardinal(command: ControllerCommand) -> bool:
 
 REFERENCE_PREP_XY_FEED_MM_MIN = 1800.0
 
+def calculate_safe_probe_z(reference_z: float, clearance_mm: float, axis_direction: int, z_limits: Any) -> float:
+    """Return an absolute Z that is clearance away from the measured surface.
+
+    ``axis_direction`` is +1 when increasing machine Z retracts from the PCB and
+    -1 for the inverse kinematic convention.  The result must remain farther
+    from the surface after clamping to discovered Klipper limits.
+    """
+    if clearance_mm <= 0 or axis_direction not in {-1, 1}:
+        raise MachineRuntimeError("La separación segura de sonda o el sentido Z es inválido.")
+    requested = reference_z + axis_direction * clearance_mm
+    target = min(max(requested, z_limits.minimum), z_limits.maximum)
+    if (target - reference_z) * axis_direction <= 0:
+        raise MachineRuntimeError(
+            f"No existe Z segura alejándose de la referencia: inicio={reference_z:.3f}, objetivo={requested:.3f}, límites={z_limits.minimum:.3f}..{z_limits.maximum:.3f}."
+        )
+    return target
+
 
 class MachineRuntime:
     def __init__(
@@ -170,6 +187,10 @@ class MachineRuntime:
         self._initialization_steps: list[InitializationStep] = []
         self._events: list[RuntimeEvent] = []
         self._counters = RuntimeCounters()
+        self._packet_sequence = 0
+        self._probe_raw = False
+        self._probe_filtered = False
+        self._probe_filtered_since: float | None = None
 
 
     _MACHINE_SETTINGS_FIELDS = {
@@ -613,11 +634,19 @@ class MachineRuntime:
             machine = self._machine
             if machine is None:
                 raise MachineRuntimeError("No hay estado de máquina descubierto.")
+            start_snapshot = machine.get_motion_snapshot()
             safe_z = self._mesh_safe_z(machine, probe_config=probe_config)
-            self._notify_probe_progress(progress_callback, "POINT_MOVE_SAFE_Z", safe_z_mm=safe_z)
+            with self._lock:
+                safe_sequence = self._packet_sequence
+            self._notify_probe_progress(progress_callback, "POINT_MOVE_SAFE_Z", safe_z_mm=safe_z, initial_z_mm=float(start_snapshot["z"]))
             self._move_absolute(z=safe_z, label="mesh_z_segura")
-            self._notify_probe_progress(progress_callback, "POINT_MOVE_XY", x_mm=float(point["x_machine"]), y_mm=float(point["y_machine"]))
+            safe_observed = machine.get_motion_snapshot()
+            self._require_fresh_open_probe(after_sequence=safe_sequence, stage="POINT_VERIFY_PROBE_OPEN", progress_callback=progress_callback)
+            with self._lock:
+                xy_sequence = self._packet_sequence
+            self._notify_probe_progress(progress_callback, "POINT_MOVE_XY", x_mm=float(point["x_machine"]), y_mm=float(point["y_machine"]), safe_z_mm=safe_z, observed_z_mm=float(safe_observed["z"]))
             self._move_absolute(x=float(point["x_machine"]), y=float(point["y_machine"]), label=f"mesh_xy_{point['index']}")
+            self._require_fresh_open_probe(after_sequence=xy_sequence, stage="POINT_VERIFY_PROBE_OPEN", progress_callback=progress_callback)
             probe_feed_mm_min = self._probe_config_float(probe_config, "probe_feed_mm_min")
             self._notify_probe_progress(progress_callback, "POINT_VERIFY_PROBE_OPEN")
             probe = self._probe_current_position(
@@ -644,6 +673,31 @@ class MachineRuntime:
         finally:
             self._movement_lock.release()
 
+    def _require_fresh_open_probe(self, *, after_sequence: int, stage: str, progress_callback=None) -> dict[str, Any]:
+        """Require a new, recent and stable OPEN controller sample before motion."""
+        deadline = time.monotonic() + 1.0
+        stable_s = 0.05
+        while time.monotonic() < deadline:
+            self._raise_if_cancelled()
+            with self._lock:
+                sequence = self._packet_sequence
+                raw = self._probe_raw
+                filtered = self._probe_filtered
+                changed_at = self._probe_filtered_since
+                packet_at = self._last_packet_at
+            now = time.monotonic()
+            age = None if packet_at is None else now - packet_at
+            stable_ms = 0.0 if changed_at is None else max(0.0, now - changed_at) * 1000.0
+            detail = {"probe_raw": raw, "probe_filtered": filtered, "last_packet_age_s": age, "open_stable_ms": stable_ms, "packet_sequence": sequence}
+            # Unit runtimes have no serial driver; production always requires a post-motion packet.
+            if not isinstance(self._driver, SerialDriver) and not raw and not filtered:
+                return detail
+            if sequence > after_sequence and age is not None and age <= self.config.serial_fresh_timeout_s and not raw and not filtered and stable_ms >= stable_s * 1000.0:
+                self._notify_probe_progress(progress_callback, stage, **detail)
+                return detail
+            time.sleep(0.01)
+        raise MachineRuntimeError(f"Sonda no OPEN fresca y estable antes de {stage}: raw={raw}, filtrada={filtered}, edad_paquete_s={age}, estable_ms={stable_ms:.1f}.")
+
     def _probe_current_position(
         self,
         *,
@@ -665,8 +719,8 @@ class MachineRuntime:
         probe_speed = probe_speed_mm_s if probe_speed_mm_s and probe_speed_mm_s > 0 else self.config.probe_lower_speed_mm_s
         retract_distance = retract_mm if retract_mm and retract_mm > 0 else self.config.probe_retract_mm
         with self._lock:
-            if self._last_command.probe_triggered:
-                raise MachineRuntimeError("La sonda está activa antes de iniciar el descenso.")
+            packet_sequence = self._packet_sequence
+        self._require_fresh_open_probe(after_sequence=packet_sequence - 1, stage="POINT_VERIFY_PROBE_OPEN", progress_callback=progress_callback)
         start = machine.get_motion_snapshot()
         start_x = float(start["x"])
         start_y = float(start["y"])
@@ -871,6 +925,11 @@ class MachineRuntime:
             self._last_command = command
             self._last_packet_at = time.monotonic()
             self._counters.valid_packets += 1
+            self._packet_sequence += 1
+            self._probe_raw = bool(command.probe_triggered)
+            if self._probe_filtered != self._probe_raw:
+                self._probe_filtered = self._probe_raw
+                self._probe_filtered_since = time.monotonic()
             manual = self._manual
             diagnostic_only = self._diagnostic_input_only
             manual_enabled = self._manual_enabled
@@ -1447,9 +1506,10 @@ class MachineRuntime:
     def _mesh_safe_z(self, machine, *, probe_config: dict[str, Any] | None = None) -> float:
         clearance_z = self._probe_config_float(probe_config, "safe_z_mm")
         reference_z = self._probe_config_float(probe_config, "reference_z_mm")
-        if clearance_z is not None and reference_z is not None:
-            return self._safe_z(machine, safe_z_mm=reference_z + clearance_z)
-        return self._safe_z(machine, safe_z_mm=clearance_z)
+        if clearance_z is None or reference_z is None:
+            raise MachineRuntimeError("La malla física requiere referencia Z y separación segura explícitas.")
+        # CNC actual: aumentar Z retrae de la PCB; esta semántica es clearance relativo, no Z absoluta.
+        return calculate_safe_probe_z(reference_z, clearance_z, +1, machine.z_limits)
 
     def _probe_config_float(self, probe_config: dict[str, Any] | None, key: str) -> float | None:
         if not probe_config:
