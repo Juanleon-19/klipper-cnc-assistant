@@ -1108,6 +1108,7 @@ export function ProjectWorkspace({
     const probeLive = runtime?.probe_live ?? {};
     const lastProbeFailure = runtime?.last_probe_failure ?? null;
     const moonraker = runtime?.moonraker ?? {};
+    const activeOperation = runtime?.active_operation ?? null;
     const preparation = runtime?.preparation ?? {};
     const toolChange = runtime?.tool_change ?? {};
     const referencePrepZ = typeof preparation.reference_prep_z_mm === "number" ? preparation.reference_prep_z_mm : 115;
@@ -1163,6 +1164,7 @@ export function ProjectWorkspace({
             <div><dt>Probe raw / filtrada</dt><dd>{String(probeLive.raw_value ?? controller.probe ?? false)} / {String(probeLive.filtered_triggered ?? controller.probe ?? false)}</dd></div>
             <div><dt>Edad / estable</dt><dd>{typeof probeLive.packet_age_s === "number" ? `${(probeLive.packet_age_s * 1000).toFixed(0)} ms` : "-"} / {typeof probeLive.stable_for_ms === "number" ? `${probeLive.stable_for_ms.toFixed(0)} ms` : "-"}</dd></div>
             <div><dt>Telemetría</dt><dd>{String(moonraker.telemetry_state ?? "DISCONNECTED")} · {typeof position?.live_position_age_s === "number" ? `${position.live_position_age_s.toFixed(2)} s` : "sin posición"}</dd></div>
+            <div><dt>Operación activa</dt><dd>{activeOperation ? `${String(activeOperation.operation_type)} #${String(activeOperation.generation)}` : "ninguna"}</dd></div>
           </dl>
           {lastProbeFailure ? <div className="alert alert--warning">Último fallo de sonda (histórico): {String(lastProbeFailure.error ?? "-")}</div> : null}
         </article>
@@ -1670,6 +1672,8 @@ export function ProjectWorkspace({
       setHeightMap(null);
       setMeshArmed(false);
       setMeshSuggestion(null);
+      setWorkspaceError("");
+      setMeshValidationMessage("");
       await machine.refreshRuntime();
       if (selectedOperation) {
         setReferenceSession(await api.getReferenceSession(project.id, selectedOperation.id));

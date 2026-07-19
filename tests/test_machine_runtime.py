@@ -419,6 +419,104 @@ class MachineRuntimeTest(unittest.TestCase):
         self.assertIsNone(snapshot["last_error"])
         self.assertTrue(any("Timeout HTTP de homing resuelto" in event["message"] for event in snapshot["events"]))
 
+    def test_cancelled_mesh_context_then_reset_does_not_cancel_preparation(self) -> None:
+        machine = MachineState(
+            position=MachinePosition(5, 5, 3),
+            x_limits=AxisLimits(-10, 110),
+            y_limits=AxisLimits(-20, 80),
+            z_limits=AxisLimits(0, 200),
+            homed_axes="",
+            max_velocity=100,
+            max_accel=500,
+            live_velocity=0,
+        )
+        runtime, client = physical_runtime_with_machine(machine)
+
+        mesh_context = runtime._begin_operation_context("mesh")
+        runtime.cancel_operation()
+        self.assertTrue(mesh_context.cancel_event.is_set())
+        runtime._finish_operation_context(mesh_context)
+        # The reset closes the simulated transport; reattach a fresh simulated one
+        # exactly as a real reconnect would before starting the next operation.
+        runtime._driver = None
+        runtime._serial_thread = None
+        runtime.reset_physical_session()
+        runtime._client = client
+        runtime._machine = machine
+        runtime._driver = type("Driver", (), {"diagnostics": FakeDiagnostics()})()
+        runtime._serial_thread = FakeThread()
+        runtime._last_packet_at = time.monotonic()
+        runtime._last_telemetry_at = time.monotonic()
+
+        snapshot = runtime.initialize()
+
+        self.assertEqual(snapshot["state"], "WAITING_FOR_XY_REFERENCE")
+        self.assertEqual(client.scripts[0], "G28")
+        self.assertIn("Z115.000000", client.scripts[1])
+        self.assertIn("X50.000000", client.scripts[2])
+        self.assertTrue(all("Sondeo cancelado" not in step["detail"] for step in snapshot["initialization_steps"]))
+        self.assertEqual(snapshot["active_operation"]["operation_type"], "preparation")
+        self.assertIsNone(runtime.snapshot()["active_operation"])
+
+    def test_cancelled_preparation_can_retry_with_a_new_context(self) -> None:
+        class CancelAfterHomeClient(MotionClient):
+            def __init__(self, machine: MachineState, runtime: MachineRuntime) -> None:
+                super().__init__(machine)
+                self.runtime = runtime
+                self.cancel_once = True
+
+            def send_gcode(self, script: str, *, timeout: float | None = None) -> dict[str, object]:
+                result = super().send_gcode(script, timeout=timeout)
+                if self.cancel_once and "G28" in script:
+                    self.cancel_once = False
+                    self.runtime.cancel_operation()
+                return result
+
+        machine = MachineState(
+            position=MachinePosition(0, 0, 0),
+            x_limits=AxisLimits(0, 100),
+            y_limits=AxisLimits(0, 100),
+            z_limits=AxisLimits(0, 200),
+            homed_axes="",
+            max_velocity=100,
+            max_accel=500,
+            live_velocity=0,
+        )
+        runtime, _client = physical_runtime_with_machine(machine)
+        cancelling_client = CancelAfterHomeClient(machine, runtime)
+        runtime._client = cancelling_client
+
+        with self.assertRaisesRegex(MachineRuntimeError, "Preparación cancelada por el operador"):
+            runtime.initialize()
+
+        failed = runtime.snapshot()
+        self.assertEqual(failed["state"], "CANCELLED")
+        self.assertTrue(any(step["name"] == "PREPARATION_CANCELLED" for step in failed["initialization_steps"]))
+        self.assertTrue(all("Sondeo cancelado" not in step["detail"] for step in failed["initialization_steps"]))
+        self.assertTrue(runtime._movement_lock.acquire(blocking=False))
+        runtime._movement_lock.release()
+
+        runtime._client = MotionClient(machine)
+        retry = runtime.initialize()
+
+        self.assertEqual(retry["state"], "WAITING_FOR_XY_REFERENCE")
+        self.assertEqual(retry["active_operation"]["operation_type"], "preparation")
+        self.assertIsNone(runtime.snapshot()["active_operation"])
+        self.assertTrue(any(step["name"] == "PREPARATION_CENTER_DONE" for step in retry["initialization_steps"]))
+
+    def test_cancelled_reference_context_cannot_cancel_new_preparation_context(self) -> None:
+        runtime = MachineRuntime(config(MachineMode.PHYSICAL))
+        reference_context = runtime._begin_operation_context("reference_z")
+        runtime.cancel_operation()
+        preparation_context = runtime._begin_operation_context("preparation")
+
+        self.assertTrue(reference_context.cancel_event.is_set())
+        self.assertFalse(preparation_context.cancel_event.is_set())
+        self.assertNotEqual(reference_context.operation_id, preparation_context.operation_id)
+        runtime._raise_if_cancelled()
+        self.assertEqual(runtime.snapshot()["active_operation"]["operation_type"], "preparation")
+        runtime._finish_operation_context(preparation_context)
+
     def test_initialize_runs_g28_then_reference_z_then_machine_center(self) -> None:
         machine = MachineState(
             position=MachinePosition(5, 5, 3),

@@ -67,6 +67,15 @@ class MachineRuntimeError(RuntimeError):
 
 
 @dataclass
+class OperationContext:
+    operation_id: str
+    operation_type: str
+    generation: int
+    cancel_event: threading.Event
+    started_at: float
+
+
+@dataclass
 class RuntimeCounters:
     valid_packets: int = 0
     invalid_packets: int = 0
@@ -161,7 +170,8 @@ class MachineRuntime:
         self._discovery = discovery
         self._lock = threading.RLock()
         self._movement_lock = threading.Lock()
-        self._cancel_requested = threading.Event()
+        self._operation_generation = 0
+        self._active_operation: OperationContext | None = None
         self._serial_stop = threading.Event()
         self._started_at = utc_now()
         self._state = MachineRuntimeState.DISCONNECTED
@@ -384,8 +394,17 @@ class MachineRuntime:
         return self.snapshot()
 
     def reset_physical_session(self) -> dict[str, Any]:
-        self.stop()
+        self.cancel_operation()
+        # A cancelled context owns its Event forever; never clear it for a new operation.
+        lock_acquired = self._movement_lock.acquire(timeout=2.0)
+        if not lock_acquired:
+            raise MachineRuntimeError("No se pudo reiniciar: la operación física anterior no liberó movement_lock a tiempo.")
+        try:
+            self.stop()
+        finally:
+            self._movement_lock.release()
         with self._lock:
+            self._active_operation = None
             self._manual_enabled = False
             self._diagnostic_input_only = True
             self._ready_for_jog = False
@@ -444,6 +463,7 @@ class MachineRuntime:
         self._require_physical_ready()
         if not self._movement_lock.acquire(blocking=False):
             raise MachineRuntimeError("Ya hay un movimiento u operación física activa.")
+        context = self._begin_operation_context("preparation")
         started = time.monotonic()
         center_x: float | None = None
         center_y: float | None = None
@@ -522,19 +542,22 @@ class MachineRuntime:
         except Exception as error:
             self._log_preparation_transition("PREPARATION_FAILED", target_z=configured_z, center_x=center_x, center_y=center_y, error=str(error), started=started)
             with self._lock:
-                self._state = MachineRuntimeState.ERROR
+                cancelled = str(error) == "Preparación cancelada por el operador."
+                self._state = MachineRuntimeState.CANCELLED if cancelled else MachineRuntimeState.ERROR
                 self._last_error = str(error)
-                self._step("PREPARATION_FAILED", "error", str(error))
-                self._step("abortar", "error", str(error))
-                self._event("error", str(error))
+                self._step("PREPARATION_CANCELLED" if cancelled else "PREPARATION_FAILED", "warning" if cancelled else "error", str(error))
+                self._step("abortar", "warning" if cancelled else "error", str(error))
+                self._event("warning" if cancelled else "error", str(error))
             raise
         finally:
+            self._finish_operation_context(context)
             self._movement_lock.release()
 
     def move_to_tool_change_position(self) -> dict[str, Any]:
         self._require_physical_ready()
         if not self._movement_lock.acquire(blocking=False):
             raise MachineRuntimeError("Ya hay un movimiento u operación física activa.")
+        context = self._begin_operation_context("tool_change")
         try:
             with self._lock:
                 self._manual_enabled = False
@@ -565,6 +588,7 @@ class MachineRuntime:
                 self._event("error", str(error))
             raise
         finally:
+            self._finish_operation_context(context)
             self._movement_lock.release()
 
     def request_probe(self) -> dict[str, Any]:
@@ -583,6 +607,7 @@ class MachineRuntime:
         self._require_physical_ready()
         if not self._movement_lock.acquire(blocking=False):
             raise MachineRuntimeError("Ya hay un movimiento u operación física activa.")
+        context = self._begin_operation_context("reference_z")
         try:
             with self._lock:
                 if self._state in {MachineRuntimeState.WAITING_FOR_XY_REFERENCE, MachineRuntimeState.REFERENCE_CAPTURED}:
@@ -649,13 +674,14 @@ class MachineRuntime:
                 self._event("error", str(error))
             raise
         finally:
+            self._finish_operation_context(context)
             self._movement_lock.release()
 
     def probe_mesh_point(self, point: dict[str, Any], probe_config: dict[str, Any] | None = None, progress_callback: Callable[[str, dict[str, Any]], None] | None = None) -> dict[str, Any]:
         self._require_physical_ready()
-        self._cancel_requested.clear()
         if not self._movement_lock.acquire(blocking=False):
             raise MachineRuntimeError("Ya hay un movimiento u operación física activa.")
+        context = self._begin_operation_context("mesh")
         started = time.monotonic()
         try:
             with self._lock:
@@ -704,6 +730,7 @@ class MachineRuntime:
                 self._event("error", str(error))
             raise
         finally:
+            self._finish_operation_context(context)
             self._movement_lock.release()
 
     def get_live_probe_state(self, *, require_fresh: bool = False, require_stable: bool = False) -> dict[str, Any]:
@@ -828,18 +855,55 @@ class MachineRuntime:
         self._wait_for_axis("z", float(result["target"]), "retracto de sonda", start_position=contact_z)
         return ProbeResult(x_mm=start_x, y_mm=start_y, z_mm=contact_z, captured_at=_iso_now())
 
-    def cancel_operation(self) -> dict[str, Any]:
-        self._cancel_requested.set()
+    def _begin_operation_context(self, operation_type: str) -> OperationContext:
         with self._lock:
+            previous = self._active_operation
+            self._operation_generation += 1
+            context = OperationContext(
+                operation_id=f"{operation_type}-{self._operation_generation}",
+                operation_type=operation_type,
+                generation=self._operation_generation,
+                cancel_event=threading.Event(),
+                started_at=time.monotonic(),
+            )
+            self._active_operation = context
+            if previous is not None:
+                logger.warning("OPERATION_CONTEXT_REPLACED operation_type=%s operation_id=%s previous_id=%s cancel_event_is_set=%s movement_lock=%s worker_alive=%s", operation_type, context.operation_id, previous.operation_id, previous.cancel_event.is_set(), self._movement_lock.locked(), False)
+            logger.info("OPERATION_CONTEXT_CREATED operation_type=%s operation_id=%s generation=%s cancel_event_is_set=%s movement_lock=%s worker_alive=%s", operation_type, context.operation_id, context.generation, False, self._movement_lock.locked(), False)
+            return context
+
+    def _finish_operation_context(self, context: OperationContext) -> None:
+        with self._lock:
+            if self._active_operation is context:
+                self._active_operation = None
+            logger.info("OPERATION_CONTEXT_FINISHED operation_type=%s operation_id=%s generation=%s cancel_event_is_set=%s movement_lock=%s worker_alive=%s", context.operation_type, context.operation_id, context.generation, context.cancel_event.is_set(), self._movement_lock.locked(), False)
+
+    def _active_operation_snapshot(self) -> dict[str, Any] | None:
+        with self._lock:
+            context = self._active_operation
+            if context is None:
+                return None
+            return {"operation_id": context.operation_id, "operation_type": context.operation_type, "generation": context.generation, "cancel_event_is_set": context.cancel_event.is_set()}
+
+    def cancel_operation(self) -> dict[str, Any]:
+        with self._lock:
+            context = self._active_operation
+            if context is not None:
+                context.cancel_event.set()
+                logger.info("OPERATION_CANCEL_REQUESTED operation_type=%s operation_id=%s generation=%s cancel_event_is_set=%s movement_lock=%s worker_alive=%s", context.operation_type, context.operation_id, context.generation, True, self._movement_lock.locked(), False)
             self._probe_requested = False
             self._manual_enabled = False
-            self._state = MachineRuntimeState.READY_FOR_HOME if self._client is not None else MachineRuntimeState.DISCONNECTED
-            self._event("warning", "Operación física cancelada por el operador.")
+            self._state = MachineRuntimeState.CANCELLED if self._client is not None else MachineRuntimeState.DISCONNECTED
+            label = "Operación física" if context is None else ({"preparation": "Preparación", "reference_z": "Referencia Z", "mesh": "Malla", "tool_change": "Movimiento de cambio"}.get(context.operation_type, "Operación física"))
+            self._event("warning", f"{label} cancelada por el operador.")
         return self.snapshot()
 
     def _raise_if_cancelled(self) -> None:
-        if self._cancel_requested.is_set():
-            raise MachineRuntimeError("Sondeo cancelado por el operador.")
+        with self._lock:
+            context = self._active_operation
+        if context is not None and context.cancel_event.is_set():
+            label = {"preparation": "Preparación", "reference_z": "Referencia Z", "mesh": "Malla", "tool_change": "Movimiento de cambio"}.get(context.operation_type, "Operación física")
+            raise MachineRuntimeError(f"{label} cancelada por el operador.")
 
     def _notify_probe_progress(self, callback: Callable[[str, dict[str, Any]], None] | None, state: str, **detail: Any) -> None:
         if callback is None:
@@ -969,6 +1033,7 @@ class MachineRuntime:
                 "last_movement": self._last_movement,
                 "last_error": self._last_error,
                 "last_probe_result": None if self._last_probe_result is None else self._last_probe_result.__dict__,
+                "active_operation": self._active_operation_snapshot(),
                 "initialization_steps": [step.__dict__ for step in self._initialization_steps],
                 "events": [event.__dict__ for event in self._events[-30:]],
             }
@@ -1719,9 +1784,15 @@ class MachineRuntime:
         with self._lock:
             telemetry_age = None if self._last_telemetry_at is None else time.monotonic() - self._last_telemetry_at
             homed_axes = None if self._machine is None else self._machine.homed_axes
+            context = self._active_operation
+            operation_type = None if context is None else context.operation_type
+            operation_id = None if context is None else context.operation_id
+            cancel_event_is_set = False if context is None else context.cancel_event.is_set()
+            movement_lock = self._movement_lock.locked()
         logger.info(
-            "%s target_z=%s observed_z=%s center_x=%s center_y=%s homed_axes=%s telemetry_age_s=%s elapsed_s=%.3f error=%s",
-            event, target_z, observed.get("z"), center_x, center_y, homed_axes, telemetry_age,
+            "%s operation_type=%s operation_id=%s cancel_event_is_set=%s movement_lock=%s worker_alive=%s target_z=%s observed_z=%s center_x=%s center_y=%s homed_axes=%s telemetry_age_s=%s elapsed_s=%.3f error=%s",
+            event, operation_type, operation_id, cancel_event_is_set, movement_lock, False,
+            target_z, observed.get("z"), center_x, center_y, homed_axes, telemetry_age,
             0.0 if started is None else time.monotonic() - started, error,
         )
 
