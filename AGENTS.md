@@ -95,6 +95,30 @@ El software de entrada expresa intención. La capa `jog` es la única autorizada
 - Tratar la desconexión de Arduino, Moonraker o WebSocket como condición de fallo seguro.
 - Documentar toda validación física: máquina, eje, velocidad, distancia, condiciones y resultado.
 
+## Seguridad física permanente
+
+- Auditorías, análisis estáticos y pruebas unitarias se ejecutan sin mover hardware.
+- No enviar G-code, homing, sondeo, spindle, carga a Moonraker ni cambiar Klipper/Moonraker sin autorización explícita y específica del operador.
+- No modificar `firmware/`, `printer.cfg`, systemd, puertos ni configuración de despliegue durante fases que no lo autoricen.
+- WebSocket conectado no equivale a telemetría reciente: el movimiento requiere estado reciente, homing, límites e input serie recientes.
+- Mocks, fakes y `MACHINE_MODE=simulated` validan software, nunca hardware.
+
+## Estructura y pruebas
+
+- `frontend/`: React/TypeScript/Vite; ejecutar `npm run lint` y `npm run test` allí.
+- `src/klipper_cnc_assistant/api/`: FastAPI; `application/`: casos de uso; `machine/`, `moonraker/`, `input/`, `jog/`: frontera física.
+- `data/projects/` contiene persistencia JSON local; preservar datos y artefactos al depurar.
+- Backend sin hardware: `MACHINE_MODE=simulated PYTHONPATH=src .venv/bin/python -m unittest discover -s tests -v`.
+- Toda prueba física exige procedimiento aprobado, PCB de descarte, límites, recuperación y evidencia.
+
+## Política por fases
+
+- Una sola fase aprobada a la vez; verificar y mostrar el diff antes de continuar.
+- No mezclar refactorización, firmware, configuración de máquina y correcciones funcionales.
+- Un commit por fase, coherente, verificable y reversible; no hacer commit si se solicitó revisión previa.
+- No borrar candidatos durante auditoría: clasificarlos y conservar evidencia.
+- Al finalizar una fase, detenerse e informar alcance, pruebas, riesgos y decisiones pendientes.
+
 ## Lo que un agente nunca debe hacer
 
 - No enviar G-code, mover ejes, sondear ni activar spindle sin autorización explícita del usuario.

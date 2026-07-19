@@ -312,6 +312,10 @@ export const api = {
     request<PhysicalMapResponse>(`/api/projects/${projectId}/physical-maps/${mapId}/resume`, { method: "POST" }),
   cancelPhysicalMap: (projectId: string, mapId: string) =>
     request<PhysicalMapResponse>(`/api/projects/${projectId}/physical-maps/${mapId}/cancel`, { method: "POST" }),
+  retryPhysicalMapPoint: (projectId: string, mapId: string, pointIndex: number) =>
+    request<PhysicalMapResponse>(`/api/projects/${projectId}/physical-maps/${mapId}/points/${pointIndex}/retry`, { method: "POST" }),
+  skipPhysicalMapPoint: (projectId: string, mapId: string, pointIndex: number) =>
+    request<PhysicalMapResponse>(`/api/projects/${projectId}/physical-maps/${mapId}/points/${pointIndex}/skip`, { method: "POST" }),
   getHeightMap: (projectId: string, operationId: string) =>
     request<HeightMap>(`/api/projects/${projectId}/operations/${operationId}/height-map`),
   configureHeightMap: (projectId: string, operationId: string, payload: Record<string, unknown>) =>

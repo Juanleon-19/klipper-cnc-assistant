@@ -140,6 +140,7 @@ class MachineRuntime:
         self._discovery = discovery
         self._lock = threading.RLock()
         self._movement_lock = threading.Lock()
+        self._cancel_requested = threading.Event()
         self._serial_stop = threading.Event()
         self._started_at = utc_now()
         self._state = MachineRuntimeState.DISCONNECTED
@@ -579,6 +580,7 @@ class MachineRuntime:
 
     def probe_mesh_point(self, point: dict[str, Any], probe_config: dict[str, Any] | None = None) -> dict[str, Any]:
         self._require_physical_ready()
+        self._cancel_requested.clear()
         if not self._movement_lock.acquire(blocking=False):
             raise MachineRuntimeError("Ya hay un movimiento u operación física activa.")
         started = time.monotonic()
@@ -645,6 +647,9 @@ class MachineRuntime:
         start_x = float(start["x"])
         start_y = float(start["y"])
         while True:
+            if self._cancel_requested.is_set():
+                raise MachineRuntimeError("Sondeo cancelado por el operador.")
+        while True:
             with self._lock:
                 if self._last_command.probe_triggered:
                     break
@@ -672,6 +677,8 @@ class MachineRuntime:
         self._wait_for_axis("z", float(result["target"]), "retracto de sonda", start_position=contact_z)
         return ProbeResult(x_mm=start_x, y_mm=start_y, z_mm=contact_z, captured_at=_iso_now())
 
+    def cancel_operation(self) -> dict[str, Any]:
+        self._cancel_requested.set()
     def cancel_operation(self) -> dict[str, Any]:
         with self._lock:
             self._probe_requested = False

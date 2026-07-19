@@ -37,12 +37,15 @@ class MeshExecutionService:
         self.max_point_retries = max_point_retries
         self._lock = threading.Lock()
         self._threads: dict[tuple[str, str], threading.Thread] = {}
+        self._cancel_requests: dict[tuple[str, str], threading.Event] = {}
 
     def start_all(self, *, project_id: str, map_id: str, runtime: Any) -> dict[str, Any]:
         payload = self.physical_map_service.get_by_id(project_id, map_id)
         if payload.get("status") in {"CANCELLED", "MESH_COMPLETE"}:
             raise ApplicationError("La malla no está en un estado ejecutable.")
         key = (project_id, map_id)
+        with self._lock:
+            self._cancel_requests[key] = threading.Event()
         with self._lock:
             for other_key, thread in list(self._threads.items()):
                 if not thread.is_alive():
@@ -66,6 +69,20 @@ class MeshExecutionService:
         self.physical_map_service.mark_status(project_id=project_id, map_id=map_id, status="MESH_READY")
         return self.start_all(project_id=project_id, map_id=map_id, runtime=runtime)
 
+    def cancel(self, *, project_id: str, map_id: str, runtime: Any) -> dict[str, Any]:
+        key = (project_id, map_id)
+        with self._lock:
+            self._cancel_requests[key] = threading.Event()
+        with self._lock:
+            cancel_request = self._cancel_requests.get(key)
+            if cancel_request is not None:
+                cancel_request.set()
+        try:
+            runtime.cancel_operation()
+        except Exception:
+            pass
+        return self.physical_map_service.mark_status(project_id=project_id, map_id=map_id, status="CANCELLED")
+
     def wait_until_idle(self, *, timeout_s: float = 5.0) -> bool:
         deadline = time.monotonic() + timeout_s
         while True:
@@ -82,8 +99,15 @@ class MeshExecutionService:
 
     def _run(self, project_id: str, map_id: str, runtime: Any) -> None:
         key = (project_id, map_id)
+        with self._lock:
+            self._cancel_requests.setdefault(key, threading.Event())
         try:
             while True:
+                with self._lock:
+                    cancel_requested = self._cancel_requests.get(key)
+                if cancel_requested is not None and cancel_requested.is_set():
+                    self.physical_map_service.mark_status(project_id=project_id, map_id=map_id, status="CANCELLED")
+                    return
                 payload = self.physical_map_service.get_by_id(project_id, map_id)
                 status = payload.get("status")
                 execution = payload.get("execution") or {}
@@ -123,6 +147,7 @@ class MeshExecutionService:
                 thread = self._threads.get(key)
                 if thread is threading.current_thread():
                     self._threads.pop(key, None)
+                    self._cancel_requests.pop(key, None)
 
     def _probe_one_point(self, project_id: str, map_id: str, runtime: Any, point: dict[str, Any], *, probe_config: dict[str, Any] | None = None) -> None:
         point_index = int(point["index"])

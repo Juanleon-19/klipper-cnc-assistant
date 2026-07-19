@@ -401,9 +401,38 @@ class PhysicalMapService:
     def next_pending_point(self, project_id: str, map_id: str) -> dict[str, Any]:
         payload = self.get_by_id(project_id, map_id)
         for point in payload["points"]:
-            if point.get("status") in {"PENDING", "RETRY_REQUIRED", "FAILED"}:
+            if point.get("status") in {"PENDING", "RETRY_REQUIRED"}:
                 return point
         raise ApplicationError("La malla no tiene puntos pendientes.")
+
+    def retry_failed_point(self, *, project_id: str, map_id: str, point_index: int) -> dict[str, Any]:
+        payload = self.get_by_id(project_id, map_id)
+        point = dict(payload["points"][point_index])
+        if point.get("status") != "FAILED":
+            raise ApplicationError("Solo se puede reintentar un punto fallido.")
+        point["status"] = "RETRY_REQUIRED"
+        point["last_error"] = point.get("error")
+        payload["points"][point_index] = point
+        payload["status"] = "MESH_READY"
+        payload = self._set_execution_state(payload, worker_active=False, point_state="POINT_RETRY", point_index=point_index, last_event=f"Punto {point_index + 1} marcado para reintento explícito.")
+        payload["updated_at"] = _iso_now()
+        self._save(project_id, map_id, payload)
+        return payload
+
+    def skip_failed_point(self, *, project_id: str, map_id: str, point_index: int) -> dict[str, Any]:
+        payload = self.get_by_id(project_id, map_id)
+        point = dict(payload["points"][point_index])
+        if point.get("status") != "FAILED":
+            raise ApplicationError("Solo se puede omitir un punto fallido.")
+        point["status"] = "SKIPPED"
+        point["skip_reason"] = "Omitido explícitamente por el operador tras fallo."
+        payload["points"][point_index] = point
+        payload["status"] = "MESH_READY"
+        payload = self._set_execution_state(payload, worker_active=False, point_state="POINT_SKIPPED", point_index=point_index, last_event=f"Punto {point_index + 1} omitido; el mapa requerirá validación de cobertura.")
+        payload["updated_at"] = _iso_now()
+        payload["height_map"] = self._height_map_payload_from_points(payload)
+        self._save(project_id, map_id, payload)
+        return payload
 
     def record_point(
         self,
