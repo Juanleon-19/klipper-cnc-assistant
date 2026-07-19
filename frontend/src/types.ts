@@ -269,6 +269,15 @@ export type ReferenceSession = {
   motivo_invalidacion: string | null;
 };
 
+export type ReferenceMoveResult = {
+  accepted: boolean;
+  reference_x: number;
+  reference_y: number;
+  preparation_z: number;
+  final_state: string;
+  message: string;
+};
+
 export type CompensationPreviewPoint = {
   x_mm: number;
   y_mm: number;

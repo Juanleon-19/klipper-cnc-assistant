@@ -185,6 +185,8 @@ export function ProjectWorkspace({
   const [referenceSession, setReferenceSession] = useState<ReferenceSession | null>(null);
   const [heightMapBusy, setHeightMapBusy] = useState(false);
   const [referenceBusy, setReferenceBusy] = useState(false);
+  const [referenceMoveResult, setReferenceMoveResult] = useState<{ reference_x: number; reference_y: number; preparation_z: number; final_state: string; message: string } | null>(null);
+  const referenceMoveInFlight = useRef(false);
   const [workspaceError, setWorkspaceError] = useState("");
   const [workOrigin, setWorkOrigin] = useState<InputState>({ x_mm: "0", y_mm: "0" });
   const [zReference, setZReference] = useState<ZInputState>({ x_mm: "0", y_mm: "0", z_mm: "0" });
@@ -1094,6 +1096,24 @@ export function ProjectWorkspace({
     });
   };
 
+  const goToReferencePoint = async () => {
+    if (!project || !selectedOperation || referenceMoveInFlight.current) return;
+    referenceMoveInFlight.current = true;
+    setReferenceBusy(true);
+    setWorkspaceError("");
+    setReferenceMoveResult(null);
+    try {
+      const result = await api.goToReferencePoint(project.id, selectedOperation.id);
+      setReferenceMoveResult(result);
+      await machine.refreshRuntime();
+    } catch (error) {
+      setWorkspaceError(error instanceof Error ? error.message : "No fue posible mover al punto de referencia.");
+    } finally {
+      referenceMoveInFlight.current = false;
+      setReferenceBusy(false);
+    }
+  };
+
   const renderPhysicalReference = () => {
     const runtime = machine.runtime;
     const position = runtime?.klipper?.position as Record<string, unknown> | null | undefined;
@@ -1132,6 +1152,7 @@ export function ProjectWorkspace({
     const canEnableJog = machine.isPhysical && machine.runtimeState === "WAITING_FOR_XY_REFERENCE";
     const canArm = machine.isPhysical && ["WAITING_FOR_XY_REFERENCE", "REFERENCE_CAPTURED"].includes(machine.runtimeState);
     const canProbe = machine.isPhysical && ["WAITING_FOR_XY_REFERENCE", "REFERENCE_ARMED", "REFERENCE_CAPTURED"].includes(machine.runtimeState);
+    const canGoToReference = machine.isPhysical && Boolean(referenceSession?.referencia_z) && Boolean(selectedOperation) && !runtime?.active_operation;
     return (
       <div className="stack gap-md">
         <article className="panel">
@@ -1272,8 +1293,10 @@ export function ProjectWorkspace({
             <button className="button button--ghost" type="button" disabled={!canArm || referenceBusy || machine.refreshing} onClick={() => void machine.runMachineAction("probe-request")}>Armar referencia</button>
             <button className="button" type="button" disabled={!canProbe || referenceBusy || machine.refreshing || !selectedOperation} onClick={() => void remeasurePhysicalReference()}>Sondear referencia ahora</button>
             <button className="button button--ghost" type="button" disabled={!canProbe || referenceBusy || machine.refreshing || !selectedOperation} onClick={() => void remeasurePhysicalReference()}>Volver a medir referencia</button>
+            <button className="button button--ghost" type="button" disabled={!canGoToReference || referenceBusy || machine.refreshing} onClick={() => void goToReferencePoint()}>{referenceBusy ? "Yendo al punto de referencia…" : "Ir al punto de referencia"}</button>
             <button className="button button--ghost" type="button" disabled={!machine.isPhysical || machine.refreshing} onClick={() => void machine.runMachineAction("cancel")}>Cancelar</button>
           </div>
+          {referenceMoveResult ? <div className="alert alert--success"><strong>{referenceMoveResult.message}</strong><br />CNC X: {formatMillimeters(referenceMoveResult.reference_x, 3)} · CNC Y: {formatMillimeters(referenceMoveResult.reference_y, 3)} · Z segura: {formatMillimeters(referenceMoveResult.preparation_z, 3)} · {referenceMoveResult.final_state}</div> : null}
           <div className="info-grid info-grid--double compact-grid">
             <div className="metric-box"><span>Origen X/Y</span><strong>{referenceSession?.origen_trabajo ? `${referenceSession.origen_trabajo.x_mm}, ${referenceSession.origen_trabajo.y_mm}` : "pendiente"}</strong></div>
             <div className="metric-box"><span>Captura origen</span><strong>{formatCapturedPosition(referenceSession?.origen_trabajo?.posicion_captura)}</strong></div>

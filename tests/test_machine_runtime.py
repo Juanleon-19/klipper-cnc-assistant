@@ -1400,3 +1400,72 @@ class MachineRuntimeTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ReferencePointMoveTest(unittest.TestCase):
+    def _runtime(self, *, homed_axes: str = "xyz") -> tuple[MachineRuntime, MotionClient]:
+        machine = MachineState(
+            position=MachinePosition(4, 5, 30),
+            x_limits=AxisLimits(0, 100),
+            y_limits=AxisLimits(0, 100),
+            z_limits=AxisLimits(0, 200),
+            homed_axes=homed_axes,
+            max_velocity=100,
+            max_accel=500,
+            live_velocity=0,
+        )
+        machine.update_motion(live_position=(4, 5, 30), live_velocity=0, source="websocket")
+        runtime, client = physical_runtime_with_machine(machine)
+        runtime._telemetry_state = "LIVE"
+        runtime._last_websocket_message_at = time.monotonic()
+        return runtime, client
+
+    def test_moves_preparation_z_before_saved_cnc_xy_without_probing(self) -> None:
+        runtime, client = self._runtime()
+
+        result = runtime.go_to_reference_point(reference_x=42.5, reference_y=67.25)
+
+        self.assertTrue(result["accepted"])
+        self.assertEqual(result["final_state"], "REFERENCE_MOVE_COMPLETE")
+        self.assertEqual(result["preparation_z"], 115.0)
+        self.assertEqual(len(client.scripts), 2)
+        self.assertIn("Z115.000000", client.scripts[0])
+        self.assertNotIn("X42.500000", client.scripts[0])
+        self.assertIn("X42.500000", client.scripts[1])
+        self.assertIn("Y67.250000", client.scripts[1])
+        self.assertNotIn("PROBE", "\n".join(client.scripts).upper())
+        self.assertIsNone(runtime._active_operation)
+        self.assertFalse(runtime._movement_lock.locked())
+
+    def test_rejects_stale_telemetry_before_any_move(self) -> None:
+        runtime, client = self._runtime()
+        runtime._telemetry_state = "STALE"
+
+        with self.assertRaisesRegex(MachineRuntimeError, "LIVE"):
+            runtime.go_to_reference_point(reference_x=42.5, reference_y=67.25)
+
+        self.assertEqual(client.scripts, [])
+        self.assertFalse(runtime._movement_lock.locked())
+
+    def test_rejects_missing_home_and_triggered_probe_before_xy(self) -> None:
+        runtime, client = self._runtime(homed_axes="xy")
+        with self.assertRaisesRegex(MachineRuntimeError, "homing"):
+            runtime.go_to_reference_point(reference_x=42.5, reference_y=67.25)
+        self.assertEqual(client.scripts, [])
+
+        runtime, client = self._runtime()
+        with runtime._lock:
+            runtime._probe_filtered = True
+            runtime._probe_raw = True
+        with self.assertRaisesRegex(MachineRuntimeError, "TRIGGERED"):
+            runtime.go_to_reference_point(reference_x=42.5, reference_y=67.25)
+        self.assertEqual(client.scripts, [])
+
+    def test_rejects_another_physical_operation_without_replacing_context(self) -> None:
+        runtime, _client = self._runtime()
+        self.assertTrue(runtime._movement_lock.acquire(blocking=False))
+        try:
+            with self.assertRaisesRegex(MachineRuntimeError, "operación física activa"):
+                runtime.go_to_reference_point(reference_x=42.5, reference_y=67.25)
+        finally:
+            runtime._movement_lock.release()

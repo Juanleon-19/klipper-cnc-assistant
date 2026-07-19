@@ -53,6 +53,7 @@ const apiMock = vi.hoisted(() => ({
   getMachineSettings: vi.fn(),
   updateMachineSettings: vi.fn(),
   confirmProbe: vi.fn(),
+  goToReferencePoint: vi.fn(),
 }));
 
 vi.mock("../lib/api", async () => {
@@ -507,6 +508,22 @@ describe("ProjectWorkspace", () => {
     fireEvent.click(screen.getByRole("button", { name: /Ir a posición de cambio/i }));
 
     await waitFor(() => expect(physicalMachine.runMachineAction).toHaveBeenCalledWith("tool-change-position"));
+  });
+
+  it("va una sola vez al punto guardado y muestra el diagnóstico", async () => {
+    apiMock.goToReferencePoint.mockResolvedValue({ accepted: true, reference_x: 10, reference_y: 8, preparation_z: 115, final_state: "REFERENCE_MOVE_COMPLETE", message: "Máquina ubicada en el punto de referencia." });
+    renderWorkspace(physicalMachine);
+
+    fireEvent.click(screen.getByRole("button", { name: /^Referencia$/i }));
+    const button = await screen.findByRole("button", { name: /Ir al punto de referencia/i });
+    fireEvent.click(button);
+    fireEvent.click(button);
+
+    await waitFor(() => expect(apiMock.goToReferencePoint).toHaveBeenCalledTimes(1));
+    expect(apiMock.goToReferencePoint).toHaveBeenCalledWith(project.id, project.operaciones[0].id);
+    expect(await screen.findByText(/Máquina ubicada en el punto de referencia/i)).toBeInTheDocument();
+    expect(screen.getByText(/CNC X: 10\.000 mm/i)).toBeInTheDocument();
+    expect(screen.getByText(/REFERENCE_MOVE_COMPLETE/i)).toBeInTheDocument();
   });
 
   it("permite sondear referencia ahora directamente desde pantalla", async () => {

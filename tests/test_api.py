@@ -46,6 +46,15 @@ class ApiTest(unittest.TestCase):
         payload["montajes"][0]["preparacion"] = preparation
         project_file.write_text(json.dumps(payload, ensure_ascii=True, indent=2), encoding="utf-8")
 
+    def test_go_to_reference_rejects_missing_saved_reference_without_motion(self) -> None:
+        project_id = self._create_project()
+        operation_id = self._create_operation(project_id)
+
+        response = self.client.post(f"/api/projects/{project_id}/operations/{operation_id}/reference/go-to")
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["detalle"], "No hay un punto de referencia guardado.")
+
     def test_health_endpoint(self) -> None:
         response = self.client.get("/api/health")
         self.assertEqual(response.status_code, 200)

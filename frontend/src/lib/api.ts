@@ -18,6 +18,7 @@ import type {
   JobPlan,
   JobRun,
   ReferenceConfirmation,
+  ReferenceMoveResult,
   ReferenceSession,
   SystemInfoResponse,
   Setup,
@@ -273,6 +274,8 @@ export const api = {
     request<ReferenceSession>(`/api/projects/${projectId}/operations/${operationId}/reference-session/physical-z-reference-from-probe`, {
       method: "POST",
     }),
+  goToReferencePoint: (projectId: string, operationId: string) =>
+    request<ReferenceMoveResult>("/api/projects/" + projectId + "/operations/" + operationId + "/reference/go-to", { method: "POST" }),
   suggestPhysicalMap: (projectId: string, operationId: string, payload: PhysicalMapPlanPayload) =>
     request<MeshSuggestion>(`/api/projects/${projectId}/operations/${operationId}/physical-map/suggest`, {
       method: "POST",

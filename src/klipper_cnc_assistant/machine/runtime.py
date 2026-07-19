@@ -593,6 +593,54 @@ class MachineRuntime:
             self._finish_operation_context(context)
             self._movement_lock.release()
 
+    def go_to_reference_point(self, *, reference_x: float, reference_y: float) -> dict[str, Any]:
+        """Move to a saved CNC reference point without probing or changing it."""
+        self._require_physical_ready()
+        if not self._movement_lock.acquire(blocking=False):
+            raise MachineRuntimeError("Ya hay un movimiento u operación física activa.")
+        context = self._begin_operation_context("reference_move")
+        preparation_z = float(self.config.reference_prep_z_mm)
+        try:
+            with self._lock:
+                self._manual_enabled = False
+                self._diagnostic_input_only = True
+                self._state = MachineRuntimeState.MOVING_TO_SAFE_Z
+            self._assert_safety_for_motion()
+            self._refresh_machine()
+            if self._telemetry_status() != "LIVE":
+                raise MachineRuntimeError("La telemetría Moonraker debe estar LIVE antes de mover al punto de referencia.")
+            machine = self._machine
+            if machine is None:
+                raise MachineRuntimeError("No hay estado de máquina descubierto.")
+            missing = sorted(axis for axis in ("x", "y", "z") if not machine.axis_is_homed(axis))
+            if missing:
+                raise MachineRuntimeError("Falta homing de ejes: " + ", ".join(axis.upper() for axis in missing) + ".")
+            probe = self.get_live_probe_state(require_fresh=True)
+            if probe["filtered_triggered"]:
+                raise MachineRuntimeError("No se puede mover al punto de referencia: la sonda está TRIGGERED.")
+            self._validate_machine_target(z=preparation_z, label="Z de preparación de referencia")
+            self._validate_machine_target(x=float(reference_x), y=float(reference_y), label="punto de referencia CNC")
+            self._event("info", f"REFERENCE_MOVE_SAFE_Z: moviendo Z a preparación {preparation_z:.3f} mm.")
+            self._move_absolute(z=preparation_z, label="reference_move_safe_z", feed_mm_min=self.config.reference_prep_z_feed_mm_min)
+            with self._lock:
+                self._state = MachineRuntimeState.MOVING_TO_CENTER
+            self._event("info", f"REFERENCE_MOVE_XY: moviendo a X={float(reference_x):.3f} Y={float(reference_y):.3f} mm.")
+            self._move_absolute(x=float(reference_x), y=float(reference_y), label="reference_move_xy", feed_mm_min=REFERENCE_PREP_XY_FEED_MM_MIN)
+            with self._lock:
+                self._state = MachineRuntimeState.WAITING_FOR_XY_REFERENCE
+                self._event("info", "REFERENCE_MOVE_COMPLETE: máquina ubicada en el punto de referencia.")
+            return {"accepted": True, "reference_x": float(reference_x), "reference_y": float(reference_y), "preparation_z": preparation_z, "final_state": "REFERENCE_MOVE_COMPLETE", "message": "Máquina ubicada en el punto de referencia."}
+        except Exception as error:
+            with self._lock:
+                cancelled = "cancelada por el operador" in str(error).lower()
+                self._state = MachineRuntimeState.CANCELLED if cancelled else MachineRuntimeState.ERROR
+                self._last_error = str(error)
+                self._event("warning" if cancelled else "error", f"{'REFERENCE_MOVE_CANCELLED' if cancelled else 'REFERENCE_MOVE_FAILED'}: {error}")
+            raise
+        finally:
+            self._finish_operation_context(context)
+            self._movement_lock.release()
+
     def request_probe(self) -> dict[str, Any]:
         self._require_physical_ready()
         with self._lock:
@@ -871,7 +919,7 @@ class MachineRuntime:
             self._probe_requested = False
             self._manual_enabled = False
             self._state = MachineRuntimeState.CANCELLED if self._client is not None else MachineRuntimeState.DISCONNECTED
-            label = "Operación física" if context is None else ({"preparation": "Preparación", "reference_z": "Referencia Z", "mesh": "Malla", "tool_change": "Movimiento de cambio"}.get(context.operation_type, "Operación física"))
+            label = "Operación física" if context is None else ({"preparation": "Preparación", "reference_z": "Referencia Z", "reference_move": "Movimiento al punto de referencia", "mesh": "Malla", "tool_change": "Movimiento de cambio"}.get(context.operation_type, "Operación física"))
             self._event("warning", f"{label} cancelada por el operador.")
         return self.snapshot()
 
@@ -879,7 +927,7 @@ class MachineRuntime:
         with self._lock:
             context = self._active_operation
         if context is not None and context.cancel_event.is_set():
-            label = {"preparation": "Preparación", "reference_z": "Referencia Z", "mesh": "Malla", "tool_change": "Movimiento de cambio"}.get(context.operation_type, "Operación física")
+            label = {"preparation": "Preparación", "reference_z": "Referencia Z", "reference_move": "Movimiento al punto de referencia", "mesh": "Malla", "tool_change": "Movimiento de cambio"}.get(context.operation_type, "Operación física")
             raise MachineRuntimeError(f"{label} cancelada por el operador.")
 
     def _notify_probe_progress(self, callback: Callable[[str, dict[str, Any]], None] | None, state: str, **detail: Any) -> None:
