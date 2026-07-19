@@ -2,7 +2,12 @@
 ==================================================
 Klipper CNC Assistant
 Joystick Controller Firmware
-Version 0.1.0
+Version 0.1.1
+
+Cambio:
+- Filtro temporal para la sonda D4.
+- Mantiene exactamente el protocolo binario anterior.
+- No cambia joystick, botones, baudios ni estructura del paquete.
 ==================================================
 */
 
@@ -14,6 +19,25 @@ const byte PIN_BUTTON   = 3;
 const byte PIN_PROBE    = 4;
 
 const byte HEADER = 0xAA;
+
+/*
+ * El protocolo conserva aproximadamente un paquete cada 20 ms.
+ */
+const uint32_t PACKET_INTERVAL_MS = 20UL;
+
+/*
+ * D4 usa INPUT_PULLUP: LOW significa contacto y HIGH significa OPEN.
+ * El filtro es bidireccional y no conserva contactos históricos.
+ */
+const uint32_t PROBE_TRIGGER_FILTER_MS = 20UL;
+const uint32_t PROBE_RELEASE_FILTER_MS = 40UL;
+
+bool probeCandidate = false;
+bool probeFiltered = false;
+
+uint32_t probeCandidateSinceMs = 0;
+uint32_t probeChangedAtMs = 0;
+uint32_t lastPacketAtMs = 0;
 
 enum Direction
 {
@@ -36,48 +60,100 @@ Direction getDirection(int x, int y)
     bool right = y < 250;
     bool left  = y > 750;
 
-    if(up && left) return UP_LEFT;
-    if(up && right) return UP_RIGHT;
+    if (up && left)
+        return UP_LEFT;
 
-    if(down && left) return DOWN_LEFT;
-    if(down && right) return DOWN_RIGHT;
+    if (up && right)
+        return UP_RIGHT;
 
-    if(up) return UP;
-    if(down) return DOWN;
+    if (down && left)
+        return DOWN_LEFT;
 
-    if(left) return LEFT;
-    if(right) return RIGHT;
+    if (down && right)
+        return DOWN_RIGHT;
+
+    if (up)
+        return UP;
+
+    if (down)
+        return DOWN;
+
+    if (left)
+        return LEFT;
+
+    if (right)
+        return RIGHT;
 
     return CENTER;
+}
+
+/*
+ * Actualiza la única fuente del bit de sonda del paquete.
+ * La resta unsigned tolera el rollover de millis().
+ */
+void updateProbeFilter()
+{
+    const uint32_t nowMs = millis();
+    const bool rawTriggered = digitalRead(PIN_PROBE) == LOW;
+
+    if (rawTriggered != probeCandidate)
+    {
+        probeCandidate = rawTriggered;
+        probeCandidateSinceMs = nowMs;
+    }
+
+    const uint32_t requiredMs =
+        probeCandidate
+            ? PROBE_TRIGGER_FILTER_MS
+            : PROBE_RELEASE_FILTER_MS;
+
+    if (
+        probeFiltered != probeCandidate &&
+        static_cast<uint32_t>(nowMs - probeCandidateSinceMs) >= requiredMs
+    )
+    {
+        probeFiltered = probeCandidate;
+        probeChangedAtMs = nowMs;
+    }
 }
 
 byte buildFlags()
 {
     byte flags = 0;
 
-    if(digitalRead(PIN_JOYSTICK) == LOW)
+    if (digitalRead(PIN_JOYSTICK) == LOW)
+    {
         flags |= (1 << 0);
+    }
 
-    if(digitalRead(PIN_BUTTON) == LOW)
+    if (digitalRead(PIN_BUTTON) == LOW)
+    {
         flags |= (1 << 1);
+    }
 
-    if(digitalRead(PIN_PROBE) == LOW)
+    /*
+     * IMPORTANTE:
+     * Se envía la señal filtrada, no la lectura directa de D4.
+     */
+    if (probeFiltered)
+    {
         flags |= (1 << 2);
+    }
 
     return flags;
 }
 
 void sendPacket()
 {
-    int x = analogRead(PIN_X);
-    int y = analogRead(PIN_Y);
+    const int x = analogRead(PIN_X);
+    const int y = analogRead(PIN_Y);
 
-    Direction direction = getDirection(x, y);
+    const Direction direction = getDirection(x, y);
 
     byte packet[8];
 
     packet[0] = HEADER;
-    packet[1] = direction;
+    packet[1] = static_cast<byte>(direction);
     packet[2] = buildFlags();
 
     packet[3] = lowByte(x);
@@ -106,12 +182,29 @@ void setup()
 
     Serial.begin(115200);
 
-    while(!Serial);
+    /* El primer paquete refleja el nivel físico actual de D4. */
+    const uint32_t nowMs = millis();
+    const bool rawTriggered = digitalRead(PIN_PROBE) == LOW;
+    probeCandidate = rawTriggered;
+    probeFiltered = rawTriggered;
+    probeCandidateSinceMs = nowMs;
+    probeChangedAtMs = nowMs;
+    lastPacketAtMs = nowMs;
 }
 
 void loop()
 {
-    sendPacket();
+    /*
+     * No usar delay(20), porque necesitamos vigilar D4
+     * continuamente para filtrar correctamente los pulsos.
+     */
+    updateProbeFilter();
 
-    delay(20);
+    const uint32_t nowMs = millis();
+
+    if (static_cast<uint32_t>(nowMs - lastPacketAtMs) >= PACKET_INTERVAL_MS)
+    {
+        lastPacketAtMs = nowMs;
+        sendPacket();
+    }
 }
