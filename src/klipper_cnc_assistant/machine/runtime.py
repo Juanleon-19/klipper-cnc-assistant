@@ -179,6 +179,9 @@ class MachineRuntime:
         "no_progress_timeout_s",
         "settle_tolerance_mm",
         "velocity_tolerance_mm_s",
+        "probe_step_mm",
+        "probe_lower_speed_mm_s",
+        "probe_retract_mm",
     }
 
     def _load_persisted_config(self, config: MachineRuntimeConfig) -> MachineRuntimeConfig:
@@ -197,11 +200,15 @@ class MachineRuntime:
             "no_progress_timeout_s": "no_progress_timeout_s",
             "position_tolerance_mm": "settle_tolerance_mm",
             "velocity_tolerance_mm_s": "velocity_tolerance_mm_s",
+            "reference_probe_step_mm": "probe_step_mm",
+            "reference_probe_feed_mm_min": "probe_lower_speed_mm_s",
+            "reference_probe_retract_mm": "probe_retract_mm",
         }
         overrides = {field: payload[field] for field in self._MACHINE_SETTINGS_FIELDS if field in payload}
         for external, field in external_mapping.items():
             if external in payload:
-                overrides[field] = payload[external]
+                value = payload[external]
+                overrides[field] = float(value) / 60.0 if external == "reference_probe_feed_mm_min" else value
         if "move_timeout_s" in overrides:
             overrides.setdefault("move_minimum_timeout_s", overrides["move_timeout_s"])
         return replace(config, **overrides) if overrides else config
@@ -214,6 +221,9 @@ class MachineRuntime:
             "no_progress_timeout_s": self.config.no_progress_timeout_s,
             "position_tolerance_mm": self.config.settle_tolerance_mm,
             "velocity_tolerance_mm_s": self.config.velocity_tolerance_mm_s,
+            "reference_probe_step_mm": self.config.probe_step_mm,
+            "reference_probe_feed_mm_min": self.config.probe_lower_speed_mm_s * 60.0,
+            "reference_probe_retract_mm": self.config.probe_retract_mm,
         }
 
     def update_machine_settings(self, payload: dict[str, Any]) -> dict[str, float]:
@@ -224,12 +234,17 @@ class MachineRuntime:
             "no_progress_timeout_s": "no_progress_timeout_s",
             "position_tolerance_mm": "settle_tolerance_mm",
             "velocity_tolerance_mm_s": "velocity_tolerance_mm_s",
+            "reference_probe_step_mm": "probe_step_mm",
+            "reference_probe_feed_mm_min": "probe_lower_speed_mm_s",
+            "reference_probe_retract_mm": "probe_retract_mm",
         }
         overrides: dict[str, float] = {}
         for external, field in mapping.items():
             if external not in payload or payload[external] is None:
                 continue
             value = float(payload[external])
+            if external == "reference_probe_feed_mm_min":
+                value /= 60.0
             if value <= 0:
                 raise MachineRuntimeError(f"{external} debe ser mayor que cero.")
             overrides[field] = value

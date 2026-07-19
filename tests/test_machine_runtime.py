@@ -591,7 +591,13 @@ class MachineRuntimeTest(unittest.TestCase):
                 "no_progress_timeout_s": 70,
                 "position_tolerance_mm": 0.04,
                 "velocity_tolerance_mm_s": 0.015,
+                "reference_probe_step_mm": 0.10,
+                "reference_probe_feed_mm_min": 120,
+                "reference_probe_retract_mm": 1.25,
             })
+            self.assertEqual(saved["reference_probe_step_mm"], 0.10)
+            self.assertEqual(saved["reference_probe_feed_mm_min"], 120)
+            self.assertEqual(saved["reference_probe_retract_mm"], 1.25)
 
             self.assertEqual(saved["reference_prep_z_mm"], 110)
             self.assertEqual(saved["reference_prep_z_feed_mm_min"], 90)
@@ -599,6 +605,9 @@ class MachineRuntimeTest(unittest.TestCase):
             self.assertEqual(reloaded.config.reference_prep_z_mm, 110)
             self.assertEqual(reloaded.config.reference_prep_z_feed_mm_min, 90)
             self.assertEqual(reloaded.config.move_timeout_s, 240)
+            self.assertEqual(reloaded.config.probe_step_mm, 0.10)
+            self.assertEqual(reloaded.config.probe_lower_speed_mm_s, 2.0)
+            self.assertEqual(reloaded.config.probe_retract_mm, 1.25)
             self.assertEqual(reloaded.config.move_minimum_timeout_s, 240)
             self.assertEqual(reloaded.config.no_progress_timeout_s, 70)
             self.assertEqual(reloaded.config.settle_tolerance_mm, 0.04)

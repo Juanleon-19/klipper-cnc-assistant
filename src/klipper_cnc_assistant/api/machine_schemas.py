@@ -48,6 +48,9 @@ class MachineSettingsRequest(BaseModel):
     no_progress_timeout_s: float | None = None
     position_tolerance_mm: float | None = None
     velocity_tolerance_mm_s: float | None = None
+    reference_probe_step_mm: float | None = None
+    reference_probe_feed_mm_min: float | None = None
+    reference_probe_retract_mm: float | None = None
 
 
 class EmergencyStopRequest(BaseModel):

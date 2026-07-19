@@ -225,6 +225,9 @@ export function ProjectWorkspace({
     no_progress_timeout_s: "60",
     position_tolerance_mm: "0.05",
     velocity_tolerance_mm_s: "0.02",
+    reference_probe_step_mm: "0.05",
+    reference_probe_feed_mm_min: "60",
+    reference_probe_retract_mm: "1.0",
   });
   const [machineSettingsMessage, setMachineSettingsMessage] = useState("");
 
@@ -240,6 +243,9 @@ export function ProjectWorkspace({
         no_progress_timeout_s: String(settings.no_progress_timeout_s ?? 60),
         position_tolerance_mm: String(settings.position_tolerance_mm ?? 0.05),
         velocity_tolerance_mm_s: String(settings.velocity_tolerance_mm_s ?? 0.02),
+        reference_probe_step_mm: String(settings.reference_probe_step_mm ?? 0.05),
+        reference_probe_feed_mm_min: String(settings.reference_probe_feed_mm_min ?? 60),
+        reference_probe_retract_mm: String(settings.reference_probe_retract_mm ?? 1.0),
       });
     }).catch(() => {
       setMachineSettingsMessage("No se pudo leer la configuración avanzada de máquina.");
@@ -625,6 +631,9 @@ export function ProjectWorkspace({
       no_progress_timeout_s: "Timeout sin progreso",
       position_tolerance_mm: "Tolerancia de posición",
       velocity_tolerance_mm_s: "Tolerancia de velocidad",
+      reference_probe_step_mm: "Paso de sonda de referencia",
+      reference_probe_feed_mm_min: "Velocidad de sonda de referencia",
+      reference_probe_retract_mm: "Retracto de sonda de referencia",
     };
     const payload: Record<string, number> = {};
     for (const [key, label] of Object.entries(labels)) {
@@ -646,6 +655,9 @@ export function ProjectWorkspace({
         no_progress_timeout_s: String(settings.no_progress_timeout_s ?? payload.no_progress_timeout_s),
         position_tolerance_mm: String(settings.position_tolerance_mm ?? payload.position_tolerance_mm),
         velocity_tolerance_mm_s: String(settings.velocity_tolerance_mm_s ?? payload.velocity_tolerance_mm_s),
+        reference_probe_step_mm: String(settings.reference_probe_step_mm ?? payload.reference_probe_step_mm),
+        reference_probe_feed_mm_min: String(settings.reference_probe_feed_mm_min ?? payload.reference_probe_feed_mm_min),
+        reference_probe_retract_mm: String(settings.reference_probe_retract_mm ?? payload.reference_probe_retract_mm),
       });
       setMachineSettingsMessage("Configuración avanzada de máquina guardada.");
       await machine.refreshRuntime();
@@ -1092,6 +1104,7 @@ export function ProjectWorkspace({
     const referencePrepZFeed = typeof preparation.reference_prep_z_feed_mm_min === "number" ? preparation.reference_prep_z_feed_mm_min : 180;
     const referencePrepXyFeed = typeof preparation.reference_prep_xy_feed_mm_min === "number" ? preparation.reference_prep_xy_feed_mm_min : 1800;
     const centerX = typeof preparation.center_x_mm === "number" ? preparation.center_x_mm : null;
+    const referenceProbeFeed = Number(machineSettingsInput.reference_probe_feed_mm_min);
     const centerY = typeof preparation.center_y_mm === "number" ? preparation.center_y_mm : null;
     const toolChangeX = typeof toolChange.x_mm === "number" ? toolChange.x_mm : 0;
     const toolChangeY = typeof toolChange.y_mm === "number" ? toolChange.y_mm : 0;
@@ -1174,6 +1187,7 @@ export function ProjectWorkspace({
             </div>
             <div className="action-grid action-grid--inline">
               <button className="button button--ghost" type="button" disabled={!machine.isPhysical || referenceBusy || machine.refreshing} onClick={() => void saveMachineSettings()}>Guardar configuración</button>
+          <button className="button button--ghost" type="button" disabled={!canInitialize || referenceBusy || machine.refreshing} onClick={() => void withPhysicalReferenceAction(async () => { await machine.runMachineAction("initialize", referencePrepZ); })}>Repetir preparación</button>
             </div>
             {machineSettingsMessage ? <p className="muted">{machineSettingsMessage}</p> : null}
           </details>
@@ -1195,6 +1209,7 @@ export function ProjectWorkspace({
             <div className="metric-box"><span>Y máquina</span><strong>{formatMillimeters(typeof position?.y === "number" ? position.y : null, 3)}</strong></div>
             <div className="metric-box"><span>Z máquina</span><strong>{formatMillimeters(typeof position?.z === "number" ? position.z : null, 3)}</strong></div>
             <div className="metric-box"><span>Modo jog</span><strong>{String(controller.jog_mode ?? "FINE")}</strong></div>
+          <div className="action-grid action-grid--inline"><button className="button button--ghost" type="button" disabled={!canEnableJog || referenceBusy || machine.refreshing} onClick={() => void machine.runMachineAction("manual-on")}>Reposicionar origen X/Y</button><button className="button" type="button" disabled={!machine.isPhysical || referenceBusy || machine.refreshing || !selectedOperation} onClick={() => void withPhysicalReferenceAction(() => api.capturePhysicalWorkOrigin(project.id, selectedOperation!.id))}>Confirmar nuevo origen</button><button className="button button--ghost" type="button" disabled={!machine.isPhysical || machine.refreshing} onClick={() => void machine.runMachineAction("cancel")}>Cancelar reposicionamiento</button></div>
           </div>
           <button className="button" type="button" disabled={!canEnableJog || referenceBusy || machine.refreshing} onClick={() => void machine.runMachineAction("manual-on")}>Habilitar joystick X/Y</button>
         </article>
@@ -1209,6 +1224,7 @@ export function ProjectWorkspace({
             <div className="metric-box"><span>Velocidad Z cambio</span><strong>{toolChangeZFeed.toFixed(0)} mm/min · {(toolChangeZFeed / 60).toFixed(3)} mm/s</strong></div>
             <div className="metric-box"><span>Orden</span><strong>Z primero, luego X/Y</strong></div>
           </div>
+            <button className="button button--ghost" type="button" disabled={!machine.isPhysical || referenceBusy || machine.refreshing || !machine.homedAxes} onClick={() => void withPhysicalReferenceAction(async () => { await machine.runMachineAction("tool-change-position"); })}>Reintentar movimiento</button><button className="button button--ghost" type="button" disabled={!machine.isPhysical || machine.refreshing} onClick={() => void machine.runMachineAction("cancel")}>Cancelar intento</button>
           <div className="action-grid action-grid--inline">
             <button className="button button--ghost" type="button" disabled={!machine.isPhysical || referenceBusy || machine.refreshing} onClick={() => window.alert("Modifique TOOL_CHANGE_X_MM, TOOL_CHANGE_Y_MM y TOOL_CHANGE_Z_MM en la configuración del servicio y reinicie la aplicación para persistir los cambios.")}>Modificar posición de cambio</button>
             <button className="button" type="button" disabled={!machine.isPhysical || referenceBusy || machine.refreshing || !machine.homedAxes} onClick={() => void withPhysicalReferenceAction(async () => { await machine.runMachineAction("tool-change-position"); })}>Ir a posición de cambio</button>
@@ -1217,6 +1233,13 @@ export function ProjectWorkspace({
 
         <article className="panel">
           <div className="section-heading"><h3>4. Medir referencia</h3></div>
+          <div className="form-grid form-grid--dense">
+            <label>Paso de sonda (mm)<input value={machineSettingsInput.reference_probe_step_mm} inputMode="decimal" disabled={referenceBusy || machine.runtimeState === "PROBING_REFERENCE"} onChange={(event) => setMachineSettingsInput((current) => ({ ...current, reference_probe_step_mm: event.target.value }))} /></label>
+            <label>Velocidad de sonda (mm/min)<input value={machineSettingsInput.reference_probe_feed_mm_min} inputMode="decimal" disabled={referenceBusy || machine.runtimeState === "PROBING_REFERENCE"} onChange={(event) => setMachineSettingsInput((current) => ({ ...current, reference_probe_feed_mm_min: event.target.value }))} /></label>
+            <label>Retracto tras contacto (mm)<input value={machineSettingsInput.reference_probe_retract_mm} inputMode="decimal" disabled={referenceBusy || machine.runtimeState === "PROBING_REFERENCE"} onChange={(event) => setMachineSettingsInput((current) => ({ ...current, reference_probe_retract_mm: event.target.value }))} /></label>
+          </div>
+          <p className="muted">Velocidad efectiva: {Number.isFinite(referenceProbeFeed) ? `${referenceProbeFeed.toFixed(2)} mm/min · ${(referenceProbeFeed / 60).toFixed(3)} mm/s` : "valor inválido"}</p>
+          <button className="button button--ghost" type="button" disabled={!machine.isPhysical || referenceBusy || machine.refreshing || machine.runtimeState === "PROBING_REFERENCE"} onClick={() => void saveMachineSettings()}>Guardar parámetros de sonda</button>
           <p className="muted">Puede armar la referencia para usar el botón externo o lanzar el sondeo directamente desde pantalla. Si la primera toma quedó mal, use "Volver a medir referencia" para repetir el mismo flujo seguro y sobrescribir la referencia Z activa con una nueva captura física.</p>
           <div className="action-grid action-grid--inline">
             <button className="button button--ghost" type="button" disabled={!canArm || referenceBusy || machine.refreshing} onClick={() => void machine.runMachineAction("probe-request")}>Armar referencia</button>
