@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import logging
 import threading
 import time
 from typing import Any
 
 from klipper_cnc_assistant.application.errors import ApplicationError
 from klipper_cnc_assistant.application.physical_map_service import PhysicalMapService
+
+
+logger = logging.getLogger(__name__)
 
 
 POINT_STATES = (
@@ -64,6 +68,7 @@ class MeshExecutionService:
             thread = threading.Thread(target=self._run, args=(project_id, map_id, runtime), name=f"mesh-{map_id}", daemon=True)
             self._threads[key] = thread
             thread.start()
+        self._log_transition("MESH_WORKER_START", project_id, map_id)
         return self.physical_map_service.get_by_id(project_id, map_id)
 
     def resume(self, *, project_id: str, map_id: str, runtime: Any) -> dict[str, Any]:
@@ -131,24 +136,17 @@ class MeshExecutionService:
                         last_event="Pausa solicitada; no se iniciará otro punto.",
                     )
                     return
-                snapshot_fn = getattr(runtime, "snapshot", None)
-                snapshot = snapshot_fn() if snapshot_fn is not None else {}
-                safety = snapshot.get("safety") if isinstance(snapshot, dict) else {}
-                if isinstance(safety, dict) and safety.get("telemetry_recent") is False:
-                    refresh_state = getattr(runtime, "refresh_observed_state", None)
-                    if refresh_state is not None:
-                        try:
-                            snapshot = refresh_state()
-                            safety = snapshot.get("safety") if isinstance(snapshot, dict) else {}
-                        except Exception:
-                            pass
-                if isinstance(safety, dict) and safety.get("telemetry_recent") is False:
+                try:
+                    snapshot = self._require_current_machine_state(runtime)
+                except Exception as error:
                     self.physical_map_service.mark_status(project_id=project_id, map_id=map_id, status="MESH_PAUSED")
                     self.physical_map_service.update_execution_state(
                         project_id=project_id, map_id=map_id, worker_active=False, point_state="MESH_PAUSED",
-                        error="Telemetría Moonraker obsoleta; la malla se liberó sin descartar puntos medidos.",
-                        last_event="Malla pausada por pérdida de telemetría; reconecte y reanude explícitamente.",
+                        error=f"No se pudo confirmar estado reciente de Moonraker: {error}",
+                        observed=self._observed_from_snapshot(snapshot if "snapshot" in locals() else {}),
+                        last_event="Malla pausada: Moonraker no respondió con estado reciente; reconecte y reanude explícitamente.",
                     )
+                    self._log_transition("POINT_FAILED", project_id, map_id, error=str(error))
                     return
                 try:
                     point = self.physical_map_service.next_pending_point(project_id, map_id)
@@ -160,7 +158,9 @@ class MeshExecutionService:
                         point_state="MESH_COMPLETE" if payload.get("status") == "MESH_COMPLETE" else "MESH_READY",
                         last_event="No quedan puntos pendientes ejecutables.",
                     )
+                    self._log_transition("MESH_COMPLETE", project_id, map_id)
                     return
+                self._log_transition("POINT_START", project_id, map_id, point_index=int(point["index"]), target=point)
                 self._probe_one_point(project_id, map_id, runtime, point, probe_config=payload.get("probe_config"))
         finally:
             with self._lock:
@@ -168,6 +168,7 @@ class MeshExecutionService:
                 if thread is threading.current_thread():
                     self._threads.pop(key, None)
                     self._cancel_requests.pop(key, None)
+            self._log_transition("MESH_WORKER_END", project_id, map_id)
 
     def _probe_one_point(self, project_id: str, map_id: str, runtime: Any, point: dict[str, Any], *, probe_config: dict[str, Any] | None = None) -> None:
         point_index = int(point["index"])
@@ -207,6 +208,18 @@ class MeshExecutionService:
                         target={**target, **detail}, observed=observed_now,
                         last_event=f"Punto {point_index + 1}: {state}.",
                     )
+                    transition = {
+                        "POINT_MOVE_SAFE_Z": "MOVE_SAFE_Z",
+                        "POINT_CONFIRM_SAFE_Z": "MOVE_SAFE_Z_DONE",
+                        "POINT_VERIFY_PROBE_OPEN": "VERIFY_PROBE_OPEN",
+                        "POINT_MOVE_XY": "MOVE_XY",
+                        "POINT_CONFIRM_XY": "MOVE_XY_DONE",
+                        "POINT_LOWER_STEP": "LOWER_STEP",
+                        "POINT_CONTACT_DETECTED": "CONTACT",
+                        "POINT_RETRACT": "RETRACT",
+                    }.get(state)
+                    if transition:
+                        self._log_transition(transition, project_id, map_id, point_index=point_index, target={**target, **detail}, observed=observed_now, started=started)
                 try:
                     result = runtime.probe_mesh_point(point, probe_config=probe_config, progress_callback=progress)
                 except TypeError as error:
@@ -246,6 +259,7 @@ class MeshExecutionService:
                     observed=observed,
                     last_event=f"Punto {point_index + 1}: completado; avanzando automáticamente.",
                 )
+                self._log_transition("POINT_COMPLETE", project_id, map_id, point_index=point_index, target=target, observed=observed, started=started)
                 return
             except Exception as error:
                 observed = self._observed_from_runtime(runtime)
@@ -286,7 +300,41 @@ class MeshExecutionService:
                     observed=observed,
                     last_event=f"Punto {point_index + 1}: falló después de {attempts} intentos; la malla queda pausada.",
                 )
+                self._log_transition("POINT_FAILED", project_id, map_id, point_index=point_index, target=target, observed=observed, error=str(error), started=started)
                 return
+
+    def _require_current_machine_state(self, runtime: Any) -> dict[str, Any]:
+        """Require a fresh HTTP observation before a physical point.
+
+        A quiet WebSocket alone is not proof that Moonraker is unavailable: the
+        discovery response contains the toolhead state used by movement guards.
+        A failed HTTP refresh remains a hard stop.
+        """
+        refresh_state = getattr(runtime, "refresh_observed_state", None)
+        if refresh_state is not None:
+            snapshot = refresh_state()
+        else:
+            snapshot_fn = getattr(runtime, "snapshot", None)
+            snapshot = snapshot_fn() if snapshot_fn is not None else {}
+        safety = snapshot.get("safety") if isinstance(snapshot, dict) else {}
+        if isinstance(safety, dict) and safety.get("serial_recent") is False:
+            raise ApplicationError("Arduino obsoleto; no se inicia el sondeo.")
+        return snapshot if isinstance(snapshot, dict) else {}
+
+    def _log_transition(self, event: str, project_id: str, map_id: str, *, point_index: int | None = None, target: dict[str, Any] | None = None, observed: dict[str, Any] | None = None, error: str | None = None, started: float | None = None) -> None:
+        observed = observed or {}
+        logger.info(
+            "%s map_id=%s point_index=%s target=%s observed=%s probe=%s telemetry_age_s=%s elapsed_s=%.3f error=%s",
+            event, map_id, point_index, target or {}, observed.get("position"), observed.get("probe") or observed.get("probe_filtered"),
+            observed.get("telemetry_age_s"), 0.0 if started is None else time.monotonic() - started, error,
+        )
+
+    @staticmethod
+    def _observed_from_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "state": snapshot.get("state"), "position": snapshot.get("position") or snapshot.get("machine_position"),
+            "telemetry_age_s": snapshot.get("telemetry_age_s"), "serial_age_s": snapshot.get("serial_age_s"),
+        }
 
     def _observed_from_runtime(self, runtime: Any) -> dict[str, Any] | None:
         snapshot_fn = getattr(runtime, "snapshot", None)
@@ -301,6 +349,7 @@ class MeshExecutionService:
             "position": snapshot.get("position") or snapshot.get("machine_position"),
             "homed_axes": snapshot.get("homed_axes"),
             "last_command": snapshot.get("last_command") or snapshot.get("last_command_text"),
+            "probe": snapshot.get("probe") or snapshot.get("last_packet"),
             "telemetry_age_s": snapshot.get("telemetry_age_s"),
             "serial_age_s": snapshot.get("serial_age_s"),
         }

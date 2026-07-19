@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import threading
 import tempfile
 import time
 import unittest
@@ -81,6 +82,69 @@ class FakeMeshRuntime:
             "telemetry_age_s": 0.01,
             "serial_age_s": 0.01,
         }
+
+
+class StatefulMeshRuntime:
+    """Stateful mesh runtime used to exercise worker lifecycle without hardware."""
+
+    def __init__(self, *, refresh_fails: bool = False, serial_stale: bool = False, unexpected: bool = False, block: bool = False) -> None:
+        self.position = {"x": 0.0, "y": 0.0, "z": 10.0}
+        self.refresh_fails = refresh_fails
+        self.serial_stale = serial_stale
+        self.unexpected = unexpected
+        self.block = block
+        self.entered = threading.Event()
+        self.release = threading.Event()
+        self.refreshes = 0
+        self.calls: list[int] = []
+        self.transitions: list[str] = []
+        self.movement_lock = False
+
+    def snapshot(self) -> dict:
+        return {
+            "state": "MESH_PROBING", "position": dict(self.position), "homed_axes": "xyz",
+            "last_command_text": self.transitions[-1] if self.transitions else None,
+            "telemetry_age_s": 999.0, "serial_age_s": 0.01,
+            "safety": {"telemetry_recent": False, "serial_recent": not self.serial_stale},
+        }
+
+    def refresh_observed_state(self) -> dict:
+        self.refreshes += 1
+        if self.refresh_fails:
+            raise RuntimeError("Moonraker HTTP timeout")
+        current = self.snapshot()
+        current["telemetry_age_s"] = 0.0
+        current["safety"] = {"telemetry_recent": True, "serial_recent": not self.serial_stale}
+        return current
+
+    def probe_mesh_point(self, point: dict, probe_config: dict | None = None, progress_callback=None) -> dict:
+        if self.movement_lock:
+            raise RuntimeError("movement lock leaked")
+        self.movement_lock = True
+        try:
+            self.entered.set()
+            if self.block:
+                self.release.wait(1.0)
+            if self.unexpected:
+                raise RuntimeError("unexpected probe failure")
+            for state, detail in (
+                ("POINT_MOVE_SAFE_Z", {"safe_z_mm": 12.0}),
+                ("POINT_CONFIRM_SAFE_Z", {"observed_z_mm": 12.0}),
+                ("POINT_VERIFY_PROBE_OPEN", {"probe_raw": False, "probe_filtered": False, "last_packet_age_s": 0.01}),
+                ("POINT_MOVE_XY", {"x_mm": point["x_machine"], "y_mm": point["y_machine"]}),
+                ("POINT_CONFIRM_XY", {}),
+                ("POINT_LOWER_STEP", {"step_mm": 0.1, "feed_mm_min": 120.0}),
+                ("POINT_CONTACT_DETECTED", {"z_mm": 9.9}),
+                ("POINT_RETRACT", {"retract_mm": 1.0}),
+            ):
+                self.transitions.append(state)
+                if progress_callback:
+                    progress_callback(state, detail)
+            self.position.update({"x": float(point["x_machine"]), "y": float(point["y_machine"]), "z": 10.9})
+            self.calls.append(int(point["index"]))
+            return {"z_measured": 9.9, "duration_s": 0.001}
+        finally:
+            self.movement_lock = False
 
 
 class PhysicalIntegrationTest(unittest.TestCase):
@@ -501,6 +565,83 @@ class PhysicalIntegrationTest(unittest.TestCase):
             self.assertIn("POINT_RETRY", {event.get("next_state") for event in log["events"]})
             self.assertIn("POINT_COMPLETE", {event.get("next_state") for event in log["events"]})
             self.assertTrue(worker.wait_until_idle(timeout_s=1.0))
+
+    def test_mesh_worker_refreshes_http_then_completes_stateful_2x2(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            repository, _project_service, project, operation = self._physical_project(temp)
+            service = PhysicalMapService(repository)
+            plan = service.capture_reference_and_plan(
+                project_id=project.id, operation_id=operation.id, machine_origin_x=0.0, machine_origin_y=0.0,
+                reference_z=10.0, machine_position={"x_mm": 0.0, "y_mm": 0.0, "z_mm": 10.0},
+                homed_axes="xyz", machine_label="test", session_id="session",
+                config=PhysicalMeshConfig(grid_mode="manual", rows=2, columns=2, edge_margin_left_mm=0.0, edge_margin_right_mm=0.0, edge_margin_bottom_mm=0.0, edge_margin_top_mm=0.0, probe_step_mm=0.1, probe_feed_mm_min=120.0, retract_mm=1.0),
+            )
+            worker = MeshExecutionService(service)
+            runtime = StatefulMeshRuntime()
+            worker.start_all(project_id=project.id, map_id=plan["map_id"], runtime=runtime)
+            self.assertTrue(worker.wait_until_idle(timeout_s=3.0))
+            completed = service.get_by_id(project.id, plan["map_id"])
+            self.assertEqual(completed["status"], "MESH_COMPLETE")
+            self.assertEqual(runtime.calls, [1, 2, 3])
+            self.assertGreaterEqual(runtime.refreshes, 3)
+            self.assertIn("POINT_LOWER_STEP", runtime.transitions)
+            self.assertFalse(runtime.movement_lock)
+            self.assertFalse(completed["execution"]["worker_active"])
+
+    def test_mesh_worker_pauses_when_http_observation_fails_and_releases_worker(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            repository, _project_service, project, operation = self._physical_project(temp)
+            service = PhysicalMapService(repository)
+            plan = service.capture_reference_and_plan(
+                project_id=project.id, operation_id=operation.id, machine_origin_x=0.0, machine_origin_y=0.0,
+                reference_z=10.0, machine_position={"x_mm": 0.0, "y_mm": 0.0, "z_mm": 10.0},
+                homed_axes="xyz", machine_label="test", session_id="session",
+                config=PhysicalMeshConfig(grid_mode="manual", rows=2, columns=2, edge_margin_left_mm=0.0, edge_margin_right_mm=0.0, edge_margin_bottom_mm=0.0, edge_margin_top_mm=0.0),
+            )
+            worker = MeshExecutionService(service)
+            runtime = StatefulMeshRuntime(refresh_fails=True)
+            worker.start_all(project_id=project.id, map_id=plan["map_id"], runtime=runtime)
+            self.assertTrue(worker.wait_until_idle(timeout_s=3.0))
+            paused = service.get_by_id(project.id, plan["map_id"])
+            self.assertEqual(paused["status"], "MESH_PAUSED")
+            self.assertFalse(paused["execution"]["worker_active"])
+            self.assertIn("Moonraker HTTP timeout", str(paused["execution"]))
+
+    def test_mesh_worker_rejects_stale_arduino_before_probe(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            repository, _project_service, project, operation = self._physical_project(temp)
+            service = PhysicalMapService(repository)
+            plan = service.capture_reference_and_plan(project_id=project.id, operation_id=operation.id, machine_origin_x=0.0, machine_origin_y=0.0, reference_z=10.0, machine_position={"x_mm": 0.0, "y_mm": 0.0, "z_mm": 10.0}, homed_axes="xyz", machine_label="test", session_id="session", config=PhysicalMeshConfig(grid_mode="manual", rows=2, columns=2, edge_margin_left_mm=0.0, edge_margin_right_mm=0.0, edge_margin_bottom_mm=0.0, edge_margin_top_mm=0.0))
+            worker = MeshExecutionService(service)
+            runtime = StatefulMeshRuntime(serial_stale=True)
+            worker.start_all(project_id=project.id, map_id=plan["map_id"], runtime=runtime)
+            self.assertTrue(worker.wait_until_idle(timeout_s=3.0))
+            paused = service.get_by_id(project.id, plan["map_id"])
+            self.assertEqual(paused["status"], "MESH_PAUSED")
+            self.assertEqual(runtime.calls, [])
+            self.assertIn("Arduino obsoleto", str(paused["execution"]))
+
+    def test_mesh_worker_prevents_double_start_and_releases_after_unexpected_error(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            repository, _project_service, project, operation = self._physical_project(temp)
+            service = PhysicalMapService(repository)
+            plan = service.capture_reference_and_plan(project_id=project.id, operation_id=operation.id, machine_origin_x=0.0, machine_origin_y=0.0, reference_z=10.0, machine_position={"x_mm": 0.0, "y_mm": 0.0, "z_mm": 10.0}, homed_axes="xyz", machine_label="test", session_id="session", config=PhysicalMeshConfig(grid_mode="manual", rows=2, columns=2, edge_margin_left_mm=0.0, edge_margin_right_mm=0.0, edge_margin_bottom_mm=0.0, edge_margin_top_mm=0.0))
+            worker = MeshExecutionService(service)
+            runtime = StatefulMeshRuntime(block=True)
+            worker.start_all(project_id=project.id, map_id=plan["map_id"], runtime=runtime)
+            self.assertTrue(runtime.entered.wait(1.0))
+            with self.assertRaises(ApplicationError):
+                worker.start_all(project_id=project.id, map_id=plan["map_id"], runtime=runtime)
+            runtime.release.set()
+            self.assertTrue(worker.wait_until_idle(timeout_s=3.0))
+            plan2 = service.repeat_measurement(project_id=project.id, map_id=plan["map_id"])
+            bad = StatefulMeshRuntime(unexpected=True)
+            worker.start_all(project_id=project.id, map_id=plan2["map_id"], runtime=bad)
+            self.assertTrue(worker.wait_until_idle(timeout_s=3.0))
+            failed = service.get_by_id(project.id, plan2["map_id"])
+            self.assertEqual(failed["status"], "MESH_PAUSED")
+            self.assertFalse(failed["execution"]["worker_active"])
+            self.assertFalse(bad.movement_lock)
 
     def test_reference_session_accepts_map_ready_active_map_without_reasking_validation(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

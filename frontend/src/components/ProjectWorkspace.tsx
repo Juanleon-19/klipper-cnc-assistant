@@ -1596,7 +1596,7 @@ export function ProjectWorkspace({
               })}>1. Generar vista previa de malla</button>
               <button className="button" type="button" disabled={!physicalMapId} onClick={() => setMeshValidationMessage(physicalFailedPoints > 0 ? `La malla tiene ${physicalFailedPoints} punto(s) fallidos o pendientes de reintento.` : "Cobertura geométrica revisada. No se extrapola fuera de la región interior ni sobre exclusiones.")}>2. Validar límites</button>
               <button className="button" type="button" disabled={!physicalMapId || physicalMap?.status === "MESH_COMPLETE"} onClick={() => { setMeshArmed(true); setMeshValidationMessage("Sondeo armado. Una sola confirmación ejecutará todos los puntos ejecutables de la malla."); }}>3. Armar sondeo</button>
-              <button className="button" type="button" disabled={heightMapBusy || !physicalMapId || !meshArmed || isPhysicalMapReady(physicalMap)} onClick={() => void withPhysicalMapAction(async () => (await api.executeAllPhysicalMapPoints(project.id, physicalMapId)).payload)}>4. Iniciar sondeo automático</button>
+              <button className="button" type="button" disabled={heightMapBusy || !physicalMapId || !meshArmed || isPhysicalMapReady(physicalMap)} onClick={() => void withPhysicalMapAction(async () => (await api.executeAllPhysicalMapPoints(project.id, physicalMapId)).payload)}>{heightMapBusy ? "Iniciando sondeo…" : "4. Iniciar sondeo automático"}</button>
               <button className="button button--ghost" type="button" disabled={!physicalMapId} onClick={() => void withPhysicalMapAction(async () => {
                 if (!physicalMapId) return null;
                 const result = await api.repeatPhysicalMap(project.id, physicalMapId);
