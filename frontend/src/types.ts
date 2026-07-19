@@ -656,6 +656,14 @@ export type JobRun = {
   manifest_path: string | null;
 };
 
+export type JobDryRun = {
+  mode: "DRY_RUN";
+  movement_lock_acquired: false;
+  moonraker_commands_sent: 0;
+  ok: boolean;
+  operations: Array<Record<string, unknown>>;
+};
+
 export type JobHistoryEntry = {
   run_id: string;
   state: string;

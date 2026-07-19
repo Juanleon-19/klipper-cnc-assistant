@@ -168,6 +168,17 @@ class JobServiceTest(unittest.TestCase):
         self.assertIn("Z4.", output)
         self.assertNotIn("X20.00000 Y10.00000 Z-0.05000", output)
 
+    def test_dry_run_uses_compensated_plan_without_adapter_calls(self) -> None:
+        self.job_service.generate_project_compensation(project_id=self.project_id, setup_id=self.setup_id, face="superior")
+        result = self.job_service.dry_run(project_id=self.project_id, setup_id=self.setup_id, face="superior")
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["mode"], "DRY_RUN")
+        self.assertFalse(result["movement_lock_acquired"])
+        self.assertEqual(result["moonraker_commands_sent"], 0)
+        self.assertEqual(self.adapter.started, [])
+        self.assertEqual(len(result["operations"]), 4)
+        self.assertIsNotNone(result["operations"][0]["plan_hash"])
+
     def test_job_run_executes_all_operations_with_two_tool_changes(self) -> None:
         self.job_service.generate_project_compensation(project_id=self.project_id, setup_id=self.setup_id, face="superior")
         run = self.job_service.start_run(project_id=self.project_id, setup_id=self.setup_id, face="superior")
@@ -180,7 +191,9 @@ class JobServiceTest(unittest.TestCase):
 
         self.job_service.run_action(project_id=self.project_id, setup_id=self.setup_id, face="superior", action="confirm-tool-change")
         run = self.job_service.run_action(project_id=self.project_id, setup_id=self.setup_id, face="superior", action="measure-reference")
-        self.assertIn(run["state"], {"TOOL_REFERENCE_READY", "JOB_STARTING", "WAITING_TOOL_CHANGE", "JOB_COMPLETE"})
+        self.assertEqual(run["state"], "READY_TO_RESUME")
+        self.assertEqual(len(self.adapter.started), 2)
+        self.job_service.run_action(project_id=self.project_id, setup_id=self.setup_id, face="superior", action="continue")
         self.job_service._threads[(self.project_id, self.setup_id, "superior")].join(timeout=5)  # type: ignore[attr-defined]
         run = self.job_service.get_run(project_id=self.project_id, setup_id=self.setup_id, face="superior")
         self.assertEqual(run["state"], "WAITING_TOOL_CHANGE")
@@ -188,6 +201,9 @@ class JobServiceTest(unittest.TestCase):
 
         self.job_service.run_action(project_id=self.project_id, setup_id=self.setup_id, face="superior", action="confirm-tool-change")
         self.job_service.run_action(project_id=self.project_id, setup_id=self.setup_id, face="superior", action="measure-reference")
+        run = self.job_service.get_run(project_id=self.project_id, setup_id=self.setup_id, face="superior")
+        self.assertEqual(run["state"], "READY_TO_RESUME")
+        self.job_service.run_action(project_id=self.project_id, setup_id=self.setup_id, face="superior", action="continue")
         self.job_service._threads[(self.project_id, self.setup_id, "superior")].join(timeout=5)  # type: ignore[attr-defined]
         run = self.job_service.get_run(project_id=self.project_id, setup_id=self.setup_id, face="superior")
 

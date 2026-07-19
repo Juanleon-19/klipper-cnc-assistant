@@ -22,7 +22,7 @@ from klipper_cnc_assistant.storage import JsonProjectRepository
 JOB_PLAN_SCHEMA = "job-plan-v1"
 JOB_RUN_SCHEMA = "job-run-v1"
 RUN_TERMINAL_STATES = {"JOB_COMPLETE", "JOB_CANCELLED", "JOB_ERROR"}
-RUN_WAITING_STATES = {"WAITING_TOOL_CHANGE", "TOOL_CHANGE_CONFIRMED", "OPERATION_PAUSED", "JOB_PAUSED"}
+RUN_WAITING_STATES = {"WAITING_TOOL_CHANGE", "TOOL_CHANGE_CONFIRMED", "READY_TO_RESUME", "OPERATION_PAUSED", "JOB_PAUSED"}
 RUN_ACTIVE_STATES = {
     "JOB_STARTING",
     "OPERATION_PREFLIGHT",
@@ -60,6 +60,21 @@ class JobContext:
     project_id: str
     setup_id: str
     face: str
+
+
+@dataclass(frozen=True)
+class ToolInstallationCalibration:
+    calibration_id: str
+    tool_id: str
+    installation_session_id: str
+    reference_point_id: str
+    reference_machine_x: float
+    reference_machine_y: float
+    tool_reference_z: float
+    measured_at: str
+    probe_method: str
+    valid: bool
+    invalidation_reason: str | None = None
 
 
 class MoonrakerJobAdapter:
@@ -202,7 +217,7 @@ class JobService:
         if not prepared.get("ready"):
             raise ApplicationError("El trabajo no está listo para iniciar. Revise el preflight general.")
         run = prepared
-        if run.get("state") not in {"JOB_READY", "JOB_PAUSED", "OPERATION_PAUSED", "TOOL_REFERENCE_READY", "NEXT_OPERATION_READY"}:
+        if run.get("state") not in {"JOB_READY", "JOB_PAUSED", "OPERATION_PAUSED", "TOOL_REFERENCE_READY", "READY_TO_RESUME", "NEXT_OPERATION_READY"}:
             raise ApplicationError(f"El trabajo no puede iniciar desde estado {run.get('state')}.")
         run["state"] = "JOB_STARTING"
         run["started_at"] = run.get("started_at") or _iso_now()
@@ -213,6 +228,34 @@ class JobService:
         self._save_run(context, run)
         self._start_worker(context)
         return run
+
+    def dry_run(self, *, project_id: str, setup_id: str, face: str) -> dict[str, Any]:
+        """Validate the immutable generated artifacts without runtime or motion access."""
+        context = self._context(project_id, setup_id, face)
+        plan = self._load_or_build_plan(context)
+        operations: list[dict[str, Any]] = []
+        for row in plan["operations"]:
+            generated = self._generated_payload_for_operation(plan, row["operation_id"])
+            if generated is None:
+                operations.append({"operation_id": row["operation_id"], "ok": False, "error": "No hay plan compensado vigente."})
+                continue
+            metadata_path = self.repository.project_dir(context.project_id) / str(generated["metadata_path"])
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            trace = list(metadata.get("movement_trace") or [])
+            xs = [item["machine_x_mm"] for item in trace]
+            ys = [item["machine_y_mm"] for item in trace]
+            zs = [item["final_z_mm"] for item in trace if item.get("final_z_mm") is not None]
+            operations.append({
+                "operation_id": row["operation_id"], "tool_id": row["tool_id"],
+                "tool_reference_z": (metadata.get("reference_frame") or {}).get("surface_reference_z_mm"),
+                "original_segments": metadata.get("segments_before"), "compensated_segments": metadata.get("segments_after"),
+                "surface_delta_min_mm": metadata.get("compensation_delta_min_mm"),
+                "surface_delta_max_mm": metadata.get("compensation_delta_max_mm"),
+                "limits": {"x_min": min(xs) if xs else None, "x_max": max(xs) if xs else None, "y_min": min(ys) if ys else None, "y_max": max(ys) if ys else None, "z_min": min(zs) if zs else None, "z_max": max(zs) if zs else None},
+                "first_movement": trace[0] if trace else None, "last_movement": trace[-1] if trace else None,
+                "plan_hash": metadata.get("generated_hash"), "ok": True,
+            })
+        return {"mode": "DRY_RUN", "movement_lock_acquired": False, "moonraker_commands_sent": 0, "operations": operations, "ok": all(item["ok"] for item in operations)}
 
     def get_run(self, *, project_id: str, setup_id: str, face: str) -> dict[str, Any]:
         context = self._context(project_id, setup_id, face)
@@ -257,14 +300,14 @@ class JobService:
             run["available_actions"] = ["resume", "cancel"]
             self._append_event(run, "warning", "Trabajo pausado por el operador.")
         elif action == "resume":
-            if run["state"] not in {"JOB_PAUSED", "OPERATION_PAUSED", "TOOL_REFERENCE_READY", "NEXT_OPERATION_READY"}:
+            if run["state"] not in {"JOB_PAUSED", "OPERATION_PAUSED", "TOOL_REFERENCE_READY", "READY_TO_RESUME", "NEXT_OPERATION_READY"}:
                 raise ApplicationError(f"No se puede reanudar desde {run['state']}.")
             try:
                 if run["state"] == "OPERATION_PAUSED":
                     adapter.resume()
             except Exception:
                 pass
-            run["state"] = "JOB_STARTING" if run["state"] in {"JOB_PAUSED", "TOOL_REFERENCE_READY", "NEXT_OPERATION_READY"} else "OPERATION_RUNNING"
+            run["state"] = "JOB_STARTING" if run["state"] in {"JOB_PAUSED", "TOOL_REFERENCE_READY", "READY_TO_RESUME", "NEXT_OPERATION_READY"} else "OPERATION_RUNNING"
             run["available_actions"] = ["pause", "cancel"]
             run["next_action"] = "Reanudando trabajo"
             self._append_event(run, "info", "Trabajo reanudado por el operador.")
@@ -301,7 +344,7 @@ class JobService:
         elif action == "measure-reference":
             self._measure_tool_reference(context, run)
         elif action == "continue":
-            if run["state"] not in {"TOOL_REFERENCE_READY", "NEXT_OPERATION_READY"}:
+            if run["state"] not in {"TOOL_REFERENCE_READY", "READY_TO_RESUME", "NEXT_OPERATION_READY"}:
                 raise ApplicationError("Continuar solo aplica cuando ya existe referencia Z y hay una siguiente operación preparada.")
             run["state"] = "JOB_STARTING"
             run["next_action"] = "Continuando secuencia"
@@ -360,10 +403,10 @@ class JobService:
         operation_payload["reference_status"] = "LISTA"
         run["current_tool_key"] = operation_payload["tool_key"]
         run["summary"]["tool_changes_completed"] = int(run["summary"].get("tool_changes_completed", 0)) + 1
-        run["state"] = "JOB_STARTING"
-        run["next_action"] = "Continuando con la siguiente operación tras la nueva referencia Z"
-        run["available_actions"] = ["pause", "cancel"]
-        self._append_event(run, "info", f"Referencia Z medida para {operation_payload['tool_name']}; continuando automáticamente.")
+        run["state"] = "READY_TO_RESUME"
+        run["next_action"] = "Revisar la nueva calibración y continuar trabajo"
+        run["available_actions"] = ["continue", "cancel"]
+        self._append_event(run, "info", f"Referencia Z medida para {operation_payload['tool_name']}; esperando confirmación explícita para continuar.")
 
     def _start_worker(self, context: JobContext) -> None:
         key = (context.project_id, context.setup_id, context.face)
@@ -584,6 +627,7 @@ class JobService:
             generated = generated_by_operation.get(operation.id)
             coverage = coverage_by_operation.get(operation.id)
             reference_status = self._reference_status(active_map, operation)
+            calibration = self._tool_installation_calibration(active_map, operation)
             blocking_reasons: list[str] = []
             if operation.archivo_gcode is None:
                 blocking_reasons.append("Falta G-code original.")
@@ -616,6 +660,7 @@ class JobService:
                     "coverage_status": "VALIDA" if coverage is None or coverage["sufficient"] else "FUERA_DE_DOMINIO",
                     "coverage_detail": None if coverage is None or coverage["sufficient"] else blocking_reasons[-1],
                     "reference_status": reference_status,
+                    "tool_installation_calibration": calibration,
                     "generated_file": None if generated is None else generated["relative_path"],
                     "generated_file_name": None if generated is None else Path(str(generated["relative_path"])).name,
                     "generated_metadata_path": None if generated is None else generated.get("metadata_path"),
@@ -773,6 +818,26 @@ class JobService:
             return "PENDIENTE"
         reference = (active_map.get("tool_references") or {}).get(_tool_key(operation))
         return "LISTA" if isinstance(reference, dict) and reference.get("valid") else "REQUIERE_REFERENCIA"
+
+    def _tool_installation_calibration(self, active_map: dict[str, Any] | None, operation: OperacionPCB) -> dict[str, Any] | None:
+        if active_map is None:
+            return None
+        reference = (active_map.get("tool_references") or {}).get(_tool_key(operation))
+        if not isinstance(reference, dict):
+            return None
+        return {
+            "calibration_id": str(reference.get("calibration_id") or reference.get("installation_id") or ""),
+            "tool_id": _tool_key(operation),
+            "installation_session_id": str(reference.get("installation_session_id") or reference.get("installation_id") or ""),
+            "reference_point_id": str(reference.get("reference_point_id") or "surface-map-origin"),
+            "reference_machine_x": reference.get("reference_x"),
+            "reference_machine_y": reference.get("reference_y"),
+            "tool_reference_z": reference.get("tool_reference_z", reference.get("reference_z")),
+            "measured_at": reference.get("measured_at"),
+            "probe_method": reference.get("probe_method", reference.get("source", "MEASURED")),
+            "valid": bool(reference.get("valid")),
+            "invalidation_reason": reference.get("invalidation_reason"),
+        }
 
     def _generated_payload_for_operation(self, plan: dict[str, Any], operation_id: str) -> dict[str, Any] | None:
         row = next((item for item in plan["operations"] if item["operation_id"] == operation_id), None)

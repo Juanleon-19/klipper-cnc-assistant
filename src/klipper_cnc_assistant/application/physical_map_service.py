@@ -592,6 +592,7 @@ class PhysicalMapService:
         reference = dict(refs.get(key) or {})
         reference["valid"] = False
         reference["invalidated_at"] = _iso_now()
+        reference["invalidation_reason"] = "TOOL_REMOVED_OR_REINSTALLED"
         refs[key] = reference
         payload["tool_references"] = refs
         payload["updated_at"] = _iso_now()
@@ -627,6 +628,12 @@ class PhysicalMapService:
         reference = dict(refs.get(key) or {})
         if installation_id:
             reference["installation_id"] = installation_id
+            reference["installation_session_id"] = installation_id
+            reference["calibration_id"] = f"calibration/{installation_id}"
+        reference["tool_reference_z"] = reference.get("reference_z")
+        reference["reference_point_id"] = "surface-map-origin"
+        reference["probe_method"] = "conductive_probe"
+        reference["invalidation_reason"] = None
         reference["valid"] = True
         refs[key] = reference
         updated["tool_references"] = refs
@@ -1365,10 +1372,15 @@ class PhysicalMapService:
             "tool_name": operation.herramienta,
             "tool_diameter": _tool_diameter(operation),
             "installation_id": utc_now().strftime("%Y%m%d-%H%M%S"),
+            "calibration_id": f"calibration/{utc_now().strftime('%Y%m%d-%H%M%S')}",
+            "installation_session_id": session_id or utc_now().strftime("%Y%m%d-%H%M%S"),
+            "reference_point_id": "surface-map-origin",
             "reference_x": float(machine_position["x_mm"]),
             "reference_y": float(machine_position["y_mm"]),
             "reference_z": reference_z,
+            "tool_reference_z": reference_z,
             "measured_at": _iso_now(),
+            "probe_method": "conductive_probe",
             "source": "MEASURED",
             "valid": True,
             "homed_axes": homed_axes,

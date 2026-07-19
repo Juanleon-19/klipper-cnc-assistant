@@ -375,8 +375,9 @@ class PhysicalIntegrationTest(unittest.TestCase):
             generator = CompensatedGCodeService(repository, service)
             result = generator.generate(project.id, operation.id)
             generated = repository.read_project_file(project.id, result["relative_path"])
-            self.assertIn("X10.00000 Y0.00000", generated)
-            self.assertIn("Z-0.09000", generated)
+            self.assertIn("X30.00000 Y30.00000", generated)
+            self.assertIn("Z0.91000", generated)
+            self.assertNotIn("X10.00000 Y0.00000 Z-0.09000", generated)
             self.assertEqual(result["metadata"]["tool_id"], "tool-v")
             self.assertTrue(result["relative_path"].startswith("generated/compensated/"))
 
@@ -410,8 +411,8 @@ class PhysicalIntegrationTest(unittest.TestCase):
             generator = CompensatedGCodeService(repository, service)
             result = generator.generate(project.id, operation.id)
             generated = repository.read_project_file(project.id, result["relative_path"])
-            self.assertIn("G1 X0.00000 Y0.00000 Z5.00000", generated)
-            self.assertIn("X20.00000 Y20.00000 Z-0.04000", generated)
+            self.assertIn("G1 X100.00000 Y200.00000 Z6.00000", generated)
+            self.assertIn("X120.00000 Y220.00000 Z0.96000", generated)
 
     def test_completed_physical_mesh_feeds_compensation_without_simulated_blockers(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -468,8 +469,8 @@ class PhysicalIntegrationTest(unittest.TestCase):
             generated = generated_path.read_text(encoding="utf-8")
             persisted_operation = project_service.get_project(project.id).get_operation(operation.id)
             self.assertEqual(repository.read_project_file(project.id, persisted_operation.archivo_gcode), original)
-            self.assertIn("X20.00000 Y0.00000 Z-0.08000", generated)
-            self.assertIn("X30.00000 Y0.00000", generated)
+            self.assertIn("X120.00000 Y200.00000 Z0.92000", generated)
+            self.assertIn("X130.00000 Y200.00000", generated)
             self.assertFalse(any(line.startswith(("G2 ", "G3 ")) for line in generated.splitlines()))
             self.assertGreater(generated.count("G1 "), 8)
             self.assertTrue(generated_path.exists())

@@ -712,6 +712,10 @@ def build_router() -> APIRouter:
     def start_job_run(project_id: str, payload: dict[str, str], request: Request) -> dict[str, object]:
         return request.app.state.job_service.start_run(project_id=project_id, setup_id=str(payload["setup_id"]), face=str(payload["face"]))
 
+    @router.post("/projects/{project_id}/job-run/dry-run", response_model=dict[str, object])
+    def dry_run_job(project_id: str, payload: dict[str, str], request: Request) -> dict[str, object]:
+        return request.app.state.job_service.dry_run(project_id=project_id, setup_id=str(payload["setup_id"]), face=str(payload["face"]))
+
     @router.post("/projects/{project_id}/job-run/action", response_model=dict[str, object])
     def job_run_action(project_id: str, payload: dict[str, str], request: Request) -> dict[str, object]:
         return request.app.state.job_service.run_action(project_id=project_id, setup_id=str(payload["setup_id"]), face=str(payload["face"]), action=str(payload["action"]))
