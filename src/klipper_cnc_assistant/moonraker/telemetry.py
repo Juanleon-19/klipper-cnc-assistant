@@ -178,9 +178,10 @@ class MoonrakerTelemetry:
             try:
                 async with websockets.connect(self.websocket_url) as websocket:
                     await self._subscribe(websocket)
-                    async for message in websocket:
-                        if not self._running:
-                            break
+                    while self._running:
+                        # A TCP socket can remain open while Moonraker stops publishing.
+                        # Treat an idle subscription as stale so the outer loop reconnects.
+                        message = await asyncio.wait_for(websocket.recv(), timeout=3.0)
                         self._process_message(json.loads(message))
             except Exception:
                 if not self._running:
