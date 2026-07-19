@@ -2,11 +2,15 @@ from __future__ import annotations
 
 import re
 import tempfile
+from pathlib import Path
 import threading
 import time
 import unittest
 from dataclasses import replace
 
+from klipper_cnc_assistant.application import MeshExecutionService
+from klipper_cnc_assistant.application.physical_map_service import PhysicalMapService, PhysicalMeshConfig
+from klipper_cnc_assistant.application.services import ProjectService
 from klipper_cnc_assistant.input.command_mapper import CommandMapper, ControllerCommand
 from klipper_cnc_assistant.input.serial_driver import ControllerPacket
 from klipper_cnc_assistant.machine.config import MachineMode, MachineRuntimeConfig
@@ -14,6 +18,7 @@ from klipper_cnc_assistant.machine.runtime import MachineRuntime, MachineRuntime
 import klipper_cnc_assistant.machine.runtime as runtime_module
 from klipper_cnc_assistant.machine.state import AxisLimits, MachinePosition, MachineState
 from klipper_cnc_assistant.moonraker.client import MoonrakerError, MoonrakerTimeout
+from klipper_cnc_assistant.storage import JsonProjectRepository
 
 
 def config(mode: MachineMode = MachineMode.SIMULATED, **overrides) -> MachineRuntimeConfig:
@@ -309,8 +314,14 @@ class ProbeJogSpy:
         target = float(snapshot[axis]) + float(distance)
         self.calls.append({"axis": axis, "distance": float(distance), "speed": float(speed), "target": target})
         self.machine.update_motion(live_position=(float(snapshot["x"]), float(snapshot["y"]), target), live_velocity=0, source="websocket")
-        if distance < 0:
-            self.runtime._last_command = ControllerCommand(probe_triggered=True)
+        triggered = distance < 0
+        with self.runtime._lock:
+            self.runtime._last_command = ControllerCommand(probe_triggered=triggered)
+            self.runtime._probe_raw = triggered
+            self.runtime._probe_filtered = triggered
+            self.runtime._probe_filtered_since = time.monotonic() - 0.1
+            self.runtime._last_packet_at = time.monotonic()
+            self.runtime._packet_sequence += 1
         return {"axis": axis, "current_position": float(snapshot[axis]), "target": target, "speed": float(speed)}
 
 
@@ -1112,7 +1123,7 @@ class MachineRuntimeTest(unittest.TestCase):
 
         self.assertTrue(runtime._last_command.probe_triggered)
 
-    def test_reference_probe_retract_uses_same_speed_as_lowering(self) -> None:
+    def test_reference_probe_retract_uses_configured_retract_speed(self) -> None:
         machine = MachineState(
             position=MachinePosition(10, 8, 5),
             x_limits=AxisLimits(0, 100),
@@ -1135,8 +1146,89 @@ class MachineRuntimeTest(unittest.TestCase):
         self.assertEqual(snapshot["state"], "REFERENCE_CAPTURED")
         self.assertEqual(len(runtime._jog.calls), 2)
         self.assertEqual(runtime._jog.calls[0]["speed"], 1.25)
-        self.assertEqual(runtime._jog.calls[1]["speed"], 1.25)
+        self.assertEqual(runtime._jog.calls[1]["speed"], 9.0)
         self.assertGreater(float(runtime._jog.calls[1]["distance"]), 0.0)
+
+    def test_reference_and_mesh_share_identical_probe_contact_contract(self) -> None:
+        def runtime_at(x: float, y: float) -> MachineRuntime:
+            machine = MachineState(
+                position=MachinePosition(x, y, 5.0),
+                x_limits=AxisLimits(0, 100), y_limits=AxisLimits(0, 100), z_limits=AxisLimits(0, 200),
+                homed_axes="xyz", max_velocity=100, max_accel=500, live_velocity=0,
+            )
+            runtime, _client = physical_runtime_with_machine(
+                machine,
+                cfg=config(MachineMode.PHYSICAL, probe_step_mm=0.1, probe_lower_speed_mm_s=1.25, probe_retract_mm=0.4, probe_retract_speed_mm_s=2.5),
+            )
+            runtime._jog = ProbeJogSpy(runtime, machine)
+            runtime._wait_for_axis = lambda *args, **kwargs: None
+            return runtime
+
+        reference_runtime = runtime_at(10.0, 8.0)
+        reference_runtime._state = runtime_module.MachineRuntimeState.WAITING_FOR_XY_REFERENCE
+        reference = reference_runtime.confirm_probe()["last_probe_result"]
+
+        mesh_runtime = runtime_at(10.0, 8.0)
+        mesh = mesh_runtime.probe_mesh_point(
+            {"index": 1, "x_machine": 10.0, "y_machine": 8.0},
+            probe_config={"reference_z_mm": 0.1, "safe_z_mm": 4.9, "probe_step_mm": 0.1, "probe_feed_mm_min": 75.0, "retract_mm": 0.4},
+        )
+
+        self.assertAlmostEqual(float(reference["z_mm"]), float(mesh["z_measured"]), places=6)
+        self.assertEqual(
+            [(call["distance"], call["speed"]) for call in reference_runtime._jog.calls],
+            [(call["distance"], call["speed"]) for call in mesh_runtime._jog.calls],
+        )
+        self.assertEqual(reference_runtime.get_live_probe_state()["display_state"], "OPEN")
+        self.assertEqual(mesh_runtime.get_live_probe_state()["display_state"], "OPEN")
+
+    def test_reference_then_actual_runtime_mesh_worker_measures_all_2x2_points(self) -> None:
+        machine = MachineState(
+            position=MachinePosition(0, 0, 10.0),
+            x_limits=AxisLimits(0, 100), y_limits=AxisLimits(0, 100), z_limits=AxisLimits(0, 200),
+            homed_axes="xyz", max_velocity=100, max_accel=500, live_velocity=0,
+        )
+        runtime, _client = physical_runtime_with_machine(
+            machine,
+            cfg=config(MachineMode.PHYSICAL, probe_step_mm=0.1, probe_lower_speed_mm_s=2.0, probe_retract_mm=0.4, probe_retract_speed_mm_s=3.0),
+        )
+        runtime._jog = ProbeJogSpy(runtime, machine)
+        runtime._wait_for_axis = lambda *args, **kwargs: None
+        calls: list[str] = []
+        common_probe = runtime._perform_probe_descent
+
+        def record_common_probe(**kwargs):
+            calls.append(str(kwargs["label"]))
+            return common_probe(**kwargs)
+
+        runtime._perform_probe_descent = record_common_probe
+        runtime._state = runtime_module.MachineRuntimeState.WAITING_FOR_XY_REFERENCE
+        reference = runtime.confirm_probe()["last_probe_result"]
+
+        with tempfile.TemporaryDirectory() as temp:
+            repository = JsonProjectRepository(Path(temp))
+            project_service = ProjectService(repository)
+            project = project_service.create_project(nombre="PCB", ancho_mm=60, alto_mm=60, espesor_mm=1.6)
+            operation = project_service.add_operation(project_id=project.id, nombre="Aislamiento", tipo="aislamiento", cara="superior", orden=0, tool_id="tool", herramienta="V-bit")
+            service = PhysicalMapService(repository)
+            plan = service.capture_reference_and_plan(
+                project_id=project.id, operation_id=operation.id,
+                machine_origin_x=0.0, machine_origin_y=0.0, reference_z=float(reference["z_mm"]),
+                machine_position={"x_mm": 0.0, "y_mm": 0.0, "z_mm": float(reference["z_mm"])},
+                homed_axes="xyz", machine_label="simulated-live-runtime", session_id="test",
+                config=PhysicalMeshConfig(grid_mode="manual", rows=2, columns=2, edge_margin_left_mm=1.0, edge_margin_right_mm=1.0, edge_margin_bottom_mm=1.0, edge_margin_top_mm=1.0, safe_z_mm=0.1, probe_step_mm=0.1, probe_feed_mm_min=120.0, retract_mm=0.4),
+            )
+            worker = MeshExecutionService(service)
+            worker.start_all(project_id=project.id, map_id=plan["map_id"], runtime=runtime)
+            self.assertTrue(worker.wait_until_idle(timeout_s=3.0))
+            completed = service.get_by_id(project.id, plan["map_id"])
+
+        self.assertAlmostEqual(float(reference["z_mm"]), 9.9, places=6)
+        self.assertEqual(calls[0], "reference_probe")
+        self.assertEqual(calls[1:], ["mesh_probe_1", "mesh_probe_2", "mesh_probe_3", "mesh_probe_4"])
+        self.assertEqual(completed["status"], "MESH_COMPLETE")
+        self.assertEqual(sum(point["status"] == "MEASURED" for point in completed["points"]), 5)
+        self.assertTrue(all(point["status"] == "MEASURED" for point in completed["points"][1:]))
 
     def test_mesh_probe_uses_saved_probe_recipe(self) -> None:
         machine = MachineState(
@@ -1168,7 +1260,7 @@ class MachineRuntimeTest(unittest.TestCase):
         self.assertIn("Y35.000000", client.scripts[1])
         self.assertEqual(len(runtime._jog.calls), 2)
         self.assertEqual(runtime._jog.calls[0]["speed"], 0.5)
-        self.assertEqual(runtime._jog.calls[1]["speed"], 0.5)
+        self.assertEqual(runtime._jog.calls[1]["speed"], 2.0)
         self.assertAlmostEqual(float(runtime._jog.calls[0]["distance"]), -0.05)
         self.assertAlmostEqual(float(runtime._jog.calls[1]["distance"]), 0.8)
 

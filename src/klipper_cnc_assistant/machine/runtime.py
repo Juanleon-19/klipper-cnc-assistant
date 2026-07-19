@@ -618,54 +618,15 @@ class MachineRuntime:
                     raise MachineRuntimeError("La referencia debe estar armada antes de sondear.")
                 if not self._probe_requested:
                     self._probe_requested = True
-                if self._last_command.probe_triggered:
-                    raise MachineRuntimeError("La sonda está activa antes de iniciar el descenso.")
                 self._manual_enabled = False
                 self._diagnostic_input_only = True
                 self._state = MachineRuntimeState.PROBING_REFERENCE
-            self._assert_safety_for_motion()
-            self._refresh_machine()
-            machine = self._machine
-            jog = self._jog
-            if machine is None or jog is None:
-                raise MachineRuntimeError("No hay control físico inicializado.")
-            if not machine.axis_is_homed("z"):
-                raise MachineRuntimeError("Z debe tener homing antes de sondear.")
-            start = machine.get_motion_snapshot()
-            start_x = float(start["x"])
-            start_y = float(start["y"])
-            while True:
-                with self._lock:
-                    if self._last_command.probe_triggered:
-                        break
-                snapshot = machine.get_motion_snapshot()
-                current_z = float(snapshot["z"])
-                remaining = current_z - machine.z_limits.minimum
-                if remaining <= self.config.settle_tolerance_mm:
-                    raise MachineRuntimeError("Se alcanzó el límite mínimo Z sin contacto de sonda.")
-                step = min(self.config.probe_step_mm, remaining)
-                result = jog.move_relative("z", -step, self.config.probe_lower_speed_mm_s)
-                with self._lock:
-                    self._last_movement = result
-                    self._last_command_text = "probe_lower_step"
-                self._wait_for_axis("z", float(result["target"]), "paso de sonda", start_position=current_z)
-            snapshot = machine.get_motion_snapshot()
-            contact_z = float(snapshot["z"])
-            retract_available = machine.z_limits.maximum - contact_z
-            if retract_available <= self.config.settle_tolerance_mm:
-                raise MachineRuntimeError("No hay margen Z para retraer después del contacto.")
-            retract = min(self.config.probe_retract_mm, retract_available)
-            result = jog.move_relative("z", retract, self.config.probe_lower_speed_mm_s)
-            with self._lock:
-                self._last_movement = result
-                self._last_command_text = "probe_retract"
-            self._wait_for_axis("z", float(result["target"]), "retracto de sonda", start_position=contact_z)
-            probe = ProbeResult(x_mm=start_x, y_mm=start_y, z_mm=contact_z, captured_at=_iso_now())
+            probe = self._perform_probe_descent(label="reference_probe")
             with self._lock:
                 self._last_probe_result = probe
                 self._probe_requested = False
                 self._state = MachineRuntimeState.REFERENCE_CAPTURED
-                self._event("info", f"Sonda de referencia capturada X={start_x:.3f} Y={start_y:.3f} Z={contact_z:.3f}.")
+                self._event("info", f"Sonda de referencia capturada X={probe.x_mm:.3f} Y={probe.y_mm:.3f} Z={probe.z_mm:.3f}.")
             return self.snapshot()
         except Exception as error:
             with self._lock:
@@ -695,24 +656,20 @@ class MachineRuntime:
                 raise MachineRuntimeError("No hay estado de máquina descubierto.")
             start_snapshot = machine.get_motion_snapshot()
             safe_z = self._mesh_safe_z(machine, probe_config=probe_config)
-            with self._lock:
-                safe_sequence = self._packet_sequence
             self._notify_probe_progress(progress_callback, "POINT_MOVE_SAFE_Z", safe_z_mm=safe_z, initial_z_mm=float(start_snapshot["z"]))
             self._move_absolute(z=safe_z, label="mesh_z_segura")
             safe_observed = machine.get_motion_snapshot()
-            self._require_fresh_open_probe(after_sequence=safe_sequence, stage="POINT_VERIFY_PROBE_OPEN", progress_callback=progress_callback)
             with self._lock:
                 xy_sequence = self._packet_sequence
             self._notify_probe_progress(progress_callback, "POINT_MOVE_XY", x_mm=float(point["x_machine"]), y_mm=float(point["y_machine"]), safe_z_mm=safe_z, observed_z_mm=float(safe_observed["z"]))
             self._move_absolute(x=float(point["x_machine"]), y=float(point["y_machine"]), label=f"mesh_xy_{point['index']}")
-            self._require_fresh_open_probe(after_sequence=xy_sequence, stage="POINT_VERIFY_PROBE_OPEN", progress_callback=progress_callback)
             probe_feed_mm_min = self._probe_config_float(probe_config, "probe_feed_mm_min")
-            self._notify_probe_progress(progress_callback, "POINT_VERIFY_PROBE_OPEN")
-            probe = self._probe_current_position(
+            probe = self._perform_probe_descent(
                 label=f"mesh_probe_{point['index']}",
                 probe_step_mm=self._probe_config_float(probe_config, "probe_step_mm"),
                 probe_speed_mm_s=None if probe_feed_mm_min is None else probe_feed_mm_min / 60.0,
                 retract_mm=self._probe_config_float(probe_config, "retract_mm"),
+                open_after_sequence=xy_sequence,
                 progress_callback=progress_callback,
             )
             with self._lock:
@@ -774,15 +731,12 @@ class MachineRuntime:
         stable_s = 0.05
         while time.monotonic() < deadline:
             self._raise_if_cancelled()
-            with self._lock:
-                sequence = self._packet_sequence
-                raw = self._probe_raw
-                filtered = self._probe_filtered
-                changed_at = self._probe_filtered_since
-                packet_at = self._last_packet_at
-            now = time.monotonic()
-            age = None if packet_at is None else now - packet_at
-            stable_ms = 0.0 if changed_at is None else max(0.0, now - changed_at) * 1000.0
+            live_probe = self.get_live_probe_state()
+            sequence = int(live_probe["packet_sequence"])
+            raw = live_probe["raw_value"]
+            filtered = live_probe["filtered_triggered"]
+            age = live_probe["packet_age_s"]
+            stable_ms = float(live_probe["stable_for_ms"])
             detail = {"probe_raw": raw, "probe_filtered": filtered, "last_packet_age_s": age, "open_stable_ms": stable_ms, "packet_sequence": sequence}
             # Unit runtimes have no serial driver; production always requires a post-motion packet.
             if not isinstance(self._driver, SerialDriver) and not raw and not filtered:
@@ -796,13 +750,14 @@ class MachineRuntime:
             self._last_probe_failure = failure
         raise MachineRuntimeError(failure["error"])
 
-    def _probe_current_position(
+    def _perform_probe_descent(
         self,
         *,
         label: str,
         probe_step_mm: float | None = None,
         probe_speed_mm_s: float | None = None,
         retract_mm: float | None = None,
+        open_after_sequence: int | None = None,
         progress_callback: Callable[[str, dict[str, Any]], None] | None = None,
     ) -> ProbeResult:
         self._assert_safety_for_motion()
@@ -818,15 +773,19 @@ class MachineRuntime:
         retract_distance = retract_mm if retract_mm and retract_mm > 0 else self.config.probe_retract_mm
         with self._lock:
             packet_sequence = self._packet_sequence
-        self._require_fresh_open_probe(after_sequence=packet_sequence - 1, stage="POINT_VERIFY_PROBE_OPEN", progress_callback=progress_callback)
+        self._require_fresh_open_probe(
+            after_sequence=packet_sequence - 1 if open_after_sequence is None else open_after_sequence,
+            stage="POINT_VERIFY_PROBE_OPEN",
+            progress_callback=progress_callback,
+        )
         start = machine.get_motion_snapshot()
         start_x = float(start["x"])
         start_y = float(start["y"])
         while True:
             self._raise_if_cancelled()
-            with self._lock:
-                if self._last_command.probe_triggered:
-                    break
+            probe_state = self.get_live_probe_state(require_fresh=True)
+            if probe_state["filtered_triggered"]:
+                break
             snapshot = machine.get_motion_snapshot()
             current_z = float(snapshot["z"])
             remaining = current_z - machine.z_limits.minimum
@@ -846,13 +805,20 @@ class MachineRuntime:
         if retract_available <= self.config.settle_tolerance_mm:
             raise MachineRuntimeError("No hay margen Z para retraer después del contacto.")
         retract = min(retract_distance, retract_available)
-        retract_speed = self.config.probe_retract_speed_mm_s if probe_speed_mm_s is None else probe_speed
+        retract_speed = self.config.probe_retract_speed_mm_s
         self._notify_probe_progress(progress_callback, "POINT_RETRACT", retract_mm=retract, feed_mm_min=retract_speed * 60.0)
+        with self._lock:
+            retract_sequence = self._packet_sequence
         result = jog.move_relative("z", retract, retract_speed)
         with self._lock:
             self._last_movement = result
             self._last_command_text = f"{label}_retract"
         self._wait_for_axis("z", float(result["target"]), "retracto de sonda", start_position=contact_z)
+        self._require_fresh_open_probe(
+            after_sequence=retract_sequence,
+            stage="POINT_VERIFY_PROBE_OPEN_AFTER_RETRACT",
+            progress_callback=progress_callback,
+        )
         return ProbeResult(x_mm=start_x, y_mm=start_y, z_mm=contact_z, captured_at=_iso_now())
 
     def _begin_operation_context(self, operation_type: str) -> OperationContext:
