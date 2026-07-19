@@ -215,6 +215,16 @@ class PhysicalIntegrationTest(unittest.TestCase):
         self.assertEqual(machine.x_limits.minimum, -5)
         self.assertEqual(machine.position.z, 3)
 
+    def test_telemetry_reports_live_and_disconnected_states(self) -> None:
+        machine = MachineState(position=MachinePosition(0, 0, 0), x_limits=AxisLimits(0, 100), y_limits=AxisLimits(0, 100), z_limits=AxisLimits(0, 50), homed_axes="xyz", max_velocity=100, max_accel=500)
+        telemetry = MoonrakerTelemetry("ws://example", machine)
+        states: list[str] = []
+        telemetry.set_state_callback(states.append)
+        telemetry._process_message({"method": "notify_status_update", "params": [{"motion_report": {"live_position": [1, 2, 3], "live_velocity": 0}}]})
+        telemetry.stop()
+        self.assertEqual(states, ["LIVE", "DISCONNECTED"])
+        self.assertAlmostEqual(machine.get_motion_snapshot()["live_position"]["z"], 3.0)
+
     def test_physical_map_is_keyed_by_setup_face_and_persists_relative_points(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             repository = JsonProjectRepository(Path(temp))
@@ -547,6 +557,8 @@ class PhysicalIntegrationTest(unittest.TestCase):
             self.assertEqual(runtime.calls, [1])
             retried = service.retry_failed_point(project_id=project.id, map_id=plan["map_id"], point_index=1)
             self.assertEqual(retried["points"][1]["status"], "RETRY_REQUIRED")
+            self.assertIsNone(retried["points"][1]["error"])
+            self.assertTrue(retried["points"][1]["last_error"])
             worker.resume(project_id=project.id, map_id=plan["map_id"], runtime=runtime)
             self.assertTrue(worker.wait_until_idle(timeout_s=3.0))
             completed = service.get_by_id(project.id, plan["map_id"])

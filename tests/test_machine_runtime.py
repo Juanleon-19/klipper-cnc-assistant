@@ -342,6 +342,37 @@ def physical_runtime_with_machine(machine: MachineState, cfg: MachineRuntimeConf
 
 
 class MachineRuntimeTest(unittest.TestCase):
+    def test_live_probe_open_is_separate_from_historical_trigger_failure(self) -> None:
+        machine = MachineState(position=MachinePosition(0, 0, 10), x_limits=AxisLimits(0, 100), y_limits=AxisLimits(0, 100), z_limits=AxisLimits(0, 200), homed_axes="xyz", max_velocity=100, max_accel=500, live_velocity=0)
+        runtime, _client = physical_runtime_with_machine(machine)
+        runtime._last_error = "Sonda no OPEN fresca y estable: raw=True"
+        runtime._last_probe_failure = {"raw_value_at_failure": True, "filtered_at_failure": True}
+        packet = ControllerPacket(direction="CENTER", joystick_button=False, external_button=False, probe=False, x=512, y=512)
+        runtime._handle_controller_packet(packet, CommandMapper().map(packet))
+
+        probe = runtime.get_live_probe_state(require_fresh=True, require_stable=False)
+        snapshot = runtime.snapshot()
+
+        self.assertEqual(probe["display_state"], "OPEN")
+        self.assertFalse(probe["raw_value"])
+        self.assertFalse(probe["filtered_triggered"])
+        self.assertIsNone(snapshot["last_error"])
+        self.assertTrue(snapshot["last_probe_failure"]["filtered_at_failure"])
+
+    def test_mesh_retry_readiness_uses_live_open_probe_and_rejects_stale_position(self) -> None:
+        machine = MachineState(position=MachinePosition(0, 0, 10), x_limits=AxisLimits(0, 100), y_limits=AxisLimits(0, 100), z_limits=AxisLimits(0, 200), homed_axes="xyz", max_velocity=100, max_accel=500, live_velocity=0)
+        runtime, _client = physical_runtime_with_machine(machine)
+        packet = ControllerPacket(direction="CENTER", joystick_button=False, external_button=False, probe=False, x=512, y=512)
+        runtime._handle_controller_packet(packet, CommandMapper().map(packet))
+        runtime._probe_filtered_since = time.monotonic() - 0.1
+        machine.live_position_updated_at = time.monotonic() - 772
+        with self.assertRaisesRegex(MachineRuntimeError, "posición Moonraker obsoleta"):
+            runtime.mesh_retry_readiness()
+        machine.update_motion(live_position=(0, 0, 10), live_velocity=0, source="websocket")
+        readiness = runtime.mesh_retry_readiness()
+        self.assertEqual(readiness["probe_state"], "OPEN")
+        self.assertLess(readiness["position_age_ms"], 1000)
+
     def test_simulated_mode_never_constructs_physical_clients(self) -> None:
         def fail_client(_url: str):
             raise AssertionError("MoonrakerClient no debe construirse en modo simulado")

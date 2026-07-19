@@ -1105,6 +1105,9 @@ export function ProjectWorkspace({
     const movementTarget = lastMovement?.target as Record<string, unknown> | null | undefined;
     const controller = runtime?.controller ?? {};
     const arduino = runtime?.arduino ?? {};
+    const probeLive = runtime?.probe_live ?? {};
+    const lastProbeFailure = runtime?.last_probe_failure ?? null;
+    const moonraker = runtime?.moonraker ?? {};
     const preparation = runtime?.preparation ?? {};
     const toolChange = runtime?.tool_change ?? {};
     const referencePrepZ = typeof preparation.reference_prep_z_mm === "number" ? preparation.reference_prep_z_mm : 115;
@@ -1156,8 +1159,12 @@ export function ProjectWorkspace({
             <div><dt>Paquetes válidos</dt><dd>{String(arduino.valid_packets ?? 0)}</dd></div>
             <div><dt>Dirección joystick</dt><dd>{String(controller.direction ?? "CENTER")}</dd></div>
             <div><dt>Botón externo</dt><dd>{controller.external_button ? "pulsado" : "reposo"}</dd></div>
-            <div><dt>Sonda</dt><dd>{controller.probe ? "contacto" : "inactiva"}</dd></div>
+            <div><dt>Sonda actual</dt><dd>{String(probeLive.display_state ?? (controller.probe ? "TRIGGERED" : "OPEN"))}</dd></div>
+            <div><dt>Probe raw / filtrada</dt><dd>{String(probeLive.raw_value ?? controller.probe ?? false)} / {String(probeLive.filtered_triggered ?? controller.probe ?? false)}</dd></div>
+            <div><dt>Edad / estable</dt><dd>{typeof probeLive.packet_age_s === "number" ? `${(probeLive.packet_age_s * 1000).toFixed(0)} ms` : "-"} / {typeof probeLive.stable_for_ms === "number" ? `${probeLive.stable_for_ms.toFixed(0)} ms` : "-"}</dd></div>
+            <div><dt>Telemetría</dt><dd>{String(moonraker.telemetry_state ?? "DISCONNECTED")} · {typeof position?.live_position_age_s === "number" ? `${position.live_position_age_s.toFixed(2)} s` : "sin posición"}</dd></div>
           </dl>
+          {lastProbeFailure ? <div className="alert alert--warning">Último fallo de sonda (histórico): {String(lastProbeFailure.error ?? "-")}</div> : null}
         </article>
 
         <article className="panel">

@@ -142,6 +142,12 @@ export default function App() {
     setMachineRuntime(runtimePayload);
   }, []);
 
+  useEffect(() => {
+    if (machineRuntime?.mode !== "PHYSICAL") return;
+    const timer = window.setInterval(() => { void refreshMachineRuntime().catch(() => undefined); }, 500);
+    return () => window.clearInterval(timer);
+  }, [machineRuntime?.mode, refreshMachineRuntime]);
+
   const syncProject = async (projectId: string) => {
     const project = await api.getProject(projectId);
     setProjects((current) => current.map((item) => (item.id === projectId ? project : item)));

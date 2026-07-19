@@ -539,7 +539,11 @@ def build_router() -> APIRouter:
     @router.post("/projects/{project_id}/physical-maps/{map_id:path}/points/{point_index}/retry", response_model=PhysicalMapResponse)
     def retry_physical_map_point(project_id: str, map_id: str, point_index: int, request: Request) -> PhysicalMapResponse:
         _reject_active_motion(request)
-        payload = request.app.state.physical_map_service.retry_failed_point(project_id, map_id, point_index)
+        runtime = request.app.state.machine_runtime
+        readiness = runtime.mesh_retry_readiness()
+        request.app.state.physical_map_service.retry_failed_point(project_id, map_id, point_index)
+        payload = request.app.state.mesh_execution_service.start_all(project_id=project_id, map_id=map_id, runtime=runtime)
+        payload.update({"retry_accepted": True, "worker_started": True, "point_index": point_index, **readiness})
         return PhysicalMapResponse(payload=payload)
 
     @router.post("/projects/{project_id}/physical-maps/{map_id:path}/points/{point_index}/skip", response_model=PhysicalMapResponse)

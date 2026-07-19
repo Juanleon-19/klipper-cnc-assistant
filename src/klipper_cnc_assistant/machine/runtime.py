@@ -195,6 +195,9 @@ class MachineRuntime:
         self._probe_raw = False
         self._probe_filtered = False
         self._probe_filtered_since: float | None = None
+        self._last_probe_failure: dict[str, Any] | None = None
+        self._telemetry_state = "DISCONNECTED"
+        self._last_websocket_message_at: float | None = None
 
 
     _MACHINE_SETTINGS_FIELDS = {
@@ -345,6 +348,8 @@ class MachineRuntime:
             machine = self._discovery(client)
             self._attach_telemetry_tracking(machine)
             telemetry = self._telemetry_factory(self.config.moonraker_ws, machine)
+            if hasattr(telemetry, "set_state_callback"):
+                telemetry.set_state_callback(self._on_telemetry_state)
             driver = self._serial_factory(port=self.config.serial_port, baudrate=self.config.serial_baudrate, startup_delay=self.config.serial_startup_delay_s)
             driver.open()
             telemetry_thread = threading.Thread(target=_run_telemetry, args=(telemetry, self._telemetry_failures), daemon=True)
@@ -701,6 +706,41 @@ class MachineRuntime:
         finally:
             self._movement_lock.release()
 
+    def get_live_probe_state(self, *, require_fresh: bool = False, require_stable: bool = False) -> dict[str, Any]:
+        """Return the current logical Arduino probe state, never an old failure message."""
+        with self._lock:
+            raw = self._probe_raw
+            filtered = self._probe_filtered
+            packet_at = self._last_packet_at
+            changed_at = self._probe_filtered_since
+            sequence = self._packet_sequence
+        now = time.monotonic()
+        age = None if packet_at is None else now - packet_at
+        stable_ms = 0.0 if changed_at is None else max(0.0, now - changed_at) * 1000.0
+        fresh = age is not None and age <= self.config.serial_fresh_timeout_s
+        state = "STALE" if not fresh else ("TRIGGERED" if filtered else "OPEN")
+        payload = {"packet_age_s": age, "raw_value": raw, "filtered_triggered": filtered, "display_state": state, "fresh": fresh, "changed_at_monotonic": changed_at, "stable_for_ms": stable_ms, "packet_sequence": sequence}
+        if require_fresh and not fresh:
+            raise MachineRuntimeError(f"Sonda Arduino obsoleta: edad_paquete_s={age}.")
+        if require_stable and stable_ms < 50.0:
+            raise MachineRuntimeError(f"Sonda Arduino aún no estable: estable_ms={stable_ms:.1f}.")
+        return payload
+
+    def mesh_retry_readiness(self) -> dict[str, Any]:
+        """Validate current probe and position before a retry can start a worker."""
+        self._require_physical_ready()
+        probe = self.get_live_probe_state(require_fresh=True, require_stable=True)
+        if probe["filtered_triggered"]:
+            raise MachineRuntimeError("No se puede reintentar: sonda actual TRIGGERED.")
+        self._refresh_machine()
+        snapshot = self.snapshot()
+        position = (snapshot.get("klipper") or {}).get("position") or {}
+        age = position.get("live_position_age_s")
+        if age is None or age > self.config.telemetry_fresh_timeout_s:
+            age_text = "sin dato" if age is None else f"{age:.0f} s"
+            raise MachineRuntimeError(f"No se puede reintentar: posición Moonraker obsoleta, edad {age_text}.")
+        return {"probe_state": probe["display_state"], "probe_age_ms": round(float(probe["packet_age_s"]) * 1000.0), "telemetry_state": self._telemetry_status(), "position_age_ms": round(float(age) * 1000.0)}
+
     def _require_fresh_open_probe(self, *, after_sequence: int, stage: str, progress_callback=None) -> dict[str, Any]:
         """Require a new, recent and stable OPEN controller sample before motion."""
         deadline = time.monotonic() + 1.0
@@ -724,7 +764,10 @@ class MachineRuntime:
                 self._notify_probe_progress(progress_callback, stage, **detail)
                 return detail
             time.sleep(0.01)
-        raise MachineRuntimeError(f"Sonda no OPEN fresca y estable antes de {stage}: raw={raw}, filtrada={filtered}, edad_paquete_s={age}, estable_ms={stable_ms:.1f}.")
+        failure = {"timestamp": _iso_now(), "stage": stage, "raw_value_at_failure": raw, "filtered_at_failure": filtered, "packet_age_at_failure_s": age, "error": f"Sonda no OPEN fresca y estable antes de {stage}: raw={raw}, filtrada={filtered}, edad_paquete_s={age}, estable_ms={stable_ms:.1f}."}
+        with self._lock:
+            self._last_probe_failure = failure
+        raise MachineRuntimeError(failure["error"])
 
     def _probe_current_position(
         self,
@@ -864,6 +907,8 @@ class MachineRuntime:
                     "ws": self.config.moonraker_ws,
                     "http_connected": self._client is not None,
                     "websocket_connected": self._telemetry_thread is not None and self._telemetry_thread.is_alive(),
+                    "telemetry_state": self._telemetry_status(),
+                    "last_websocket_message_age_s": None if self._last_websocket_message_at is None else max(0.0, now - self._last_websocket_message_at),
                     "last_error": self._last_error,
                 },
                 "klipper": {
@@ -902,6 +947,8 @@ class MachineRuntime:
                     "z_speed_mm_s": self.config.tool_change_z_feed_mm_min / 60.0,
                 },
                 "arduino": self._arduino_snapshot(now=now, serial_age=serial_age),
+                "probe_live": self.get_live_probe_state(),
+                "last_probe_failure": self._last_probe_failure,
                 "controller": {
                     "direction": self._last_packet.direction if self._last_packet else "CENTER",
                     "x": self._last_packet.x if self._last_packet else None,
@@ -960,10 +1007,14 @@ class MachineRuntime:
             self._last_packet_at = time.monotonic()
             self._counters.valid_packets += 1
             self._packet_sequence += 1
-            self._probe_raw = bool(command.probe_triggered)
+            # ControllerPacket.probe is already the logical contact bit: false=OPEN, true=TRIGGERED.
+            # Do not apply active-low inversion again in the runtime.
+            self._probe_raw = bool(packet.probe)
             if self._probe_filtered != self._probe_raw:
                 self._probe_filtered = self._probe_raw
                 self._probe_filtered_since = time.monotonic()
+            if not self._probe_filtered and self._last_error and self._last_error.startswith("Sonda no OPEN fresca y estable"):
+                self._last_error = None
             manual = self._manual
             diagnostic_only = self._diagnostic_input_only
             manual_enabled = self._manual_enabled
@@ -1114,6 +1165,20 @@ class MachineRuntime:
                     homing_origin=None if refreshed.homing_origin is None else refreshed.homing_origin.as_tuple(),
                 )
             self._last_telemetry_at = time.monotonic()
+
+    def _on_telemetry_state(self, state: str) -> None:
+        with self._lock:
+            self._telemetry_state = str(state)
+            if state == "LIVE":
+                self._last_websocket_message_at = time.monotonic()
+
+    def _telemetry_status(self) -> str:
+        with self._lock:
+            state = self._telemetry_state
+            last_message = self._last_websocket_message_at
+        if state == "LIVE" and (last_message is None or time.monotonic() - last_message > self.config.telemetry_fresh_timeout_s):
+            return "STALE"
+        return state
 
     def _attach_telemetry_tracking(self, machine) -> None:
         original_update_motion = machine.update_motion

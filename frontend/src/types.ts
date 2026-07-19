@@ -410,6 +410,8 @@ export type MachineRuntime = {
   };
   tool_change?: { x_mm?: number; y_mm?: number; z_mm?: number; z_feed_mm_min?: number; z_speed_mm_s?: number };
   arduino: Record<string, unknown>;
+  probe_live?: Record<string, unknown>;
+  last_probe_failure?: Record<string, unknown> | null;
   controller: Record<string, unknown>;
   safety: Record<string, unknown>;
   last_command: string | null;

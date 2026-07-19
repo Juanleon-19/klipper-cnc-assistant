@@ -15,6 +15,14 @@ class MoonrakerTelemetry:
         self.machine_state = machine_state
 
         self._running = False
+        self._state_callback = None
+
+    def set_state_callback(self, callback):
+        self._state_callback = callback
+
+    def _state(self, state):
+        if self._state_callback is not None:
+            self._state_callback(state)
 
     async def _subscribe(
         self,
@@ -99,6 +107,7 @@ class MoonrakerTelemetry:
         self,
         data,
     ):
+        self._state("LIVE")
         if data.get("id") == 1:
             result = data.get("result")
 
@@ -176,6 +185,7 @@ class MoonrakerTelemetry:
         self._running = True
         while self._running:
             try:
+                self._state("RECONNECTING")
                 async with websockets.connect(self.websocket_url) as websocket:
                     await self._subscribe(websocket)
                     while self._running:
@@ -184,9 +194,19 @@ class MoonrakerTelemetry:
                         message = await asyncio.wait_for(websocket.recv(), timeout=3.0)
                         self._process_message(json.loads(message))
             except Exception:
+                self._state("STALE")
                 if not self._running:
                     break
                 await asyncio.sleep(1.0)
 
     def stop(self):
         self._running = False
+        self._state("DISCONNECTED")
+        self._state_callback = None
+
+    def set_state_callback(self, callback):
+        self._state_callback = callback
+
+    def _state(self, state):
+        if self._state_callback is not None:
+            self._state_callback(state)

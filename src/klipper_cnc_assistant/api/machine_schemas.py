@@ -15,6 +15,8 @@ class MachineRuntimeResponse(BaseModel):
     preparation: dict = Field(default_factory=dict)
     tool_change: dict = Field(default_factory=dict)
     arduino: dict
+    probe_live: dict = Field(default_factory=dict)
+    last_probe_failure: dict | None = None
     controller: dict
     safety: dict
     last_command: str | None

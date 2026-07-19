@@ -411,7 +411,10 @@ class PhysicalMapService:
         if point.get("status") != "FAILED":
             raise ApplicationError("Solo se puede reintentar un punto fallido.")
         point["status"] = "RETRY_REQUIRED"
+        # Keep the failed observation for history, but never expose it as current state.
         point["last_error"] = point.get("error")
+        point["last_probe_failure"] = point.get("last_probe_failure") or {"timestamp": _iso_now(), "error": point.get("error")}
+        point["error"] = None
         payload["points"][point_index] = point
         payload["status"] = "MESH_READY"
         payload = self._set_execution_state(payload, worker_active=False, point_state="POINT_RETRY", point_index=point_index, last_event=f"Punto {point_index + 1} marcado para reintento explícito.")
