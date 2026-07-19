@@ -1550,6 +1550,30 @@ class PhysicalMapService:
             })
         return entries
 
+    def reconcile_abandoned_workers(self) -> int:
+        """Marks persisted workers without a live process as safely resumable on startup."""
+        reconciled = 0
+        for project in self.repository.list_projects():
+            maps_dir = self.repository.project_dir(project.id) / "maps" / "measured"
+            for file in maps_dir.glob("**/height_map.json") if maps_dir.exists() else ():
+                payload = self._load_file(file)
+                execution = payload.get("execution") or {}
+                if payload.get("status") != "MESH_PROBING" and not execution.get("worker_active"):
+                    continue
+                map_id = payload.get("map_id")
+                if not isinstance(map_id, str) or not map_id:
+                    continue
+                payload["status"] = "MESH_PAUSED"
+                payload = self._set_execution_state(
+                    payload, worker_active=False, point_state="MESH_PAUSED",
+                    error="El worker no existe después del reinicio; la malla quedó pausada y es recuperable.",
+                    last_event="Worker de malla reconciliado al arrancar; los puntos medidos se conservaron.",
+                )
+                payload["updated_at"] = _iso_now()
+                self._save(project.id, map_id, payload)
+                reconciled += 1
+        return reconciled
+
     def reset_map(self, *, project_id: str, setup_id: str, reason: str | None = None, user_session: str | None = None) -> dict[str, Any]:
         project = self._load_project(project_id)
         setup = project.get_setup(setup_id)

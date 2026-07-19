@@ -51,6 +51,7 @@ class MachineSettingsRequest(BaseModel):
     reference_probe_step_mm: float | None = None
     reference_probe_feed_mm_min: float | None = None
     reference_probe_retract_mm: float | None = None
+    reference_probe_retract_feed_mm_min: float | None = None
 
 
 class EmergencyStopRequest(BaseModel):

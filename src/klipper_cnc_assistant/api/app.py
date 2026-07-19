@@ -90,6 +90,7 @@ def create_app(
 
     @app.on_event("startup")
     async def start_machine_runtime() -> None:
+        physical_map_service.reconcile_abandoned_workers()
         machine_runtime.start()
 
     @app.on_event("shutdown")

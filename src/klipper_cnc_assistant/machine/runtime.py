@@ -182,6 +182,7 @@ class MachineRuntime:
         "probe_step_mm",
         "probe_lower_speed_mm_s",
         "probe_retract_mm",
+            "probe_retract_speed_mm_s",
     }
 
     def _load_persisted_config(self, config: MachineRuntimeConfig) -> MachineRuntimeConfig:
@@ -203,12 +204,13 @@ class MachineRuntime:
             "reference_probe_step_mm": "probe_step_mm",
             "reference_probe_feed_mm_min": "probe_lower_speed_mm_s",
             "reference_probe_retract_mm": "probe_retract_mm",
+            "reference_probe_retract_feed_mm_min": "probe_retract_speed_mm_s",
         }
         overrides = {field: payload[field] for field in self._MACHINE_SETTINGS_FIELDS if field in payload}
         for external, field in external_mapping.items():
             if external in payload:
                 value = payload[external]
-                overrides[field] = float(value) / 60.0 if external == "reference_probe_feed_mm_min" else value
+                overrides[field] = float(value) / 60.0 if external in {"reference_probe_feed_mm_min", "reference_probe_retract_feed_mm_min"} else value
         if "move_timeout_s" in overrides:
             overrides.setdefault("move_minimum_timeout_s", overrides["move_timeout_s"])
         return replace(config, **overrides) if overrides else config
@@ -224,6 +226,7 @@ class MachineRuntime:
             "reference_probe_step_mm": self.config.probe_step_mm,
             "reference_probe_feed_mm_min": self.config.probe_lower_speed_mm_s * 60.0,
             "reference_probe_retract_mm": self.config.probe_retract_mm,
+            "reference_probe_retract_feed_mm_min": self.config.probe_retract_speed_mm_s * 60.0,
         }
 
     def update_machine_settings(self, payload: dict[str, Any]) -> dict[str, float]:
@@ -237,13 +240,14 @@ class MachineRuntime:
             "reference_probe_step_mm": "probe_step_mm",
             "reference_probe_feed_mm_min": "probe_lower_speed_mm_s",
             "reference_probe_retract_mm": "probe_retract_mm",
+            "reference_probe_retract_feed_mm_min": "probe_retract_speed_mm_s",
         }
         overrides: dict[str, float] = {}
         for external, field in mapping.items():
             if external not in payload or payload[external] is None:
                 continue
             value = float(payload[external])
-            if external == "reference_probe_feed_mm_min":
+            if external in {"reference_probe_feed_mm_min", "reference_probe_retract_feed_mm_min"}:
                 value /= 60.0
             if value <= 0:
                 raise MachineRuntimeError(f"{external} debe ser mayor que cero.")
@@ -690,8 +694,9 @@ class MachineRuntime:
         if retract_available <= self.config.settle_tolerance_mm:
             raise MachineRuntimeError("No hay margen Z para retraer después del contacto.")
         retract = min(retract_distance, retract_available)
-        self._notify_probe_progress(progress_callback, "POINT_RETRACT", retract_mm=retract, feed_mm_min=probe_speed * 60.0)
-        result = jog.move_relative("z", retract, probe_speed)
+        retract_speed = self.config.probe_retract_speed_mm_s if probe_speed_mm_s is None else probe_speed
+        self._notify_probe_progress(progress_callback, "POINT_RETRACT", retract_mm=retract, feed_mm_min=retract_speed * 60.0)
+        result = jog.move_relative("z", retract, retract_speed)
         with self._lock:
             self._last_movement = result
             self._last_command_text = f"{label}_retract"

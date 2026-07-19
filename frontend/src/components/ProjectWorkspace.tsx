@@ -228,6 +228,7 @@ export function ProjectWorkspace({
     reference_probe_step_mm: "0.05",
     reference_probe_feed_mm_min: "60",
     reference_probe_retract_mm: "1.0",
+    reference_probe_retract_feed_mm_min: "60",
   });
   const [machineSettingsMessage, setMachineSettingsMessage] = useState("");
 
@@ -246,6 +247,7 @@ export function ProjectWorkspace({
         reference_probe_step_mm: String(settings.reference_probe_step_mm ?? 0.05),
         reference_probe_feed_mm_min: String(settings.reference_probe_feed_mm_min ?? 60),
         reference_probe_retract_mm: String(settings.reference_probe_retract_mm ?? 1.0),
+        reference_probe_retract_feed_mm_min: String(settings.reference_probe_retract_feed_mm_min ?? 60),
       });
     }).catch(() => {
       setMachineSettingsMessage("No se pudo leer la configuración avanzada de máquina.");
@@ -634,6 +636,7 @@ export function ProjectWorkspace({
       reference_probe_step_mm: "Paso de sonda de referencia",
       reference_probe_feed_mm_min: "Velocidad de sonda de referencia",
       reference_probe_retract_mm: "Retracto de sonda de referencia",
+      reference_probe_retract_feed_mm_min: "Velocidad de retracto de sonda",
     };
     const payload: Record<string, number> = {};
     for (const [key, label] of Object.entries(labels)) {
@@ -658,6 +661,7 @@ export function ProjectWorkspace({
         reference_probe_step_mm: String(settings.reference_probe_step_mm ?? payload.reference_probe_step_mm),
         reference_probe_feed_mm_min: String(settings.reference_probe_feed_mm_min ?? payload.reference_probe_feed_mm_min),
         reference_probe_retract_mm: String(settings.reference_probe_retract_mm ?? payload.reference_probe_retract_mm),
+        reference_probe_retract_feed_mm_min: String(settings.reference_probe_retract_feed_mm_min ?? payload.reference_probe_retract_feed_mm_min),
       });
       setMachineSettingsMessage("Configuración avanzada de máquina guardada.");
       await machine.refreshRuntime();
@@ -1237,6 +1241,7 @@ export function ProjectWorkspace({
             <label>Paso de sonda (mm)<input value={machineSettingsInput.reference_probe_step_mm} inputMode="decimal" disabled={referenceBusy || machine.runtimeState === "PROBING_REFERENCE"} onChange={(event) => setMachineSettingsInput((current) => ({ ...current, reference_probe_step_mm: event.target.value }))} /></label>
             <label>Velocidad de sonda (mm/min)<input value={machineSettingsInput.reference_probe_feed_mm_min} inputMode="decimal" disabled={referenceBusy || machine.runtimeState === "PROBING_REFERENCE"} onChange={(event) => setMachineSettingsInput((current) => ({ ...current, reference_probe_feed_mm_min: event.target.value }))} /></label>
             <label>Retracto tras contacto (mm)<input value={machineSettingsInput.reference_probe_retract_mm} inputMode="decimal" disabled={referenceBusy || machine.runtimeState === "PROBING_REFERENCE"} onChange={(event) => setMachineSettingsInput((current) => ({ ...current, reference_probe_retract_mm: event.target.value }))} /></label>
+            <label>Velocidad de retracto (mm/min)<input value={machineSettingsInput.reference_probe_retract_feed_mm_min} inputMode="decimal" disabled={referenceBusy || machine.runtimeState === "PROBING_REFERENCE"} onChange={(event) => setMachineSettingsInput((current) => ({ ...current, reference_probe_retract_feed_mm_min: event.target.value }))} /></label>
           </div>
           <p className="muted">Velocidad efectiva: {Number.isFinite(referenceProbeFeed) ? `${referenceProbeFeed.toFixed(2)} mm/min · ${(referenceProbeFeed / 60).toFixed(3)} mm/s` : "valor inválido"}</p>
           <button className="button button--ghost" type="button" disabled={!machine.isPhysical || referenceBusy || machine.refreshing || machine.runtimeState === "PROBING_REFERENCE"} onClick={() => void saveMachineSettings()}>Guardar parámetros de sonda</button>
@@ -1614,7 +1619,7 @@ export function ProjectWorkspace({
         {activeMapTab === "superficie3d" && heightMap ? <HeightMapSurface3D heightMap={heightMap} mode={heightMode} /> : null}
         {activeMapTab === "superficie3d" && !heightMap && isPhysicalMapReady(physicalMap) ? <article className="panel empty-state"><p>Cargando superficie 3D del mapa medido...</p></article> : null}
         {activeMapTab === "puntos" ? (
-          <article className="panel"><div className="section-heading section-heading--stacked"><div><p className="eyebrow">Puntos de malla</p><h3>Lecturas y estados</h3></div><div className="map-segmented" aria-label="Filtro de puntos">{(["ALL", "PENDING", "MEASURED", "EXCLUDED", "FAILED"] as const).map((filter) => <button key={filter} className={`map-segment-button${pointFilter === filter ? " map-segment-button--active" : ""}`} type="button" onClick={() => setPointFilter(filter)}>{filter === "ALL" ? "Todos" : filter === "PENDING" ? "Pendientes" : filter === "MEASURED" ? "Medidos" : filter === "EXCLUDED" ? "Excluidos" : "Fallidos"}</button>)}</div></div>{filteredPhysicalPoints.length ? <div className="point-card-grid">{filteredPhysicalPoints.map((point: PhysicalMeshPoint) => <div className="mesh-point-card" key={point.index}><strong>{point.role === "REFERENCE" ? "Punto #0 — Referencia X0/Y0" : `Punto #${hasReferencePoint ? point.index : point.index + 1}`}</strong><span>Fila {typeof point.row === "number" && point.row >= 0 ? point.row + 1 : "-"}</span><span>Columna {typeof point.column === "number" && point.column >= 0 ? point.column + 1 : "-"}</span><span>PCB X/Y: {formatMillimeters(point.x_local, 3)} / {formatMillimeters(point.y_local, 3)}</span><span>CNC X/Y: {formatMillimeters(point.x_machine ?? null, 3)} / {formatMillimeters(point.y_machine ?? null, 3)}</span><span>Z medida: {formatMillimeters(point.z_measured_abs ?? point.z_measured ?? null, 3)}</span><span>Delta Z: {formatMillimeters(point.delta_z ?? null, 3)}</span><span>Estado: {formatPointStatus(point.status)}</span><span>Intentos: {point.attempts ?? 0}</span><span>Duración: {typeof point.duration_s === "number" ? `${point.duration_s.toFixed(3)} s` : "-"}</span>{point.error || point.last_error ? <span>Error: {point.error ?? point.last_error}</span> : null}</div>)}</div> : <p className="muted">Genere la vista previa de malla para ver los puntos.</p>}</article>
+          <article className="panel"><div className="section-heading section-heading--stacked"><div><p className="eyebrow">Puntos de malla</p><h3>Lecturas y estados</h3></div><div className="map-segmented" aria-label="Filtro de puntos">{(["ALL", "PENDING", "MEASURED", "EXCLUDED", "FAILED"] as const).map((filter) => <button key={filter} className={`map-segment-button${pointFilter === filter ? " map-segment-button--active" : ""}`} type="button" onClick={() => setPointFilter(filter)}>{filter === "ALL" ? "Todos" : filter === "PENDING" ? "Pendientes" : filter === "MEASURED" ? "Medidos" : filter === "EXCLUDED" ? "Excluidos" : "Fallidos"}</button>)}</div></div>{filteredPhysicalPoints.length ? <div className="point-card-grid">{filteredPhysicalPoints.map((point: PhysicalMeshPoint) => <div className="mesh-point-card" key={point.index}><strong>{point.role === "REFERENCE" ? "Punto #0 — Referencia X0/Y0" : `Punto #${hasReferencePoint ? point.index : point.index + 1}`}</strong><span>Fila {typeof point.row === "number" && point.row >= 0 ? point.row + 1 : "-"}</span><span>Columna {typeof point.column === "number" && point.column >= 0 ? point.column + 1 : "-"}</span><span>PCB X/Y: {formatMillimeters(point.x_local, 3)} / {formatMillimeters(point.y_local, 3)}</span><span>CNC X/Y: {formatMillimeters(point.x_machine ?? null, 3)} / {formatMillimeters(point.y_machine ?? null, 3)}</span><span>Z medida: {formatMillimeters(point.z_measured_abs ?? point.z_measured ?? null, 3)}</span><span>Delta Z: {formatMillimeters(point.delta_z ?? null, 3)}</span><span>Estado: {formatPointStatus(point.status)}</span><span>Intentos: {point.attempts ?? 0}</span><span>Duración: {typeof point.duration_s === "number" ? `${point.duration_s.toFixed(3)} s` : "-"}</span>{point.error || point.last_error ? <span>Error: {point.error ?? point.last_error}</span> : null}{point.status === "FAILED" && physicalMapId ? <div className="action-grid action-grid--inline"><button className="button button--ghost" type="button" disabled={heightMapBusy} onClick={() => void withPhysicalMapAction(async () => (await api.retryPhysicalMapPoint(project.id, physicalMapId, point.index)).payload)}>Reintentar punto</button><button className="button button--ghost" type="button" disabled={heightMapBusy} onClick={() => void withPhysicalMapAction(async () => (await api.skipPhysicalMapPoint(project.id, physicalMapId, point.index)).payload)}>Omitir punto</button></div> : null}</div>)}</div> : <p className="muted">Genere la vista previa de malla para ver los puntos.</p>}</article>
         ) : null}
         {activeMapTab === "puntos" && physicalMapHistory.length > 0 ? (
           <article className="panel"><div className="section-heading"><h3>Historial de mediciones</h3></div><div className="point-card-grid">{physicalMapHistory.slice(0, 8).map((entry) => <div className="mesh-point-card" key={String(entry.map_id)}><strong>Versión {String(entry.version ?? "-")}</strong><span>Estado: {String(entry.status ?? "-")}</span><span>Placement: {String(entry.placement_revision ?? "-")}</span><span>Filas/columnas: {String(entry.rows ?? "-")} × {String(entry.columns ?? "-")}</span><span>Medidos: {String(entry.points_measured ?? 0)}</span><span>Fallidos: {String(entry.points_failed ?? 0)}</span><span>{entry.active ? "Activo" : "Histórico"}</span></div>)}</div></article>

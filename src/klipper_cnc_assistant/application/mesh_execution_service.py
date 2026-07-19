@@ -131,6 +131,17 @@ class MeshExecutionService:
                         last_event="Pausa solicitada; no se iniciará otro punto.",
                     )
                     return
+                snapshot_fn = getattr(runtime, "snapshot", None)
+                snapshot = snapshot_fn() if snapshot_fn is not None else {}
+                safety = snapshot.get("safety") if isinstance(snapshot, dict) else {}
+                if isinstance(safety, dict) and safety.get("telemetry_recent") is False:
+                    self.physical_map_service.mark_status(project_id=project_id, map_id=map_id, status="MESH_PAUSED")
+                    self.physical_map_service.update_execution_state(
+                        project_id=project_id, map_id=map_id, worker_active=False, point_state="MESH_PAUSED",
+                        error="Telemetría Moonraker obsoleta; la malla se liberó sin descartar puntos medidos.",
+                        last_event="Malla pausada por pérdida de telemetría; reconecte y reanude explícitamente.",
+                    )
+                    return
                 try:
                     point = self.physical_map_service.next_pending_point(project_id, map_id)
                 except ApplicationError:

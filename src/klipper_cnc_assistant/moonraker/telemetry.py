@@ -174,24 +174,18 @@ class MoonrakerTelemetry:
 
     async def run(self):
         self._running = True
-
-        async with websockets.connect(
-            self.websocket_url
-        ) as websocket:
-
-            await self._subscribe(
-                websocket
-            )
-
-            async for message in websocket:
+        while self._running:
+            try:
+                async with websockets.connect(self.websocket_url) as websocket:
+                    await self._subscribe(websocket)
+                    async for message in websocket:
+                        if not self._running:
+                            break
+                        self._process_message(json.loads(message))
+            except Exception:
                 if not self._running:
                     break
-
-                data = json.loads(message)
-
-                self._process_message(
-                    data
-                )
+                await asyncio.sleep(1.0)
 
     def stop(self):
         self._running = False
