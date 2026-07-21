@@ -552,7 +552,14 @@ class JobService:
             operation["progress"] = status.get("progress")
             operation["machine_status"] = status
             state = str(status.get("state") or "").lower()
+            observed_filename = str(status.get("filename") or "").replace("\\", "/").lstrip("/")
+            expected_filename = str(operation.get("remote_file") or "").replace("\\", "/").lstrip("/")
             current["updated_at"] = _iso_now()
+            if observed_filename == expected_filename and state == "printing":
+                operation["observed_printing"] = True
+                operation["execution_status"] = "RUNNING"
+                current["state"] = "OPERATION_RUNNING"
+                current["next_action"] = f"Ejecutando {operation['name']}"
             if state in {"paused"}:
                 operation["execution_status"] = "PAUSED"
                 current["state"] = "OPERATION_PAUSED"
@@ -561,7 +568,7 @@ class JobService:
                 self._append_event(current, "warning", f"Operación {operation['name']} pausada.")
                 self._save_run(context, current)
                 return
-            if state in {"complete", "completed", "standby"} and status.get("filename") == operation.get("remote_file"):
+            if state in {"complete", "completed"} and observed_filename == expected_filename and operation.get("observed_printing") is True:
                 operation["execution_status"] = "COMPLETED"
                 operation["completed_at"] = _iso_now()
                 current["summary"]["operations_completed"] = sum(1 for item in current["operations"] if item["execution_status"] == "COMPLETED")
@@ -976,7 +983,8 @@ class JobService:
         return None
 
     def _append_event(self, run: dict[str, Any], level: str, message: str) -> None:
-        run.setdefault("events", []).append({"timestamp": _iso_now(), "level": level, "message": message})
+        timestamp = _iso_now()
+        run.setdefault("events", []).append({"event_id": hashlib.sha256(f"{run.get('run_id')}:{timestamp}:{message}".encode()).hexdigest()[:16], "run_id": run.get("run_id"), "operation_id": run.get("current_operation_id"), "timestamp": timestamp, "level": level, "stage": run.get("state"), "message": message})
         run["events"] = run["events"][-300:]
 
     def _context(self, project_id: str, setup_id: str, face: str) -> JobContext:

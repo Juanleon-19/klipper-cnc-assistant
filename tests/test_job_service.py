@@ -44,6 +44,7 @@ class FakeAdapter:
         self.reference_moves: list[tuple[float, float]] = []
         self.spindle_stops = 0
         self.probe_calls = 0
+        self._printing_seen = False
 
     def runtime_snapshot(self) -> dict:
         return self.runtime.snapshot()
@@ -53,6 +54,7 @@ class FakeAdapter:
         self.uploads.append(remote)
         self.current_filename = remote
         self.state = "complete"
+        self._printing_seen = False
         return {"item": {"path": remote, "root": "gcodes"}, "print_started": True, "print_queued": False}
 
     def start_file(self, remote_path: str) -> dict:
@@ -77,8 +79,12 @@ class FakeAdapter:
         return {"state": self.state}
 
     def print_status(self) -> dict:
+        state = self.state
+        if self.state == "complete" and not self._printing_seen:
+            self._printing_seen = True
+            state = "printing"
         return {
-            "state": self.state,
+            "state": state,
             "filename": self.current_filename,
             "progress": 1.0 if self.state == "complete" else 0.5,
             "message": None,
