@@ -41,6 +41,8 @@ class FakeAdapter:
         self.resume_calls = 0
         self.cancel_calls = 0
         self.tool_change_moves = 0
+        self.reference_moves: list[tuple[float, float]] = []
+        self.spindle_stops = 0
         self.probe_calls = 0
 
     def runtime_snapshot(self) -> dict:
@@ -80,9 +82,17 @@ class FakeAdapter:
             "message": None,
         }
 
+    def stop_spindle(self) -> dict:
+        self.spindle_stops += 1
+        return {"stopped": True}
+
     def move_to_tool_change_position(self) -> dict:
         self.tool_change_moves += 1
         return self.runtime.snapshot()
+
+    def move_to_reference_point(self, *, x_mm: float, y_mm: float) -> dict:
+        self.reference_moves.append((x_mm, y_mm))
+        return {"accepted": True}
 
     def probe_tool_reference(self, *, x_mm: float, y_mm: float, probe_config: dict | None) -> dict:
         self.probe_calls += 1
@@ -184,23 +194,24 @@ class JobServiceTest(unittest.TestCase):
         run = self.job_service.start_run(project_id=self.project_id, setup_id=self.setup_id, face="superior")
         self.job_service._threads[(self.project_id, self.setup_id, "superior")].join(timeout=5)  # type: ignore[attr-defined]
         run = self.job_service.get_run(project_id=self.project_id, setup_id=self.setup_id, face="superior")
-        self.assertEqual(run["state"], "WAITING_TOOL_CHANGE")
+        self.assertEqual(run["state"], "TOOL_CHANGE_REQUIRED")
         self.assertEqual(run["operations"][0]["execution_status"], "COMPLETED")
         self.assertEqual(run["operations"][1]["execution_status"], "COMPLETED")
         self.assertEqual(self.adapter.tool_change_moves, 1)
 
         self.job_service.run_action(project_id=self.project_id, setup_id=self.setup_id, face="superior", action="confirm-tool-change")
-        run = self.job_service.run_action(project_id=self.project_id, setup_id=self.setup_id, face="superior", action="measure-reference")
+        self.job_service._threads[(self.project_id, self.setup_id, "superior")].join(timeout=5)  # type: ignore[attr-defined]
+        run = self.job_service.get_run(project_id=self.project_id, setup_id=self.setup_id, face="superior")
         self.assertEqual(run["state"], "READY_TO_RESUME")
         self.assertEqual(len(self.adapter.started), 2)
         self.job_service.run_action(project_id=self.project_id, setup_id=self.setup_id, face="superior", action="continue")
         self.job_service._threads[(self.project_id, self.setup_id, "superior")].join(timeout=5)  # type: ignore[attr-defined]
         run = self.job_service.get_run(project_id=self.project_id, setup_id=self.setup_id, face="superior")
-        self.assertEqual(run["state"], "WAITING_TOOL_CHANGE")
+        self.assertEqual(run["state"], "TOOL_CHANGE_REQUIRED")
         self.assertEqual(run["operations"][2]["execution_status"], "COMPLETED")
 
         self.job_service.run_action(project_id=self.project_id, setup_id=self.setup_id, face="superior", action="confirm-tool-change")
-        self.job_service.run_action(project_id=self.project_id, setup_id=self.setup_id, face="superior", action="measure-reference")
+        self.job_service._threads[(self.project_id, self.setup_id, "superior")].join(timeout=5)  # type: ignore[attr-defined]
         run = self.job_service.get_run(project_id=self.project_id, setup_id=self.setup_id, face="superior")
         self.assertEqual(run["state"], "READY_TO_RESUME")
         self.job_service.run_action(project_id=self.project_id, setup_id=self.setup_id, face="superior", action="continue")
@@ -211,6 +222,8 @@ class JobServiceTest(unittest.TestCase):
         self.assertEqual(run["summary"]["operations_completed"], 4)
         self.assertEqual(self.adapter.probe_calls, 2)
         self.assertEqual(self.adapter.tool_change_moves, 2)
+        self.assertEqual(self.adapter.spindle_stops, 2)
+        self.assertEqual(self.adapter.reference_moves, [(100.0, 100.0), (100.0, 100.0)])
         self.assertEqual(len(self.adapter.started), 4)
         self.assertEqual(run["operations"][3]["execution_status"], "COMPLETED")
 

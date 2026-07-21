@@ -22,7 +22,7 @@ from klipper_cnc_assistant.storage import JsonProjectRepository
 JOB_PLAN_SCHEMA = "job-plan-v1"
 JOB_RUN_SCHEMA = "job-run-v1"
 RUN_TERMINAL_STATES = {"JOB_COMPLETE", "JOB_CANCELLED", "JOB_ERROR"}
-RUN_WAITING_STATES = {"WAITING_TOOL_CHANGE", "TOOL_CHANGE_CONFIRMED", "READY_TO_RESUME", "OPERATION_PAUSED", "JOB_PAUSED"}
+RUN_WAITING_STATES = {"TOOL_CHANGE_REQUIRED", "READY_TO_RESUME", "OPERATION_PAUSED", "JOB_PAUSED"}
 RUN_ACTIVE_STATES = {
     "JOB_STARTING",
     "OPERATION_PREFLIGHT",
@@ -132,8 +132,14 @@ class MoonrakerJobAdapter:
             "toolhead_position": toolhead.get("position"),
         }
 
+    def stop_spindle(self) -> dict[str, Any]:
+        return self._client().send_gcode("M5")
+
     def move_to_tool_change_position(self) -> dict[str, Any]:
         return self.runtime.move_to_tool_change_position()
+
+    def move_to_reference_point(self, *, x_mm: float, y_mm: float) -> dict[str, Any]:
+        return self.runtime.go_to_reference_point(reference_x=x_mm, reference_y=y_mm)
 
     def probe_tool_reference(self, *, x_mm: float, y_mm: float, probe_config: dict[str, Any] | None) -> dict[str, Any]:
         point = {
@@ -324,7 +330,7 @@ class JobService:
             self._append_event(run, "warning", "Trabajo cancelado por el operador.")
             self._archive_run(context, run)
         elif action == "confirm-tool-change":
-            if run["state"] != "WAITING_TOOL_CHANGE":
+            if run["state"] != "TOOL_CHANGE_REQUIRED":
                 raise ApplicationError("El cambio de herramienta solo puede confirmarse cuando el trabajo está esperando al operador.")
             next_index = int(run["current_operation_index"]) + 1
             next_operation = run["operations"][next_index]
@@ -338,9 +344,9 @@ class JobService:
             next_operation["reference_status"] = "REQUIERE_REFERENCIA"
             next_operation["installation_revision"] = _utc_now().strftime("%Y%m%d-%H%M%S")
             run["state"] = "TOOL_CHANGE_CONFIRMED"
-            run["next_action"] = "Medir referencia Z de la nueva herramienta"
-            run["available_actions"] = ["measure-reference", "cancel"]
-            self._append_event(run, "info", f"Herramienta confirmada para {next_operation['tool_name']}. Falta medir la nueva referencia Z.")
+            run["next_action"] = "Moviendo al punto de referencia para calibrar la nueva herramienta"
+            run["available_actions"] = ["cancel"]
+            self._append_event(run, "info", f"Herramienta confirmada para {next_operation['tool_name']}; la CNC irá automáticamente al punto de referencia.")
         elif action == "measure-reference":
             self._measure_tool_reference(context, run)
         elif action == "continue":
@@ -357,7 +363,7 @@ class JobService:
             raise ApplicationError(f"Acción de trabajo no soportada: {action}.")
         run["updated_at"] = _iso_now()
         self._save_run(context, run)
-        if action == "measure-reference":
+        if action in {"confirm-tool-change", "measure-reference"}:
             self._start_worker(context)
         return run
 
@@ -369,14 +375,21 @@ class JobService:
         operation_index = int(run["current_operation_index"]) + 1 if run["state"] == "TOOL_CHANGE_CONFIRMED" else int(run.get("current_operation_index", 0) or 0)
         operation_payload = run["operations"][operation_index]
         adapter = self.adapter_factory(self.runtime)
-        run["state"] = "PROBING_TOOL_REFERENCE"
+        reference_x = float(active_map["machine_origin_x"])
+        reference_y = float(active_map["machine_origin_y"])
+        run["state"] = "MOVING_TO_REFERENCE"
         run["available_actions"] = ["cancel"]
-        run["next_action"] = "Sondeando referencia Z de herramienta"
-        self._append_event(run, "info", "Retornando al punto X0/Y0 para medir la nueva referencia Z.")
+        run["next_action"] = f"Moviendo al punto de referencia CNC X={reference_x:.3f}, Y={reference_y:.3f}"
+        self._append_event(run, "info", run["next_action"])
+        self._save_run(context, run)
+        adapter.move_to_reference_point(x_mm=reference_x, y_mm=reference_y)
+        run["state"] = "CALIBRATING_TOOL"
+        run["next_action"] = "Sondeando referencia Z de la nueva herramienta"
+        self._append_event(run, "info", run["next_action"])
         self._save_run(context, run)
         probe = adapter.probe_tool_reference(
-            x_mm=float(active_map["machine_origin_x"]),
-            y_mm=float(active_map["machine_origin_y"]),
+            x_mm=reference_x,
+            y_mm=reference_y,
             probe_config=active_map.get("probe_config"),
         )
         snapshot = adapter.runtime_snapshot()
@@ -399,7 +412,15 @@ class JobService:
             session_id=snapshot.get("started_at"),
             installation_id=operation_payload.get("installation_revision"),
         )
+        run["state"] = "REGENERATING_COMPENSATION"
+        run["next_action"] = "Regenerando compensación pendiente con la nueva referencia Z"
+        self._save_run(context, run)
         self.generate_project_compensation(project_id=context.project_id, setup_id=context.setup_id, face=context.face)
+        run["state"] = "VALIDATING_REGENERATED_PLAN"
+        dry_run = self.dry_run(project_id=context.project_id, setup_id=context.setup_id, face=context.face)
+        if not dry_run.get("ok"):
+            raise ApplicationError("El dry-run del plan regenerado falló.")
+        run["dry_run"] = dry_run
         operation_payload["reference_status"] = "LISTA"
         run["current_tool_key"] = operation_payload["tool_key"]
         run["summary"]["tool_changes_completed"] = int(run["summary"].get("tool_changes_completed", 0)) + 1
@@ -407,6 +428,7 @@ class JobService:
         run["next_action"] = "Revisar la nueva calibración y continuar trabajo"
         run["available_actions"] = ["continue", "cancel"]
         self._append_event(run, "info", f"Referencia Z medida para {operation_payload['tool_name']}; esperando confirmación explícita para continuar.")
+        self._save_run(context, run)
 
     def _start_worker(self, context: JobContext) -> None:
         key = (context.project_id, context.setup_id, context.face)
@@ -428,6 +450,9 @@ class JobService:
                 state = str(run.get("state"))
                 if state in {"JOB_STARTING", "NEXT_OPERATION_READY", "TOOL_REFERENCE_READY"}:
                     self._execute_next_operation(context, run)
+                    continue
+                if state == "TOOL_CHANGE_CONFIRMED":
+                    self._measure_tool_reference(context, run)
                     continue
                 if state == "OPERATION_RUNNING":
                     self._watch_operation(context, run)
@@ -558,14 +583,19 @@ class JobService:
     def _handle_tool_change_required(self, context: JobContext, run: dict[str, Any], *, operation_index: int) -> None:
         adapter = self.adapter_factory(self.runtime)
         next_operation = run["operations"][operation_index]
-        run["state"] = "MOVING_TO_TOOL_CHANGE_SAFE_Z"
-        run["next_action"] = "Llevando la máquina a posición segura de cambio de herramienta"
+        run["state"] = "OPERATION_COMPLETE"
+        run["next_action"] = "Operación terminada; deteniendo spindle"
+        run["available_actions"] = ["cancel"]
+        self._save_run(context, run)
+        adapter.stop_spindle()
+        run["state"] = "RETRACTING"
+        run["next_action"] = "Subiendo a Z segura para cambio de herramienta"
         run["available_actions"] = ["cancel"]
         self._append_event(run, "info", f"Cambio de herramienta requerido antes de {next_operation['name']}.")
         self._save_run(context, run)
         adapter.move_to_tool_change_position()
-        run["state"] = "WAITING_TOOL_CHANGE"
-        run["next_action"] = "Confirmar cambio de herramienta"
+        run["state"] = "TOOL_CHANGE_REQUIRED"
+        run["next_action"] = "Instale la herramienta requerida y pulse Herramienta cambiada"
         run["available_actions"] = ["confirm-tool-change", "cancel"]
         run["summary"]["tool_changes_required"] = max(run["summary"].get("tool_changes_required", 0), 1)
         self._append_event(run, "warning", f"Cambie a {next_operation['tool_name']} y confirme cuando esté instalada.")

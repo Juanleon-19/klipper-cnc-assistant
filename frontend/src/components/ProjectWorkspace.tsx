@@ -457,7 +457,7 @@ export function ProjectWorkspace({
     if (!project || !selectedSetup || !activeJobFace || !jobRun) {
       return;
     }
-    if (!["JOB_STARTING", "OPERATION_UPLOADING", "OPERATION_RUNNING", "MOVING_TO_TOOL_CHANGE_SAFE_Z", "MOVING_TO_TOOL_CHANGE_XY", "RETURNING_TO_REFERENCE_SAFE_Z", "RETURNING_TO_REFERENCE_XY", "PROBING_TOOL_REFERENCE", "COMPENSATING_NEXT_OPERATIONS", "NEXT_OPERATION_READY"].includes(jobRun.state)) {
+    if (!["JOB_STARTING", "OPERATION_UPLOADING", "OPERATION_RUNNING", "OPERATION_COMPLETE", "RETRACTING", "MOVING_TO_TOOL_CHANGE_SAFE_Z", "MOVING_TO_TOOL_CHANGE_XY", "TOOL_CHANGE_CONFIRMED", "MOVING_TO_REFERENCE", "CALIBRATING_TOOL", "REGENERATING_COMPENSATION", "VALIDATING_REGENERATED_PLAN", "NEXT_OPERATION_READY"].includes(jobRun.state)) {
       return;
     }
     let cancelled = false;
@@ -1885,7 +1885,7 @@ export function ProjectWorkspace({
       pause: "Pausar",
       resume: "Reanudar",
       cancel: "Cancelar proyecto",
-      'confirm-tool-change': "Confirmar cambio de herramienta",
+      'confirm-tool-change': "Herramienta cambiada",
       'measure-reference': "Medir referencia",
       continue: "Continuar",
     };
@@ -1896,7 +1896,7 @@ export function ProjectWorkspace({
             <p className="eyebrow">2. Ejecución del proyecto</p>
             <h3>Secuencia automática por operaciones — {translateFace(activeJobFace)}</h3>
           </div>
-          <StatusBadge tone={jobRun?.state === "JOB_COMPLETE" ? "success" : jobRun?.state === "JOB_ERROR" ? "danger" : jobRun?.state === "WAITING_TOOL_CHANGE" ? "warning" : "info"}>{jobRun?.state ?? "JOB_DRAFT"}</StatusBadge>
+          <StatusBadge tone={jobRun?.state === "JOB_COMPLETE" ? "success" : jobRun?.state === "JOB_ERROR" ? "danger" : jobRun?.state === "TOOL_CHANGE_REQUIRED" ? "warning" : "info"}>{jobRun?.state ?? "JOB_DRAFT"}</StatusBadge>
         </div>
         <div className="info-grid info-grid--double compact-grid">
           <div className="metric-box"><span>Operación actual</span><strong>{currentOperation?.name ?? "pendiente"}</strong></div>
