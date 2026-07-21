@@ -258,7 +258,7 @@ export function ProjectWorkspace({
 
   useEffect(() => {
     setSelectedOperationId((current) => {
-      if (!project) {
+  if (!project) {
         return null;
       }
       if (current && project.operaciones.some((operation) => operation.id === current)) {
@@ -546,6 +546,14 @@ export function ProjectWorkspace({
     }
   }, [machine.isPhysical]);
 
+  const payload = useMemo<ProjectPayload | null>(() => project ? ({
+    nombre: project.nombre,
+    material: project.material,
+    doble_cara: project.doble_cara,
+    eje_volteo: project.eje_volteo,
+    agujeros_alineacion: project.agujeros_alineacion,
+  }) : null, [project]);
+
   if (!project) {
     return (
       <div className="panel empty-state">
@@ -555,14 +563,6 @@ export function ProjectWorkspace({
       </div>
     );
   }
-
-  const payload: ProjectPayload = {
-    nombre: project.nombre,
-    material: project.material,
-    doble_cara: project.doble_cara,
-    eje_volteo: project.eje_volteo,
-    agujeros_alineacion: project.agujeros_alineacion,
-  };
 
   const analysisBusy = selectedOperation ? busyKey === `analyze:${selectedOperation.id}` : false;
   const fileBusy = selectedOperation ? busyKey === `file:${selectedOperation.id}` : false;
@@ -1965,7 +1965,7 @@ export function ProjectWorkspace({
         </div>
       </article>
 
-      {editingProject ? <ProjectForm initialValue={payload} mode="edit" onSubmit={onSaveProject} submitting={savingProject} /> : null}
+      {editingProject ? <ProjectForm initialValue={payload!} projectId={project.id} mode="edit" onSubmit={onSaveProject} submitting={savingProject} /> : null}
 
       <article className="panel workspace-summary-panel">
         <div className="section-heading section-heading--stacked">

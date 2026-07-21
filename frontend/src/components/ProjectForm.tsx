@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import type { AgujeroAlineacion, ProjectPayload } from "../types";
 
@@ -10,6 +10,7 @@ const emptyHole: AgujeroAlineacion = {
 
 type ProjectFormProps = {
   initialValue?: ProjectPayload;
+  projectId?: string;
   mode: "create" | "edit";
   onSubmit: (payload: ProjectPayload) => Promise<void>;
   submitting: boolean;
@@ -37,13 +38,24 @@ function createInitialState(initialValue?: ProjectPayload): FormState {
   };
 }
 
-export function ProjectForm({ initialValue, mode, onSubmit, submitting }: ProjectFormProps) {
+export function ProjectForm({ initialValue, projectId, mode, onSubmit, submitting }: ProjectFormProps) {
   const [state, setState] = useState<FormState>(() => createInitialState(initialValue));
   const [error, setError] = useState("");
+  const [dirty, setDirty] = useState(false);
+  const previousProjectId = useRef(projectId);
 
   useEffect(() => {
+    if (previousProjectId.current === projectId) return;
+    previousProjectId.current = projectId;
     setState(createInitialState(initialValue));
-  }, [initialValue]);
+    setDirty(false);
+    setError("");
+  }, [initialValue, projectId]);
+
+  const updateState = (updater: (current: FormState) => FormState) => {
+    setDirty(true);
+    setState(updater);
+  };
 
   const title = useMemo(() => (mode === "create" ? "Nuevo proyecto" : "Editar proyecto"), [mode]);
 
@@ -73,7 +85,7 @@ export function ProjectForm({ initialValue, mode, onSubmit, submitting }: Projec
 
   const updateHole = (index: number, field: keyof AgujeroAlineacion, value: string) => {
     const parsed = value === "" ? null : Number(value);
-    setState((current) => ({
+    updateState((current) => ({
       ...current,
       agujeros: current.agujeros.map((hole, holeIndex) =>
         holeIndex === index ? { ...hole, [field]: parsed } : hole
@@ -100,13 +112,14 @@ export function ProjectForm({ initialValue, mode, onSubmit, submitting }: Projec
       eje_volteo: state.dobleCara ? state.ejeVolteo : null,
       agujeros_alineacion: state.dobleCara ? state.agujeros : [],
     });
+    setDirty(false);
     if (mode === "create") {
       setState(createInitialState());
     }
   };
 
   return (
-    <form className="panel form-panel" onSubmit={handleSubmit}>
+    <form className="panel form-panel" data-dirty={dirty ? "true" : "false"} onSubmit={handleSubmit}>
       <div className="section-heading section-heading--stacked">
         <div>
           <p className="eyebrow">Proyecto PCB</p>
@@ -121,7 +134,7 @@ export function ProjectForm({ initialValue, mode, onSubmit, submitting }: Projec
           <input
             aria-label="Nombre del proyecto"
             value={state.nombre}
-            onChange={(event) => setState((current) => ({ ...current, nombre: event.target.value }))}
+            onChange={(event) => updateState((current) => ({ ...current, nombre: event.target.value }))}
             placeholder="PCB controlador"
           />
         </label>
@@ -133,7 +146,7 @@ export function ProjectForm({ initialValue, mode, onSubmit, submitting }: Projec
             min="0.01"
             step="0.01"
             value={state.ancho}
-            onChange={(event) => setState((current) => ({ ...current, ancho: event.target.value }))}
+            onChange={(event) => updateState((current) => ({ ...current, ancho: event.target.value }))}
           />
         </label>
         <label>
@@ -144,7 +157,7 @@ export function ProjectForm({ initialValue, mode, onSubmit, submitting }: Projec
             min="0.01"
             step="0.01"
             value={state.alto}
-            onChange={(event) => setState((current) => ({ ...current, alto: event.target.value }))}
+            onChange={(event) => updateState((current) => ({ ...current, alto: event.target.value }))}
           />
         </label>
         <label>
@@ -155,7 +168,7 @@ export function ProjectForm({ initialValue, mode, onSubmit, submitting }: Projec
             min="0.01"
             step="0.01"
             value={state.espesor}
-            onChange={(event) => setState((current) => ({ ...current, espesor: event.target.value }))}
+            onChange={(event) => updateState((current) => ({ ...current, espesor: event.target.value }))}
           />
         </label>
       </div>
@@ -166,7 +179,7 @@ export function ProjectForm({ initialValue, mode, onSubmit, submitting }: Projec
           type="checkbox"
           checked={state.dobleCara}
           onChange={(event) =>
-            setState((current) => ({
+            updateState((current) => ({
               ...current,
               dobleCara: event.target.checked,
               ejeVolteo: event.target.checked ? current.ejeVolteo : "",
@@ -185,7 +198,7 @@ export function ProjectForm({ initialValue, mode, onSubmit, submitting }: Projec
               aria-label="Eje de volteo"
               value={state.ejeVolteo}
               onChange={(event) =>
-                setState((current) => ({
+                updateState((current) => ({
                   ...current,
                   ejeVolteo: event.target.value as "x" | "y" | "",
                 }))
@@ -209,7 +222,7 @@ export function ProjectForm({ initialValue, mode, onSubmit, submitting }: Projec
             <button
               className="button button--ghost"
               type="button"
-              onClick={() => setState((current) => ({ ...current, agujeros: [...current.agujeros, { ...emptyHole }] }))}
+              onClick={() => updateState((current) => ({ ...current, agujeros: [...current.agujeros, { ...emptyHole }] }))}
             >
               Añadir agujero
             </button>
@@ -233,7 +246,7 @@ export function ProjectForm({ initialValue, mode, onSubmit, submitting }: Projec
                 <button
                   className="button button--ghost button--danger"
                   type="button"
-                  onClick={() => setState((current) => ({ ...current, agujeros: current.agujeros.filter((_, holeIndex) => holeIndex !== index) }))}
+                  onClick={() => updateState((current) => ({ ...current, agujeros: current.agujeros.filter((_, holeIndex) => holeIndex !== index) }))}
                 >
                   Eliminar
                 </button>
