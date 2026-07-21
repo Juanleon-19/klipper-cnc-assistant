@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse
 from starlette.datastructures import UploadFile
 
@@ -710,7 +710,12 @@ def build_router() -> APIRouter:
 
     @router.post("/projects/{project_id}/job-run/start", response_model=dict[str, object])
     def start_job_run(project_id: str, payload: dict[str, str], request: Request) -> dict[str, object]:
-        return request.app.state.job_service.start_run(project_id=project_id, setup_id=str(payload["setup_id"]), face=str(payload["face"]))
+        try:
+            return request.app.state.job_service.start_run(project_id=project_id, setup_id=str(payload["setup_id"]), face=str(payload["face"]))
+        except ApplicationError as error:
+            if str(error) == "JOB_ACTIVE_CONFLICT":
+                raise HTTPException(status_code=409, detail="Ya existe un trabajo activo para este montaje y cara.") from error
+            raise
 
     @router.post("/projects/{project_id}/job-run/dry-run", response_model=dict[str, object])
     def dry_run_job(project_id: str, payload: dict[str, str], request: Request) -> dict[str, object]:

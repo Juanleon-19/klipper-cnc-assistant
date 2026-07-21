@@ -219,6 +219,10 @@ class JobService:
 
     def start_run(self, *, project_id: str, setup_id: str, face: str) -> dict[str, Any]:
         context = self._context(project_id, setup_id, face)
+        with self._lock:
+            current = self._load_run(context)
+            if current is not None and current.get("state") not in RUN_TERMINAL_STATES | {"JOB_READY"}:
+                raise ApplicationError("JOB_ACTIVE_CONFLICT")
         prepared = self.prepare_run(project_id=project_id, setup_id=setup_id, face=face)
         if not prepared.get("ready"):
             raise ApplicationError("El trabajo no está listo para iniciar. Revise el preflight general.")

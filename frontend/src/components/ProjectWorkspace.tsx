@@ -187,6 +187,7 @@ export function ProjectWorkspace({
   const [referenceBusy, setReferenceBusy] = useState(false);
   const [referenceMoveResult, setReferenceMoveResult] = useState<{ reference_x: number; reference_y: number; preparation_z: number; final_state: string; message: string } | null>(null);
   const referenceMoveInFlight = useRef(false);
+  const startJobInFlight = useRef(false);
   const [workspaceError, setWorkspaceError] = useState("");
   const [workOrigin, setWorkOrigin] = useState<InputState>({ x_mm: "0", y_mm: "0" });
   const [zReference, setZReference] = useState<ZInputState>({ x_mm: "0", y_mm: "0", z_mm: "0" });
@@ -1773,9 +1774,10 @@ export function ProjectWorkspace({
   };
 
   const startJobRun = async () => {
-    if (!project || !selectedSetup || !activeJobFace) {
+    if (startJobInFlight.current || !project || !selectedSetup || !activeJobFace) {
       return;
     }
+    startJobInFlight.current = true;
     setReferenceBusy(true);
     setWorkspaceError("");
     try {
@@ -1785,6 +1787,7 @@ export function ProjectWorkspace({
     } catch (error) {
       setWorkspaceError(error instanceof Error ? error.message : "No fue posible iniciar el trabajo multioperación.");
     } finally {
+      startJobInFlight.current = false;
       setReferenceBusy(false);
     }
   };
