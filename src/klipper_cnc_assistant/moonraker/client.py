@@ -153,21 +153,31 @@ class MoonrakerClient:
         except MoonrakerError as error:
             raise MoonrakerError(f"G-code request failed: {error}") from error
 
-    def upload_file(self, *, local_path, remote_dir="klipper-cnc-assistant"):
+    def upload_file(self, *, local_path, remote_dir="klipper-cnc-assistant", checksum=None, print_file=False):
         file_path = Path(local_path)
-        with file_path.open("rb") as handle:
-            result = self._post(
-                "/server/files/upload",
-                data={"root": "gcodes", "path": remote_dir},
-                files={"file": (file_path.name, handle, "text/plain")},
-            )
+        data = {"root": "gcodes", "path": remote_dir, "print": "true" if print_file else "false"}
+        if checksum:
+            data["checksum"] = checksum
+        try:
+            with file_path.open("rb") as handle:
+                response = self.session.post(f"{self.base_url}/server/files/upload", data=data, files={"file": (file_path.name, handle, "text/plain")}, timeout=self.timeout)
+            if response.status_code != 201:
+                raise MoonrakerError(f"Moonraker upload returned HTTP {response.status_code}: {response.text}")
+            payload = response.json()
+        except requests.RequestException as error:
+            raise MoonrakerError(f"Moonraker upload failed: {error}") from error
+        except ValueError as error:
+            raise MoonrakerError("Moonraker upload returned invalid JSON") from error
+        if "error" in payload:
+            raise MoonrakerError(f"Moonraker API error: {payload['error']}")
+        result = payload.get("result")
         if not isinstance(result, dict):
             raise MoonrakerError("Moonraker upload returned no result.")
         item = result.get("item")
-        if not isinstance(item, dict) or not isinstance(item.get("path"), str) or not item["path"].strip():
-            raise MoonrakerError("Moonraker upload returned no item.path.")
-        if item.get("root") != "gcodes":
-            raise MoonrakerError("Moonraker upload did not return a gcodes item.")
+        if not isinstance(item, dict) or item.get("root") != "gcodes" or not isinstance(item.get("path"), str) or not item["path"].strip():
+            raise MoonrakerError("Moonraker upload returned no gcodes item.path.")
+        if print_file and not result.get("print_started") and not result.get("print_queued"):
+            raise MoonrakerError("START_NOT_ACCEPTED: Moonraker did not accept the uploaded file for printing.")
         return result
 
     def start_print(self, filename):

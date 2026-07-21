@@ -93,7 +93,8 @@ class MoonrakerJobAdapter:
 
     def upload_file(self, *, local_path: Path, project_id: str, setup_id: str, face: str) -> dict[str, Any]:
         remote_dir = f"klipper-cnc-assistant/{project_id}/{setup_id}/{_safe_face(face)}"
-        return self._client().upload_file(local_path=local_path, remote_dir=remote_dir)
+        checksum = hashlib.sha256(local_path.read_bytes()).hexdigest()
+        return self._client().upload_file(local_path=local_path, remote_dir=remote_dir, checksum=checksum, print_file=True)
 
     def start_file(self, remote_path: str) -> dict[str, Any]:
         return self._client().start_print(remote_path)
@@ -527,8 +528,11 @@ class JobService:
         run["state"] = "OPERATION_STARTING"
         run["next_action"] = f"Iniciando {operation['name']} en Klipper"
         self._append_event(run, "info", f"Archivo subido a Moonraker: {remote_file}.")
-        self._save_run(context, run)
-        adapter.start_file(remote_file)
+        if not upload.get("print_started"):
+            operation["execution_status"] = "PRINT_QUEUED" if upload.get("print_queued") else "START_NOT_ACCEPTED"
+            run["state"] = "PRINT_QUEUED" if upload.get("print_queued") else "JOB_ERROR"
+            self._save_run(context, run)
+            return
         operation["execution_status"] = "WAITING_FOR_KLIPPER"
         run["state"] = "OPERATION_RUNNING"
         operation["started_at"] = operation.get("started_at") or _iso_now()

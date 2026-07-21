@@ -51,7 +51,9 @@ class FakeAdapter:
     def upload_file(self, *, local_path: Path, project_id: str, setup_id: str, face: str) -> dict:
         remote = f"klipper-cnc-assistant/{project_id}/{setup_id}/{face}/{local_path.name}"
         self.uploads.append(remote)
-        return {"item": {"path": remote, "root": "gcodes"}}
+        self.current_filename = remote
+        self.state = "complete"
+        return {"item": {"path": remote, "root": "gcodes"}, "print_started": True, "print_queued": False}
 
     def start_file(self, remote_path: str) -> dict:
         self.current_filename = remote_path
@@ -203,7 +205,7 @@ class JobServiceTest(unittest.TestCase):
         self.job_service._threads[(self.project_id, self.setup_id, "superior")].join(timeout=5)  # type: ignore[attr-defined]
         run = self.job_service.get_run(project_id=self.project_id, setup_id=self.setup_id, face="superior")
         self.assertEqual(run["state"], "READY_TO_RESUME")
-        self.assertEqual(len(self.adapter.started), 2)
+        self.assertEqual(len(self.adapter.started), 0)
         self.job_service.run_action(project_id=self.project_id, setup_id=self.setup_id, face="superior", action="continue")
         self.job_service._threads[(self.project_id, self.setup_id, "superior")].join(timeout=5)  # type: ignore[attr-defined]
         run = self.job_service.get_run(project_id=self.project_id, setup_id=self.setup_id, face="superior")
@@ -224,7 +226,7 @@ class JobServiceTest(unittest.TestCase):
         self.assertEqual(self.adapter.tool_change_moves, 2)
         self.assertEqual(self.adapter.spindle_stops, 2)
         self.assertEqual(self.adapter.reference_moves, [(100.0, 100.0), (100.0, 100.0)])
-        self.assertEqual(len(self.adapter.started), 4)
+        self.assertEqual(len(self.adapter.started), 0)
         self.assertEqual(run["operations"][3]["execution_status"], "COMPLETED")
 
 
