@@ -51,7 +51,7 @@ class FakeAdapter:
     def upload_file(self, *, local_path: Path, project_id: str, setup_id: str, face: str) -> dict:
         remote = f"klipper-cnc-assistant/{project_id}/{setup_id}/{face}/{local_path.name}"
         self.uploads.append(remote)
-        return {"path": remote, "filename": local_path.name}
+        return {"item": {"path": remote, "root": "gcodes"}}
 
     def start_file(self, remote_path: str) -> dict:
         self.current_filename = remote_path

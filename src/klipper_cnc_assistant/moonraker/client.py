@@ -161,9 +161,13 @@ class MoonrakerClient:
                 data={"root": "gcodes", "path": remote_dir},
                 files={"file": (file_path.name, handle, "text/plain")},
             )
-        if isinstance(result, dict):
-            result.setdefault("path", f"{remote_dir}/{file_path.name}")
-            result.setdefault("filename", file_path.name)
+        if not isinstance(result, dict):
+            raise MoonrakerError("Moonraker upload returned no result.")
+        item = result.get("item")
+        if not isinstance(item, dict) or not isinstance(item.get("path"), str) or not item["path"].strip():
+            raise MoonrakerError("Moonraker upload returned no item.path.")
+        if item.get("root") != "gcodes":
+            raise MoonrakerError("Moonraker upload did not return a gcodes item.")
         return result
 
     def start_print(self, filename):

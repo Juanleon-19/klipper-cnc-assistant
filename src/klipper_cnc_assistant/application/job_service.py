@@ -515,15 +515,22 @@ class JobService:
             setup_id=context.setup_id,
             face=context.face,
         )
-        operation["remote_file"] = upload.get("path") or upload.get("filename") or generated["relative_path"].split("/")[-1]
+        item = upload.get("item") if isinstance(upload, dict) else None
+        remote_file = item.get("path") if isinstance(item, dict) else None
+        if not isinstance(remote_file, str) or not remote_file.strip():
+            operation["execution_status"] = "UPLOAD_FAILED"
+            raise ApplicationError("Moonraker no devolvió item.path para el archivo cargado.")
+        operation["remote_file"] = remote_file
         operation["generated_file"] = generated["relative_path"]
         operation["generated_metadata"] = generated.get("metadata_path")
         operation["execution_status"] = "UPLOADED"
+        run["state"] = "OPERATION_STARTING"
+        run["next_action"] = f"Iniciando {operation['name']} en Klipper"
+        self._append_event(run, "info", f"Archivo subido a Moonraker: {remote_file}.")
+        self._save_run(context, run)
+        adapter.start_file(remote_file)
+        operation["execution_status"] = "WAITING_FOR_KLIPPER"
         run["state"] = "OPERATION_RUNNING"
-        run["next_action"] = f"Ejecutando {operation['name']}"
-        self._append_event(run, "info", f"Archivo subido a Moonraker: {operation['remote_file']}.")
-        adapter.start_file(str(operation["remote_file"]))
-        operation["execution_status"] = "RUNNING"
         operation["started_at"] = operation.get("started_at") or _iso_now()
         self._save_run(context, run)
 
