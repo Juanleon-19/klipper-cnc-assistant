@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { MachineContext, type MachineContextValue } from "../context/MachineContext";
 import { ApiError } from "../lib/api";
-import type { HeightMap, JobPlan, JobRun, Project, ReferenceSession } from "../types";
+import type { HeightMap, JobPlan, JobRun, LiveExecutionSnapshot, Project, ReferenceSession } from "../types";
 import { ProjectWorkspace } from "./ProjectWorkspace";
 
 const apiMock = vi.hoisted(() => ({
@@ -43,6 +43,7 @@ const apiMock = vi.hoisted(() => ({
   createJobPlan: vi.fn(),
   generateProjectCompensation: vi.fn(),
   getJobRun: vi.fn(),
+  getLiveExecution: vi.fn(),
   prepareJobRun: vi.fn(),
   startJobRun: vi.fn(),
   runJobAction: vi.fn(),
@@ -167,6 +168,59 @@ const jobRun: JobRun = {
   timeline: [],
   events: [{ timestamp: new Date().toISOString(), level: "info", message: "Trabajo listo para iniciar." }],
   manifest_path: jobPlan.manifest_path,
+};
+
+const liveExecution: LiveExecutionSnapshot = {
+  moonraker: {
+    connected: true,
+    klipper_state: "ready",
+    print_state: "standby",
+    filename: null,
+    progress: 0,
+    is_active: false,
+    file_position: null,
+    file_size: null,
+    print_duration: 0,
+    message: null,
+    updated_at: new Date().toISOString(),
+  },
+  run: {
+    run_id: jobRun.run_id,
+    status: "JOB_READY",
+    current_operation_index: 0,
+    total_operations: 2,
+    completed_operations: 0,
+    overall_progress: 0,
+    next_action: "Iniciar trabajo",
+    available_actions: ["start"],
+    worker_alive: false,
+    watcher_alive: false,
+    last_watcher_error: null,
+    updated_at: new Date().toISOString(),
+  },
+  operation: {
+    operation_id: "op_1",
+    name: "Fresado superior",
+    tool: "V-bit 30°",
+    execution_status: "JOB_READY",
+    expected_remote_file: null,
+    observed_filename: null,
+    filename_match: false,
+    observed_printing: false,
+    progress: 0,
+  },
+  operations: jobRun.operations,
+  transition: {
+    state: "JOB_READY",
+    required_tool: "Broca 0.8 mm",
+    operator_confirmation_required: false,
+  },
+  synchronization: {
+    ok: true,
+    reason: null,
+  },
+  events: [{ event_id: "evt-1", timestamp: new Date().toISOString(), level: "info", stage: "JOB_READY", message: "Trabajo listo para iniciar." }],
+  job_run: jobRun,
 };
 
 const referenceSession: ReferenceSession = {
@@ -441,6 +495,7 @@ describe("ProjectWorkspace", () => {
     apiMock.createJobPlan.mockResolvedValue(jobPlan);
     apiMock.generateProjectCompensation.mockResolvedValue(jobPlan);
     apiMock.getJobRun.mockResolvedValue(jobRun);
+    apiMock.getLiveExecution.mockResolvedValue(liveExecution);
     apiMock.prepareJobRun.mockResolvedValue(jobRun);
     apiMock.startJobRun.mockResolvedValue({ ...jobRun, state: "JOB_STARTING" });
     apiMock.runJobAction.mockResolvedValue({ ...jobRun, state: "WAITING_TOOL_CHANGE", next_action: "Confirmar cambio de herramienta" });
@@ -1012,14 +1067,15 @@ describe("ProjectWorkspace", () => {
     expect(await screen.findByText("Esta operación todavía no tiene G-code.")).toBeInTheDocument();
     expect(screen.getAllByText(/Taladrado 1,0 mm/).length).toBeGreaterThan(0);
   });
-  it("muestra la ejecución unificada con compensación del proyecto y preparación del trabajo", async () => {
+  it("reemplaza el panel antiguo por la consola de ejecución en vivo v2", async () => {
     renderWorkspace(physicalMachine);
 
     fireEvent.click(screen.getByRole("button", { name: /^Ejecución$/i }));
 
-    expect(await screen.findByText(/Plan multioperación listo para ejecución/i)).toBeInTheDocument();
-    expect(screen.getByText(/Secuencia automática por operaciones/i)).toBeInTheDocument();
-    expect(screen.getAllByText(/Taladrado 0.8/i).length).toBeGreaterThan(0);
+    expect(await screen.findByText(/CONSOLA DE EJECUCIÓN EN VIVO — V2/i)).toBeInTheDocument();
+    expect(screen.queryByText(/Secuencia automática por operaciones/i)).toBeNull();
+    expect(screen.getByText(/Moonraker real/i)).toBeInTheDocument();
+    expect(screen.getByText(/Orquestador JobRun/i)).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: /Generar compensación del proyecto/i }));
     await waitFor(() => expect(apiMock.generateProjectCompensation).toHaveBeenCalledWith(project.id, project.montajes[0].id, "superior"));

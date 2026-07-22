@@ -17,6 +17,7 @@ import type {
   JobHistoryEntry,
   JobPlan,
   JobRun,
+  LiveExecutionSnapshot,
   ReferenceConfirmation,
   ReferenceMoveResult,
   ReferenceSession,
@@ -375,6 +376,8 @@ export const api = {
     request<JobPlan>(`/api/projects/${projectId}/job-plan`, { method: "POST", body: JSON.stringify({ setup_id: setupId, face }) }),
   generateProjectCompensation: (projectId: string, setupId: string, face: string) =>
     request<JobPlan>(`/api/projects/${projectId}/job-plan/generate`, { method: "POST", body: JSON.stringify({ setup_id: setupId, face }) }),
+  getLiveExecution: (projectId: string, setupId: string, face: string) =>
+    request<LiveExecutionSnapshot>(`/api/projects/${projectId}/execution/live?setup_id=${encodeURIComponent(setupId)}&face=${encodeURIComponent(face)}`),
   getJobRun: (projectId: string, setupId: string, face: string) =>
     request<JobRun>(`/api/projects/${projectId}/job-run?setup_id=${encodeURIComponent(setupId)}&face=${encodeURIComponent(face)}`),
   prepareJobRun: (projectId: string, setupId: string, face: string) =>

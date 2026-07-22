@@ -24,12 +24,12 @@ import type {
   PhysicalMeshPoint,
   Bounds,
   OperationAnalysis,
-  JobHistoryEntry,
   JobPlan,
-  JobRun,
+  LiveExecutionSnapshot,
 } from "../types";
 import { ProjectForm } from "./ProjectForm";
 import { StatusBadge } from "./StatusBadge";
+import { ExecutionConsole } from "./execution/ExecutionConsole";
 
 type ProjectWorkspaceProps = {
   project: Project | null;
@@ -58,12 +58,6 @@ type ReferenceFieldErrors = Partial<Record<"x_mm" | "y_mm" | "z_mm", string>>;
 type InputState = { x_mm: string; y_mm: string };
 type ZInputState = { x_mm: string; y_mm: string; z_mm: string };
 
-function jobProgress(completed: number, total: number, current: number | null, state: string) {
-  if (total <= 0) return { operation: 0, overall: 0 };
-  const operation = Math.min(1, Math.max(0, current ?? 0));
-  const overall = state === "JOB_COMPLETE" ? 1 : Math.min(1, Math.max(0, (completed + operation) / total));
-  return { operation, overall };
-}
 
 const operationTypeOptions = [
   { value: "fresado_superior", label: "Fresado superior" },
@@ -226,8 +220,7 @@ export function ProjectWorkspace({
   const [meshArmed, setMeshArmed] = useState(false);
   const [meshValidationMessage, setMeshValidationMessage] = useState("");
   const [jobPlan, setJobPlan] = useState<JobPlan | null>(null);
-  const [jobRun, setJobRun] = useState<JobRun | null>(null);
-  const [jobHistory, setJobHistory] = useState<JobHistoryEntry[]>([]);
+  const [liveExecution, setLiveExecution] = useState<LiveExecutionSnapshot | null>(null);
   const [machineSettingsInput, setMachineSettingsInput] = useState({
     reference_prep_z_mm: "115",
     reference_prep_z_feed_mm_min: "180",
@@ -429,29 +422,25 @@ export function ProjectWorkspace({
   useEffect(() => {
     if (!project || !selectedSetup || !activeJobFace) {
       setJobPlan(null);
-      setJobRun(null);
-      setJobHistory([]);
+      setLiveExecution(null);
       return;
     }
     let cancelled = false;
     const loadJobState = async () => {
       try {
-        const [plan, run, history] = await Promise.all([
+        const [plan, live] = await Promise.all([
           api.getJobPlan(project.id, selectedSetup.id, activeJobFace),
-          api.getJobRun(project.id, selectedSetup.id, activeJobFace),
-          api.getJobHistory(project.id, selectedSetup.id, activeJobFace),
+          api.getLiveExecution(project.id, selectedSetup.id, activeJobFace),
         ]);
         if (cancelled) {
           return;
         }
         setJobPlan(plan);
-        setJobRun(run);
-        setJobHistory(history);
+        setLiveExecution(live);
       } catch {
         if (!cancelled) {
           setJobPlan(null);
-          setJobRun(null);
-          setJobHistory([]);
+          setLiveExecution(null);
         }
       }
     };
@@ -462,26 +451,17 @@ export function ProjectWorkspace({
   }, [activeJobFace, project, selectedSetup]);
 
   useEffect(() => {
-    if (!project || !selectedSetup || !activeJobFace || !jobRun) {
-      return;
-    }
-    if (!["JOB_STARTING", "OPERATION_UPLOADING", "OPERATION_RUNNING", "OPERATION_COMPLETE", "RETRACTING", "MOVING_TO_TOOL_CHANGE_SAFE_Z", "MOVING_TO_TOOL_CHANGE_XY", "TOOL_CHANGE_CONFIRMED", "MOVING_TO_REFERENCE", "CALIBRATING_TOOL", "REGENERATING_COMPENSATION", "VALIDATING_REGENERATED_PLAN", "NEXT_OPERATION_READY"].includes(jobRun.state)) {
+    if (!project || !selectedSetup || !activeJobFace) {
       return;
     }
     let cancelled = false;
     const poll = async () => {
       try {
-        const [run, plan, history] = await Promise.all([
-          api.getJobRun(project.id, selectedSetup.id, activeJobFace),
-          api.getJobPlan(project.id, selectedSetup.id, activeJobFace),
-          api.getJobHistory(project.id, selectedSetup.id, activeJobFace),
-        ]);
+        const live = await api.getLiveExecution(project.id, selectedSetup.id, activeJobFace);
         if (cancelled) {
           return;
         }
-        setJobRun(run);
-        setJobPlan(plan);
-        setJobHistory(history);
+        setLiveExecution(live);
       } catch {
         // conserve last visible state
       }
@@ -494,7 +474,7 @@ export function ProjectWorkspace({
       cancelled = true;
       window.clearInterval(timer);
     };
-  }, [activeJobFace, jobRun, project, selectedSetup]);
+  }, [activeJobFace, project, selectedSetup]);
 
   useEffect(() => {
     if (!referenceSession) {
@@ -1731,14 +1711,12 @@ export function ProjectWorkspace({
     if (!project || !selectedSetup || !activeJobFace) {
       return;
     }
-    const [plan, run, history] = await Promise.all([
+    const [plan, live] = await Promise.all([
       api.getJobPlan(project.id, selectedSetup.id, activeJobFace),
-      api.getJobRun(project.id, selectedSetup.id, activeJobFace),
-      api.getJobHistory(project.id, selectedSetup.id, activeJobFace),
+      api.getLiveExecution(project.id, selectedSetup.id, activeJobFace),
     ]);
     setJobPlan(plan);
-    setJobRun(run);
-    setJobHistory(history);
+    setLiveExecution(live);
   };
 
   const generateProjectCompensation = async () => {
@@ -1750,12 +1728,7 @@ export function ProjectWorkspace({
     try {
       const plan = await api.generateProjectCompensation(project.id, selectedSetup.id, activeJobFace);
       setJobPlan(plan);
-      const [run, history] = await Promise.all([
-        api.getJobRun(project.id, selectedSetup.id, activeJobFace),
-        api.getJobHistory(project.id, selectedSetup.id, activeJobFace),
-      ]);
-      setJobRun(run);
-      setJobHistory(history);
+      setLiveExecution(await api.getLiveExecution(project.id, selectedSetup.id, activeJobFace));
     } catch (error) {
       setWorkspaceError(error instanceof Error ? error.message : "No fue posible generar la compensación del proyecto.");
     } finally {
@@ -1770,8 +1743,7 @@ export function ProjectWorkspace({
     setReferenceBusy(true);
     setWorkspaceError("");
     try {
-      const run = await api.prepareJobRun(project.id, selectedSetup.id, activeJobFace);
-      setJobRun(run);
+      await api.prepareJobRun(project.id, selectedSetup.id, activeJobFace);
       await refreshJobState();
     } catch (error) {
       setWorkspaceError(error instanceof Error ? error.message : "No fue posible preparar el trabajo.");
@@ -1788,8 +1760,7 @@ export function ProjectWorkspace({
     setReferenceBusy(true);
     setWorkspaceError("");
     try {
-      const run = await api.startJobRun(project.id, selectedSetup.id, activeJobFace);
-      setJobRun(run);
+      await api.startJobRun(project.id, selectedSetup.id, activeJobFace);
       await refreshJobState();
     } catch (error) {
       setWorkspaceError(error instanceof Error ? error.message : "No fue posible iniciar el trabajo multioperación.");
@@ -1806,8 +1777,7 @@ export function ProjectWorkspace({
     setReferenceBusy(true);
     setWorkspaceError("");
     try {
-      const run = await api.runJobAction(project.id, selectedSetup.id, activeJobFace, action);
-      setJobRun(run);
+      await api.runJobAction(project.id, selectedSetup.id, activeJobFace, action);
       await refreshJobState();
       if (selectedOperation) {
         void api.getReferenceSession(project.id, selectedOperation.id).then(setReferenceSession).catch(() => undefined);
@@ -1889,58 +1859,14 @@ export function ProjectWorkspace({
     if (!selectedSetup || !activeJobFace) {
       return null;
     }
-    const currentOperation = jobRun?.current_operation_id ? jobRun.operations.find((item) => item.operation_id === jobRun.current_operation_id) ?? null : null;
-    const progress = jobProgress(jobRun?.summary.operations_completed ?? 0, jobRun?.summary.operations_total ?? 0, currentOperation?.progress ?? null, jobRun?.state ?? "");
-    const moonraker = currentOperation?.machine_status ?? {};
-    const actionLabels: Record<string, string> = {
-      start: "Iniciar trabajo",
-      pause: "Pausar",
-      resume: "Reanudar",
-      cancel: "Cancelar proyecto",
-      'confirm-tool-change': "Herramienta cambiada",
-      'measure-reference': "Medir referencia",
-      continue: "Continuar",
-    };
     return (
-      <article className="panel">
-        <div className="section-heading section-heading--stacked">
-          <div>
-            <p className="eyebrow">2. Ejecución del proyecto</p>
-            <h3>Secuencia automática por operaciones — {translateFace(activeJobFace)}</h3>
-          </div>
-          <StatusBadge tone={jobRun?.state === "JOB_COMPLETE" ? "success" : jobRun?.state === "JOB_ERROR" ? "danger" : jobRun?.state === "TOOL_CHANGE_REQUIRED" ? "warning" : "info"}>{jobRun?.state ?? "JOB_DRAFT"}</StatusBadge>
-        </div>
-        <div className="info-grid info-grid--double compact-grid">
-          <div className="metric-box"><span>Operación actual</span><strong>{currentOperation?.name ?? "pendiente"}</strong></div>
-          <div className="metric-box"><span>Herramienta actual</span><strong>{currentOperation?.tool_name ?? "pendiente"}</strong></div>
-          <div className="metric-box"><span>Operación</span><strong>{jobRun ? `${(currentOperation?.order ?? 0) + 1} de ${jobRun.summary.operations_total}` : "0 de 0"}</strong></div>
-          <div className="metric-box"><span>Progreso general</span><strong>{jobRun ? `${jobRun.summary.operations_completed}/${jobRun.summary.operations_total} · ${(progress.overall * 100).toFixed(1)} %` : "0/0 · 0.0 %"}</strong></div>
-          <div className="metric-box"><span>Cambios de herramienta</span><strong>{jobRun ? `${jobRun.summary.tool_changes_completed}/${jobRun.summary.tool_changes_required}` : "0/0"}</strong></div>
-          <div className="metric-box"><span>Mapa activo</span><strong>{jobPlan?.active_map_id ?? "pendiente"}</strong></div>
-          <div className="metric-box"><span>Siguiente acción</span><strong>{jobRun?.next_action ?? "Prepare el trabajo"}</strong></div>
-        </div>
-        <div className="stack gap-sm" aria-label="Progreso de ejecución">
-          <div><span className="muted">Progreso de operación: {(progress.operation * 100).toFixed(1)} %</span><progress value={progress.operation} max="1" aria-label="Progreso de operación" /></div>
-          <div><span className="muted">Progreso total: {(progress.overall * 100).toFixed(1)} %</span><progress value={progress.overall} max="1" aria-label="Progreso total" /></div>
-          <p className="muted">Klipper: {String(moonraker.state ?? "sin dato")} · Archivo remoto: {currentOperation?.remote_file ?? "pendiente"} · Activo: {String(moonraker.active ?? "sin dato")} · Actualizado: {jobRun?.updated_at ? formatDate(jobRun.updated_at) : "-"}</p>
-        </div>
-        <div className="action-grid">
-          <button className="button button--ghost" type="button" disabled={referenceBusy} onClick={() => void prepareJobRun()}>Preparar trabajo</button>
-          <button className="button" type="button" disabled={referenceBusy || Boolean(jobRun?.ready === false)} onClick={() => void startJobRun()}>Iniciar trabajo</button>
-          {(jobRun?.available_actions ?? []).filter((action) => action !== "start").map((action) => (
-            <button key={action} className={`button${action === "cancel" ? " button--ghost button--danger" : " button--ghost"}`} type="button" disabled={referenceBusy} onClick={() => void runJobAction(action)}>{actionLabels[action] ?? action}</button>
-          ))}
-        </div>
-        <p className="muted">El backend ejecuta una sola secuencia: primera operación, cambio de herramienta seguro, confirmación del operador, nueva referencia Z, recompensación de lo pendiente y continuación hasta finalizar.</p>{jobRun?.checks?.length ? <ul className="compact-check-list">{jobRun.checks.map((check, index) => <li key={String(check.name ?? index)} data-ok={Boolean(check.ok)}>{String(check.name)}: {String(check.detail)}</li>)}</ul> : null}
-        {jobRun?.operations?.length ? <div className="point-card-grid">{jobRun.operations.map((item) => <div className="mesh-point-card" key={item.operation_id}><strong>{item.order_label} — {item.name}</strong><span>Herramienta: {item.tool_name}</span><span>Estado: {item.execution_status}</span><span>Referencia Z: {item.reference_status}</span><span>Archivo: {item.generated_file_name ?? "pendiente"}</span><span>Progreso: {typeof item.progress === "number" ? `${(item.progress * 100).toFixed(1)} %` : "-"}</span>{item.error ? <span>Error: {item.error}</span> : null}</div>)}</div> : null}
-        {jobRun?.events?.length ? <div className="machine-event-list">{jobRun.events.slice(-8).map((event) => <div className="machine-event" key={`${event.timestamp}-${event.message}`}><strong>{new Date(event.timestamp).toLocaleTimeString()} · {String(event.stage ?? event.level)}</strong><span>{event.message}</span></div>)}</div> : null}
-        {jobHistory.length > 0 ? (
-          <div className="stack gap-sm">
-            <div className="section-heading"><h4>Historial de ejecuciones</h4></div>
-            <div className="point-card-grid">{jobHistory.slice(0, 6).map((entry) => <div className="mesh-point-card" key={entry.run_id}><strong>{entry.state}</strong><span>Inicio: {entry.started_at ? formatDate(entry.started_at) : "-"}</span><span>Fin: {entry.completed_at ? formatDate(entry.completed_at) : "-"}</span><span>Operaciones: {entry.operations_completed}</span><span>Cambios de herramienta: {entry.tool_changes_completed}</span>{entry.manifest_path ? <span>Manifiesto: {entry.manifest_path}</span> : null}</div>)}</div>
-          </div>
-        ) : null}
-      </article>
+      <ExecutionConsole
+        snapshot={liveExecution}
+        busy={referenceBusy}
+        onPrepare={prepareJobRun}
+        onStart={startJobRun}
+        onAction={runJobAction}
+      />
     );
   };
 

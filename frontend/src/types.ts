@@ -625,6 +625,16 @@ export type JobRunOperation = {
   observed_printing?: boolean;
 };
 
+export type JobRunEvent = {
+  event_id?: string;
+  run_id?: string;
+  operation_id?: string | null;
+  timestamp: string;
+  level: string;
+  stage?: string;
+  message: string;
+};
+
 export type JobRun = {
   schema_version: string;
   run_id: string;
@@ -653,8 +663,9 @@ export type JobRun = {
     tool_changes_completed: number;
   };
   timeline: Array<Record<string, unknown>>;
-  events: Array<{ timestamp: string; level: string; message: string }>;
+  events: JobRunEvent[];
   manifest_path: string | null;
+  last_watcher_error?: string | null;
 };
 
 export type JobDryRun = {
@@ -673,4 +684,58 @@ export type JobHistoryEntry = {
   tool_changes_completed: number;
   operations_completed: number;
   manifest_path: string | null;
+};
+
+
+export type LiveExecutionSnapshot = {
+  moonraker: {
+    connected: boolean;
+    klipper_state: string | null;
+    print_state: string | null;
+    filename: string | null;
+    progress: number;
+    is_active: boolean;
+    file_position: number | null;
+    file_size: number | null;
+    print_duration: number | null;
+    message: string | null;
+    updated_at: string;
+  };
+  run: {
+    run_id: string | null;
+    status: string;
+    current_operation_index: number;
+    total_operations: number;
+    completed_operations: number;
+    overall_progress: number;
+    next_action: string;
+    available_actions: string[];
+    worker_alive: boolean;
+    watcher_alive: boolean;
+    last_watcher_error: string | null;
+    updated_at: string | null;
+  };
+  operation: {
+    operation_id: string | null;
+    name: string | null;
+    tool: string | null;
+    execution_status: string;
+    expected_remote_file: string | null;
+    observed_filename: string | null;
+    filename_match: boolean;
+    observed_printing: boolean;
+    progress: number;
+  };
+  operations: JobRunOperation[];
+  transition: {
+    state: string;
+    required_tool: string | null;
+    operator_confirmation_required: boolean;
+  };
+  synchronization: {
+    ok: boolean;
+    reason: string | null;
+  };
+  events: JobRunEvent[];
+  job_run: JobRun | null;
 };
