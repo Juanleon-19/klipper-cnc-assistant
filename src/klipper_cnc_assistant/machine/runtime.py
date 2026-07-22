@@ -567,18 +567,41 @@ class MachineRuntime:
                 self._state = MachineRuntimeState.MOVING_TO_SAFE_Z
             self._assert_safety_for_motion()
             self._refresh_machine()
+            if self._telemetry_status() != "LIVE":
+                raise MachineRuntimeError("La telemetría Moonraker debe estar LIVE antes de mover a cambio de herramienta.")
             machine = self._machine
             if machine is None:
                 raise MachineRuntimeError("No hay estado de máquina descubierto.")
             target_x = float(self.config.tool_change_x_mm)
             target_y = float(self.config.tool_change_y_mm)
-            target_z = float(self.config.tool_change_z_mm)
-            self._validate_machine_target(z=target_z, label="Z de cambio de herramienta")
+            work_z = float(self.config.tool_change_work_z_mm)
             self._validate_machine_target(x=target_x, y=target_y, label="posición XY de cambio de herramienta")
-            self._move_absolute(z=target_z, label="tool_change_z_segura", feed_mm_min=self.config.tool_change_z_feed_mm_min)
+            self._validate_machine_target(z=work_z, label="Z de trabajo de cambio de herramienta")
+            frame_snapshot = machine.get_motion_snapshot()
+            current_gcode, _frame_age = self._frame_position(frame_snapshot, "gcode_position", label="tool_change_clearance")
+            current_gcode_z = float(current_gcode["z"])
+            clearance_target = self._tool_change_clearance_target(current_gcode_z)
+            self._validate_machine_target(z=clearance_target, label="Z de despeje para cambio de herramienta")
+            if abs(clearance_target - current_gcode_z) > self.config.settle_tolerance_mm:
+                self._move_absolute(
+                    z=clearance_target,
+                    label="tool_change_clearance_z",
+                    feed_mm_min=self.config.tool_change_z_feed_mm_min,
+                    coordinate_frame="gcode_position",
+                )
             with self._lock:
                 self._state = MachineRuntimeState.MOVING_TO_CENTER
-            self._move_absolute(x=target_x, y=target_y, label="tool_change_xy")
+            self._move_absolute(x=target_x, y=target_y, label="tool_change_xy", coordinate_frame="gcode_position")
+            self._refresh_machine_best_effort()
+            xy_snapshot = self._machine.get_motion_snapshot() if self._machine is not None else frame_snapshot
+            current_after_xy, _age_after_xy = self._frame_position(xy_snapshot, "gcode_position", label="tool_change_work_z")
+            if abs(float(current_after_xy["z"]) - work_z) > self.config.settle_tolerance_mm:
+                self._move_absolute(
+                    z=work_z,
+                    label="tool_change_work_z",
+                    feed_mm_min=self.config.tool_change_z_feed_mm_min,
+                    coordinate_frame="gcode_position",
+                )
             with self._lock:
                 self._state = MachineRuntimeState.WAITING_FOR_XY_REFERENCE
                 self._event("info", "Máquina en posición segura para cambio de herramienta.")
@@ -1032,6 +1055,9 @@ class MachineRuntime:
                     "x_mm": self.config.tool_change_x_mm,
                     "y_mm": self.config.tool_change_y_mm,
                     "z_mm": self.config.tool_change_z_mm,
+                    "clearance_z_mm": self.config.tool_change_clearance_z_mm,
+                    "work_z_mm": self.config.tool_change_work_z_mm,
+                    "z_positive_up": self.config.tool_change_z_positive_up,
                     "z_feed_mm_min": self.config.tool_change_z_feed_mm_min,
                     "z_speed_mm_s": self.config.tool_change_z_feed_mm_min / 60.0,
                 },
@@ -1350,7 +1376,7 @@ class MachineRuntime:
             if value < minimum or value > maximum:
                 raise MachineRuntimeError(f"{label}: {axis}={value:.3f} mm fuera de límites Klipper {minimum:.3f}..{maximum:.3f} mm.")
 
-    def _move_absolute(self, *, x: float | None = None, y: float | None = None, z: float | None = None, label: str, feed_mm_min: float = 600.0) -> None:
+    def _move_absolute(self, *, x: float | None = None, y: float | None = None, z: float | None = None, label: str, feed_mm_min: float = 600.0, coordinate_frame: str = "live_position") -> None:
         self._raise_if_cancelled()
         self._validate_machine_target(x=x, y=y, z=z, label=label)
         if self._machine is None:
@@ -1359,9 +1385,10 @@ class MachineRuntime:
         if requested_feed_mm_min <= 0:
             raise MachineRuntimeError(f"{label}: velocidad inválida F{requested_feed_mm_min:.3f}; debe ser positiva.")
         start_snapshot = self._machine.get_motion_snapshot()
+        start_position, _start_age = self._frame_position(start_snapshot, coordinate_frame, label=label)
         targets = {axis: target for axis, target in (("x", x), ("y", y), ("z", z)) if target is not None}
         effective_feed_mm_min = self._effective_feed_mm_min(targets, requested_feed_mm_min)
-        distance_mm = self._target_distance(start_snapshot, targets)
+        distance_mm = self._target_distance(start_position, targets)
         commanded_speed_mm_s = requested_feed_mm_min / 60.0
         effective_speed_mm_s = effective_feed_mm_min / 60.0
         expected_time_s = distance_mm / effective_speed_mm_s if effective_speed_mm_s > 0 else 0.0
@@ -1379,9 +1406,11 @@ class MachineRuntime:
             "gcode": script,
             "command_sent_at": None,
             "moonraker_response": None,
-            "initial_position": {axis: float(start_snapshot[axis]) for axis in ("x", "y", "z")},
+            "coordinate_frame": coordinate_frame,
+            "target_frame": coordinate_frame,
+            "initial_position": {axis: float(start_position[axis]) for axis in ("x", "y", "z")},
             "target": targets,
-            "direction": {axis: self._target_direction(float(start_snapshot[axis]), target) for axis, target in targets.items()},
+            "direction": {axis: self._target_direction(float(start_position[axis]), target) for axis, target in targets.items()},
             "distance_mm": distance_mm,
             "requested_feed_mm_min": requested_feed_mm_min,
             "feed_mm_min": effective_feed_mm_min,
@@ -1399,11 +1428,13 @@ class MachineRuntime:
             "live_position": start_snapshot.get("live_position"),
             "commanded_position": start_snapshot.get("commanded_position"),
             "gcode_position": start_snapshot.get("gcode_position"),
+            "gcode_move_position": start_snapshot.get("gcode_move_position"),
+            "homing_origin": start_snapshot.get("homing_origin"),
         }
         with self._lock:
             self._last_movement = movement
         self._send_script(script, label=label)
-        result = self._wait_for_targets(targets, label, operation_timeout_s=operation_timeout_s)
+        result = self._wait_for_targets(targets, label, operation_timeout_s=operation_timeout_s, coordinate_frame=coordinate_frame)
         movement.update(result)
         with self._lock:
             self._last_movement = movement
@@ -1423,8 +1454,8 @@ class MachineRuntime:
         max_effective_feed = min(axis_limits_mm_s) * 60.0
         return min(requested_feed_mm_min, max_effective_feed)
 
-    def _target_distance(self, snapshot: dict[str, Any], targets: dict[str, float]) -> float:
-        return math.sqrt(sum((float(snapshot[axis]) - target) ** 2 for axis, target in targets.items()))
+    def _target_distance(self, start_position: dict[str, float], targets: dict[str, float]) -> float:
+        return math.sqrt(sum((float(start_position[axis]) - target) ** 2 for axis, target in targets.items()))
 
     def _target_direction(self, start: float, target: float) -> int:
         delta = target - start
@@ -1448,29 +1479,90 @@ class MachineRuntime:
             if axis in observed
         )
         return (
-            f"{label}: objetivo {target_detail}; distancia {movement['distance_mm']:.3f} mm; "
+            f"{label}: objetivo {target_detail}; frame {movement.get('coordinate_frame', 'unknown')}; distancia {movement['distance_mm']:.3f} mm; "
             f"velocidad configurada {movement['requested_feed_mm_min']:.3f} mm/min; "
             f"velocidad efectiva {movement['effective_speed_mm_s']:.3f} mm/s; "
             f"estimado {movement['expected_time_s']:.3f} s; timeout {movement['timeout_s']:.3f} s; "
             f"observado {observed_detail}; resultado {movement.get('result', 'confirmado')}."
         )
 
-    def _targets_reached(self, snapshot: dict[str, Any], targets: dict[str, float]) -> tuple[bool, bool, float]:
+    def _frame_position(self, snapshot: dict[str, Any], coordinate_frame: str, *, label: str) -> tuple[dict[str, float], float | None]:
+        if coordinate_frame == "gcode_position":
+            raw = snapshot.get("gcode_position")
+            age = snapshot.get("gcode_position_age_s")
+        elif coordinate_frame == "commanded_position":
+            raw = snapshot.get("commanded_position")
+            age = snapshot.get("commanded_position_age_s")
+        elif coordinate_frame == "live_position":
+            raw = snapshot.get("live_position")
+            age = snapshot.get("live_position_age_s")
+        else:
+            raise MachineRuntimeError(f"{label}: frame de coordenadas no soportado: {coordinate_frame}.")
+        if not isinstance(raw, dict):
+            raise MachineRuntimeError(f"{label}: telemetría insuficiente; frame {coordinate_frame} no disponible.")
+        return ({axis: float(raw[axis]) for axis in ("x", "y", "z")}, None if age is None else float(age))
+
+    def _frame_is_stale(self, age_s: float | None) -> bool:
+        return age_s is None or age_s > self.config.telemetry_fresh_timeout_s
+
+    def _frame_offset_z(self, snapshot: dict[str, Any]) -> float | None:
+        gcode_move = snapshot.get("gcode_move_position")
+        gcode = snapshot.get("gcode_position")
+        if isinstance(gcode_move, dict) and isinstance(gcode, dict):
+            return float(gcode_move["z"]) - float(gcode["z"])
+        homing_origin = snapshot.get("homing_origin")
+        if isinstance(homing_origin, dict) and homing_origin.get("z") is not None:
+            return float(homing_origin["z"])
+        return None
+
+    def _tool_change_clearance_target(self, current_gcode_z: float) -> float:
+        configured_clearance_z = float(self.config.tool_change_clearance_z_mm)
+        safe_z = float(self.config.safe_z_mm)
+        if self.config.tool_change_z_positive_up:
+            minimum_clearance = max(configured_clearance_z, safe_z)
+            return max(current_gcode_z, minimum_clearance)
+        maximum_clearance = min(configured_clearance_z, safe_z)
+        return min(current_gcode_z, maximum_clearance)
+
+    def _targets_reached(self, snapshot: dict[str, Any], targets: dict[str, float], *, coordinate_frame: str, label: str) -> tuple[bool, bool, float, dict[str, float], float | None]:
+        observed_position, frame_age = self._frame_position(snapshot, coordinate_frame, label=label)
         velocity = abs(float(snapshot["velocity"]))
         positions_ok = all(
-            abs(float(snapshot[axis]) - target) <= self.config.settle_tolerance_mm
+            abs(float(observed_position[axis]) - target) <= self.config.settle_tolerance_mm
             for axis, target in targets.items()
         )
         stopped = velocity <= self.config.velocity_tolerance_mm_s
-        return positions_ok and stopped, positions_ok, velocity
+        return positions_ok and stopped, positions_ok, velocity, observed_position, frame_age
 
-    def _remaining_distance(self, snapshot: dict[str, Any], targets: dict[str, float]) -> float:
-        return math.sqrt(sum((float(snapshot[axis]) - target) ** 2 for axis, target in targets.items()))
+    def _remaining_distance(self, observed_position: dict[str, float], targets: dict[str, float]) -> float:
+        return math.sqrt(sum((float(observed_position[axis]) - target) ** 2 for axis, target in targets.items()))
 
-    def _distance_from_start(self, start_snapshot: dict[str, Any], snapshot: dict[str, Any], targets: dict[str, float]) -> float:
-        return math.sqrt(sum((float(snapshot[axis]) - float(start_snapshot[axis])) ** 2 for axis in targets))
+    def _distance_from_start(self, start_position: dict[str, float], observed_position: dict[str, float], targets: dict[str, float]) -> float:
+        return math.sqrt(sum((float(observed_position[axis]) - float(start_position[axis])) ** 2 for axis in targets))
 
-    def _wait_for_targets(self, targets: dict[str, float], label: str, *, operation_timeout_s: float) -> dict[str, Any]:
+    def _wait_diagnostic(self, snapshot: dict[str, Any], targets: dict[str, float], *, coordinate_frame: str, trend: str | None = None) -> str:
+        observed_position, frame_age = self._frame_position(snapshot, coordinate_frame, label="diagnostic")
+        observed_z = observed_position.get("z")
+        target_z = targets.get("z")
+        error_mm = None if observed_z is None or target_z is None else observed_z - target_z
+        observed_detail = ", ".join(f"{axis.upper()}={float(observed_position[axis]):.3f}" for axis in ("x", "y", "z"))
+        homing_origin = snapshot.get("homing_origin") or {}
+        offset_z = self._frame_offset_z(snapshot)
+        return (
+            f"target_frame={coordinate_frame}; observed_frame={coordinate_frame}; "
+            f"target_z={None if target_z is None else f'{target_z:.3f}'}; "
+            f"observed_z={None if observed_z is None else f'{observed_z:.3f}'}; "
+            f"Posición observada: {observed_detail}; "
+            f"homing_origin_z={None if homing_origin.get('z') is None else f'{float(homing_origin['z']):.3f}'}; "
+            f"offset_z={None if offset_z is None else f'{offset_z:.3f}'}; "
+            f"error_mm={None if error_mm is None else f'{error_mm:.3f}'}; "
+            f"tendencia={trend or 'estable'}; "
+            f"frame_age_s={None if frame_age is None else f'{frame_age:.3f}'}; "
+            f"live_age_s={snapshot.get('live_position_age_s')}; "
+            f"gcode_age_s={snapshot.get('gcode_position_age_s')}"
+        )
+
+    def _wait_for_targets(self, targets: dict[str, float], label: str, *, operation_timeout_s: float, coordinate_frame: str = "live_position") -> dict[str, Any]:
         if self._machine is None:
             raise MachineRuntimeError("No hay telemetría de máquina.")
         start = time.monotonic()
@@ -1478,8 +1570,9 @@ class MachineRuntime:
         required_stable_samples = max(1, int(self.config.stable_samples))
         start_snapshot = self._machine.get_motion_snapshot()
         last_snapshot = start_snapshot
-        previous_live_sample: dict[str, float] | None = None
-        previous_live_source: str | None = None
+        start_position, _start_age = self._frame_position(start_snapshot, coordinate_frame, label=label)
+        previous_sample: dict[str, float] | None = None
+        previous_offset_z: float | None = None
         last_progress_at = start
         reached_position_at: float | None = None
         away_required_samples = 5
@@ -1495,22 +1588,23 @@ class MachineRuntime:
                 self._refresh_machine_best_effort()
                 last_refresh = now
             last_snapshot = self._machine.get_motion_snapshot()
-            reached, positions_ok, last_velocity = self._targets_reached(last_snapshot, targets)
-            remaining = self._remaining_distance(last_snapshot, targets)
-            live_sample_source = str(last_snapshot.get("live_position_source") or "unknown")
-            current_live_sample = {axis: float(last_snapshot[axis]) for axis in targets}
+            reached, positions_ok, last_velocity, observed_position, frame_age = self._targets_reached(last_snapshot, targets, coordinate_frame=coordinate_frame, label=label)
+            remaining = self._remaining_distance(observed_position, targets)
+            current_offset_z = self._frame_offset_z(last_snapshot)
             previous_distance = None
             current_distance = None
-            if previous_live_sample is not None and previous_live_source == live_sample_source:
-                previous_distance = math.sqrt(sum((targets[axis] - previous_live_sample[axis]) ** 2 for axis in targets))
-                current_distance = math.sqrt(sum((targets[axis] - current_live_sample[axis]) ** 2 for axis in targets))
+            if previous_sample is not None and previous_offset_z == current_offset_z:
+                previous_distance = math.sqrt(sum((targets[axis] - previous_sample[axis]) ** 2 for axis in targets))
+                current_distance = math.sqrt(sum((targets[axis] - observed_position[axis]) ** 2 for axis in targets))
             with self._lock:
                 if self._last_movement is not None and self._last_movement.get("label") == label:
                     self._last_movement.update({
-                        "observed_position": {axis: float(last_snapshot[axis]) for axis in ("x", "y", "z")},
+                        "observed_position": {axis: float(observed_position[axis]) for axis in ("x", "y", "z")},
                         "observed_velocity_mm_s": last_velocity,
-                        "position_source": last_snapshot.get("source"),
-                        "live_position_source": live_sample_source,
+                        "position_source": coordinate_frame,
+                        "coordinate_frame": coordinate_frame,
+                        "target_frame": coordinate_frame,
+                        "live_position_source": last_snapshot.get("live_position_source"),
                         "live_position": last_snapshot.get("live_position"),
                         "commanded_position": last_snapshot.get("commanded_position"),
                         "gcode_position": last_snapshot.get("gcode_position"),
@@ -1521,56 +1615,68 @@ class MachineRuntime:
                         "no_progress_elapsed_s": now - last_progress_at,
                         "progress_remaining_mm": remaining,
                         "stable_samples": stable_samples,
-                        "previous_live_z": None if previous_live_sample is None or "z" not in previous_live_sample else previous_live_sample["z"],
-                        "current_live_z": current_live_sample.get("z"),
+                        "frame_age_s": frame_age,
                         "target_z": targets.get("z"),
+                        "observed_z": observed_position.get("z"),
+                        "offset_z": current_offset_z,
                         "previous_distance_mm": previous_distance,
                         "current_distance_mm": current_distance,
                         "consecutive_away_samples": consecutive_away_samples,
                     })
-            if previous_live_source != live_sample_source or previous_live_sample is None:
-                previous_live_sample = current_live_sample
-                previous_live_source = live_sample_source
+            if self._frame_is_stale(frame_age):
+                stable_samples = 0
+                time.sleep(0.05)
+                continue
+            if previous_sample is None or previous_offset_z != current_offset_z:
+                previous_sample = observed_position
+                previous_offset_z = current_offset_z
                 consecutive_away_samples = 0
                 last_progress_at = now
             elif previous_distance is not None and current_distance is not None:
                 moving_by_velocity = abs(last_velocity) >= self.config.velocity_tolerance_mm_s
+                observed_delta = max(abs(observed_position[axis] - previous_sample[axis]) for axis in targets)
+                moving_by_position = observed_delta > self.config.settle_tolerance_mm
                 if current_distance < previous_distance - progress_epsilon:
                     last_progress_at = now
                     consecutive_away_samples = 0
-                elif current_distance > previous_distance + away_tolerance:
+                elif current_distance > previous_distance + away_tolerance and (moving_by_velocity or moving_by_position):
                     consecutive_away_samples += 1
                     if consecutive_away_samples >= away_required_samples:
-                        detail = self._observed_detail(last_snapshot)
+                        detail = self._wait_diagnostic(last_snapshot, targets, coordinate_frame=coordinate_frame, trend="alejandose")
                         if label == "z_preparacion_referencia":
                             with self._lock:
-                                self._event("warning", f"{label}: detección de alejamiento tratada como diagnóstico; Observado {detail}; objetivo {self._target_detail(targets)}.")
+                                self._event("warning", f"{label}: detección de alejamiento tratada como diagnóstico; {detail}.")
                         else:
-                            raise MachineRuntimeError(f"{label}: la posición se aleja del objetivo. Observado {detail}; objetivo {self._target_detail(targets)}.")
-                elif moving_by_velocity:
+                            raise MachineRuntimeError(f"{label}: la posición se aleja del objetivo. {detail}.")
+                elif moving_by_velocity or moving_by_position:
                     last_progress_at = now
                     consecutive_away_samples = 0
-                previous_live_sample = current_live_sample
-                previous_live_source = live_sample_source
+                previous_sample = observed_position
+                previous_offset_z = current_offset_z
             if positions_ok:
                 reached_position_at = reached_position_at or now
                 if now - reached_position_at > self.config.settle_timeout_s:
-                    detail = self._observed_detail(last_snapshot)
-                    raise MachineRuntimeError(f"{label}: objetivo alcanzado pero la velocidad no se estabilizó. Observado {detail}; velocidad={last_velocity:.3f} mm/s.")
+                    detail = self._wait_diagnostic(last_snapshot, targets, coordinate_frame=coordinate_frame, trend="sin_estabilizar")
+                    raise MachineRuntimeError(f"{label}: objetivo alcanzado pero la velocidad no se estabilizó. {detail}; velocidad={last_velocity:.3f} mm/s.")
             else:
                 reached_position_at = None
-            if reached and not self._telemetry_is_stale(now):
+            if reached:
                 stable_samples += 1
             else:
                 stable_samples = 0
             if stable_samples >= required_stable_samples:
                 self._clear_resolved_transport_timeout(label)
                 return {
-                    "observed_position": {axis: float(last_snapshot[axis]) for axis in ("x", "y", "z")},
+                    "observed_position": {axis: float(observed_position[axis]) for axis in ("x", "y", "z")},
                     "observed_velocity_mm_s": last_velocity,
-                    "position_source": last_snapshot.get("source"),
+                    "position_source": coordinate_frame,
+                    "coordinate_frame": coordinate_frame,
+                    "target_frame": coordinate_frame,
                     "live_position": last_snapshot.get("live_position"),
                     "commanded_position": last_snapshot.get("commanded_position"),
+                    "gcode_position": last_snapshot.get("gcode_position"),
+                    "gcode_move_position": last_snapshot.get("gcode_move_position"),
+                    "homing_origin": last_snapshot.get("homing_origin"),
                     "stable_samples": stable_samples,
                     "elapsed_s": time.monotonic() - start,
                     "progress_remaining_mm": remaining,
@@ -1579,45 +1685,55 @@ class MachineRuntime:
             if now - last_progress_at > self.config.no_progress_timeout_s and remaining > self.config.settle_tolerance_mm:
                 self._refresh_machine_best_effort()
                 checked_snapshot = self._machine.get_motion_snapshot()
-                checked_remaining = self._remaining_distance(checked_snapshot, targets)
-                checked_reached, _checked_positions_ok, checked_velocity = self._targets_reached(checked_snapshot, targets)
-                if checked_reached:
+                checked_reached, _checked_positions_ok, checked_velocity, checked_position, checked_age = self._targets_reached(checked_snapshot, targets, coordinate_frame=coordinate_frame, label=label)
+                checked_remaining = self._remaining_distance(checked_position, targets)
+                if checked_reached and not self._frame_is_stale(checked_age):
                     self._clear_resolved_transport_timeout(label)
                     return {
-                        "observed_position": {axis: float(checked_snapshot[axis]) for axis in ("x", "y", "z")},
+                        "observed_position": {axis: float(checked_position[axis]) for axis in ("x", "y", "z")},
                         "observed_velocity_mm_s": checked_velocity,
-                        "position_source": checked_snapshot.get("source"),
+                        "position_source": coordinate_frame,
+                        "coordinate_frame": coordinate_frame,
+                        "target_frame": coordinate_frame,
                         "live_position": checked_snapshot.get("live_position"),
                         "commanded_position": checked_snapshot.get("commanded_position"),
+                        "gcode_position": checked_snapshot.get("gcode_position"),
+                        "gcode_move_position": checked_snapshot.get("gcode_move_position"),
+                        "homing_origin": checked_snapshot.get("homing_origin"),
                         "stable_samples": stable_samples,
                         "elapsed_s": time.monotonic() - start,
                         "progress_remaining_mm": checked_remaining,
                         "result": "reconciliado",
                     }
-                detail = self._observed_detail(checked_snapshot)
-                raise MachineRuntimeError(f"{label}: sin progreso durante {self.config.no_progress_timeout_s:.3f} s. Observado {detail}; objetivo {self._target_detail(targets)}.")
+                detail = self._wait_diagnostic(checked_snapshot, targets, coordinate_frame=coordinate_frame, trend="sin_progreso")
+                raise MachineRuntimeError(f"{label}: sin progreso durante {self.config.no_progress_timeout_s:.3f} s. {detail}.")
             time.sleep(0.05)
         self._refresh_machine_best_effort()
         final_snapshot = self._machine.get_motion_snapshot()
-        reached, _positions_ok, final_velocity = self._targets_reached(final_snapshot, targets)
-        if reached:
+        reached, _positions_ok, final_velocity, final_position, final_age = self._targets_reached(final_snapshot, targets, coordinate_frame=coordinate_frame, label=label)
+        if reached and not self._frame_is_stale(final_age):
             self._clear_resolved_transport_timeout(label)
             with self._lock:
-                self._event("info", f"{label}: timeout de espera reconciliado por posición física dentro de tolerancia y velocidad cero.")
+                self._event("info", f"{label}: timeout de espera reconciliado por posición dentro de tolerancia y velocidad cero.")
             return {
-                "observed_position": {axis: float(final_snapshot[axis]) for axis in ("x", "y", "z")},
+                "observed_position": {axis: float(final_position[axis]) for axis in ("x", "y", "z")},
                 "observed_velocity_mm_s": final_velocity,
-                "position_source": final_snapshot.get("source"),
+                "position_source": coordinate_frame,
+                "coordinate_frame": coordinate_frame,
+                "target_frame": coordinate_frame,
                 "live_position": final_snapshot.get("live_position"),
                 "commanded_position": final_snapshot.get("commanded_position"),
+                "gcode_position": final_snapshot.get("gcode_position"),
+                "gcode_move_position": final_snapshot.get("gcode_move_position"),
+                "homing_origin": final_snapshot.get("homing_origin"),
                 "stable_samples": stable_samples,
                 "elapsed_s": time.monotonic() - start,
-                "progress_remaining_mm": self._remaining_distance(final_snapshot, targets),
+                "progress_remaining_mm": self._remaining_distance(final_position, targets),
                 "result": "reconciliado",
             }
+        detail = self._wait_diagnostic(final_snapshot, targets, coordinate_frame=coordinate_frame, trend="timeout")
         raise MachineRuntimeError(
-            f"Timeout esperando confirmación de {label} ({self._target_detail(targets)}) tras {operation_timeout_s:.3f} s. "
-            f"Posición observada: {self._observed_detail(final_snapshot)}; velocidad={final_velocity:.3f} mm/s."
+            f"Timeout esperando confirmación de {label} ({self._target_detail(targets)}) tras {operation_timeout_s:.3f} s. {detail}; velocidad={final_velocity:.3f} mm/s."
         )
 
     def _telemetry_is_stale(self, now: float) -> bool:

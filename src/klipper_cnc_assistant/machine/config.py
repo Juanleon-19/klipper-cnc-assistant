@@ -22,6 +22,9 @@ class MachineRuntimeConfig:
     reference_prep_z_mm: float
     reference_prep_z_feed_mm_min: float
     tool_change_z_mm: float
+    tool_change_clearance_z_mm: float
+    tool_change_work_z_mm: float
+    tool_change_z_positive_up: bool
     tool_change_z_feed_mm_min: float
     tool_change_x_mm: float
     tool_change_y_mm: float
@@ -85,6 +88,9 @@ def load_machine_runtime_config() -> MachineRuntimeConfig:
         reference_prep_z_mm=_env_float("REFERENCE_PREP_Z_MM", 115.0),
         reference_prep_z_feed_mm_min=_env_float("REFERENCE_PREP_Z_FEED_MM_MIN", 180.0),
         tool_change_z_mm=_env_float("TOOL_CHANGE_Z_MM", 115.0),
+        tool_change_clearance_z_mm=_env_float("TOOL_CHANGE_CLEARANCE_Z_MM", _env_float("TOOL_CHANGE_Z_MM", 115.0)),
+        tool_change_work_z_mm=_env_float("TOOL_CHANGE_WORK_Z_MM", _env_float("TOOL_CHANGE_Z_MM", 115.0)),
+        tool_change_z_positive_up=_env_bool("TOOL_CHANGE_Z_POSITIVE_UP", True),
         tool_change_z_feed_mm_min=_env_float("TOOL_CHANGE_Z_FEED_MM_MIN", 180.0),
         tool_change_x_mm=_env_float("TOOL_CHANGE_X_MM", 0.0),
         tool_change_y_mm=_env_float("TOOL_CHANGE_Y_MM", 0.0),

@@ -16,6 +16,7 @@ const ACTION_LABELS: Record<string, string> = {
   resume: "Reanudar",
   cancel: "Cancelar proyecto",
   "confirm-tool-change": "Herramienta cambiada",
+  "retry-tool-change-transition": "Reintentar transición de herramienta",
   "measure-reference": "Medir referencia",
   continue: "Continuar trabajo",
 };

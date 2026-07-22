@@ -33,6 +33,9 @@ def config(mode: MachineMode = MachineMode.SIMULATED, **overrides) -> MachineRun
         reference_prep_z_mm=115.0,
         reference_prep_z_feed_mm_min=180.0,
         tool_change_z_mm=115.0,
+        tool_change_clearance_z_mm=115.0,
+        tool_change_work_z_mm=115.0,
+        tool_change_z_positive_up=True,
         tool_change_z_feed_mm_min=180.0,
         tool_change_x_mm=0.0,
         tool_change_y_mm=0.0,
@@ -98,6 +101,7 @@ class MotionClient:
         if "G28" in script:
             self.machine.update_toolhead(position=(0, 0, 0), homed_axes="xyz")
             self.machine.update_motion(live_position=(0, 0, 0), live_velocity=0)
+            self.machine.update_gcode_move(gcode_position=(0, 0, 0), position=(0, 0, 0), absolute_coordinates=True, homing_origin=(0, 0, 0))
             return {"result": "ok"}
         snapshot = self.machine.get_motion_snapshot()
         x = float(snapshot["x"])
@@ -112,7 +116,9 @@ class MotionClient:
             y = float(match_y.group(1))
         if match_z:
             z = float(match_z.group(1))
-        self.machine.update_motion(live_position=(x, y, z), live_velocity=0)
+        self.machine.update_toolhead(position=(x, y, z), homed_axes=self.machine.homed_axes)
+        self.machine.update_gcode_move(gcode_position=(x, y, z), position=(x, y, z), absolute_coordinates=True, homing_origin=(0.0, 0.0, 0.0))
+        self.machine.update_motion(live_position=(x, y, z), live_velocity=0, source="websocket")
         return {"result": "ok"}
 
 
@@ -139,6 +145,7 @@ class DelayedMoveClient(MotionClient):
         if "G28" in script:
             self.machine.update_toolhead(position=(0, 0, 0), homed_axes="xyz")
             self.machine.update_motion(live_position=(0, 0, 0), live_velocity=0)
+            self.machine.update_gcode_move(gcode_position=(0, 0, 0), position=(0, 0, 0), absolute_coordinates=True, homing_origin=(0, 0, 0))
             return {"result": "ok"}
         snapshot = self.machine.get_motion_snapshot()
         x = float(snapshot["x"])
@@ -153,6 +160,8 @@ class DelayedMoveClient(MotionClient):
             y = float(match_y.group(1))
         if match_z:
             z = float(match_z.group(1))
+        self.machine.update_toolhead(position=(x, y, z), homed_axes=self.machine.homed_axes)
+        self.machine.update_gcode_move(gcode_position=(x, y, z), position=(x, y, z), absolute_coordinates=True, homing_origin=(0, 0, 0))
         self.machine.update_motion(live_velocity=10)
 
         def arrive() -> None:
@@ -175,6 +184,7 @@ class SlowZClient(MotionClient):
         if "G28" in script:
             self.machine.update_toolhead(position=(0, 0, 0), homed_axes="xyz")
             self.machine.update_motion(live_position=(0, 0, 0), live_velocity=0)
+            self.machine.update_gcode_move(gcode_position=(0, 0, 0), position=(0, 0, 0), absolute_coordinates=True, homing_origin=(0, 0, 0))
             return {"result": "ok"}
         snapshot = self.machine.get_motion_snapshot()
         match_z = re.search(r"\bZ(-?\d+(?:\.\d+)?)", script)
@@ -228,6 +238,7 @@ class RejectedZClient(MotionClient):
         if "G28" in script:
             self.machine.update_toolhead(position=(0, 0, 0), homed_axes="xyz")
             self.machine.update_motion(live_position=(0, 0, 0), live_velocity=0)
+            self.machine.update_gcode_move(gcode_position=(0, 0, 0), position=(0, 0, 0), absolute_coordinates=True, homing_origin=(0, 0, 0))
             return {"result": "ok"}
         if "Z115" in script:
             raise MoonrakerError("Move rejected by Klipper")
@@ -244,6 +255,7 @@ class QueryFallbackClient(MotionClient):
         if "G28" in script:
             self.machine.update_toolhead(position=(0, 0, 0), homed_axes="xyz")
             self.machine.update_motion(live_position=(0, 0, 0), live_velocity=0)
+            self.machine.update_gcode_move(gcode_position=(0, 0, 0), position=(0, 0, 0), absolute_coordinates=True, homing_origin=(0, 0, 0))
             return {"result": "ok"}
         if "Z115" in script:
             self.z_command_sent = True
@@ -349,6 +361,10 @@ def physical_runtime_with_machine(machine: MachineState, cfg: MachineRuntimeConf
     runtime._driver = type("Driver", (), {"diagnostics": FakeDiagnostics()})()
     runtime._serial_thread = FakeThread()
     runtime._last_packet_at = time.monotonic()
+    runtime._telemetry_state = "LIVE"
+    runtime._last_websocket_message_at = time.monotonic()
+    machine.update_motion(live_position=machine.position.as_tuple(), live_velocity=0.0, source="websocket")
+    machine.update_gcode_move(gcode_position=machine.position.as_tuple(), position=machine.position.as_tuple(), absolute_coordinates=True, homing_origin=(0.0, 0.0, 0.0))
     runtime._probe_raw_since = time.monotonic() - 0.1
     runtime._probe_filtered_since = time.monotonic() - 0.1
     runtime._last_telemetry_at = time.monotonic()
@@ -460,6 +476,7 @@ class MachineRuntimeTest(unittest.TestCase):
         packet = ControllerPacket(direction="CENTER", joystick_button=False, external_button=False, probe=False, x=512, y=512)
         runtime._handle_controller_packet(packet, CommandMapper().map(packet))
         runtime._probe_filtered_since = time.monotonic() - 0.1
+        machine.live_position = None
         machine.live_position_updated_at = time.monotonic() - 772
         with self.assertRaisesRegex(MachineRuntimeError, "posición Moonraker obsoleta"):
             runtime.mesh_retry_readiness()
@@ -1347,6 +1364,114 @@ class MachineRuntimeTest(unittest.TestCase):
         self.assertEqual(runtime._jog.calls[1]["speed"], 2.0)
         self.assertAlmostEqual(float(runtime._jog.calls[0]["distance"]), -0.05)
         self.assertAlmostEqual(float(runtime._jog.calls[1]["distance"]), 0.8)
+
+    def test_tool_change_skips_clearance_descent_when_current_gcode_z_is_already_higher(self) -> None:
+        machine = MachineState(
+            position=MachinePosition(40, 30, 119.127),
+            x_limits=AxisLimits(0, 200),
+            y_limits=AxisLimits(0, 200),
+            z_limits=AxisLimits(0, 200),
+            homed_axes="xyz",
+            max_velocity=100,
+            max_accel=500,
+            live_velocity=0,
+        )
+        runtime, client = physical_runtime_with_machine(
+            machine,
+            cfg=config(MachineMode.PHYSICAL, tool_change_clearance_z_mm=115.0, tool_change_work_z_mm=119.127),
+        )
+
+        snapshot = runtime.move_to_tool_change_position()
+
+        self.assertEqual(snapshot["state"], "WAITING_FOR_XY_REFERENCE")
+        self.assertTrue(any("X0.000000" in script and "Y0.000000" in script for script in client.scripts))
+        self.assertFalse(any("Z115.000000" in script for script in client.scripts))
+        self.assertEqual(machine.get_motion_snapshot()["x"], 0.0)
+        self.assertEqual(machine.get_motion_snapshot()["y"], 0.0)
+
+    def test_tool_change_moves_clearance_z_before_xy_when_below_clearance(self) -> None:
+        machine = MachineState(
+            position=MachinePosition(40, 30, 110),
+            x_limits=AxisLimits(0, 200),
+            y_limits=AxisLimits(0, 200),
+            z_limits=AxisLimits(0, 200),
+            homed_axes="xyz",
+            max_velocity=100,
+            max_accel=500,
+            live_velocity=0,
+        )
+        runtime, client = physical_runtime_with_machine(
+            machine,
+            cfg=config(MachineMode.PHYSICAL, tool_change_clearance_z_mm=115.0, tool_change_work_z_mm=115.0),
+        )
+
+        runtime.move_to_tool_change_position()
+
+        self.assertIn("Z115.000000", client.scripts[0])
+        self.assertIn("X0.000000", client.scripts[1])
+        self.assertIn("Y0.000000", client.scripts[1])
+
+    def test_move_absolute_confirms_g1_targets_in_gcode_frame(self) -> None:
+        machine = MachineState(
+            position=MachinePosition(40, 30, 110),
+            x_limits=AxisLimits(0, 200),
+            y_limits=AxisLimits(0, 200),
+            z_limits=AxisLimits(0, 200),
+            homed_axes="xyz",
+            max_velocity=100,
+            max_accel=500,
+            live_velocity=0,
+        )
+        runtime, _client = physical_runtime_with_machine(machine)
+
+        runtime._move_absolute(z=115.0, label="frame_check", coordinate_frame="gcode_position")
+
+        self.assertEqual(runtime._last_movement["coordinate_frame"], "gcode_position")
+        self.assertEqual(runtime._last_movement["position_source"], "gcode_position")
+        self.assertAlmostEqual(runtime._last_movement["observed_position"]["z"], 115.0, places=3)
+
+    def test_wait_for_targets_does_not_fail_when_live_and_gcode_frames_differ_by_offset(self) -> None:
+        machine = MachineState(
+            position=MachinePosition(97.4, 153.2, 119.127),
+            x_limits=AxisLimits(0, 300),
+            y_limits=AxisLimits(0, 300),
+            z_limits=AxisLimits(0, 300),
+            homed_axes="xyz",
+            max_velocity=100,
+            max_accel=500,
+            live_velocity=0,
+        )
+        runtime, _client = physical_runtime_with_machine(machine)
+        machine.update_motion(live_position=(97.4, 153.2, 119.127), live_velocity=0, source="websocket")
+        machine.update_gcode_move(gcode_position=(97.4, 153.2, 115.0), position=(97.4, 153.2, 119.127), absolute_coordinates=True, homing_origin=(0.0, 0.0, 4.127))
+
+        result = runtime._wait_for_targets({"z": 115.0}, "tool_change_clearance_z", operation_timeout_s=0.2, coordinate_frame="gcode_position")
+
+        self.assertIn(result["result"], {"confirmado", "reconciliado"})
+        self.assertEqual(result["position_source"], "gcode_position")
+
+    def test_tool_change_can_adjust_optional_work_z_after_xy(self) -> None:
+        machine = MachineState(
+            position=MachinePosition(40, 30, 110),
+            x_limits=AxisLimits(0, 200),
+            y_limits=AxisLimits(0, 200),
+            z_limits=AxisLimits(0, 200),
+            homed_axes="xyz",
+            max_velocity=100,
+            max_accel=500,
+            live_velocity=0,
+        )
+        runtime, client = physical_runtime_with_machine(
+            machine,
+            cfg=config(MachineMode.PHYSICAL, tool_change_clearance_z_mm=130.0, tool_change_work_z_mm=115.0),
+        )
+
+        runtime.move_to_tool_change_position()
+
+        self.assertIn("Z130.000000", client.scripts[0])
+        self.assertIn("X0.000000", client.scripts[1])
+        self.assertIn("Y0.000000", client.scripts[1])
+        self.assertIn("Z115.000000", client.scripts[2])
 
     def test_tool_change_position_moves_z_before_xy(self) -> None:
         machine = MachineState(

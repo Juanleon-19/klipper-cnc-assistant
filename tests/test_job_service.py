@@ -20,7 +20,7 @@ class FakeRuntime:
     def snapshot(self) -> dict:
         return {
             "mode": "PHYSICAL",
-            "moonraker": {"http_connected": True, "websocket_connected": True, "url": "http://moonraker.local"},
+            "moonraker": {"http_connected": True, "websocket_connected": True, "telemetry_state": "LIVE", "url": "http://moonraker.local"},
             "klipper": {"ready": True, "homed_axes": "xyz"},
             "started_at": "runtime-session",
         }
@@ -267,6 +267,34 @@ class JobServiceTest(unittest.TestCase):
         self.assertEqual(self.adapter.reference_moves, [(100.0, 100.0), (100.0, 100.0)])
         self.assertEqual(len(self.adapter.started), 0)
         self.assertEqual(run["operations"][3]["execution_status"], "COMPLETED")
+
+    def test_retry_tool_change_transition_does_not_repeat_completed_operation(self) -> None:
+        self.job_service.generate_project_compensation(project_id=self.project_id, setup_id=self.setup_id, face="superior")
+        original_move = self.adapter.move_to_tool_change_position
+        calls = {"count": 0}
+
+        def fail_once() -> dict:
+            calls["count"] += 1
+            if calls["count"] == 1:
+                raise RuntimeError("tool change blocked")
+            return original_move()
+
+        self.adapter.move_to_tool_change_position = fail_once  # type: ignore[assignment]
+        self.job_service.start_run(project_id=self.project_id, setup_id=self.setup_id, face="superior")
+        self.job_service._threads[(self.project_id, self.setup_id, "superior")].join(timeout=5)  # type: ignore[attr-defined]
+        run = self.job_service.get_run(project_id=self.project_id, setup_id=self.setup_id, face="superior")
+        self.assertEqual(run["state"], "RECOVERY_REQUIRED")
+        self.assertEqual(run["operations"][1]["execution_status"], "COMPLETED")
+        uploads_before = list(self.adapter.uploads)
+
+        self.job_service.run_action(project_id=self.project_id, setup_id=self.setup_id, face="superior", action="retry-tool-change-transition")
+        self.job_service._threads[(self.project_id, self.setup_id, "superior")].join(timeout=5)  # type: ignore[attr-defined]
+        run = self.job_service.get_run(project_id=self.project_id, setup_id=self.setup_id, face="superior")
+
+        self.assertEqual(run["state"], "TOOL_CHANGE_REQUIRED")
+        self.assertEqual(run["operations"][1]["execution_status"], "COMPLETED")
+        self.assertEqual(self.adapter.uploads, uploads_before)
+        self.assertEqual(calls["count"], 2)
 
     def test_live_execution_reports_running_progress_from_current_run(self) -> None:
         self.job_service.generate_project_compensation(project_id=self.project_id, setup_id=self.setup_id, face="superior")
