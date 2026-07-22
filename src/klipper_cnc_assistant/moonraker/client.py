@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import requests
@@ -160,24 +161,65 @@ class MoonrakerClient:
             data["checksum"] = checksum
         try:
             with file_path.open("rb") as handle:
-                response = self.session.post(f"{self.base_url}/server/files/upload", data=data, files={"file": (file_path.name, handle, "text/plain")}, timeout=self.timeout)
+                response = self.session.post(
+                    f"{self.base_url}/server/files/upload",
+                    data=data,
+                    files={"file": (file_path.name, handle, "text/plain")},
+                    timeout=self.timeout,
+                )
+            content_type = response.headers.get("Content-Type", "")
+            body_text = response.text
             if response.status_code != 201:
-                raise MoonrakerError(f"Moonraker upload returned HTTP {response.status_code}: {response.text}")
+                raise MoonrakerError(
+                    "Moonraker upload failed: "
+                    f"HTTP {response.status_code} "
+                    f"content_type={content_type!r} "
+                    f"url={response.url!s} "
+                    f"local_name={file_path.name!r} "
+                    f"remote_dir={remote_dir!r} "
+                    f"body={body_text[:1000]!r}"
+                )
             payload = response.json()
         except requests.RequestException as error:
             raise MoonrakerError(f"Moonraker upload failed: {error}") from error
         except ValueError as error:
-            raise MoonrakerError("Moonraker upload returned invalid JSON") from error
+            raise MoonrakerError(
+                "Moonraker upload returned invalid JSON: "
+                f"url={self.base_url}/server/files/upload "
+                f"local_name={file_path.name!r} "
+                f"remote_dir={remote_dir!r}"
+            ) from error
         if "error" in payload:
             raise MoonrakerError(f"Moonraker API error: {payload['error']}")
-        result = payload.get("result")
-        if not isinstance(result, dict):
-            raise MoonrakerError("Moonraker upload returned no result.")
+        if isinstance(payload, dict) and isinstance(payload.get("result"), dict):
+            result = payload["result"]
+        elif isinstance(payload, dict):
+            result = payload
+        else:
+            raise MoonrakerError(
+                "Moonraker upload returned an unsupported payload: "
+                f"url={self.base_url}/server/files/upload "
+                f"local_name={file_path.name!r} "
+                f"remote_dir={remote_dir!r} "
+                f"payload_type={type(payload).__name__}"
+            )
         item = result.get("item")
         if not isinstance(item, dict) or item.get("root") != "gcodes" or not isinstance(item.get("path"), str) or not item["path"].strip():
-            raise MoonrakerError("Moonraker upload returned no gcodes item.path.")
+            raise MoonrakerError(
+                "Moonraker upload returned no valid gcodes item.path: "
+                f"url={self.base_url}/server/files/upload "
+                f"local_name={file_path.name!r} "
+                f"remote_dir={remote_dir!r} "
+                f"payload={json.dumps(result, ensure_ascii=True)[:1000]}"
+            )
         if print_file and not result.get("print_started") and not result.get("print_queued"):
-            raise MoonrakerError("START_NOT_ACCEPTED: Moonraker did not accept the uploaded file for printing.")
+            raise MoonrakerError(
+                "START_NOT_ACCEPTED: Moonraker did not accept the uploaded file for printing. "
+                f"url={self.base_url}/server/files/upload "
+                f"local_name={file_path.name!r} "
+                f"remote_dir={remote_dir!r} "
+                f"payload={json.dumps(result, ensure_ascii=True)[:1000]}"
+            )
         return result
 
     def start_print(self, filename):

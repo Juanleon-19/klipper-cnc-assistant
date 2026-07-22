@@ -176,6 +176,7 @@ export function ExecutionConsole({ snapshot, busy, onPrepare, onStart, onAction 
             <div className="metric-box"><span>Observed printing</span><strong>{snapshot?.operation.observed_printing ? "si" : "no"}</strong></div>
             <div className="metric-box"><span>Supervisor</span><strong>{snapshot?.run.worker_alive ? "activo" : "inactivo"}</strong></div>
             <div className="metric-box"><span>Watcher</span><strong>{snapshot?.run.watcher_alive ? "activo" : "inactivo"}</strong></div>
+            <div className="metric-box"><span>Recuperación</span><strong>{snapshot?.run.recovery_state ?? "normal"}</strong></div>
             <div className="metric-box"><span>Última persistencia</span><strong>{snapshot?.run.updated_at ? formatDate(snapshot.run.updated_at) : "-"}</strong></div>
             <div className="metric-box execution-console-v2__error"><span>Último error</span><strong>{snapshot?.run.last_watcher_error ?? "ninguno"}</strong></div>
           </div>

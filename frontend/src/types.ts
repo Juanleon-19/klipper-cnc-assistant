@@ -713,6 +713,7 @@ export type LiveExecutionSnapshot = {
     worker_alive: boolean;
     watcher_alive: boolean;
     last_watcher_error: string | null;
+    recovery_state?: string | null;
     updated_at: string | null;
   };
   operation: {

@@ -29,6 +29,8 @@ RUN_ACTIVE_STATES = {
     "OPERATION_PREFLIGHT",
     "OPERATION_UPLOADING",
     "OPERATION_READY",
+    "WAITING_FOR_KLIPPER",
+    "PRINT_QUEUED",
     "OPERATION_RUNNING",
     "MOVING_TO_TOOL_CHANGE_SAFE_Z",
     "MOVING_TO_TOOL_CHANGE_XY",
@@ -235,7 +237,12 @@ class JobService:
         context = self._context(project_id, setup_id, face)
         with self._lock:
             current = self._load_run(context)
-            if current is not None and current.get("state") not in RUN_TERMINAL_STATES | {"JOB_READY"}:
+        if current is not None:
+            recovered = self._recover_active_print_if_possible(context, current)
+            if recovered is not None:
+                self._start_worker(context)
+                return recovered
+            if current.get("state") not in RUN_TERMINAL_STATES | {"JOB_READY"}:
                 raise ApplicationError("JOB_ACTIVE_CONFLICT")
         prepared = self.prepare_run(project_id=project_id, setup_id=setup_id, face=face)
         if not prepared.get("ready"):
@@ -368,6 +375,7 @@ class JobService:
                 "worker_alive": worker_alive,
                 "watcher_alive": worker_alive,
                 "last_watcher_error": run.get("last_watcher_error"),
+                "recovery_state": run.get("recovery_state"),
                 "updated_at": run.get("updated_at"),
             },
             "operation": {
@@ -580,7 +588,7 @@ class JobService:
                     if state == "TOOL_CHANGE_CONFIRMED":
                         self._measure_tool_reference(context, run)
                         continue
-                    if state == "OPERATION_RUNNING":
+                    if state in {"OPERATION_RUNNING", "OPERATION_STARTING", "WAITING_FOR_KLIPPER", "PRINT_QUEUED"}:
                         self._watch_operation(context, run)
                         continue
                     return
@@ -637,6 +645,15 @@ class JobService:
         run["current_operation_index"] = index
         run["current_operation_id"] = operation["operation_id"]
         run["current_tool_key"] = operation["tool_key"]
+        expected_remote_file = self._expected_remote_file(context, str(generated["relative_path"]))
+        recovered = self._recover_active_print_if_possible(
+            context,
+            run,
+            operation_index=index,
+            expected_remote_file=expected_remote_file,
+        )
+        if recovered is not None:
+            return
         run["state"] = "OPERATION_UPLOADING"
         run["next_action"] = f"Subiendo {operation['generated_file_name']} a Moonraker"
         run["available_actions"] = ["pause", "cancel"]
@@ -659,16 +676,21 @@ class JobService:
         operation["execution_status"] = "WAITING_FOR_KLIPPER"
         operation["observed_printing"] = False
         operation["progress"] = 0.0
-        run["state"] = "OPERATION_STARTING"
-        run["next_action"] = f"Iniciando {operation['name']} en Klipper"
+        run["recovery_state"] = None
         self._append_event(run, "info", f"Archivo subido a Moonraker: {remote_file}.")
-        if not upload.get("print_started"):
-            operation["execution_status"] = "PRINT_QUEUED" if upload.get("print_queued") else "START_NOT_ACCEPTED"
-            run["state"] = "PRINT_QUEUED" if upload.get("print_queued") else "JOB_ERROR"
+        if upload.get("print_started"):
+            run["state"] = "WAITING_FOR_KLIPPER"
+            run["next_action"] = f"Esperando confirmación de Klipper para {operation['name']}"
             self._save_run(context, run)
             return
-        run["state"] = "OPERATION_RUNNING"
-        operation["started_at"] = operation.get("started_at") or _iso_now()
+        if upload.get("print_queued"):
+            operation["execution_status"] = "PRINT_QUEUED"
+            run["state"] = "PRINT_QUEUED"
+            run["next_action"] = f"Moonraker dejó {operation['name']} en cola; esperando impresión"
+            self._save_run(context, run)
+            return
+        operation["execution_status"] = "START_NOT_ACCEPTED"
+        run["state"] = "JOB_ERROR"
         self._save_run(context, run)
 
     def _watch_operation(self, context: JobContext, run: dict[str, Any]) -> None:
@@ -988,6 +1010,7 @@ class JobService:
             "events": [],
             "manifest_path": plan.get("manifest_path"),
             "last_watcher_error": None,
+            "recovery_state": None,
         }
 
     def _coverage_by_operation(self, active_map: dict[str, Any] | None, operations: list[OperacionPCB]) -> dict[str, dict[str, Any]]:
@@ -1126,6 +1149,74 @@ class JobService:
         for index, item in enumerate(run["operations"]):
             if item["execution_status"] not in {"COMPLETED", "CANCELLED"}:
                 return index
+        return None
+
+    def _expected_remote_file(self, context: JobContext, generated_relative_path: str) -> str:
+        return f"klipper-cnc-assistant/{context.project_id}/{context.setup_id}/{_safe_face(context.face)}/{Path(str(generated_relative_path)).name}"
+
+    def _recover_active_print_if_possible(
+        self,
+        context: JobContext,
+        run: dict[str, Any],
+        *,
+        operation_index: int | None = None,
+        expected_remote_file: str | None = None,
+    ) -> dict[str, Any] | None:
+        try:
+            status = self.adapter_factory(self.runtime).print_status()
+        except Exception:
+            return None
+        if str(status.get("state") or "").lower() != "printing":
+            return None
+        observed_filename = self._normalize_filename(status.get("filename"))
+        operations = list(run.get("operations") or [])
+        candidate_indexes: list[int] = []
+        if operation_index is not None:
+            candidate_indexes.append(operation_index)
+        current_index = run.get("current_operation_index")
+        if isinstance(current_index, int):
+            candidate_indexes.append(current_index)
+        pending_index = self._next_pending_operation_index(run)
+        if pending_index is not None:
+            candidate_indexes.append(pending_index)
+        seen_indexes: set[int] = set()
+        for candidate_index in candidate_indexes:
+            if candidate_index in seen_indexes or not (0 <= candidate_index < len(operations)):
+                continue
+            seen_indexes.add(candidate_index)
+            operation = operations[candidate_index]
+            candidate_remote = expected_remote_file or operation.get("remote_file")
+            if not candidate_remote and operation.get("generated_file"):
+                candidate_remote = self._expected_remote_file(context, str(operation["generated_file"]))
+            normalized_candidate = self._normalize_filename(candidate_remote)
+            if not normalized_candidate or normalized_candidate != observed_filename:
+                continue
+            operation["remote_file"] = candidate_remote
+            operation["execution_status"] = "RUNNING"
+            operation["observed_printing"] = True
+            operation["progress"] = self._clamp_progress(status.get("progress"))
+            operation["moonraker_filename"] = status.get("filename")
+            operation["moonraker_state"] = status.get("state")
+            operation["machine_status"] = status
+            operation["started_at"] = operation.get("started_at") or _iso_now()
+            run["current_operation_index"] = candidate_index
+            run["current_operation_id"] = operation["operation_id"]
+            run["current_tool_key"] = operation["tool_key"]
+            run["state"] = "OPERATION_RUNNING"
+            run["next_action"] = f"RECOVERED_ACTIVE_PRINT · Ejecutando {operation['name']}"
+            run["available_actions"] = ["pause", "cancel"]
+            run["updated_at"] = _iso_now()
+            run["recovery_state"] = "RECOVERED_ACTIVE_PRINT"
+            self._append_event(run, "warning", f"RECOVER_ACTIVE_PRINT: se recupero la impresion activa de {operation['name']} sin re-subir el archivo.")
+            self._save_run(context, run)
+            return run
+        if str(run.get("state")) == "JOB_ERROR":
+            run["state"] = "RECOVERY_REQUIRED"
+            run["next_action"] = "Revision manual requerida: Moonraker imprime un archivo que no coincide con este JobRun"
+            run["available_actions"] = ["cancel"]
+            run["updated_at"] = _iso_now()
+            run["recovery_state"] = "RECOVERY_REQUIRED"
+            self._save_run(context, run)
         return None
 
     def _append_event(self, run: dict[str, Any], level: str, message: str) -> None:

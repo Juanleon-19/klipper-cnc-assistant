@@ -329,6 +329,86 @@ class JobServiceTest(unittest.TestCase):
         self.assertEqual(persisted["state"], "JOB_ERROR")
         self.assertIn("watcher exploded", persisted["last_watcher_error"])
 
+    def test_recover_active_print_reuses_existing_moonraker_job(self) -> None:
+        self.job_service.generate_project_compensation(project_id=self.project_id, setup_id=self.setup_id, face="superior")
+        self.job_service.prepare_run(project_id=self.project_id, setup_id=self.setup_id, face="superior")
+        context = self.job_service._context(self.project_id, self.setup_id, "superior")
+        run = self.job_service._load_run(context)
+        assert run is not None
+        run["state"] = "JOB_ERROR"
+        self.job_service._save_run(context, run)
+        expected = self.job_service._expected_remote_file(context, str(run["operations"][0]["generated_file"]))
+        self.adapter.status_sequence = [
+            {"state": "printing", "filename": expected, "progress": 0.553, "is_active": True},
+            {"state": "printing", "filename": expected, "progress": 0.553, "is_active": True},
+        ]
+
+        recovered = self.job_service.start_run(project_id=self.project_id, setup_id=self.setup_id, face="superior")
+        time.sleep(0.7)
+        persisted = json.loads(self.job_service._run_file(context).read_text(encoding="utf-8"))
+
+        self.assertEqual(self.adapter.uploads, [])
+        self.assertEqual(recovered["recovery_state"], "RECOVERED_ACTIVE_PRINT")
+        self.assertEqual(persisted["recovery_state"], "RECOVERED_ACTIVE_PRINT")
+        self.assertEqual(persisted["operations"][0]["remote_file"], expected)
+        self.assertEqual(persisted["operations"][0]["execution_status"], "RUNNING")
+        self.assertTrue(persisted["operations"][0]["observed_printing"])
+        self.assertAlmostEqual(persisted["operations"][0]["progress"], 0.553, places=3)
+
+        live = self.job_service.live_execution(project_id=self.project_id, setup_id=self.setup_id, face="superior")
+        self.assertEqual(live["run"]["recovery_state"], "RECOVERED_ACTIVE_PRINT")
+        self.assertEqual(live["operation"]["expected_remote_file"], expected)
+        self.assertAlmostEqual(live["operation"]["progress"], 0.553, places=3)
+
+        self.adapter.status_sequence = [{"state": "cancelled", "filename": expected, "progress": 0.553, "is_active": False}]
+        self.job_service._threads[(self.project_id, self.setup_id, "superior")].join(timeout=5)  # type: ignore[attr-defined]
+
+    def test_recovered_active_print_accepts_complete(self) -> None:
+        self.job_service.generate_project_compensation(project_id=self.project_id, setup_id=self.setup_id, face="superior")
+        self.job_service.prepare_run(project_id=self.project_id, setup_id=self.setup_id, face="superior")
+        context = self.job_service._context(self.project_id, self.setup_id, "superior")
+        run = self.job_service._load_run(context)
+        assert run is not None
+        run["state"] = "JOB_ERROR"
+        for item in run["operations"][1:]:
+            item["execution_status"] = "COMPLETED"
+        run["summary"]["operations_completed"] = 3
+        self.job_service._save_run(context, run)
+        expected = self.job_service._expected_remote_file(context, str(run["operations"][0]["generated_file"]))
+        self.adapter.status_sequence = [
+            {"state": "printing", "filename": expected, "progress": 0.553, "is_active": True},
+            {"state": "complete", "filename": expected, "progress": 1.0, "is_active": False},
+        ]
+
+        self.job_service.start_run(project_id=self.project_id, setup_id=self.setup_id, face="superior")
+        self.job_service._threads[(self.project_id, self.setup_id, "superior")].join(timeout=5)  # type: ignore[attr-defined]
+        persisted = json.loads(self.job_service._run_file(context).read_text(encoding="utf-8"))
+
+        self.assertEqual(self.adapter.uploads, [])
+        self.assertEqual(persisted["operations"][0]["execution_status"], "COMPLETED")
+        self.assertEqual(persisted["summary"]["operations_completed"], 4)
+        self.assertEqual(persisted["state"], "JOB_COMPLETE")
+
+    def test_recover_active_print_rejects_filename_mismatch(self) -> None:
+        self.job_service.generate_project_compensation(project_id=self.project_id, setup_id=self.setup_id, face="superior")
+        self.job_service.prepare_run(project_id=self.project_id, setup_id=self.setup_id, face="superior")
+        context = self.job_service._context(self.project_id, self.setup_id, "superior")
+        run = self.job_service._load_run(context)
+        assert run is not None
+        run["state"] = "JOB_ERROR"
+        self.job_service._save_run(context, run)
+        self.adapter.status_sequence = [
+            {"state": "printing", "filename": "klipper-cnc-assistant/otro/archivo.gcode", "progress": 0.553, "is_active": True},
+        ]
+
+        with self.assertRaisesRegex(Exception, "JOB_ACTIVE_CONFLICT"):
+            self.job_service.start_run(project_id=self.project_id, setup_id=self.setup_id, face="superior")
+
+        persisted = json.loads(self.job_service._run_file(context).read_text(encoding="utf-8"))
+        self.assertEqual(self.adapter.uploads, [])
+        self.assertEqual(persisted["state"], "RECOVERY_REQUIRED")
+        self.assertEqual(persisted["recovery_state"], "RECOVERY_REQUIRED")
+
 
 if __name__ == "__main__":
     unittest.main()
