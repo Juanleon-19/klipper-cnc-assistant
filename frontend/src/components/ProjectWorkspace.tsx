@@ -58,6 +58,13 @@ type ReferenceFieldErrors = Partial<Record<"x_mm" | "y_mm" | "z_mm", string>>;
 type InputState = { x_mm: string; y_mm: string };
 type ZInputState = { x_mm: string; y_mm: string; z_mm: string };
 
+function jobProgress(completed: number, total: number, current: number | null, state: string) {
+  if (total <= 0) return { operation: 0, overall: 0 };
+  const operation = Math.min(1, Math.max(0, current ?? 0));
+  const overall = state === "JOB_COMPLETE" ? 1 : Math.min(1, Math.max(0, (completed + operation) / total));
+  return { operation, overall };
+}
+
 const operationTypeOptions = [
   { value: "fresado_superior", label: "Fresado superior" },
   { value: "fresado_inferior", label: "Fresado inferior" },
@@ -1883,6 +1890,8 @@ export function ProjectWorkspace({
       return null;
     }
     const currentOperation = jobRun?.current_operation_id ? jobRun.operations.find((item) => item.operation_id === jobRun.current_operation_id) ?? null : null;
+    const progress = jobProgress(jobRun?.summary.operations_completed ?? 0, jobRun?.summary.operations_total ?? 0, currentOperation?.progress ?? null, jobRun?.state ?? "");
+    const moonraker = currentOperation?.machine_status ?? {};
     const actionLabels: Record<string, string> = {
       start: "Iniciar trabajo",
       pause: "Pausar",
@@ -1904,10 +1913,16 @@ export function ProjectWorkspace({
         <div className="info-grid info-grid--double compact-grid">
           <div className="metric-box"><span>Operación actual</span><strong>{currentOperation?.name ?? "pendiente"}</strong></div>
           <div className="metric-box"><span>Herramienta actual</span><strong>{currentOperation?.tool_name ?? "pendiente"}</strong></div>
-          <div className="metric-box"><span>Progreso general</span><strong>{jobRun ? `${jobRun.summary.operations_completed}/${jobRun.summary.operations_total}` : "0/0"}</strong></div>
+          <div className="metric-box"><span>Operación</span><strong>{jobRun ? `${(currentOperation?.order ?? 0) + 1} de ${jobRun.summary.operations_total}` : "0 de 0"}</strong></div>
+          <div className="metric-box"><span>Progreso general</span><strong>{jobRun ? `${jobRun.summary.operations_completed}/${jobRun.summary.operations_total} · ${(progress.overall * 100).toFixed(1)} %` : "0/0 · 0.0 %"}</strong></div>
           <div className="metric-box"><span>Cambios de herramienta</span><strong>{jobRun ? `${jobRun.summary.tool_changes_completed}/${jobRun.summary.tool_changes_required}` : "0/0"}</strong></div>
           <div className="metric-box"><span>Mapa activo</span><strong>{jobPlan?.active_map_id ?? "pendiente"}</strong></div>
           <div className="metric-box"><span>Siguiente acción</span><strong>{jobRun?.next_action ?? "Prepare el trabajo"}</strong></div>
+        </div>
+        <div className="stack gap-sm" aria-label="Progreso de ejecución">
+          <div><span className="muted">Progreso de operación: {(progress.operation * 100).toFixed(1)} %</span><progress value={progress.operation} max="1" aria-label="Progreso de operación" /></div>
+          <div><span className="muted">Progreso total: {(progress.overall * 100).toFixed(1)} %</span><progress value={progress.overall} max="1" aria-label="Progreso total" /></div>
+          <p className="muted">Klipper: {String(moonraker.state ?? "sin dato")} · Archivo remoto: {currentOperation?.remote_file ?? "pendiente"} · Activo: {String(moonraker.active ?? "sin dato")} · Actualizado: {jobRun?.updated_at ? formatDate(jobRun.updated_at) : "-"}</p>
         </div>
         <div className="action-grid">
           <button className="button button--ghost" type="button" disabled={referenceBusy} onClick={() => void prepareJobRun()}>Preparar trabajo</button>
