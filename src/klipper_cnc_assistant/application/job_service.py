@@ -4,6 +4,7 @@ import json
 import hashlib
 import threading
 import time
+import traceback
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -31,6 +32,7 @@ RUN_ACTIVE_STATES = {
     "OPERATION_RUNNING",
     "MOVING_TO_TOOL_CHANGE_SAFE_Z",
     "MOVING_TO_TOOL_CHANGE_XY",
+    "MOVING_TO_TOOL_CHANGE",
     "RETURNING_TO_REFERENCE_SAFE_Z",
     "RETURNING_TO_REFERENCE_XY",
     "PROBING_TOOL_REFERENCE",
@@ -111,26 +113,37 @@ class MoonrakerJobAdapter:
     def print_status(self) -> dict[str, Any]:
         status = self._client().query_objects(
             {
-                "print_stats": ["state", "filename", "message"],
-                "virtual_sdcard": ["progress", "file_position", "is_active"],
+                "webhooks": ["state", "state_message"],
+                "print_stats": ["state", "filename", "message", "print_duration", "total_duration"],
+                "virtual_sdcard": ["progress", "file_position", "file_size", "file_path", "is_active"],
                 "toolhead": ["position"],
                 "motion_report": ["live_position", "live_velocity"],
             }
         )
+        webhooks = status.get("webhooks") or {}
         print_stats = status.get("print_stats") or {}
         virtual_sdcard = status.get("virtual_sdcard") or {}
         motion_report = status.get("motion_report") or {}
         toolhead = status.get("toolhead") or {}
         return {
+            "connected": True,
+            "klipper_ready": webhooks.get("state") == "ready",
+            "klipper_state": webhooks.get("state"),
+            "state_message": webhooks.get("state_message"),
             "state": print_stats.get("state"),
             "filename": print_stats.get("filename"),
             "message": print_stats.get("message"),
             "progress": virtual_sdcard.get("progress"),
             "file_position": virtual_sdcard.get("file_position"),
-            "active": virtual_sdcard.get("is_active"),
+            "file_size": virtual_sdcard.get("file_size"),
+            "file_path": virtual_sdcard.get("file_path"),
+            "print_duration": print_stats.get("print_duration"),
+            "active": bool(virtual_sdcard.get("is_active")),
+            "is_active": bool(virtual_sdcard.get("is_active")),
             "live_position": motion_report.get("live_position"),
             "live_velocity": motion_report.get("live_velocity"),
             "toolhead_position": toolhead.get("position"),
+            "updated_at": _iso_now(),
         }
 
     def stop_spindle(self) -> dict[str, Any]:
@@ -274,6 +287,113 @@ class JobService:
         if run is None:
             return self.prepare_run(project_id=project_id, setup_id=setup_id, face=face)
         return run
+
+    def live_execution(self, *, project_id: str, setup_id: str, face: str) -> dict[str, Any]:
+        context = self._context(project_id, setup_id, face)
+        run = self._load_run(context)
+        if run is None:
+            run = self.prepare_run(project_id=project_id, setup_id=setup_id, face=face)
+        thread = self._threads.get((context.project_id, context.setup_id, context.face))
+        worker_alive = bool(thread and thread.is_alive())
+        try:
+            status = self.adapter_factory(self.runtime).print_status()
+        except Exception as error:
+            status = {
+                "connected": False,
+                "klipper_ready": False,
+                "klipper_state": None,
+                "state": None,
+                "filename": None,
+                "message": str(error),
+                "progress": 0.0,
+                "file_position": None,
+                "file_size": None,
+                "file_path": None,
+                "print_duration": None,
+                "active": False,
+                "is_active": False,
+                "updated_at": _iso_now(),
+            }
+        operations = list(run.get("operations") or [])
+        index = int(run.get("current_operation_index", 0) or 0)
+        if operations:
+            index = max(0, min(index, len(operations) - 1))
+            operation = operations[index]
+        else:
+            operation = None
+        expected = self._normalize_filename((operation or {}).get("remote_file"))
+        observed = self._normalize_filename(status.get("filename"))
+        total = int(run.get("summary", {}).get("operations_total", len(operations)) or 0)
+        completed = int(run.get("summary", {}).get("operations_completed", 0) or 0)
+        progress = self._clamp_progress((operation or {}).get("progress"))
+        overall_progress = 1.0 if str(run.get("state")) == "JOB_COMPLETE" else (min(1.0, (completed + progress) / total) if total else 0.0)
+        next_index = index + 1
+        next_operation = operations[next_index] if 0 <= next_index < len(operations) else None
+        sync_reason = None
+        print_state = str(status.get("state") or "").lower()
+        if print_state == "printing":
+            if not expected:
+                sync_reason = "remote_file_missing"
+            elif expected != observed:
+                sync_reason = "filename_mismatch"
+            elif str((operation or {}).get("execution_status") or "") != "RUNNING":
+                sync_reason = "jobrun_not_running"
+            elif not bool((operation or {}).get("observed_printing")):
+                sync_reason = "observed_printing_missing"
+        elif worker_alive is False and str(run.get("state")) in RUN_ACTIVE_STATES:
+            sync_reason = "watcher_inactive"
+        return {
+            "moonraker": {
+                "connected": bool(status.get("connected", True)),
+                "klipper_state": status.get("klipper_state"),
+                "print_state": status.get("state"),
+                "filename": status.get("filename"),
+                "progress": self._clamp_progress(status.get("progress")),
+                "is_active": bool(status.get("is_active", status.get("active"))),
+                "file_position": status.get("file_position"),
+                "file_size": status.get("file_size"),
+                "print_duration": status.get("print_duration"),
+                "message": status.get("message"),
+                "updated_at": status.get("updated_at") or _iso_now(),
+            },
+            "run": {
+                "run_id": run.get("run_id"),
+                "status": run.get("state") or "JOB_DRAFT",
+                "current_operation_index": index if operations else 0,
+                "total_operations": total,
+                "completed_operations": completed,
+                "overall_progress": overall_progress,
+                "next_action": run.get("next_action") or "Preparar trabajo",
+                "available_actions": list(run.get("available_actions") or []),
+                "worker_alive": worker_alive,
+                "watcher_alive": worker_alive,
+                "last_watcher_error": run.get("last_watcher_error"),
+                "updated_at": run.get("updated_at"),
+            },
+            "operation": {
+                "operation_id": (operation or {}).get("operation_id"),
+                "name": (operation or {}).get("name"),
+                "tool": (operation or {}).get("tool_name"),
+                "execution_status": (operation or {}).get("execution_status") or "PENDING",
+                "expected_remote_file": (operation or {}).get("remote_file"),
+                "observed_filename": status.get("filename"),
+                "filename_match": bool(expected and expected == observed),
+                "observed_printing": bool((operation or {}).get("observed_printing")),
+                "progress": progress,
+            },
+            "operations": operations,
+            "transition": {
+                "state": run.get("state") or "JOB_DRAFT",
+                "required_tool": (next_operation or {}).get("tool_name"),
+                "operator_confirmation_required": str(run.get("state")) in {"TOOL_CHANGE_REQUIRED", "READY_TO_RESUME"},
+            },
+            "synchronization": {
+                "ok": sync_reason is None,
+                "reason": sync_reason,
+            },
+            "events": self._dedupe_events(run.get("events") or []),
+            "job_run": run,
+        }
 
     def history(self, *, project_id: str, setup_id: str, face: str) -> list[dict[str, Any]]:
         history_dir = self._history_dir(self._context(project_id, setup_id, face))
@@ -448,21 +568,33 @@ class JobService:
     def _run_worker(self, context: JobContext) -> None:
         key = (context.project_id, context.setup_id, context.face)
         try:
-            while True:
-                run = self._load_run(context)
-                if run is None or run.get("state") in RUN_TERMINAL_STATES | RUN_WAITING_STATES:
+            try:
+                while True:
+                    run = self._load_run(context)
+                    if run is None or run.get("state") in RUN_TERMINAL_STATES | RUN_WAITING_STATES:
+                        return
+                    state = str(run.get("state"))
+                    if state in {"JOB_STARTING", "NEXT_OPERATION_READY", "TOOL_REFERENCE_READY"}:
+                        self._execute_next_operation(context, run)
+                        continue
+                    if state == "TOOL_CHANGE_CONFIRMED":
+                        self._measure_tool_reference(context, run)
+                        continue
+                    if state == "OPERATION_RUNNING":
+                        self._watch_operation(context, run)
+                        continue
                     return
-                state = str(run.get("state"))
-                if state in {"JOB_STARTING", "NEXT_OPERATION_READY", "TOOL_REFERENCE_READY"}:
-                    self._execute_next_operation(context, run)
-                    continue
-                if state == "TOOL_CHANGE_CONFIRMED":
-                    self._measure_tool_reference(context, run)
-                    continue
-                if state == "OPERATION_RUNNING":
-                    self._watch_operation(context, run)
-                    continue
-                return
+            except Exception as error:
+                current = self._load_run(context)
+                if current is not None:
+                    current["state"] = "JOB_ERROR"
+                    current["completed_at"] = current.get("completed_at") or _iso_now()
+                    current["updated_at"] = _iso_now()
+                    current["available_actions"] = ["cancel"]
+                    current["next_action"] = "Revisar error del supervisor"
+                    current["last_watcher_error"] = traceback.format_exc()
+                    self._append_event(current, "error", f"Fallo del supervisor: {error}")
+                    self._save_run(context, current)
         finally:
             with self._lock:
                 existing = self._threads.get(key)
@@ -524,7 +656,9 @@ class JobService:
         operation["remote_file"] = remote_file
         operation["generated_file"] = generated["relative_path"]
         operation["generated_metadata"] = generated.get("metadata_path")
-        operation["execution_status"] = "UPLOADED"
+        operation["execution_status"] = "WAITING_FOR_KLIPPER"
+        operation["observed_printing"] = False
+        operation["progress"] = 0.0
         run["state"] = "OPERATION_STARTING"
         run["next_action"] = f"Iniciando {operation['name']} en Klipper"
         self._append_event(run, "info", f"Archivo subido a Moonraker: {remote_file}.")
@@ -533,7 +667,6 @@ class JobService:
             run["state"] = "PRINT_QUEUED" if upload.get("print_queued") else "JOB_ERROR"
             self._save_run(context, run)
             return
-        operation["execution_status"] = "WAITING_FOR_KLIPPER"
         run["state"] = "OPERATION_RUNNING"
         operation["started_at"] = operation.get("started_at") or _iso_now()
         self._save_run(context, run)
@@ -549,17 +682,22 @@ class JobService:
                 return
             status = adapter.print_status()
             operation = current["operations"][int(current["current_operation_index"])]
-            operation["progress"] = status.get("progress")
+            operation["progress"] = max(0.0, min(1.0, float(status.get("progress") or 0.0)))
             operation["machine_status"] = status
+            operation["moonraker_filename"] = status.get("filename")
+            operation["moonraker_state"] = status.get("state")
             state = str(status.get("state") or "").lower()
             observed_filename = str(status.get("filename") or "").replace("\\", "/").lstrip("/")
             expected_filename = str(operation.get("remote_file") or "").replace("\\", "/").lstrip("/")
             current["updated_at"] = _iso_now()
             if observed_filename == expected_filename and state == "printing":
+                first_printing = not bool(operation.get("observed_printing"))
                 operation["observed_printing"] = True
                 operation["execution_status"] = "RUNNING"
                 current["state"] = "OPERATION_RUNNING"
                 current["next_action"] = f"Ejecutando {operation['name']}"
+                if first_printing:
+                    self._append_event(current, "info", f"Klipper confirmó la ejecución de {operation['name']}.")
             if state in {"paused"}:
                 operation["execution_status"] = "PAUSED"
                 current["state"] = "OPERATION_PAUSED"
@@ -570,7 +708,9 @@ class JobService:
                 return
             if state in {"complete", "completed"} and observed_filename == expected_filename and operation.get("observed_printing") is True:
                 operation["execution_status"] = "COMPLETED"
-                operation["completed_at"] = _iso_now()
+                operation["progress"] = 1.0
+                operation["finished_at"] = _iso_now()
+                operation["completed_at"] = operation["finished_at"]
                 current["summary"]["operations_completed"] = sum(1 for item in current["operations"] if item["execution_status"] == "COMPLETED")
                 current["state"] = "NEXT_OPERATION_READY"
                 current["next_action"] = "Preparando siguiente operación"
@@ -608,11 +748,16 @@ class JobService:
         run["state"] = "OPERATION_COMPLETE"
         run["next_action"] = "Operación terminada; deteniendo spindle"
         run["available_actions"] = ["cancel"]
+        self._append_event(run, "info", f"Operación completada; enviando M5 antes de {next_operation['name']}.")
         self._save_run(context, run)
         adapter.stop_spindle()
         run["state"] = "RETRACTING"
         run["next_action"] = "Subiendo a Z segura para cambio de herramienta"
         run["available_actions"] = ["cancel"]
+        self._append_event(run, "info", "M5 enviado. Subiendo a Z segura para cambio de herramienta.")
+        self._save_run(context, run)
+        run["state"] = "MOVING_TO_TOOL_CHANGE"
+        run["next_action"] = "Moviendo a posición de cambio de herramienta"
         self._append_event(run, "info", f"Cambio de herramienta requerido antes de {next_operation['name']}.")
         self._save_run(context, run)
         adapter.move_to_tool_change_position()
@@ -842,6 +987,7 @@ class JobService:
             ],
             "events": [],
             "manifest_path": plan.get("manifest_path"),
+            "last_watcher_error": None,
         }
 
     def _coverage_by_operation(self, active_map: dict[str, Any] | None, operations: list[OperacionPCB]) -> dict[str, dict[str, Any]]:
@@ -985,7 +1131,7 @@ class JobService:
     def _append_event(self, run: dict[str, Any], level: str, message: str) -> None:
         timestamp = _iso_now()
         run.setdefault("events", []).append({"event_id": hashlib.sha256(f"{run.get('run_id')}:{timestamp}:{message}".encode()).hexdigest()[:16], "run_id": run.get("run_id"), "operation_id": run.get("current_operation_id"), "timestamp": timestamp, "level": level, "stage": run.get("state"), "message": message})
-        run["events"] = run["events"][-300:]
+        run["events"] = self._dedupe_events(run["events"])[-300:]
 
     def _context(self, project_id: str, setup_id: str, face: str) -> JobContext:
         normalized_face = BoardFace(face).value if face in {BoardFace.SUPERIOR.value, BoardFace.INFERIOR.value} else str(face)
@@ -1039,6 +1185,27 @@ class JobService:
             return None
         with self._lock:
             return json.loads(path.read_text(encoding="utf-8"))
+
+    def _dedupe_events(self, events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        unique: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for event in events:
+            key = str(event.get("event_id") or f"{event.get('timestamp')}:{event.get('stage')}:{event.get('message')}")
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append(event)
+        return unique
+
+    def _normalize_filename(self, value: Any) -> str:
+        return str(value or "").replace("\\", "/").lstrip("/")
+
+    def _clamp_progress(self, value: Any) -> float:
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            return 0.0
+        return max(0.0, min(1.0, numeric))
 
     def _save_run(self, context: JobContext, run: dict[str, Any]) -> None:
         path = self._run_file(context)

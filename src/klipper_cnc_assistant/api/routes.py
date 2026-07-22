@@ -700,6 +700,10 @@ def build_router() -> APIRouter:
     def generate_job_plan(project_id: str, payload: dict[str, str], request: Request) -> dict[str, object]:
         return request.app.state.job_service.generate_project_compensation(project_id=project_id, setup_id=str(payload["setup_id"]), face=str(payload["face"]))
 
+    @router.get("/projects/{project_id}/execution/live", response_model=dict[str, object])
+    def get_live_execution(project_id: str, setup_id: str, face: str, request: Request) -> dict[str, object]:
+        return request.app.state.job_service.live_execution(project_id=project_id, setup_id=setup_id, face=face)
+
     @router.get("/projects/{project_id}/job-run", response_model=dict[str, object])
     def get_job_run(project_id: str, setup_id: str, face: str, request: Request) -> dict[str, object]:
         return request.app.state.job_service.get_run(project_id=project_id, setup_id=setup_id, face=face)

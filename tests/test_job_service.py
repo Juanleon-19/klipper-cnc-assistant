@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -45,6 +47,8 @@ class FakeAdapter:
         self.spindle_stops = 0
         self.probe_calls = 0
         self._printing_seen = False
+        self.status_sequence: list[dict] | None = None
+        self.command_log: list[str] = []
 
     def runtime_snapshot(self) -> dict:
         return self.runtime.snapshot()
@@ -79,23 +83,52 @@ class FakeAdapter:
         return {"state": self.state}
 
     def print_status(self) -> dict:
+        if self.status_sequence:
+            payload = self.status_sequence[0]
+            if len(self.status_sequence) > 1:
+                self.status_sequence.pop(0)
+            state = str(payload.get("state", self.state))
+            filename = str(payload.get("filename", self.current_filename or "")) or self.current_filename
+            progress = float(payload.get("progress", 1.0 if state == "complete" else 0.5))
+            return {
+                "connected": True,
+                "klipper_state": "ready",
+                "state": state,
+                "filename": filename,
+                "progress": progress,
+                "is_active": bool(payload.get("is_active", state == "printing")),
+                "file_position": payload.get("file_position", 49386),
+                "file_size": payload.get("file_size", 119710),
+                "print_duration": payload.get("print_duration", 0.0),
+                "message": payload.get("message"),
+                "updated_at": "2026-07-22T00:00:00+00:00",
+            }
         state = self.state
         if self.state == "complete" and not self._printing_seen:
             self._printing_seen = True
             state = "printing"
         return {
+            "connected": True,
+            "klipper_state": "ready",
             "state": state,
             "filename": self.current_filename,
             "progress": 1.0 if self.state == "complete" else 0.5,
+            "is_active": state == "printing",
+            "file_position": 49386,
+            "file_size": 119710,
+            "print_duration": 0.0,
             "message": None,
+            "updated_at": "2026-07-22T00:00:00+00:00",
         }
 
     def stop_spindle(self) -> dict:
         self.spindle_stops += 1
+        self.command_log.append("M5")
         return {"stopped": True}
 
     def move_to_tool_change_position(self) -> dict:
         self.tool_change_moves += 1
+        self.command_log.append("tool-change-position")
         return self.runtime.snapshot()
 
     def move_to_reference_point(self, *, x_mm: float, y_mm: float) -> dict:
@@ -234,6 +267,67 @@ class JobServiceTest(unittest.TestCase):
         self.assertEqual(self.adapter.reference_moves, [(100.0, 100.0), (100.0, 100.0)])
         self.assertEqual(len(self.adapter.started), 0)
         self.assertEqual(run["operations"][3]["execution_status"], "COMPLETED")
+
+    def test_live_execution_reports_running_progress_from_current_run(self) -> None:
+        self.job_service.generate_project_compensation(project_id=self.project_id, setup_id=self.setup_id, face="superior")
+        self.adapter.status_sequence = [
+            {"state": "printing", "progress": 0.553, "is_active": True},
+        ]
+        self.job_service.start_run(project_id=self.project_id, setup_id=self.setup_id, face="superior")
+        time.sleep(0.7)
+        context = self.job_service._context(self.project_id, self.setup_id, "superior")
+        persisted = json.loads(self.job_service._run_file(context).read_text(encoding="utf-8"))
+        operation = persisted["operations"][0]
+        self.assertEqual(operation["execution_status"], "RUNNING")
+        self.assertTrue(operation["observed_printing"])
+        self.assertEqual(operation["remote_file"], self.adapter.uploads[0])
+        self.assertAlmostEqual(operation["progress"], 0.553, places=3)
+        live = self.job_service.live_execution(project_id=self.project_id, setup_id=self.setup_id, face="superior")
+        self.assertEqual(live["moonraker"]["print_state"], "printing")
+        self.assertEqual(live["operation"]["execution_status"], "RUNNING")
+        self.assertAlmostEqual(live["operation"]["progress"], 0.553, places=3)
+        self.assertAlmostEqual(live["run"]["overall_progress"], 0.553 / 4.0, places=3)
+        self.adapter.status_sequence = [{"state": "cancelled", "progress": 0.553, "is_active": False}]
+        self.job_service._threads[(self.project_id, self.setup_id, "superior")].join(timeout=5)  # type: ignore[attr-defined]
+
+    def test_live_execution_rejects_complete_without_printing(self) -> None:
+        self.job_service.generate_project_compensation(project_id=self.project_id, setup_id=self.setup_id, face="superior")
+        self.adapter.status_sequence = [
+            {"state": "complete", "progress": 1.0, "is_active": False},
+        ]
+        self.job_service.start_run(project_id=self.project_id, setup_id=self.setup_id, face="superior")
+        time.sleep(0.7)
+        context = self.job_service._context(self.project_id, self.setup_id, "superior")
+        persisted = json.loads(self.job_service._run_file(context).read_text(encoding="utf-8"))
+        self.assertNotEqual(persisted["operations"][0]["execution_status"], "COMPLETED")
+        self.assertFalse(persisted["operations"][0].get("observed_printing", False))
+        self.adapter.status_sequence = [{"state": "cancelled", "progress": 1.0, "is_active": False}]
+        self.job_service._threads[(self.project_id, self.setup_id, "superior")].join(timeout=5)  # type: ignore[attr-defined]
+
+    def test_live_execution_detects_filename_mismatch(self) -> None:
+        self.job_service.generate_project_compensation(project_id=self.project_id, setup_id=self.setup_id, face="superior")
+        self.adapter.status_sequence = [
+            {"state": "printing", "filename": "otro/archivo.gcode", "progress": 0.553, "is_active": True},
+        ]
+        self.job_service.start_run(project_id=self.project_id, setup_id=self.setup_id, face="superior")
+        time.sleep(0.7)
+        live = self.job_service.live_execution(project_id=self.project_id, setup_id=self.setup_id, face="superior")
+        self.assertFalse(live["synchronization"]["ok"])
+        self.assertEqual(live["synchronization"]["reason"], "filename_mismatch")
+        self.adapter.status_sequence = [{"state": "cancelled", "progress": 0.553, "is_active": False}]
+        self.job_service._threads[(self.project_id, self.setup_id, "superior")].join(timeout=5)  # type: ignore[attr-defined]
+
+    def test_watcher_error_is_persisted(self) -> None:
+        self.job_service.generate_project_compensation(project_id=self.project_id, setup_id=self.setup_id, face="superior")
+        def boom() -> dict:
+            raise RuntimeError("watcher exploded")
+        self.adapter.print_status = boom  # type: ignore[assignment]
+        self.job_service.start_run(project_id=self.project_id, setup_id=self.setup_id, face="superior")
+        self.job_service._threads[(self.project_id, self.setup_id, "superior")].join(timeout=5)  # type: ignore[attr-defined]
+        context = self.job_service._context(self.project_id, self.setup_id, "superior")
+        persisted = json.loads(self.job_service._run_file(context).read_text(encoding="utf-8"))
+        self.assertEqual(persisted["state"], "JOB_ERROR")
+        self.assertIn("watcher exploded", persisted["last_watcher_error"])
 
 
 if __name__ == "__main__":
