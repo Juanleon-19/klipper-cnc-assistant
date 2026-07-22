@@ -1927,7 +1927,7 @@ export function ProjectWorkspace({
         <div className="action-grid">
           <button className="button button--ghost" type="button" disabled={referenceBusy} onClick={() => void prepareJobRun()}>Preparar trabajo</button>
           <button className="button" type="button" disabled={referenceBusy || Boolean(jobRun?.ready === false)} onClick={() => void startJobRun()}>Iniciar trabajo</button>
-          {(jobRun?.available_actions ?? []).map((action) => (
+          {(jobRun?.available_actions ?? []).filter((action) => action !== "start").map((action) => (
             <button key={action} className={`button${action === "cancel" ? " button--ghost button--danger" : " button--ghost"}`} type="button" disabled={referenceBusy} onClick={() => void runJobAction(action)}>{actionLabels[action] ?? action}</button>
           ))}
         </div>

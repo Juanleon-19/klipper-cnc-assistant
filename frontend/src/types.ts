@@ -622,6 +622,7 @@ export type JobRunOperation = {
   installation_revision?: string | null;
   remote_file?: string | null;
   machine_status?: Record<string, unknown> | null;
+  observed_printing?: boolean;
 };
 
 export type JobRun = {

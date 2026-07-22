@@ -1026,6 +1026,7 @@ describe("ProjectWorkspace", () => {
 
     fireEvent.click(screen.getByRole("button", { name: /Preparar trabajo/i }));
     await waitFor(() => expect(apiMock.prepareJobRun).toHaveBeenCalledWith(project.id, project.montajes[0].id, "superior"));
+    expect(screen.getAllByRole("button", { name: "Iniciar trabajo" })).toHaveLength(1);
   });
 
 });
