@@ -1292,6 +1292,8 @@ class JobService:
             return False
         if metadata.get("generated_hash") != hashlib.sha256(file_path.read_bytes()).hexdigest():
             return False
+        if metadata.get("tool_id") != _tool_key(operation):
+            return False
         reference = (active_map.get("tool_references") or {}).get(_tool_key(operation))
         if isinstance(reference, dict) and reference.get("valid"):
             actual_z = (metadata.get("reference_frame") or {}).get("surface_reference_z_mm")

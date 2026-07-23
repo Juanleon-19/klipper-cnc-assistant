@@ -49,16 +49,31 @@ def _format_tool_diameter(value: float) -> str:
     return text or "0"
 
 
+def _label_tool_id(herramienta: str | None) -> str | None:
+    if herramienta is None or not herramienta.strip():
+        return None
+    return f"tool-label-{_slugify(herramienta).lower()}"
+
+
+def _legacy_diameter_tool_id(herramienta: str | None) -> str | None:
+    if herramienta is None or not herramienta.strip():
+        return None
+    values = re.findall(r"\d+(?:[\.,]\d+)?", herramienta)
+    if not values:
+        return None
+    diameter = float(values[0].replace(",", "."))
+    return f"tool-diam-{_format_tool_diameter(diameter)}-mm"
+
+
 def _canonical_tool_id(tool_id: str | None, herramienta: str | None) -> str | None:
-    if tool_id is not None and str(tool_id).strip():
-        return str(tool_id).strip()
-    if herramienta is not None and herramienta.strip():
-        values = re.findall(r"\d+(?:[\.,]\d+)?", herramienta)
-        if values:
-            diameter = float(values[0].replace(",", "."))
-            return f"tool-diam-{_format_tool_diameter(diameter)}-mm"
-        return f"tool-label-{_slugify(herramienta).lower()}"
-    return None
+    explicit = None if tool_id is None else str(tool_id).strip()
+    legacy = _legacy_diameter_tool_id(herramienta)
+    if explicit and explicit != legacy:
+        return explicit
+    fallback = _label_tool_id(herramienta)
+    if fallback is not None:
+        return fallback
+    return explicit or None
 
 
 class JsonProjectRepository:
