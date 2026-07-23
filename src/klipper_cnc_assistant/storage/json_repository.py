@@ -44,6 +44,23 @@ def _slugify(value: str) -> str:
     return slug or "archivo"
 
 
+def _format_tool_diameter(value: float) -> str:
+    text = f"{value:.4f}".rstrip("0").rstrip(".")
+    return text or "0"
+
+
+def _canonical_tool_id(tool_id: str | None, herramienta: str | None) -> str | None:
+    if tool_id is not None and str(tool_id).strip():
+        return str(tool_id).strip()
+    if herramienta is not None and herramienta.strip():
+        values = re.findall(r"\d+(?:[\.,]\d+)?", herramienta)
+        if values:
+            diameter = float(values[0].replace(",", "."))
+            return f"tool-diam-{_format_tool_diameter(diameter)}-mm"
+        return f"tool-label-{_slugify(herramienta).lower()}"
+    return None
+
+
 class JsonProjectRepository:
     def __init__(
         self,
@@ -107,6 +124,7 @@ class JsonProjectRepository:
             or "status" not in payload
             or "current_setup_id" not in payload
             or any("placement_revision" not in item for item in payload.get("montajes", []))
+            or any(_canonical_tool_id(item.get("tool_id"), item.get("herramienta")) != item.get("tool_id") for item in payload.get("operaciones", []))
         )
 
     def project_dir(
@@ -545,7 +563,7 @@ class JsonProjectRepository:
             nombre_archivo_original=payload.get("nombre_archivo_original"),
             tamano_archivo_bytes=payload.get("tamano_archivo_bytes"),
             sha256=payload.get("sha256"),
-            tool_id=payload.get("tool_id"),
+            tool_id=_canonical_tool_id(payload.get("tool_id"), payload.get("herramienta")),
             herramienta=payload.get("herramienta"),
             analisis=self._deserialize_analysis(payload.get("analisis")),
             estado=OperationStatus(payload.get("estado", OperationStatus.ESPERANDO_ARCHIVO)),

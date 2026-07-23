@@ -30,6 +30,7 @@ const baseSnapshot: LiveExecutionSnapshot = {
     available_actions: ["pause", "cancel"],
     worker_alive: true,
     watcher_alive: true,
+    stale_candidate: false,
     last_watcher_error: null,
     updated_at: new Date().toISOString(),
   },
@@ -169,6 +170,29 @@ describe("ExecutionConsole", () => {
 
     expect(screen.getByRole("button", { name: /Continuar trabajo/i })).toBeInTheDocument();
   });
+  it("no muestra cerrar ejecución obsoleta para un JOB_VALIDATING nuevo", () => {
+    render(
+      <ExecutionConsole
+        snapshot={{
+          ...baseSnapshot,
+          moonraker: { ...baseSnapshot.moonraker, print_state: "standby", is_active: false, filename: "", progress: 0 },
+          run: { ...baseSnapshot.run, status: "JOB_VALIDATING", worker_alive: false, watcher_alive: false, supervisor_registered: false, stale_candidate: false, available_actions: [] },
+          operation: { ...baseSnapshot.operation, execution_status: "PENDING", progress: 0, observed_printing: false },
+          synchronization: { ok: true, reason: null },
+          job_run: { ...(baseSnapshot.job_run as NonNullable<typeof baseSnapshot.job_run>), state: "JOB_VALIDATING", available_actions: [] },
+        }}
+        error={null}
+        busy={false}
+        onPrepare={vi.fn()}
+        onStart={vi.fn()}
+        onAction={vi.fn()}
+        onArchiveStale={vi.fn()}
+      />,
+    );
+
+    expect(screen.queryByRole("button", { name: /Cerrar ejecución obsoleta/i })).toBeNull();
+  });
+
   it("muestra el conflicto estructurado y la acción para cerrar la ejecución obsoleta", () => {
     const detail: JobRunConflictDetail = {
       code: "JOB_ACTIVE_CONFLICT",
@@ -214,7 +238,7 @@ describe("ExecutionConsole", () => {
         snapshot={{
           ...baseSnapshot,
           moonraker: { ...baseSnapshot.moonraker, print_state: "standby", is_active: false, filename: "", progress: 0 },
-          run: { ...baseSnapshot.run, status: "JOB_VALIDATING", worker_alive: false, watcher_alive: false, available_actions: [] },
+          run: { ...baseSnapshot.run, status: "JOB_VALIDATING", worker_alive: false, watcher_alive: false, supervisor_registered: false, stale_candidate: false, available_actions: [] },
           operation: { ...baseSnapshot.operation, execution_status: "PENDING", progress: 0, observed_printing: false },
           synchronization: { ok: true, reason: null },
           job_run: { ...(baseSnapshot.job_run as NonNullable<typeof baseSnapshot.job_run>), state: "JOB_VALIDATING", available_actions: [] },

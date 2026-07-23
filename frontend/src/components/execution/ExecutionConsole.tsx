@@ -50,11 +50,13 @@ function canArchiveStale(snapshot: LiveExecutionSnapshot | null, detail: JobRunC
   if (!snapshot) {
     return false;
   }
-  return !snapshot.moonraker.is_active
+  return snapshot.run.stale_candidate === true
+    && !snapshot.moonraker.is_active
     && String(snapshot.moonraker.print_state ?? "").toLowerCase() !== "printing"
     && ARCHIVE_CANDIDATE_STATES.has(snapshot.run.status)
     && snapshot.run.worker_alive === false
-    && snapshot.run.watcher_alive === false;
+    && snapshot.run.watcher_alive === false
+    && snapshot.run.supervisor_registered === false;
 }
 
 function executionTone(value: string | null | undefined): "success" | "warning" | "danger" | "info" | "neutral" {
@@ -238,7 +240,7 @@ export function ExecutionConsole({ snapshot, error, busy, onPrepare, onStart, on
             <div className="metric-box"><span>Expected filename</span><strong className="mono-text execution-console-v2__file">{snapshot?.operation.expected_remote_file ?? "-"}</strong></div>
             <div className="metric-box"><span>Filename match</span><strong>{snapshot?.operation.filename_match ? "si" : "no"}</strong></div>
             <div className="metric-box"><span>Observed printing</span><strong>{snapshot?.operation.observed_printing ? "si" : "no"}</strong></div>
-            <div className="metric-box"><span>Supervisor</span><strong>{snapshot?.run.worker_alive ? "activo" : "inactivo"}</strong></div>
+            <div className="metric-box"><span>Supervisor</span><strong>{snapshot?.run.supervisor_registered ? "activo" : "inactivo"}</strong></div>
             <div className="metric-box"><span>Watcher</span><strong>{snapshot?.run.watcher_alive ? "activo" : "inactivo"}</strong></div>
             <div className="metric-box"><span>Recuperación</span><strong>{snapshot?.run.recovery_state ?? "normal"}</strong></div>
             <div className="metric-box"><span>Última persistencia</span><strong>{snapshot?.run.updated_at ? formatDate(snapshot.run.updated_at) : "-"}</strong></div>

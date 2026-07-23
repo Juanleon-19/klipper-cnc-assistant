@@ -1123,7 +1123,7 @@ describe("ProjectWorkspace", () => {
     fireEvent.click(screen.getByRole("button", { name: /Generar compensación del proyecto/i }));
     await waitFor(() => expect(apiMock.generateProjectCompensation).toHaveBeenCalledWith(project.id, project.montajes[0].id, "superior"));
 
-    fireEvent.click(screen.getByRole("button", { name: /Preparar trabajo/i }));
+    fireEvent.click(screen.getByRole("button", { name: /Revalidar plan/i }));
     await waitFor(() => expect(apiMock.prepareJobRun).toHaveBeenCalledWith(project.id, project.montajes[0].id, "superior"));
     expect(screen.getAllByRole("button", { name: "Iniciar trabajo" })).toHaveLength(1);
   });

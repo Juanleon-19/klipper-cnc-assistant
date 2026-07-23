@@ -43,6 +43,7 @@ RUN_ACTIVE_STATES = {
 }
 RUN_REFRESHABLE_IDLE_STATES = {"JOB_DRAFT", "JOB_VALIDATING"}
 RUN_MARKED_ACTIVE_STATES = RUN_ACTIVE_STATES | RUN_WAITING_STATES | {"JOB_VALIDATING"}
+STALE_RUN_IDLE_SECONDS = 300.0
 
 
 def _utc_now() -> datetime:
@@ -51,6 +52,15 @@ def _utc_now() -> datetime:
 
 def _iso_now() -> str:
     return _utc_now().isoformat()
+
+
+def _parse_iso_datetime(value: Any) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value))
+    except ValueError:
+        return None
 
 
 def _tool_key(operation: OperacionPCB) -> str:
@@ -192,6 +202,7 @@ class JobService:
     def get_plan(self, *, project_id: str, setup_id: str, face: str) -> dict[str, Any]:
         context = self._context(project_id, setup_id, face)
         plan = self._build_plan(context)
+        self._write_manifest(context, plan)
         self._save_plan(context, plan)
         return plan
 
@@ -211,10 +222,7 @@ class JobService:
             except Exception as error:
                 generated_results[item["operation_id"]] = {"error": str(error)}
         refreshed = self._build_plan(context, generated_results=generated_results)
-        manifest = self._build_manifest(refreshed)
-        manifest_path = self._plan_dir(context) / "job_manifest.json"
-        manifest_path.write_text(json.dumps(manifest, ensure_ascii=True, indent=2, sort_keys=True), encoding="utf-8")
-        refreshed["manifest_path"] = self._relative_to_project(context.project_id, manifest_path)
+        self._write_manifest(context, refreshed)
         refreshed["updated_at"] = _iso_now()
         self._save_plan(context, refreshed)
         return refreshed
@@ -225,7 +233,7 @@ class JobService:
         checks = self._build_run_checks(context, plan)
         ready = all(check["ok"] for check in checks)
         current = self._load_run(context)
-        run = self._base_run(context, plan) if current is None or current.get("state") in RUN_TERMINAL_STATES else current
+        run = self._base_run(context, plan) if current is None or current.get("state") in (RUN_TERMINAL_STATES | RUN_REFRESHABLE_IDLE_STATES) else current
         run["checks"] = checks
         run["state"] = "JOB_READY" if ready else "JOB_VALIDATING"
         run["ready"] = ready
@@ -369,6 +377,7 @@ class JobService:
                 "job_lock": bool(diagnosis["run"].get("job_lock")),
                 "last_watcher_error": run.get("last_watcher_error"),
                 "recovery_state": run.get("recovery_state"),
+                "stale_candidate": self._is_stale_run(diagnosis["run"], str(run.get("state") or "JOB_DRAFT")),
                 "updated_at": run.get("updated_at"),
             },
             "operation": {
@@ -409,9 +418,7 @@ class JobService:
         )
         can_archive_stale = (
             self._moonraker_is_idle(diagnosis["moonraker"])
-            and state in RUN_MARKED_ACTIVE_STATES
-            and diagnosis["run"]["worker_alive"] is False
-            and diagnosis["run"]["watcher_alive"] is False
+            and self._is_stale_run(diagnosis["run"], state)
         )
         return {
             "code": "JOB_ACTIVE_CONFLICT",
@@ -432,6 +439,8 @@ class JobService:
         moonraker = diagnosis["moonraker"]
         if not self._moonraker_is_idle(moonraker):
             raise ApplicationError("No se puede archivar la ejecución obsoleta mientras Moonraker siga imprimiendo o virtual_sdcard esté activa.")
+        if not self._is_stale_run(diagnosis["run"], str(run.get("state") or "JOB_DRAFT")):
+            raise ApplicationError("La ejecución actual no cumple el criterio real de obsolescencia; primero revalide el plan o espere a que el estado se estabilice.")
         released = self._release_stale_supervisor(context, run, diagnosis)
         previous_status = str(run.get("state") or "JOB_DRAFT")
         archived = json.loads(json.dumps(run))
@@ -939,6 +948,7 @@ class JobService:
         previous_tool_key: str | None = None
         tool_change_count = 0
         distinct_tools: list[str] = []
+        initial_reference_binding = self._initial_reference_binding(active_map, setup, operations)
         for index, operation in enumerate(operations):
             tool_key = _tool_key(operation)
             if tool_key not in distinct_tools:
@@ -946,11 +956,12 @@ class JobService:
             tool_changed = previous_tool_key is not None and previous_tool_key != tool_key
             if tool_changed:
                 tool_change_count += 1
+            binding = initial_reference_binding
             previous_tool_key = tool_key
             generated = generated_by_operation.get(operation.id)
             coverage = coverage_by_operation.get(operation.id)
-            reference_status = self._reference_status(active_map, operation)
-            calibration = self._tool_installation_calibration(active_map, operation)
+            reference_status = self._reference_status(active_map, operation, binding)
+            calibration = self._tool_installation_calibration(active_map, operation, binding)
             blocking_reasons: list[str] = []
             if operation.archivo_gcode is None:
                 blocking_reasons.append("Falta G-code original.")
@@ -1090,7 +1101,7 @@ class JobService:
                     "completed_at": None,
                     "error": None,
                     "progress": 0.0,
-                    "installation_revision": None,
+                    "installation_revision": None if not item.get("tool_installation_calibration") else item["tool_installation_calibration"].get("installation_id"),
                 }
                 for item in plan["operations"]
             ],
@@ -1138,21 +1149,18 @@ class JobService:
             }
         return result
 
-    def _reference_status(self, active_map: dict[str, Any] | None, operation: OperacionPCB) -> str:
-        if active_map is None:
-            return "PENDIENTE"
-        reference = (active_map.get("tool_references") or {}).get(_tool_key(operation))
+    def _reference_status(self, active_map: dict[str, Any] | None, operation: OperacionPCB, initial_reference_binding: dict[str, Any] | None = None) -> str:
+        reference = self._reference_entry(active_map, operation, initial_reference_binding)
         return "LISTA" if isinstance(reference, dict) and reference.get("valid") else "REQUIERE_REFERENCIA"
 
-    def _tool_installation_calibration(self, active_map: dict[str, Any] | None, operation: OperacionPCB) -> dict[str, Any] | None:
-        if active_map is None:
-            return None
-        reference = (active_map.get("tool_references") or {}).get(_tool_key(operation))
+    def _tool_installation_calibration(self, active_map: dict[str, Any] | None, operation: OperacionPCB, initial_reference_binding: dict[str, Any] | None = None) -> dict[str, Any] | None:
+        reference = self._reference_entry(active_map, operation, initial_reference_binding)
         if not isinstance(reference, dict):
             return None
         return {
             "calibration_id": str(reference.get("calibration_id") or reference.get("installation_id") or ""),
             "tool_id": _tool_key(operation),
+            "installation_id": str(reference.get("installation_id") or reference.get("installation_session_id") or ""),
             "installation_session_id": str(reference.get("installation_session_id") or reference.get("installation_id") or ""),
             "reference_point_id": str(reference.get("reference_point_id") or "surface-map-origin"),
             "reference_machine_x": reference.get("reference_x"),
@@ -1162,6 +1170,54 @@ class JobService:
             "probe_method": reference.get("probe_method", reference.get("source", "MEASURED")),
             "valid": bool(reference.get("valid")),
             "invalidation_reason": reference.get("invalidation_reason"),
+        }
+
+    def _reference_entry(self, active_map: dict[str, Any] | None, operation: OperacionPCB, initial_reference_binding: dict[str, Any] | None = None) -> dict[str, Any] | None:
+        if active_map is None:
+            return None
+        operation_tool_key = _tool_key(operation)
+        references = active_map.get("tool_references") or {}
+        reference = references.get(operation_tool_key)
+        if initial_reference_binding is not None:
+            source_tool_key = initial_reference_binding.get("source_tool_key")
+            rebound_tool_key = initial_reference_binding.get("tool_key")
+            if operation_tool_key == rebound_tool_key:
+                fallback = initial_reference_binding.get("reference")
+                if isinstance(fallback, dict) and fallback.get("valid"):
+                    return fallback
+            elif operation_tool_key == source_tool_key:
+                return None
+        if isinstance(reference, dict) and reference.get("valid"):
+            return reference
+        return reference if isinstance(reference, dict) else None
+
+    def _initial_reference_binding(self, active_map: dict[str, Any] | None, setup: Any, operations: list[OperacionPCB]) -> dict[str, Any] | None:
+        if active_map is None or not operations:
+            return None
+        first_tool_key = _tool_key(operations[0])
+        references = active_map.get("tool_references") or {}
+        direct = references.get(first_tool_key)
+        if isinstance(direct, dict) and direct.get("valid"):
+            return None
+        valid_references = [reference for reference in references.values() if isinstance(reference, dict) and reference.get("valid")]
+        if len(valid_references) != 1:
+            return None
+        active_reference_id = str(getattr(setup, "active_reference_id", "") or "")
+        reference = valid_references[0]
+        if active_reference_id:
+            reference_ids = {
+                str(reference.get("installation_id") or ""),
+                str(reference.get("calibration_id") or ""),
+                str(reference.get("installation_session_id") or ""),
+            }
+            if active_reference_id not in reference_ids:
+                return None
+        return {
+            "tool_key": first_tool_key,
+            "reference": reference,
+            "source_tool_key": next((key for key, value in references.items() if value is reference), None),
+            "source_tool_id": reference.get("tool_id"),
+            "source_tool_name": reference.get("tool_name"),
         }
 
     def _generated_payload_for_operation(self, plan: dict[str, Any], operation_id: str) -> dict[str, Any] | None:
@@ -1336,8 +1392,7 @@ class JobService:
         plan = self._load_plan(context)
         if plan is not None:
             refreshed = self._build_plan(context)
-            if plan.get("manifest_path"):
-                refreshed["manifest_path"] = plan["manifest_path"]
+            self._write_manifest(context, refreshed)
             self._save_plan(context, refreshed)
             return refreshed
         return self.get_plan(project_id=context.project_id, setup_id=context.setup_id, face=context.face)
@@ -1374,12 +1429,29 @@ class JobService:
     def _save_plan(self, context: JobContext, plan: dict[str, Any]) -> None:
         self._plan_file(context).write_text(json.dumps(plan, ensure_ascii=True, indent=2, sort_keys=True), encoding="utf-8")
 
+    def _write_manifest(self, context: JobContext, plan: dict[str, Any]) -> None:
+        manifest = self._build_manifest(plan)
+        manifest_path = self._plan_dir(context) / "job_manifest.json"
+        manifest_path.write_text(json.dumps(manifest, ensure_ascii=True, indent=2, sort_keys=True), encoding="utf-8")
+        plan["manifest_path"] = self._relative_to_project(context.project_id, manifest_path)
+
     def _load_run(self, context: JobContext) -> dict[str, Any] | None:
         path = self._run_file(context)
         if not path.exists():
             return None
         with self._lock:
             return json.loads(path.read_text(encoding="utf-8"))
+
+    def _is_stale_run(self, run: dict[str, Any], state: str | None = None) -> bool:
+        run_state = str(state or run.get("status") or run.get("state") or "")
+        if run_state not in RUN_MARKED_ACTIVE_STATES:
+            return False
+        if bool(run.get("worker_alive")) or bool(run.get("watcher_alive")) or bool(run.get("supervisor_registered")):
+            return False
+        updated_at = _parse_iso_datetime(run.get("updated_at"))
+        if updated_at is None:
+            return False
+        return (_utc_now() - updated_at).total_seconds() >= STALE_RUN_IDLE_SECONDS
 
     def _dedupe_events(self, events: list[dict[str, Any]]) -> list[dict[str, Any]]:
         unique: list[dict[str, Any]] = []
@@ -1518,12 +1590,7 @@ class JobService:
         actions = ["open"]
         if diagnosis["moonraker"]["print_state"] == "printing" or diagnosis["moonraker"]["is_active"]:
             actions.append("recover")
-        if (
-            self._moonraker_is_idle(diagnosis["moonraker"])
-            and str(run.get("state") or "") in RUN_MARKED_ACTIVE_STATES
-            and diagnosis["run"]["worker_alive"] is False
-            and diagnosis["run"]["watcher_alive"] is False
-        ):
+        if self._moonraker_is_idle(diagnosis["moonraker"]) and self._is_stale_run(diagnosis["run"], str(run.get("state") or "")):
             actions.append("archive-stale")
         return actions
 

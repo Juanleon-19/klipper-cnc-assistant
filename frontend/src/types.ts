@@ -771,6 +771,7 @@ export type LiveExecutionSnapshot = {
     job_lock?: boolean;
     last_watcher_error: string | null;
     recovery_state?: string | null;
+    stale_candidate?: boolean;
     updated_at: string | null;
   };
   operation: {

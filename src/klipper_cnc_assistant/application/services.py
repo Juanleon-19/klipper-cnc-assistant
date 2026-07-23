@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import platform
+import re
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path, PurePath
@@ -30,6 +31,24 @@ from .errors import ApplicationError, NotFoundError
 
 ALLOWED_GCODE_EXTENSIONS = {".nc", ".gcode", ".tap"}
 DEFAULT_MAX_GCODE_FILE_BYTES = 5 * 1024 * 1024
+
+
+def _format_tool_diameter(value: float) -> str:
+    text = f"{value:.4f}".rstrip("0").rstrip(".")
+    return text or "0"
+
+
+def _canonical_tool_id(tool_id: str | None, herramienta: str | None) -> str | None:
+    if tool_id is not None and str(tool_id).strip():
+        return str(tool_id).strip()
+    if herramienta is not None and herramienta.strip():
+        values = re.findall(r"\d+(?:[\.,]\d+)?", herramienta)
+        if values:
+            diameter = float(values[0].replace(",", "."))
+            return f"tool-diam-{_format_tool_diameter(diameter)}-mm"
+        slug = re.sub(r"[^a-zA-Z0-9._-]+", "-", herramienta.strip()).strip("-").lower() or "sin-herramienta"
+        return f"tool-label-{slug}"
+    return None
 
 
 class ProjectService:
@@ -181,7 +200,7 @@ class ProjectService:
             cara=operation_face,
             orden=next_order,
             setup_id=target_setup_id,
-            tool_id=tool_id,
+            tool_id=_canonical_tool_id(tool_id, herramienta),
             herramienta=herramienta,
         )
         updated = project.add_operation(operation)
@@ -202,7 +221,7 @@ class ProjectService:
         updated_operation = replace(
             operation,
             nombre=nombre,
-            tool_id=tool_id,
+            tool_id=_canonical_tool_id(tool_id, herramienta),
             herramienta=herramienta,
         )
         updated = project.replace_operation(updated_operation)

@@ -1837,7 +1837,7 @@ export function ProjectWorkspace({
             <h3>Plan multioperación listo para ejecución — {translateFace(activeJobFace)}</h3>
           </div>
           <div className="toolbar-inline">
-            <button className="button button--ghost" type="button" disabled={referenceBusy} onClick={() => void refreshJobState()}>Actualizar plan</button>
+            <button className="button button--ghost" type="button" disabled={referenceBusy} onClick={() => void prepareJobRun()}>Revalidar plan</button>
             <button className="button" type="button" disabled={referenceBusy} onClick={() => void generateProjectCompensation()}>Generar compensación del proyecto</button>
           </div>
         </div>

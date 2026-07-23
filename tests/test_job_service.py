@@ -202,6 +202,106 @@ class JobServiceTest(unittest.TestCase):
         for index, z in enumerate((5.0, 5.01, 5.02, 5.01, 4.99)):
             self.physical_map_service.record_point(project_id=self.project_id, map_id=payload["map_id"], point_index=index, z_measured=z, attempts=1, duration_s=0.1)
 
+    def _create_label_only_tool_project(self) -> tuple[str, str, str]:
+        project = self.project_service.create_project(nombre="PCB etiquetas", ancho_mm=80.0, alto_mm=60.0)
+        project_id = project.id
+        setup_id = project.montajes[0].id
+        definitions = [
+            ("Fresado superior", "aislamiento", 0, "0.8", "G21\nG90\nG0 X10 Y10\nG1 X20 Y10 Z-0.050 F120\n"),
+            ("Taladrado_1", "taladrado", 1, "0.8 MM", "G21\nG90\nG0 X15 Y15\nG1 X15 Y15 Z-0.100 F120\n"),
+            ("Taladrado_2", "taladrado", 2, "1 MM", "G21\nG90\nG0 X18 Y18\nG1 X18 Y18 Z-0.100 F120\n"),
+            ("Taladrado_3", "taladrado", 3, "3 mm", "G21\nG90\nG0 X22 Y22\nG1 X22 Y22 Z-0.100 F120\n"),
+            ("Contorno", "contorno", 4, "1.2", "G21\nG90\nG0 X12 Y12\nG1 X18 Y18 Z-0.120 F120\n"),
+        ]
+        operation_ids: list[str] = []
+        for nombre, tipo, orden, herramienta, gcode in definitions:
+            operation = self.project_service.add_operation(
+                project_id=project_id,
+                nombre=nombre,
+                tipo=tipo,
+                cara="superior",
+                orden=orden,
+                setup_id=setup_id,
+                tool_id=None,
+                herramienta=herramienta,
+            )
+            operation_ids.append(operation.id)
+            self.project_service.upload_operation_gcode(project_id=project_id, operation_id=operation.id, filename=f"{operation.id}.gcode", content=gcode)
+            self.project_service.analyze_operation(project_id=project_id, operation_id=operation.id)
+        contour_id = operation_ids[-1]
+        payload = self.physical_map_service.capture_reference_and_plan(
+            project_id=project_id,
+            operation_id=contour_id,
+            machine_origin_x=80.0,
+            machine_origin_y=109.15,
+            reference_z=104.9,
+            machine_position={"x_mm": 80.0, "y_mm": 109.15, "z_mm": 104.9},
+            homed_axes="xyz",
+            machine_label="http://127.0.0.1:7126",
+            session_id="session-current",
+            config=PhysicalMeshConfig(rows=2, columns=2, edge_margin_left_mm=0.0, edge_margin_right_mm=13.0, edge_margin_bottom_mm=0.0, edge_margin_top_mm=6.0),
+        )
+        for index, z in enumerate((104.9, 104.91, 104.89, 104.92)):
+            self.physical_map_service.record_point(project_id=project_id, map_id=payload["map_id"], point_index=index, z_measured=z, attempts=1, duration_s=0.1)
+        return project_id, setup_id, payload["map_id"]
+
+    def test_prepare_run_uses_canonical_tool_ids_and_binds_initial_reference_to_first_tool(self) -> None:
+        project_id, setup_id, map_id = self._create_label_only_tool_project()
+        plan = self.job_service.generate_project_compensation(project_id=project_id, setup_id=setup_id, face="superior")
+        map_file = self.repository.project_dir(project_id) / "maps" / Path(map_id) / "height_map.json"
+        map_before = json.loads(map_file.read_text(encoding="utf-8"))
+        generated_files = [self.repository.project_dir(project_id) / item["generated_file"] for item in plan["operations"] if item.get("generated_file")]
+
+        refreshed_plan = self.job_service.get_plan(project_id=project_id, setup_id=setup_id, face="superior")
+        run = self.job_service.prepare_run(project_id=project_id, setup_id=setup_id, face="superior")
+        project = self.project_service.get_project(project_id)
+        operations = sorted(project.operations_for_setup(setup_id), key=lambda item: item.orden)
+        tool_ids = [operation.tool_id for operation in operations]
+        reference_statuses = [item["reference_status"] for item in refreshed_plan["operations"]]
+
+        self.assertEqual(tool_ids[0], "tool-diam-0.8-mm")
+        self.assertEqual(tool_ids[1], "tool-diam-0.8-mm")
+        self.assertEqual(len(set(tool_ids)), 4)
+        self.assertEqual(refreshed_plan["summary"]["distinct_tools"], 4)
+        self.assertEqual(refreshed_plan["summary"]["tool_changes"], 3)
+        self.assertEqual(reference_statuses[:2], ["LISTA", "LISTA"])
+        self.assertEqual(reference_statuses[2:], ["REQUIERE_REFERENCIA", "REQUIERE_REFERENCIA", "REQUIERE_REFERENCIA"])
+        self.assertEqual(run["state"], "JOB_READY")
+        self.assertTrue(run["ready"])
+        checks = {item["name"]: item["ok"] for item in run["checks"]}
+        self.assertTrue(checks["referencia_inicial"])
+        active_reference_id = project.get_setup(setup_id).active_reference_id
+        self.assertEqual(run["operations"][0]["installation_revision"], active_reference_id)
+        self.assertEqual(run["operations"][1]["installation_revision"], active_reference_id)
+        self.assertEqual(run["operations"][4]["reference_status"], "REQUIERE_REFERENCIA")
+        self.assertEqual(self.adapter.uploads, [])
+        self.assertEqual(self.adapter.command_log, [])
+        self.assertEqual(self.adapter.reference_moves, [])
+        map_after = json.loads(map_file.read_text(encoding="utf-8"))
+        self.assertEqual(map_after["points"], map_before["points"])
+        self.assertEqual(map_after["acquisition_reference_z"], map_before["acquisition_reference_z"])
+        self.assertEqual(map_after["tool_references"], map_before["tool_references"])
+        for generated in generated_files:
+            self.assertTrue(generated.exists())
+        manifest = self.repository.project_dir(project_id) / refreshed_plan["manifest_path"]
+        manifest_payload = json.loads(manifest.read_text(encoding="utf-8"))
+        self.assertEqual([item["reference_status"] for item in manifest_payload["operations"]][:2], ["LISTA", "LISTA"])
+        self.assertEqual(manifest_payload["operations"][4]["reference_status"], "REQUIERE_REFERENCIA")
+
+    def test_archive_stale_run_rejects_fresh_job_validating_even_if_idle(self) -> None:
+        project_id, setup_id, _map_id = self._create_label_only_tool_project()
+        self.job_service.generate_project_compensation(project_id=project_id, setup_id=setup_id, face="superior")
+        run = self.job_service.prepare_run(project_id=project_id, setup_id=setup_id, face="superior")
+        self.assertEqual(run["state"], "JOB_READY")
+        run["state"] = "JOB_VALIDATING"
+        run["ready"] = False
+        context = self.job_service._context(project_id, setup_id, "superior")
+        self.job_service._save_run(context, run)
+        self.adapter.status_sequence = [{"state": "standby", "filename": "", "progress": 0.0, "is_active": False}]
+
+        with self.assertRaisesRegex(Exception, "criterio real de obsolescencia"):
+            self.job_service.archive_stale_run(project_id=project_id, setup_id=setup_id, face="superior")
+
     def test_job_plan_groups_tools_and_writes_manifest(self) -> None:
         plan = self.job_service.generate_project_compensation(project_id=self.project_id, setup_id=self.setup_id, face="superior")
 
@@ -474,7 +574,8 @@ class JobServiceTest(unittest.TestCase):
         self.assertEqual(detail["existing_run"]["status"], "JOB_VALIDATING")
         self.assertFalse(detail["existing_run"]["worker_alive"])
         self.assertFalse(detail["moonraker"]["is_active"])
-        self.assertTrue(detail["can_archive_stale"])
+        self.assertFalse(detail["can_archive_stale"])
+        self.assertNotIn("archive-stale", detail["available_actions"])
 
     def test_archive_stale_run_rejects_active_moonraker_print(self) -> None:
         self.job_service.generate_project_compensation(project_id=self.project_id, setup_id=self.setup_id, face="superior")
@@ -495,9 +596,8 @@ class JobServiceTest(unittest.TestCase):
         run = self.job_service.prepare_run(project_id=self.project_id, setup_id=self.setup_id, face="superior")
         run["state"] = "WAITING_FOR_KLIPPER"
         run["available_actions"] = ["pause", "cancel"]
+        run["updated_at"] = "2026-07-23T00:00:00+00:00"
         self.job_service._save_run(context, run)
-        stale_thread = threading.Thread(target=lambda: None, name="stale-supervisor")
-        self.job_service._threads[(self.project_id, self.setup_id, "superior")] = stale_thread  # type: ignore[attr-defined]
         self.adapter.status_sequence = [{"state": "standby", "filename": "", "progress": 0.0, "is_active": False}]
         setup_before = self.project_service.get_project(self.project_id).get_setup(self.setup_id)
         generated_files = [self.repository.project_dir(self.project_id) / item["generated_file"] for item in plan["operations"] if item.get("generated_file")]
@@ -508,7 +608,6 @@ class JobServiceTest(unittest.TestCase):
         self.assertEqual(result["previous_status"], "WAITING_FOR_KLIPPER")
         self.assertTrue(result["can_start_new_run"])
         self.assertIn("job_run.current_run", result["locks_released"])
-        self.assertIn("job_supervisor.registry", result["locks_released"])
         archive_path = self.repository.project_dir(self.project_id) / result["archive_path"]
         self.assertTrue(archive_path.exists())
         archived = json.loads(archive_path.read_text(encoding="utf-8"))
