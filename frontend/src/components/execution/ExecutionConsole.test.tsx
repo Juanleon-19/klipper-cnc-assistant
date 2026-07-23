@@ -1,7 +1,8 @@
 import { render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
-import type { LiveExecutionSnapshot } from "../../types";
+import { ApiError } from "../../lib/api";
+import type { JobRunConflictDetail, LiveExecutionSnapshot } from "../../types";
 import { ExecutionConsole } from "./ExecutionConsole";
 
 const baseSnapshot: LiveExecutionSnapshot = {
@@ -93,7 +94,7 @@ const baseSnapshot: LiveExecutionSnapshot = {
 
 describe("ExecutionConsole", () => {
   it("renderiza la consola v2 con progreso real de operación y proyecto", () => {
-    render(<ExecutionConsole snapshot={baseSnapshot} busy={false} onPrepare={vi.fn()} onStart={vi.fn()} onAction={vi.fn()} />);
+    render(<ExecutionConsole snapshot={baseSnapshot} error={null} busy={false} onPrepare={vi.fn()} onStart={vi.fn()} onAction={vi.fn()} onArchiveStale={vi.fn()} />);
 
     expect(screen.getByText(/CONSOLA DE EJECUCIÓN EN VIVO — V2/i)).toBeInTheDocument();
     expect(screen.getAllByText(/RUNNING/i).length).toBeGreaterThan(0);
@@ -116,10 +117,12 @@ describe("ExecutionConsole", () => {
           moonraker: { ...baseSnapshot.moonraker, print_state: "printing" },
           job_run: { ...(baseSnapshot.job_run as NonNullable<typeof baseSnapshot.job_run>), state: "JOB_READY", available_actions: ["start", "start"] },
         }}
+        error={null}
         busy={false}
         onPrepare={vi.fn()}
         onStart={vi.fn()}
         onAction={vi.fn()}
+        onArchiveStale={vi.fn()}
       />,
     );
 
@@ -136,10 +139,12 @@ describe("ExecutionConsole", () => {
           transition: { ...baseSnapshot.transition, state: "TOOL_CHANGE_REQUIRED", operator_confirmation_required: true },
           job_run: { ...(baseSnapshot.job_run as NonNullable<typeof baseSnapshot.job_run>), state: "TOOL_CHANGE_REQUIRED", available_actions: ["confirm-tool-change", "cancel"] },
         }}
+        error={null}
         busy={false}
         onPrepare={vi.fn()}
         onStart={vi.fn()}
         onAction={vi.fn()}
+        onArchiveStale={vi.fn()}
       />,
     );
 
@@ -153,13 +158,80 @@ describe("ExecutionConsole", () => {
           transition: { ...baseSnapshot.transition, state: "READY_TO_RESUME", operator_confirmation_required: true },
           job_run: { ...(baseSnapshot.job_run as NonNullable<typeof baseSnapshot.job_run>), state: "READY_TO_RESUME", available_actions: ["continue", "cancel"] },
         }}
+        error={null}
         busy={false}
         onPrepare={vi.fn()}
         onStart={vi.fn()}
         onAction={vi.fn()}
+        onArchiveStale={vi.fn()}
       />,
     );
 
     expect(screen.getByRole("button", { name: /Continuar trabajo/i })).toBeInTheDocument();
   });
+  it("muestra el conflicto estructurado y la acción para cerrar la ejecución obsoleta", () => {
+    const detail: JobRunConflictDetail = {
+      code: "JOB_ACTIVE_CONFLICT",
+      message: "Ya existe un trabajo activo para este montaje y cara.",
+      conflict_condition: "current_run.state=JOB_VALIDATING no es terminal ni JOB_READY.",
+      existing_run: {
+        run_id: "job-run/setup-main/superior/20260722-040230",
+        project_id: "proj_1",
+        setup: "setup-main",
+        side: "superior",
+        placement_revision: "placement-72",
+        status: "JOB_VALIDATING",
+        current_operation: { operation_id: "op_1", name: "Fresado superior", execution_status: "PENDING", remote_file: null },
+        remote_file: null,
+        worker_alive: false,
+        watcher_alive: false,
+        supervisor_registered: false,
+        movement_lock: false,
+        job_lock: true,
+        updated_at: new Date().toISOString(),
+        last_error: null,
+        available_actions: [],
+      },
+      moonraker: {
+        connected: true,
+        webhooks_state: "ready",
+        klipper_state: "ready",
+        print_state: "standby",
+        filename: "",
+        progress: 0,
+        is_active: false,
+        file_position: 0,
+        file_size: 0,
+        print_duration: 0,
+        message: "",
+        updated_at: new Date().toISOString(),
+      },
+      available_actions: ["open", "archive-stale"],
+      can_archive_stale: true,
+    };
+    render(
+      <ExecutionConsole
+        snapshot={{
+          ...baseSnapshot,
+          moonraker: { ...baseSnapshot.moonraker, print_state: "standby", is_active: false, filename: "", progress: 0 },
+          run: { ...baseSnapshot.run, status: "JOB_VALIDATING", worker_alive: false, watcher_alive: false, available_actions: [] },
+          operation: { ...baseSnapshot.operation, execution_status: "PENDING", progress: 0, observed_printing: false },
+          synchronization: { ok: true, reason: null },
+          job_run: { ...(baseSnapshot.job_run as NonNullable<typeof baseSnapshot.job_run>), state: "JOB_VALIDATING", available_actions: [] },
+        }}
+        error={new ApiError("JOB_ACTIVE_CONFLICT: Ya existe un trabajo activo para este montaje y cara.", 409, {}, detail)}
+        busy={false}
+        onPrepare={vi.fn()}
+        onStart={vi.fn()}
+        onAction={vi.fn()}
+        onArchiveStale={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText(/Errores de ejecución/i)).toBeInTheDocument();
+    expect(screen.getByText(/JOB_ACTIVE_CONFLICT/i)).toBeInTheDocument();
+    expect(screen.getByText(/job-run\/setup-main\/superior\/20260722-040230/i)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Cerrar ejecución obsoleta/i })).toBeInTheDocument();
+  });
+
 });

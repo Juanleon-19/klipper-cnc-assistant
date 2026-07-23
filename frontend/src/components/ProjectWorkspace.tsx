@@ -46,6 +46,7 @@ type ProjectWorkspaceProps = {
   onAnalyze: (operation: Operation) => Promise<void>;
   onUploadFile: (operation: Operation, file: File) => Promise<void>;
   onRefreshProject?: () => Promise<void>;
+  onProjectStateChange?: (project: Project) => void;
   initialView?: WorkspaceView;
 };
 
@@ -166,11 +167,12 @@ export function ProjectWorkspace({
   onAnalyze,
   onUploadFile,
   onRefreshProject,
+  onProjectStateChange,
   initialView,
 }: ProjectWorkspaceProps) {
   const [editingProject, setEditingProject] = useState(false);
   const [selectedOperationId, setSelectedOperationId] = useState<string | null>(pickDefaultOperation(project));
-  const [selectedSetupId, setSelectedSetupId] = useState<string | null>(project?.montajes[0]?.id ?? null);
+  const [selectedSetupId, setSelectedSetupId] = useState<string | null>(project?.current_setup_id ?? project?.montajes[0]?.id ?? null);
   const [newSetupName, setNewSetupName] = useState("");
   const [newOperationName, setNewOperationName] = useState("Fresado superior");
   const [newOperationType, setNewOperationType] = useState("fresado_superior");
@@ -190,6 +192,7 @@ export function ProjectWorkspace({
   const referenceMoveInFlight = useRef(false);
   const startJobInFlight = useRef(false);
   const [workspaceError, setWorkspaceError] = useState("");
+  const [executionError, setExecutionError] = useState<ApiError | null>(null);
   const [workOrigin, setWorkOrigin] = useState<InputState>({ x_mm: "0", y_mm: "0" });
   const [zReference, setZReference] = useState<ZInputState>({ x_mm: "0", y_mm: "0", z_mm: "0" });
   const [useWorkOriginXYForZ, setUseWorkOriginXYForZ] = useState(false);
@@ -302,8 +305,15 @@ export function ProjectWorkspace({
       setSelectedSetupId(selectedOperation.setup_id);
       return;
     }
-    setSelectedSetupId((current) => project.montajes.some((setup) => setup.id === current) ? current : project.montajes[0]?.id ?? null);
+    setSelectedSetupId((current) => project.montajes.some((setup) => setup.id === current) ? current : project.current_setup_id ?? project.montajes[0]?.id ?? null);
   }, [project, selectedOperation]);
+
+  useEffect(() => {
+    if (!project || !selectedSetupId || project.current_setup_id === selectedSetupId || !onProjectStateChange) {
+      return;
+    }
+    onProjectStateChange({ ...project, current_setup_id: selectedSetupId });
+  }, [onProjectStateChange, project, selectedSetupId]);
 
   useEffect(() => {
     if (!project || !selectedOperation) {
@@ -437,6 +447,7 @@ export function ProjectWorkspace({
         }
         setJobPlan(plan);
         setLiveExecution(live);
+        setExecutionError(null);
       } catch {
         if (!cancelled) {
           setJobPlan(null);
@@ -1717,6 +1728,7 @@ export function ProjectWorkspace({
     ]);
     setJobPlan(plan);
     setLiveExecution(live);
+    setExecutionError(null);
   };
 
   const generateProjectCompensation = async () => {
@@ -1746,6 +1758,7 @@ export function ProjectWorkspace({
       await api.prepareJobRun(project.id, selectedSetup.id, activeJobFace);
       await refreshJobState();
     } catch (error) {
+      setExecutionError(error instanceof ApiError ? error : null);
       setWorkspaceError(error instanceof Error ? error.message : "No fue posible preparar el trabajo.");
     } finally {
       setReferenceBusy(false);
@@ -1763,6 +1776,7 @@ export function ProjectWorkspace({
       await api.startJobRun(project.id, selectedSetup.id, activeJobFace);
       await refreshJobState();
     } catch (error) {
+      setExecutionError(error instanceof ApiError ? error : null);
       setWorkspaceError(error instanceof Error ? error.message : "No fue posible iniciar el trabajo multioperación.");
     } finally {
       startJobInFlight.current = false;
@@ -1784,7 +1798,28 @@ export function ProjectWorkspace({
         void api.getPhysicalMap(project.id, selectedOperation.id).then((result) => setPhysicalMap(result.payload)).catch(() => undefined);
       }
     } catch (error) {
+      setExecutionError(error instanceof ApiError ? error : null);
       setWorkspaceError(error instanceof Error ? error.message : "No fue posible actualizar el trabajo multioperación.");
+    } finally {
+      setReferenceBusy(false);
+    }
+  };
+
+  const archiveStaleJobRun = async () => {
+    if (!project || !selectedSetup || !activeJobFace) {
+      return;
+    }
+    setReferenceBusy(true);
+    setWorkspaceError("");
+    try {
+      await api.archiveStaleJobRun(project.id, selectedSetup.id, activeJobFace);
+      await refreshJobState();
+      if (onRefreshProject) {
+        await onRefreshProject();
+      }
+    } catch (error) {
+      setExecutionError(error instanceof ApiError ? error : null);
+      setWorkspaceError(error instanceof Error ? error.message : "No fue posible cerrar la ejecución obsoleta.");
     } finally {
       setReferenceBusy(false);
     }
@@ -1862,10 +1897,12 @@ export function ProjectWorkspace({
     return (
       <ExecutionConsole
         snapshot={liveExecution}
+        error={executionError}
         busy={referenceBusy}
         onPrepare={prepareJobRun}
         onStart={startJobRun}
         onAction={runJobAction}
+        onArchiveStale={archiveStaleJobRun}
       />
     );
   };

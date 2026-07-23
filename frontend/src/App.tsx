@@ -659,6 +659,9 @@ Después deberá volver a conectar el Arduino, hacer homing, posicionar X0/Y0 y 
                 onAnalyze={handleAnalyze}
                 onUploadFile={handleUploadFile}
                 onRefreshProject={selectedProjectId ? async () => { await syncProject(selectedProjectId); } : undefined}
+                onProjectStateChange={(project) => {
+                  setProjects((current) => current.map((item) => item.id === project.id ? project : item));
+                }}
                 initialView={workspaceViewOverride}
               />
             </div>

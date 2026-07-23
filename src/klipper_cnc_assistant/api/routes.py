@@ -718,8 +718,13 @@ def build_router() -> APIRouter:
             return request.app.state.job_service.start_run(project_id=project_id, setup_id=str(payload["setup_id"]), face=str(payload["face"]))
         except ApplicationError as error:
             if str(error) == "JOB_ACTIVE_CONFLICT":
-                raise HTTPException(status_code=409, detail="Ya existe un trabajo activo para este montaje y cara.") from error
+                detail = request.app.state.job_service.describe_run_conflict(project_id=project_id, setup_id=str(payload["setup_id"]), face=str(payload["face"]))
+                raise HTTPException(status_code=409, detail=detail) from error
             raise
+
+    @router.post("/projects/{project_id}/job-run/archive-stale", response_model=dict[str, object])
+    def archive_stale_job_run(project_id: str, payload: dict[str, str], request: Request) -> dict[str, object]:
+        return request.app.state.job_service.archive_stale_run(project_id=project_id, setup_id=str(payload["setup_id"]), face=str(payload["face"]))
 
     @router.post("/projects/{project_id}/job-run/dry-run", response_model=dict[str, object])
     def dry_run_job(project_id: str, payload: dict[str, str], request: Request) -> dict[str, object]:

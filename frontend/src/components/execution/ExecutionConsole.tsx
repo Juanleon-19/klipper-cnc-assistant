@@ -1,13 +1,16 @@
+import type { ApiError } from "../../lib/api";
 import { formatDate, formatFileSize } from "../../lib/format";
-import type { JobRunEvent, JobRunOperation, LiveExecutionSnapshot } from "../../types";
+import type { JobRunConflictDetail, JobRunEvent, JobRunOperation, LiveExecutionSnapshot } from "../../types";
 import { StatusBadge } from "../StatusBadge";
 
 type ExecutionConsoleProps = {
   snapshot: LiveExecutionSnapshot | null;
+  error: ApiError | null;
   busy: boolean;
   onPrepare: () => void | Promise<void>;
   onStart: () => void | Promise<void>;
   onAction: (action: string) => void | Promise<void>;
+  onArchiveStale: () => void | Promise<void>;
 };
 
 const ACTION_LABELS: Record<string, string> = {
@@ -21,7 +24,8 @@ const ACTION_LABELS: Record<string, string> = {
   continue: "Continuar trabajo",
 };
 
-const ACTIVE_STATES = new Set(["JOB_READY", "JOB_VALIDATING", "JOB_DRAFT"]);
+const STARTABLE_STATES = new Set(["JOB_READY"]);
+const ARCHIVE_CANDIDATE_STATES = new Set(["JOB_VALIDATING", "JOB_STARTING", "OPERATION_PREFLIGHT", "OPERATION_UPLOADING", "WAITING_FOR_KLIPPER", "PRINT_QUEUED", "OPERATION_RUNNING", "RECOVERY_REQUIRED", "TOOL_CHANGE_REQUIRED", "READY_TO_RESUME", "OPERATION_PAUSED", "JOB_PAUSED", "NEXT_OPERATION_READY"]);
 const TOOL_WAIT_STATES = new Set(["TOOL_CHANGE_REQUIRED", "TOOL_CHANGE_CONFIRMED", "MOVING_TO_REFERENCE", "CALIBRATING_TOOL", "REGENERATING_COMPENSATION", "VALIDATING_REGENERATED_PLAN", "READY_TO_RESUME"]);
 
 function clamp(value: number | null | undefined): number {
@@ -33,6 +37,24 @@ function clamp(value: number | null | undefined): number {
 
 function percent(value: number | null | undefined): string {
   return `${(clamp(value) * 100).toFixed(1)} %`;
+}
+
+function isConflictDetail(value: unknown): value is JobRunConflictDetail {
+  return Boolean(value && typeof value === "object" && "code" in (value as Record<string, unknown>) && "existing_run" in (value as Record<string, unknown>));
+}
+
+function canArchiveStale(snapshot: LiveExecutionSnapshot | null, detail: JobRunConflictDetail | null): boolean {
+  if (detail?.can_archive_stale) {
+    return true;
+  }
+  if (!snapshot) {
+    return false;
+  }
+  return !snapshot.moonraker.is_active
+    && String(snapshot.moonraker.print_state ?? "").toLowerCase() !== "printing"
+    && ARCHIVE_CANDIDATE_STATES.has(snapshot.run.status)
+    && snapshot.run.worker_alive === false
+    && snapshot.run.watcher_alive === false;
 }
 
 function executionTone(value: string | null | undefined): "success" | "warning" | "danger" | "info" | "neutral" {
@@ -78,11 +100,13 @@ function currentOperationLabel(snapshot: LiveExecutionSnapshot | null): string {
   return `Operación ${index} de ${snapshot.run.total_operations}`;
 }
 
-export function ExecutionConsole({ snapshot, busy, onPrepare, onStart, onAction }: ExecutionConsoleProps) {
+export function ExecutionConsole({ snapshot, error, busy, onPrepare, onStart, onAction, onArchiveStale }: ExecutionConsoleProps) {
   const jobRun = snapshot?.job_run ?? null;
   const actions = (snapshot?.run.available_actions ?? jobRun?.available_actions ?? []).filter((action, index, list) => list.indexOf(action) === index);
   const events = dedupeEvents(snapshot?.events ?? []);
-  const showStart = ACTIVE_STATES.has(snapshot?.run.status ?? "") || actions.includes("start");
+  const conflictDetail = isConflictDetail(error?.detail) ? error.detail : null;
+  const showArchiveStale = canArchiveStale(snapshot, conflictDetail);
+  const showStart = STARTABLE_STATES.has(snapshot?.run.status ?? "") || actions.includes("start");
   const extraActions = actions.filter((action) => action !== "start");
   const operationPercent = percent(snapshot?.operation.progress ?? 0);
   const overallPercent = percent(snapshot?.run.overall_progress ?? 0);
@@ -101,6 +125,31 @@ export function ExecutionConsole({ snapshot, busy, onPrepare, onStart, onAction 
       </div>
 
       {desync ? <div className="alert alert--danger"><strong>DESINCRONIZACIÓN:</strong> Moonraker está ejecutando el archivo, pero JobRun no lo está siguiendo.</div> : null}
+
+      {error ? (
+        <section className="execution-panel">
+          <div className="section-heading"><h4>Errores de ejecución</h4></div>
+          <div className="alert alert--danger">
+            <strong>{conflictDetail?.code ?? `HTTP ${error.status}`}</strong>
+            <p>{conflictDetail?.message ?? error.message}</p>
+            {conflictDetail ? (
+              <>
+                <div className="info-grid info-grid--double compact-grid">
+                  <div className="metric-box"><span>Run ID</span><strong className="mono-text execution-console-v2__file">{conflictDetail.existing_run.run_id ?? "-"}</strong></div>
+                  <div className="metric-box"><span>Estado</span><strong>{conflictDetail.existing_run.status}</strong></div>
+                  <div className="metric-box"><span>Operación</span><strong>{conflictDetail.existing_run.current_operation.name ?? "-"}</strong></div>
+                  <div className="metric-box"><span>Archivo</span><strong className="mono-text execution-console-v2__file">{conflictDetail.existing_run.remote_file ?? conflictDetail.moonraker.filename ?? "-"}</strong></div>
+                  <div className="metric-box"><span>Última actualización</span><strong>{conflictDetail.existing_run.updated_at ? formatDate(conflictDetail.existing_run.updated_at) : "-"}</strong></div>
+                  <div className="metric-box"><span>Worker</span><strong>{conflictDetail.existing_run.worker_alive ? "activo" : "inactivo"}</strong></div>
+                  <div className="metric-box"><span>Moonraker</span><strong>{conflictDetail.moonraker.print_state ?? conflictDetail.moonraker.webhooks_state ?? "standby"}</strong></div>
+                  <div className="metric-box"><span>Acción disponible</span><strong>{conflictDetail.available_actions.join(", ") || "abrir"}</strong></div>
+                </div>
+                <p>{conflictDetail.conflict_condition}</p>
+              </>
+            ) : null}
+          </div>
+        </section>
+      ) : null}
 
       <div className="execution-console-v2__metrics">
         <div className="metric-box"><span>Estado</span><strong>{snapshot?.operation.execution_status ?? snapshot?.run.status ?? "JOB_DRAFT"}</strong></div>
@@ -140,6 +189,20 @@ export function ExecutionConsole({ snapshot, busy, onPrepare, onStart, onAction 
             {ACTION_LABELS[action] ?? action}
           </button>
         ))}
+        {showArchiveStale ? (
+          <button
+            className="button button--ghost button--danger"
+            type="button"
+            disabled={busy}
+            onClick={() => {
+              if (window.confirm("Se archivará la ejecución obsoleta actual sin borrar datos del proyecto. ¿Desea continuar?")) {
+                void onArchiveStale();
+              }
+            }}
+          >
+            Cerrar ejecución obsoleta
+          </button>
+        ) : null}
       </div>
 
       <div className="execution-console-v2__layout">

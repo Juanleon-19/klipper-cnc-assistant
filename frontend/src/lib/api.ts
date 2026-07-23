@@ -18,6 +18,7 @@ import type {
   JobPlan,
   JobRun,
   LiveExecutionSnapshot,
+  StaleRunArchiveResult,
   ReferenceConfirmation,
   ReferenceMoveResult,
   ReferenceSession,
@@ -73,12 +74,16 @@ export type PhysicalMapPlanPayload = {
 export class ApiError extends Error {
   status: number;
   fieldErrors: Record<string, string>;
+  detail: unknown;
+  errors: unknown;
 
-  constructor(message: string, status: number, fieldErrors: Record<string, string> = {}) {
+  constructor(message: string, status: number, fieldErrors: Record<string, string> = {}, detail: unknown = null, errors: unknown = null) {
     super(message);
     this.name = "ApiError";
     this.status = status;
     this.fieldErrors = fieldErrors;
+    this.detail = detail;
+    this.errors = errors;
   }
 }
 
@@ -98,6 +103,19 @@ function translateFastApiDetail(detail: unknown, structuredErrors?: unknown): { 
     if (messages.length > 0) {
       return { message: `Solicitud inválida. ${messages.join(" ")}`, fieldErrors };
     }
+  }
+
+  if (detail && typeof detail === "object") {
+    const record = detail as Record<string, unknown>;
+    const message = typeof record.message === "string" && record.message.trim()
+      ? record.message
+      : typeof record.detalle === "string" && record.detalle.trim()
+        ? record.detalle
+        : typeof record.code === "string" && record.code.trim()
+          ? record.code
+          : "Solicitud rechazada.";
+    const code = typeof record.code === "string" && record.code.trim() ? record.code : null;
+    return { message: code ? `${code}: ${message}` : message, fieldErrors: {} };
   }
 
   if (typeof detail === "string" && detail.trim()) {
@@ -155,7 +173,7 @@ async function request<T>(input: RequestInfo, init?: RequestInit): Promise<T> {
     };
     const rawDetail = payload.detalle ?? payload.detail;
     const { message, fieldErrors } = translateFastApiDetail(rawDetail, payload.errores);
-    throw new ApiError(message, response.status, fieldErrors);
+    throw new ApiError(message, response.status, fieldErrors, rawDetail, payload.errores);
   }
   return (await response.json()) as T;
 }
@@ -384,6 +402,8 @@ export const api = {
     request<JobRun>(`/api/projects/${projectId}/job-run/prepare`, { method: "POST", body: JSON.stringify({ setup_id: setupId, face }) }),
   startJobRun: (projectId: string, setupId: string, face: string) =>
     request<JobRun>(`/api/projects/${projectId}/job-run/start`, { method: "POST", body: JSON.stringify({ setup_id: setupId, face }) }),
+  archiveStaleJobRun: (projectId: string, setupId: string, face: string) =>
+    request<StaleRunArchiveResult>(`/api/projects/${projectId}/job-run/archive-stale`, { method: "POST", body: JSON.stringify({ setup_id: setupId, face }) }),
   runJobAction: (projectId: string, setupId: string, face: string, action: string) =>
     request<JobRun>(`/api/projects/${projectId}/job-run/action`, { method: "POST", body: JSON.stringify({ setup_id: setupId, face, action }) }),
   getJobHistory: (projectId: string, setupId: string, face: string) =>

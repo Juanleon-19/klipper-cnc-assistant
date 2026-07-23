@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -436,6 +437,92 @@ class JobServiceTest(unittest.TestCase):
         self.assertEqual(self.adapter.uploads, [])
         self.assertEqual(persisted["state"], "RECOVERY_REQUIRED")
         self.assertEqual(persisted["recovery_state"], "RECOVERY_REQUIRED")
+
+    def test_start_run_refreshes_job_validating_before_reporting_blockers(self) -> None:
+        self.job_service.generate_project_compensation(project_id=self.project_id, setup_id=self.setup_id, face="superior")
+        context = self.job_service._context(self.project_id, self.setup_id, "superior")
+        run = self.job_service.prepare_run(project_id=self.project_id, setup_id=self.setup_id, face="superior")
+        run["state"] = "JOB_VALIDATING"
+        self.job_service._save_run(context, run)
+        self.runtime.snapshot = lambda: {  # type: ignore[method-assign]
+            "mode": "PHYSICAL",
+            "moonraker": {"http_connected": True, "websocket_connected": True, "telemetry_state": "LIVE", "url": "http://moonraker.local"},
+            "klipper": {"ready": True, "homed_axes": "xy"},
+            "started_at": "runtime-session",
+        }
+
+        with self.assertRaisesRegex(Exception, "El trabajo no está listo para iniciar"):
+            self.job_service.start_run(project_id=self.project_id, setup_id=self.setup_id, face="superior")
+
+        persisted = json.loads(self.job_service._run_file(context).read_text(encoding="utf-8"))
+        self.assertEqual(persisted["state"], "JOB_VALIDATING")
+        self.assertFalse(persisted["ready"])
+        self.assertEqual(self.adapter.uploads, [])
+
+    def test_describe_run_conflict_reports_structured_dead_jobrun(self) -> None:
+        self.job_service.generate_project_compensation(project_id=self.project_id, setup_id=self.setup_id, face="superior")
+        context = self.job_service._context(self.project_id, self.setup_id, "superior")
+        run = self.job_service.prepare_run(project_id=self.project_id, setup_id=self.setup_id, face="superior")
+        run["state"] = "JOB_VALIDATING"
+        self.job_service._save_run(context, run)
+        self.adapter.status_sequence = [{"state": "standby", "filename": "", "progress": 0.0, "is_active": False}]
+
+        detail = self.job_service.describe_run_conflict(project_id=self.project_id, setup_id=self.setup_id, face="superior")
+
+        self.assertEqual(detail["code"], "JOB_ACTIVE_CONFLICT")
+        self.assertEqual(detail["existing_run"]["run_id"], run["run_id"])
+        self.assertEqual(detail["existing_run"]["status"], "JOB_VALIDATING")
+        self.assertFalse(detail["existing_run"]["worker_alive"])
+        self.assertFalse(detail["moonraker"]["is_active"])
+        self.assertTrue(detail["can_archive_stale"])
+
+    def test_archive_stale_run_rejects_active_moonraker_print(self) -> None:
+        self.job_service.generate_project_compensation(project_id=self.project_id, setup_id=self.setup_id, face="superior")
+        context = self.job_service._context(self.project_id, self.setup_id, "superior")
+        run = self.job_service.prepare_run(project_id=self.project_id, setup_id=self.setup_id, face="superior")
+        run["state"] = "WAITING_FOR_KLIPPER"
+        self.job_service._save_run(context, run)
+        self.adapter.status_sequence = [{"state": "printing", "filename": "active.gcode", "progress": 0.42, "is_active": True}]
+
+        with self.assertRaisesRegex(Exception, "No se puede archivar la ejecución obsoleta"):
+            self.job_service.archive_stale_run(project_id=self.project_id, setup_id=self.setup_id, face="superior")
+
+        self.assertTrue(self.job_service._run_file(context).exists())
+
+    def test_archive_stale_run_preserves_map_reference_and_compensated_files(self) -> None:
+        plan = self.job_service.generate_project_compensation(project_id=self.project_id, setup_id=self.setup_id, face="superior")
+        context = self.job_service._context(self.project_id, self.setup_id, "superior")
+        run = self.job_service.prepare_run(project_id=self.project_id, setup_id=self.setup_id, face="superior")
+        run["state"] = "WAITING_FOR_KLIPPER"
+        run["available_actions"] = ["pause", "cancel"]
+        self.job_service._save_run(context, run)
+        stale_thread = threading.Thread(target=lambda: None, name="stale-supervisor")
+        self.job_service._threads[(self.project_id, self.setup_id, "superior")] = stale_thread  # type: ignore[attr-defined]
+        self.adapter.status_sequence = [{"state": "standby", "filename": "", "progress": 0.0, "is_active": False}]
+        setup_before = self.project_service.get_project(self.project_id).get_setup(self.setup_id)
+        generated_files = [self.repository.project_dir(self.project_id) / item["generated_file"] for item in plan["operations"] if item.get("generated_file")]
+
+        result = self.job_service.archive_stale_run(project_id=self.project_id, setup_id=self.setup_id, face="superior")
+
+        self.assertEqual(result["archived_run_id"], run["run_id"])
+        self.assertEqual(result["previous_status"], "WAITING_FOR_KLIPPER")
+        self.assertTrue(result["can_start_new_run"])
+        self.assertIn("job_run.current_run", result["locks_released"])
+        self.assertIn("job_supervisor.registry", result["locks_released"])
+        archive_path = self.repository.project_dir(self.project_id) / result["archive_path"]
+        self.assertTrue(archive_path.exists())
+        archived = json.loads(archive_path.read_text(encoding="utf-8"))
+        self.assertEqual(archived["state"], "STALE_RUN_ARCHIVED")
+        self.assertEqual(archived["previous_status"], "WAITING_FOR_KLIPPER")
+        self.assertFalse(self.job_service._run_file(context).exists())
+        setup_after = self.project_service.get_project(self.project_id).get_setup(self.setup_id)
+        self.assertEqual(setup_after.active_map_id, setup_before.active_map_id)
+        self.assertEqual(setup_after.preparacion.referencia_z, setup_before.preparacion.referencia_z)
+        for generated in generated_files:
+            self.assertTrue(generated.exists())
+        new_run = self.job_service.get_run(project_id=self.project_id, setup_id=self.setup_id, face="superior")
+        self.assertEqual(new_run["state"], "JOB_READY")
+        self.assertTrue(self.job_service._run_file(context).exists())
 
 
 if __name__ == "__main__":

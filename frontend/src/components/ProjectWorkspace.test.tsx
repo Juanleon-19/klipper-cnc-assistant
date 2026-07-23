@@ -46,6 +46,7 @@ const apiMock = vi.hoisted(() => ({
   getLiveExecution: vi.fn(),
   prepareJobRun: vi.fn(),
   startJobRun: vi.fn(),
+  archiveStaleJobRun: vi.fn(),
   runJobAction: vi.fn(),
   getJobHistory: vi.fn(),
   executionPreflight: vi.fn(),
@@ -396,7 +397,7 @@ const physicalMachine: MachineContextValue = {
   refreshRuntime: vi.fn(),
 };
 
-function renderWorkspace(machine?: MachineContextValue, options?: { onRefreshProject?: () => Promise<void> }) {
+function renderWorkspace(machine?: MachineContextValue, options?: { onRefreshProject?: () => Promise<void>; onProjectStateChange?: (project: Project) => void }) {
   const workspace = (
     <ProjectWorkspace
       project={project}
@@ -413,6 +414,7 @@ function renderWorkspace(machine?: MachineContextValue, options?: { onRefreshPro
       onAnalyze={vi.fn()}
       onUploadFile={vi.fn()}
       onRefreshProject={options?.onRefreshProject}
+      onProjectStateChange={options?.onProjectStateChange}
     />
   );
   return render(machine ? <MachineContext.Provider value={machine}>{workspace}</MachineContext.Provider> : workspace);
@@ -498,6 +500,7 @@ describe("ProjectWorkspace", () => {
     apiMock.getLiveExecution.mockResolvedValue(liveExecution);
     apiMock.prepareJobRun.mockResolvedValue(jobRun);
     apiMock.startJobRun.mockResolvedValue({ ...jobRun, state: "JOB_STARTING" });
+    apiMock.archiveStaleJobRun.mockResolvedValue({ archived_run_id: jobRun.run_id, previous_status: "JOB_VALIDATING", archive_path: "reports/jobs/setup-main/superior/history/stale.json", locks_released: ["job_run.current_run"], can_start_new_run: true });
     apiMock.runJobAction.mockResolvedValue({ ...jobRun, state: "WAITING_TOOL_CHANGE", next_action: "Confirmar cambio de herramienta" });
     apiMock.getJobHistory.mockResolvedValue([{ run_id: jobRun.run_id, state: jobRun.state, started_at: null, completed_at: null, tool_changes_completed: 0, operations_completed: 0, manifest_path: jobRun.manifest_path }]);
     apiMock.confirmWorkOrigin.mockResolvedValue(referenceSession);
@@ -520,6 +523,46 @@ describe("ProjectWorkspace", () => {
       },
     });
     window.localStorage.clear();
+  });
+
+  it("sincroniza el montaje activo con el estado lateral del proyecto", async () => {
+    const sync = vi.fn();
+    const projectWithTwoSetups: Project = {
+      ...project,
+      current_setup_id: "setup-main",
+      montajes: [
+        { ...project.montajes[0], id: "setup-main", nombre: "Montaje principal", orden: 0 },
+        { id: "setup-bottom", nombre: "Montaje inferior", orden: 1 },
+      ],
+      operaciones: [
+        ...project.operaciones,
+        { ...project.operaciones[0], id: "op_2", nombre: "Contorno inferior", cara: "inferior", setup_id: "setup-bottom" },
+      ],
+    };
+    const workspace = (
+      <ProjectWorkspace
+        project={projectWithTwoSetups}
+        busyKey={null}
+        savingProject={false}
+        onSaveProject={vi.fn()}
+        onAddSetup={vi.fn()}
+        onAddOperation={vi.fn()}
+        onUpdateOperation={vi.fn()}
+        onDuplicateOperation={vi.fn()}
+        onMoveOperation={vi.fn()}
+        onDeleteOperation={vi.fn()}
+        onRemoveFile={vi.fn()}
+        onAnalyze={vi.fn()}
+        onUploadFile={vi.fn()}
+        onProjectStateChange={sync}
+      />
+    );
+    render(workspace);
+
+    const select = await screen.findByLabelText(/Montaje activo/i);
+    fireEvent.change(select, { target: { value: "setup-bottom" } });
+
+    await waitFor(() => expect(sync).toHaveBeenCalledWith(expect.objectContaining({ current_setup_id: "setup-bottom" })));
   });
 
   it("navega entre vistas principales y subpestañas del mapa", async () => {

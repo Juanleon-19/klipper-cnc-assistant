@@ -9,6 +9,7 @@ from unittest.mock import patch
 from fastapi.testclient import TestClient
 
 from klipper_cnc_assistant.api import create_app
+from klipper_cnc_assistant.application.errors import ApplicationError
 
 
 class ApiTest(unittest.TestCase):
@@ -45,6 +46,44 @@ class ApiTest(unittest.TestCase):
         payload = json.loads(project_file.read_text(encoding="utf-8"))
         payload["montajes"][0]["preparacion"] = preparation
         project_file.write_text(json.dumps(payload, ensure_ascii=True, indent=2), encoding="utf-8")
+
+    def test_job_run_start_conflict_returns_structured_detail(self) -> None:
+        def raise_conflict(*_args, **_kwargs):
+            raise ApplicationError("JOB_ACTIVE_CONFLICT")
+
+        self.app.state.job_service.start_run = raise_conflict
+        self.app.state.job_service.describe_run_conflict = lambda **_kwargs: {
+            "code": "JOB_ACTIVE_CONFLICT",
+            "message": "Ya existe un trabajo activo para este montaje y cara.",
+            "conflict_condition": "current_run.state=JOB_VALIDATING no es terminal ni JOB_READY.",
+            "existing_run": {"run_id": "job-run/setup-main/superior/20260722-040230", "status": "JOB_VALIDATING"},
+            "moonraker": {"print_state": "standby", "is_active": False},
+            "available_actions": ["open", "archive-stale"],
+            "can_archive_stale": True,
+        }
+
+        response = self.client.post('/api/projects/proj_1/job-run/start', json={"setup_id": "setup-main", "face": "superior"})
+
+        self.assertEqual(response.status_code, 409)
+        payload = response.json()["detail"]
+        self.assertEqual(payload["code"], "JOB_ACTIVE_CONFLICT")
+        self.assertEqual(payload["existing_run"]["run_id"], "job-run/setup-main/superior/20260722-040230")
+        self.assertTrue(payload["can_archive_stale"])
+
+    def test_archive_stale_job_run_endpoint_returns_archive_report(self) -> None:
+        self.app.state.job_service.archive_stale_run = lambda **_kwargs: {
+            "archived_run_id": "job-run/setup-main/superior/20260722-040230",
+            "previous_status": "WAITING_FOR_KLIPPER",
+            "archive_path": "reports/jobs/setup-main/superior/history/stale.json",
+            "locks_released": ["job_run.current_run"],
+            "can_start_new_run": True,
+        }
+
+        response = self.client.post('/api/projects/proj_1/job-run/archive-stale', json={"setup_id": "setup-main", "face": "superior"})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["archived_run_id"], "job-run/setup-main/superior/20260722-040230")
+        self.assertTrue(response.json()["can_start_new_run"])
 
     def test_go_to_reference_rejects_missing_saved_reference_without_motion(self) -> None:
         project_id = self._create_project()

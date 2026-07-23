@@ -41,6 +41,8 @@ RUN_ACTIVE_STATES = {
     "COMPENSATING_NEXT_OPERATIONS",
     "NEXT_OPERATION_READY",
 }
+RUN_REFRESHABLE_IDLE_STATES = {"JOB_DRAFT", "JOB_VALIDATING"}
+RUN_MARKED_ACTIVE_STATES = RUN_ACTIVE_STATES | RUN_WAITING_STATES | {"JOB_VALIDATING"}
 
 
 def _utc_now() -> datetime:
@@ -237,14 +239,20 @@ class JobService:
         context = self._context(project_id, setup_id, face)
         with self._lock:
             current = self._load_run(context)
+        run: dict[str, Any] | None = current
         if current is not None:
             recovered = self._recover_active_print_if_possible(context, current)
             if recovered is not None:
                 self._start_worker(context)
                 return recovered
-            if current.get("state") not in RUN_TERMINAL_STATES | {"JOB_READY"}:
+            state = str(current.get("state") or "")
+            if state in RUN_TERMINAL_STATES:
+                run = None
+            elif state in RUN_REFRESHABLE_IDLE_STATES:
+                run = self.prepare_run(project_id=project_id, setup_id=setup_id, face=face)
+            elif state != "JOB_READY":
                 raise ApplicationError("JOB_ACTIVE_CONFLICT")
-        prepared = self.prepare_run(project_id=project_id, setup_id=setup_id, face=face)
+        prepared = run if run is not None else self.prepare_run(project_id=project_id, setup_id=setup_id, face=face)
         if not prepared.get("ready"):
             raise ApplicationError("El trabajo no está listo para iniciar. Revise el preflight general.")
         run = prepared
@@ -300,27 +308,9 @@ class JobService:
         run = self._load_run(context)
         if run is None:
             run = self.prepare_run(project_id=project_id, setup_id=setup_id, face=face)
-        thread = self._threads.get((context.project_id, context.setup_id, context.face))
-        worker_alive = bool(thread and thread.is_alive())
-        try:
-            status = self.adapter_factory(self.runtime).print_status()
-        except Exception as error:
-            status = {
-                "connected": False,
-                "klipper_ready": False,
-                "klipper_state": None,
-                "state": None,
-                "filename": None,
-                "message": str(error),
-                "progress": 0.0,
-                "file_position": None,
-                "file_size": None,
-                "file_path": None,
-                "print_duration": None,
-                "active": False,
-                "is_active": False,
-                "updated_at": _iso_now(),
-            }
+        diagnosis = self._diagnose_run(context, run)
+        status = diagnosis["moonraker"]
+        worker_alive = bool(diagnosis["run"].get("worker_alive"))
         operations = list(run.get("operations") or [])
         index = int(run.get("current_operation_index", 0) or 0)
         if operations:
@@ -337,7 +327,7 @@ class JobService:
         next_index = index + 1
         next_operation = operations[next_index] if 0 <= next_index < len(operations) else None
         sync_reason = None
-        print_state = str(status.get("state") or "").lower()
+        print_state = str(status.get("print_state") or "").lower()
         if print_state == "printing":
             if not expected:
                 sync_reason = "remote_file_missing"
@@ -353,7 +343,7 @@ class JobService:
             "moonraker": {
                 "connected": bool(status.get("connected", True)),
                 "klipper_state": status.get("klipper_state"),
-                "print_state": status.get("state"),
+                "print_state": status.get("print_state"),
                 "filename": status.get("filename"),
                 "progress": self._clamp_progress(status.get("progress")),
                 "is_active": bool(status.get("is_active", status.get("active"))),
@@ -374,6 +364,9 @@ class JobService:
                 "available_actions": list(run.get("available_actions") or []),
                 "worker_alive": worker_alive,
                 "watcher_alive": worker_alive,
+                "supervisor_registered": bool(diagnosis["run"].get("supervisor_registered")),
+                "movement_lock": diagnosis["run"].get("movement_lock"),
+                "job_lock": bool(diagnosis["run"].get("job_lock")),
                 "last_watcher_error": run.get("last_watcher_error"),
                 "recovery_state": run.get("recovery_state"),
                 "updated_at": run.get("updated_at"),
@@ -401,6 +394,67 @@ class JobService:
             },
             "events": self._dedupe_events(run.get("events") or []),
             "job_run": run,
+        }
+
+    def describe_run_conflict(self, *, project_id: str, setup_id: str, face: str) -> dict[str, Any]:
+        context = self._context(project_id, setup_id, face)
+        run = self._load_run(context)
+        if run is None:
+            raise NotFoundError("No existe una ejecución de trabajo para este montaje/cara.")
+        diagnosis = self._diagnose_run(context, run)
+        state = str(run.get("state") or "JOB_DRAFT")
+        conflict_condition = (
+            f"current_run.state={state} no es terminal ni JOB_READY, "
+            "por lo que start_run rechaza un segundo inicio para el mismo montaje/cara."
+        )
+        can_archive_stale = (
+            self._moonraker_is_idle(diagnosis["moonraker"])
+            and state in RUN_MARKED_ACTIVE_STATES
+            and diagnosis["run"]["worker_alive"] is False
+            and diagnosis["run"]["watcher_alive"] is False
+        )
+        return {
+            "code": "JOB_ACTIVE_CONFLICT",
+            "message": "Ya existe un trabajo activo para este montaje y cara.",
+            "conflict_condition": conflict_condition,
+            "existing_run": diagnosis["run"],
+            "moonraker": diagnosis["moonraker"],
+            "available_actions": self._available_recovery_actions(diagnosis, run),
+            "can_archive_stale": can_archive_stale,
+        }
+
+    def archive_stale_run(self, *, project_id: str, setup_id: str, face: str) -> dict[str, Any]:
+        context = self._context(project_id, setup_id, face)
+        run = self._load_run(context)
+        if run is None:
+            raise NotFoundError("No existe una ejecución de trabajo para este montaje/cara.")
+        diagnosis = self._diagnose_run(context, run)
+        moonraker = diagnosis["moonraker"]
+        if not self._moonraker_is_idle(moonraker):
+            raise ApplicationError("No se puede archivar la ejecución obsoleta mientras Moonraker siga imprimiendo o virtual_sdcard esté activa.")
+        released = self._release_stale_supervisor(context, run, diagnosis)
+        previous_status = str(run.get("state") or "JOB_DRAFT")
+        archived = json.loads(json.dumps(run))
+        archived["previous_status"] = previous_status
+        archived["state"] = "STALE_RUN_ARCHIVED"
+        archived["recovery_state"] = "RECOVERY_REQUIRED" if diagnosis["run"]["supervisor_registered"] else "STALE_RUN_ARCHIVED"
+        archived["completed_at"] = archived.get("completed_at") or _iso_now()
+        archived["updated_at"] = _iso_now()
+        archived["available_actions"] = []
+        archived["next_action"] = "Ejecución obsoleta archivada"
+        archived["moonraker_snapshot"] = moonraker
+        self._append_event(archived, "warning", "Ejecución obsoleta archivada manualmente tras confirmar que Moonraker estaba inactivo.")
+        archive_path = self._write_archived_run(context, archived, suffix="stale")
+        run_file = self._run_file(context)
+        if run_file.exists():
+            run_file.unlink()
+            released.append("job_run.current_run")
+        return {
+            "archived_run_id": archived.get("run_id"),
+            "previous_status": previous_status,
+            "archive_path": self._relative_to_project(context.project_id, archive_path),
+            "locks_released": released,
+            "can_start_new_run": not self._run_file(context).exists(),
         }
 
     def history(self, *, project_id: str, setup_id: str, face: str) -> list[dict[str, Any]]:
@@ -1358,9 +1412,150 @@ class JobService:
 
     def _archive_run(self, context: JobContext, run: dict[str, Any]) -> None:
         archived = dict(run)
-        history_file = self._history_dir(context) / (str(run["run_id"]).replace("/", "_") + ".json")
-        history_file.write_text(json.dumps(archived, ensure_ascii=True, indent=2, sort_keys=True), encoding="utf-8")
+        self._write_archived_run(context, archived)
         self._save_run(context, run)
+
+    def _write_archived_run(self, context: JobContext, run: dict[str, Any], *, suffix: str | None = None) -> Path:
+        stamp = _utc_now().strftime("%Y%m%d-%H%M%S")
+        base = str(run["run_id"]).replace("/", "_")
+        filename = f"{base}__{suffix}_{stamp}.json" if suffix else f"{base}__{stamp}.json"
+        history_file = self._history_dir(context) / filename
+        history_file.write_text(json.dumps(run, ensure_ascii=True, indent=2, sort_keys=True), encoding="utf-8")
+        return history_file
+
+    def _supervisor_thread(self, context: JobContext) -> threading.Thread | None:
+        return self._threads.get((context.project_id, context.setup_id, context.face))
+
+    def _status_fallback(self, error: Exception) -> dict[str, Any]:
+        return {
+            "connected": False,
+            "klipper_ready": False,
+            "klipper_state": None,
+            "state": None,
+            "filename": None,
+            "message": str(error),
+            "progress": 0.0,
+            "file_position": None,
+            "file_size": None,
+            "file_path": None,
+            "print_duration": None,
+            "active": False,
+            "is_active": False,
+            "updated_at": _iso_now(),
+        }
+
+    def _diagnose_run(self, context: JobContext, run: dict[str, Any]) -> dict[str, Any]:
+        thread = self._supervisor_thread(context)
+        worker_alive = bool(thread and thread.is_alive())
+        try:
+            status = self.adapter_factory(self.runtime).print_status()
+        except Exception as error:
+            status = self._status_fallback(error)
+        current_operation = self._diagnostic_operation(run)
+        return {
+            "moonraker": {
+                "connected": bool(status.get("connected", True)),
+                "webhooks_state": status.get("klipper_state"),
+                "klipper_state": status.get("klipper_state"),
+                "print_state": status.get("state"),
+                "filename": status.get("filename"),
+                "progress": self._clamp_progress(status.get("progress")),
+                "is_active": bool(status.get("is_active", status.get("active"))),
+                "file_position": status.get("file_position"),
+                "file_size": status.get("file_size"),
+                "print_duration": status.get("print_duration"),
+                "message": status.get("message"),
+                "updated_at": status.get("updated_at") or _iso_now(),
+            },
+            "run": {
+                "run_id": run.get("run_id"),
+                "project_id": context.project_id,
+                "setup": context.setup_id,
+                "side": context.face,
+                "placement_revision": run.get("placement_revision"),
+                "status": run.get("state") or "JOB_DRAFT",
+                "current_operation": current_operation,
+                "remote_file": current_operation.get("remote_file"),
+                "worker_alive": worker_alive,
+                "watcher_alive": worker_alive,
+                "supervisor_registered": thread is not None,
+                "movement_lock": self._movement_lock_state(),
+                "job_lock": self._run_file(context).exists(),
+                "updated_at": run.get("updated_at"),
+                "last_error": run.get("last_watcher_error"),
+                "available_actions": list(run.get("available_actions") or []),
+            },
+        }
+
+    def _diagnostic_operation(self, run: dict[str, Any]) -> dict[str, Any]:
+        operations = list(run.get("operations") or [])
+        if not operations:
+            return {"operation_id": None, "name": None, "execution_status": None, "remote_file": None}
+        index = int(run.get("current_operation_index", 0) or 0)
+        index = max(0, min(index, len(operations) - 1))
+        operation = operations[index]
+        return {
+            "operation_id": operation.get("operation_id"),
+            "name": operation.get("name"),
+            "execution_status": operation.get("execution_status"),
+            "remote_file": operation.get("remote_file"),
+        }
+
+    def _movement_lock_state(self) -> bool | None:
+        lock = getattr(self.runtime, "_movement_lock", None)
+        if lock is None or not hasattr(lock, "locked"):
+            return None
+        try:
+            return bool(lock.locked())
+        except Exception:
+            return None
+
+    def _moonraker_is_idle(self, status: dict[str, Any]) -> bool:
+        state = str(status.get("print_state") or "").lower()
+        return state not in {"printing", "paused"} and not bool(status.get("is_active"))
+
+    def _available_recovery_actions(self, diagnosis: dict[str, Any], run: dict[str, Any]) -> list[str]:
+        actions = ["open"]
+        if diagnosis["moonraker"]["print_state"] == "printing" or diagnosis["moonraker"]["is_active"]:
+            actions.append("recover")
+        if (
+            self._moonraker_is_idle(diagnosis["moonraker"])
+            and str(run.get("state") or "") in RUN_MARKED_ACTIVE_STATES
+            and diagnosis["run"]["worker_alive"] is False
+            and diagnosis["run"]["watcher_alive"] is False
+        ):
+            actions.append("archive-stale")
+        return actions
+
+    def _release_stale_supervisor(self, context: JobContext, run: dict[str, Any], diagnosis: dict[str, Any]) -> list[str]:
+        released: list[str] = []
+        key = (context.project_id, context.setup_id, context.face)
+        thread = self._supervisor_thread(context)
+        if thread is not None and not thread.is_alive():
+            with self._lock:
+                if self._threads.get(key) is thread:
+                    self._threads.pop(key, None)
+            released.extend(["job_supervisor.registry", "job_supervisor.dead_worker"])
+            return released
+        if thread is None:
+            return released
+        run["state"] = "RECOVERY_REQUIRED"
+        run["recovery_state"] = "RECOVERY_REQUIRED"
+        run["next_action"] = "Supervisor detenido por recuperación"
+        run["available_actions"] = []
+        run["updated_at"] = _iso_now()
+        self._append_event(run, "warning", "Se detuvo el supervisor interno porque Moonraker no tenía impresión física activa.")
+        self._save_run(context, run)
+        thread.join(timeout=2.0)
+        if thread.is_alive():
+            raise ApplicationError("El supervisor interno sigue activo; no es seguro archivar todavía esta ejecución.")
+        with self._lock:
+            if self._threads.get(key) is thread:
+                self._threads.pop(key, None)
+        released.extend(["job_supervisor.registry", "job_supervisor.ghost_worker"])
+        if diagnosis["run"].get("movement_lock") is False:
+            released.append("machine_runtime.movement_lock_clear")
+        return released
 
     def _relative_to_project(self, project_id: str, path: Path) -> str:
         return path.relative_to(self._project_dir(project_id)).as_posix()

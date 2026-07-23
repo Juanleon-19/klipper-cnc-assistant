@@ -666,6 +666,7 @@ export type JobRun = {
   events: JobRunEvent[];
   manifest_path: string | null;
   last_watcher_error?: string | null;
+  recovery_state?: string | null;
 };
 
 export type JobDryRun = {
@@ -686,6 +687,59 @@ export type JobHistoryEntry = {
   manifest_path: string | null;
 };
 
+
+export type JobRunConflictDetail = {
+  code: string;
+  message: string;
+  conflict_condition: string;
+  existing_run: {
+    run_id: string | null;
+    project_id: string;
+    setup: string;
+    side: string;
+    placement_revision: string | null;
+    status: string;
+    current_operation: {
+      operation_id: string | null;
+      name: string | null;
+      execution_status: string | null;
+      remote_file: string | null;
+    };
+    remote_file: string | null;
+    worker_alive: boolean;
+    watcher_alive: boolean;
+    supervisor_registered: boolean;
+    movement_lock: boolean | null;
+    job_lock: boolean;
+    updated_at: string | null;
+    last_error: string | null;
+    available_actions: string[];
+  };
+  moonraker: {
+    connected: boolean;
+    webhooks_state: string | null;
+    klipper_state: string | null;
+    print_state: string | null;
+    filename: string | null;
+    progress: number;
+    is_active: boolean;
+    file_position: number | null;
+    file_size: number | null;
+    print_duration: number | null;
+    message: string | null;
+    updated_at: string;
+  };
+  available_actions: string[];
+  can_archive_stale: boolean;
+};
+
+export type StaleRunArchiveResult = {
+  archived_run_id: string | null;
+  previous_status: string;
+  archive_path: string;
+  locks_released: string[];
+  can_start_new_run: boolean;
+};
 
 export type LiveExecutionSnapshot = {
   moonraker: {
@@ -712,6 +766,9 @@ export type LiveExecutionSnapshot = {
     available_actions: string[];
     worker_alive: boolean;
     watcher_alive: boolean;
+    supervisor_registered?: boolean;
+    movement_lock?: boolean | null;
+    job_lock?: boolean;
     last_watcher_error: string | null;
     recovery_state?: string | null;
     updated_at: string | null;
