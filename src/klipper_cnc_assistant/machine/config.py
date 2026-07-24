@@ -10,6 +10,11 @@ class MachineMode(StrEnum):
     PHYSICAL = "physical"
 
 
+class SpindleControlMode(StrEnum):
+    MANUAL = "manual"
+    AUTO = "auto"
+
+
 @dataclass(frozen=True)
 class MachineRuntimeConfig:
     mode: MachineMode
@@ -47,6 +52,7 @@ class MachineRuntimeConfig:
     probe_lower_speed_mm_s: float
     probe_retract_mm: float
     probe_retract_speed_mm_s: float
+    spindle_control_mode: SpindleControlMode = SpindleControlMode.MANUAL
 
     @property
     def mode_label(self) -> str:
@@ -79,6 +85,7 @@ def load_machine_runtime_config() -> MachineRuntimeConfig:
     mode = MachineMode.PHYSICAL if raw_mode == "physical" else MachineMode.SIMULATED
     return MachineRuntimeConfig(
         mode=mode,
+        spindle_control_mode=SpindleControlMode(os.getenv("SPINDLE_CONTROL_MODE", "manual").strip().lower() or "manual"),
         auto_connect=_env_bool("MACHINE_AUTO_CONNECT", False),
         moonraker_url=os.getenv("MOONRAKER_URL") or None,
         moonraker_ws=os.getenv("MOONRAKER_WS") or None,

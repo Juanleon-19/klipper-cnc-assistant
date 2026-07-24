@@ -23,7 +23,7 @@ from klipper_cnc_assistant.storage import JsonProjectRepository
 JOB_PLAN_SCHEMA = "job-plan-v1"
 JOB_RUN_SCHEMA = "job-run-v1"
 RUN_TERMINAL_STATES = {"JOB_COMPLETE", "JOB_CANCELLED", "JOB_ERROR"}
-RUN_WAITING_STATES = {"TOOL_CHANGE_REQUIRED", "READY_TO_RESUME", "OPERATION_PAUSED", "JOB_PAUSED", "RECOVERY_REQUIRED"}
+RUN_WAITING_STATES = {"SPINDLE_STOP_REQUIRED", "TOOL_CHANGE_REQUIRED", "READY_TO_RESUME", "OPERATION_PAUSED", "JOB_PAUSED", "RECOVERY_REQUIRED"}
 RUN_ACTIVE_STATES = {
     "JOB_STARTING",
     "OPERATION_PREFLIGHT",
@@ -32,6 +32,8 @@ RUN_ACTIVE_STATES = {
     "WAITING_FOR_KLIPPER",
     "PRINT_QUEUED",
     "OPERATION_RUNNING",
+    "SPINDLE_STOP_CONFIRMED",
+    "RETRACTING",
     "MOVING_TO_TOOL_CHANGE_SAFE_Z",
     "MOVING_TO_TOOL_CHANGE_XY",
     "MOVING_TO_TOOL_CHANGE",
@@ -160,7 +162,12 @@ class MoonrakerJobAdapter:
             "updated_at": _iso_now(),
         }
 
+    def spindle_control_mode(self) -> str:
+        return str(getattr(self.runtime.config, "spindle_control_mode", "manual") or "manual").strip().lower()
+
     def stop_spindle(self) -> dict[str, Any]:
+        if self.spindle_control_mode() == "manual":
+            return {"mode": "manual", "command_sent": False}
         return self._client().send_gcode("M5")
 
     def move_to_tool_change_position(self) -> dict[str, Any]:
@@ -395,7 +402,7 @@ class JobService:
             "transition": {
                 "state": run.get("state") or "JOB_DRAFT",
                 "required_tool": (next_operation or {}).get("tool_name"),
-                "operator_confirmation_required": str(run.get("state")) in {"TOOL_CHANGE_REQUIRED", "READY_TO_RESUME"},
+                "operator_confirmation_required": str(run.get("state")) in {"SPINDLE_STOP_REQUIRED", "TOOL_CHANGE_REQUIRED", "READY_TO_RESUME"},
             },
             "synchronization": {
                 "ok": sync_reason is None,
@@ -528,15 +535,6 @@ class JobService:
         elif action == "retry-tool-change-transition":
             if run["state"] != "RECOVERY_REQUIRED":
                 raise ApplicationError("El reintento de transición solo aplica cuando la ejecución quedó en recuperación.")
-            status = adapter.print_status()
-            if str(status.get("state") or "").lower() == "printing":
-                raise ApplicationError("No se puede reintentar la transición mientras Moonraker sigue imprimiendo.")
-            snapshot = self.runtime.snapshot()
-            if str(snapshot.get("moonraker", {}).get("telemetry_state") or "") != "LIVE":
-                raise ApplicationError("La telemetría Moonraker debe estar LIVE para reintentar la transición.")
-            homed_axes = str(snapshot.get("klipper", {}).get("homed_axes") or "")
-            if not set("xyz").issubset(set(homed_axes)):
-                raise ApplicationError("Falta homing XYZ para reintentar la transición de herramienta.")
             current_index = int(run.get("current_operation_index", 0) or 0)
             if current_index < 0 or current_index >= len(run["operations"]):
                 raise ApplicationError("No existe operación completada para reintentar la transición.")
@@ -547,11 +545,22 @@ class JobService:
                 raise ApplicationError("No existe una siguiente operación que requiera cambio de herramienta.")
             if run["operations"][next_index].get("tool_key") == run["operations"][current_index].get("tool_key"):
                 raise ApplicationError("La siguiente operación no requiere cambio de herramienta.")
-            run["state"] = "TOOL_CHANGE_RETRY"
-            run["next_action"] = "Reintentando transición de herramienta"
+            self._validate_spindle_stop_confirmation(adapter)
+            self._handle_tool_change_required(context, run, operation_index=next_index, retry=True)
+            return run
+        elif action == "confirm-spindle-stopped":
+            if run["state"] != "SPINDLE_STOP_REQUIRED":
+                raise ApplicationError("La confirmación del spindle detenido solo aplica cuando el trabajo está esperando al operador.")
+            next_index = int(run.get("current_operation_index", 0) or 0) + 1
+            if next_index >= len(run["operations"]):
+                raise ApplicationError("No existe una siguiente operación que requiera cambio de herramienta.")
+            self._validate_spindle_stop_confirmation(adapter)
+            next_operation = run["operations"][next_index]
+            run["state"] = "SPINDLE_STOP_CONFIRMED"
+            run["next_action"] = "Iniciando transición segura hacia el cambio de herramienta"
             run["available_actions"] = ["cancel"]
             run["updated_at"] = _iso_now()
-            self._append_event(run, "warning", "Reintentando la transición segura hacia la posición de cambio de herramienta.")
+            self._append_event(run, "info", f"El operador confirmó el spindle detenido; iniciando transición segura antes de {next_operation['name']}.")
             self._save_run(context, run)
             self._start_worker(context)
             return run
@@ -678,11 +687,11 @@ class JobService:
                     if state in {"JOB_STARTING", "NEXT_OPERATION_READY", "TOOL_REFERENCE_READY"}:
                         self._execute_next_operation(context, run)
                         continue
+                    if state == "SPINDLE_STOP_CONFIRMED":
+                        self._perform_tool_change_transition(context, run)
+                        continue
                     if state == "TOOL_CHANGE_CONFIRMED":
                         self._measure_tool_reference(context, run)
-                        continue
-                    if state == "TOOL_CHANGE_RETRY":
-                        self._retry_tool_change_transition(context, run)
                         continue
                     if state in {"OPERATION_RUNNING", "OPERATION_STARTING", "WAITING_FOR_KLIPPER", "PRINT_QUEUED"}:
                         self._watch_operation(context, run)
@@ -865,41 +874,62 @@ class JobService:
         next_index = current_index + 1
         if next_index >= len(run.get("operations") or []):
             raise ApplicationError("No existe una siguiente operación para reintentar el cambio de herramienta.")
-        self._handle_tool_change_required(context, run, operation_index=next_index)
+        self._handle_tool_change_required(context, run, operation_index=next_index, retry=True)
 
-    def _handle_tool_change_required(self, context: JobContext, run: dict[str, Any], *, operation_index: int) -> None:
-        adapter = self.adapter_factory(self.runtime)
+    def _validate_spindle_stop_confirmation(self, adapter: MoonrakerJobAdapter) -> None:
+        status = adapter.print_status()
+        if str(status.get("state") or "").lower() == "printing":
+            raise ApplicationError("No se puede continuar mientras Moonraker sigue imprimiendo.")
+        if bool(status.get("is_active", status.get("active"))):
+            raise ApplicationError("virtual_sdcard.is_active debe ser false antes de continuar con el cambio de herramienta.")
+        snapshot = self.runtime.snapshot()
+        if str(snapshot.get("moonraker", {}).get("telemetry_state") or "") != "LIVE":
+            raise ApplicationError("La telemetría Moonraker debe estar LIVE para confirmar el spindle detenido.")
+        homed_axes = str(snapshot.get("klipper", {}).get("homed_axes") or "")
+        if not set("xyz").issubset(set(homed_axes)):
+            raise ApplicationError("Falta homing XYZ para continuar con el cambio de herramienta.")
+
+    def _handle_tool_change_required(self, context: JobContext, run: dict[str, Any], *, operation_index: int, retry: bool = False) -> None:
         next_operation = run["operations"][operation_index]
+        run["state"] = "SPINDLE_STOP_REQUIRED"
+        run["next_action"] = "Apague manualmente el spindle antes de continuar."
+        run["available_actions"] = ["confirm-spindle-stopped", "cancel"]
+        run["updated_at"] = _iso_now()
+        run["recovery_state"] = None
+        if retry:
+            run["last_watcher_error"] = None
+            self._append_event(run, "warning", "Reintento de transición listo; apague manualmente el spindle antes de continuar.")
+        else:
+            self._append_event(run, "warning", f"Apague manualmente el spindle antes de continuar con {next_operation['name']}.")
+        self._save_run(context, run)
+
+    def _perform_tool_change_transition(self, context: JobContext, run: dict[str, Any]) -> None:
+        adapter = self.adapter_factory(self.runtime)
+        current_index = int(run.get("current_operation_index", 0) or 0)
+        next_index = current_index + 1
+        if next_index >= len(run.get("operations") or []):
+            raise ApplicationError("No existe una siguiente operación para completar el cambio de herramienta.")
+        next_operation = run["operations"][next_index]
         try:
-            run["state"] = "OPERATION_COMPLETE"
-            run["next_action"] = "Operación terminada; deteniendo spindle"
-            run["available_actions"] = ["cancel"]
-            self._append_event(run, "info", f"Operación completada; enviando M5 antes de {next_operation['name']}.")
-            self._save_run(context, run)
-            adapter.stop_spindle()
             run["state"] = "RETRACTING"
             run["next_action"] = "Subiendo a Z segura para cambio de herramienta"
             run["available_actions"] = ["cancel"]
-            self._append_event(run, "info", "M5 enviado. Subiendo a Z segura para cambio de herramienta.")
-            self._save_run(context, run)
-            run["state"] = "MOVING_TO_TOOL_CHANGE"
-            run["next_action"] = "Moviendo a posición de cambio de herramienta"
-            self._append_event(run, "info", f"Cambio de herramienta requerido antes de {next_operation['name']}.")
+            self._append_event(run, "info", "Spindle detenido confirmado. Subiendo a Z segura para cambio de herramienta.")
             self._save_run(context, run)
             adapter.move_to_tool_change_position()
             run["last_watcher_error"] = None
             run["state"] = "TOOL_CHANGE_REQUIRED"
-            run["next_action"] = "Instale la herramienta requerida y pulse Herramienta cambiada"
+            run["next_action"] = "Cambie la herramienta y pulse Herramienta cambiada"
             run["available_actions"] = ["confirm-tool-change", "cancel"]
-            run["summary"]["tool_changes_required"] = max(run["summary"].get("tool_changes_required", 0), 1)
             self._append_event(run, "warning", f"Cambie a {next_operation['tool_name']} y confirme cuando esté instalada.")
             self._save_run(context, run)
         except Exception as error:
             run["state"] = "RECOVERY_REQUIRED"
-            run["next_action"] = "Revise el cambio de herramienta y pulse Reintentar transición de herramienta"
+            run["next_action"] = "Revise la transición y pulse Reintentar transición de herramienta"
             run["available_actions"] = ["retry-tool-change-transition", "cancel"]
             run["updated_at"] = _iso_now()
             run["last_watcher_error"] = traceback.format_exc()
+            run["recovery_state"] = "RECOVERY_REQUIRED"
             self._append_event(run, "error", f"Fallo la transición segura de herramienta: {error}")
             self._save_run(context, run)
 

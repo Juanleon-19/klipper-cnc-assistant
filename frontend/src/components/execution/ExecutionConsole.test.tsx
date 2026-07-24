@@ -131,8 +131,29 @@ describe("ExecutionConsole", () => {
     expect(screen.getAllByRole("button", { name: "Iniciar trabajo" })).toHaveLength(1);
   });
 
-  it("muestra las acciones correctas para TOOL_CHANGE_REQUIRED y READY_TO_RESUME", () => {
+  it("separa la confirmación de spindle detenido y herramienta cambiada", () => {
     const { rerender } = render(
+      <ExecutionConsole
+        snapshot={{
+          ...baseSnapshot,
+          run: { ...baseSnapshot.run, status: "SPINDLE_STOP_REQUIRED", available_actions: ["confirm-spindle-stopped", "cancel"] },
+          transition: { ...baseSnapshot.transition, state: "SPINDLE_STOP_REQUIRED", operator_confirmation_required: true },
+          job_run: { ...(baseSnapshot.job_run as NonNullable<typeof baseSnapshot.job_run>), state: "SPINDLE_STOP_REQUIRED", available_actions: ["confirm-spindle-stopped", "cancel"] },
+        }}
+        error={null}
+        busy={false}
+        onPrepare={vi.fn()}
+        onStart={vi.fn()}
+        onAction={vi.fn()}
+        onArchiveStale={vi.fn()}
+      />,
+    );
+
+    expect(screen.getAllByText(/Apague manualmente el spindle/i).length).toBeGreaterThan(0);
+    expect(screen.getByRole("button", { name: /Spindle detenido/i })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Herramienta cambiada/i })).toBeNull();
+
+    rerender(
       <ExecutionConsole
         snapshot={{
           ...baseSnapshot,
@@ -149,6 +170,7 @@ describe("ExecutionConsole", () => {
       />,
     );
 
+    expect(screen.getAllByText(/Cambie la herramienta/i).length).toBeGreaterThan(0);
     expect(screen.getByRole("button", { name: /Herramienta cambiada/i })).toBeInTheDocument();
 
     rerender(

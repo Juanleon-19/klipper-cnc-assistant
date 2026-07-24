@@ -8,6 +8,7 @@ import unittest
 from pathlib import Path
 
 from klipper_cnc_assistant.application import CompensatedGCodeService, JobService, PhysicalMapService, ProjectService, ReferenceSessionService
+from klipper_cnc_assistant.application.job_service import MoonrakerJobAdapter
 from klipper_cnc_assistant.application.services import MachineSessionService
 from klipper_cnc_assistant.application.physical_map_service import PhysicalMeshConfig
 from klipper_cnc_assistant.storage import JsonProjectRepository
@@ -15,16 +16,17 @@ from klipper_cnc_assistant.storage import JsonProjectRepository
 
 class FakeRuntime:
     def __init__(self) -> None:
-        self.config = type("Config", (), {"moonraker_url": "http://moonraker.local", "moonraker_request_timeout_s": 2.0})()
+        self.config = type("Config", (), {"moonraker_url": "http://moonraker.local", "moonraker_request_timeout_s": 2.0, "spindle_control_mode": "manual"})()
         self._last_probe = {"x_mm": 100.0, "y_mm": 100.0, "z_mm": 4.75}
-
-    def snapshot(self) -> dict:
-        return {
+        self.snapshot_payload = {
             "mode": "PHYSICAL",
             "moonraker": {"http_connected": True, "websocket_connected": True, "telemetry_state": "LIVE", "url": "http://moonraker.local"},
             "klipper": {"ready": True, "homed_axes": "xyz"},
             "started_at": "runtime-session",
         }
+
+    def snapshot(self) -> dict:
+        return json.loads(json.dumps(self.snapshot_payload))
 
     def move_to_tool_change_position(self) -> dict:
         return self.snapshot()
@@ -129,7 +131,7 @@ class FakeAdapter:
 
     def move_to_tool_change_position(self) -> dict:
         self.tool_change_moves += 1
-        self.command_log.append("tool-change-position")
+        self.command_log.extend(["tool-change-z", "M400", "tool-change-xy", "M400"])
         return self.runtime.snapshot()
 
     def move_to_reference_point(self, *, x_mm: float, y_mm: float) -> dict:
@@ -265,6 +267,80 @@ class JobServiceTest(unittest.TestCase):
             map_file.write_text(json.dumps(map_payload, ensure_ascii=True, indent=2, sort_keys=True), encoding="utf-8")
         return project_id, setup_id, payload["map_id"]
 
+    def test_manual_spindle_mode_never_sends_spindle_gcode(self) -> None:
+        sent_commands: list[str] = []
+
+        class RecordingClient:
+            def send_gcode(self, command: str) -> dict[str, object]:
+                sent_commands.append(command)
+                return {"command": command}
+
+        adapter = MoonrakerJobAdapter(self.runtime, client_factory=lambda *_args, **_kwargs: RecordingClient())
+
+        result = adapter.stop_spindle()
+
+        self.assertEqual(result["mode"], "manual")
+        self.assertFalse(result["command_sent"])
+        self.assertEqual(sent_commands, [])
+        self.assertTrue({"M3", "M4", "M5"}.isdisjoint(sent_commands))
+
+    def test_job_run_requires_manual_spindle_stop_before_tool_change_transition(self) -> None:
+        self.job_service.generate_project_compensation(project_id=self.project_id, setup_id=self.setup_id, face="superior")
+
+        self.job_service.start_run(project_id=self.project_id, setup_id=self.setup_id, face="superior")
+        self.job_service._threads[(self.project_id, self.setup_id, "superior")].join(timeout=5)  # type: ignore[attr-defined]
+        run = self.job_service.get_run(project_id=self.project_id, setup_id=self.setup_id, face="superior")
+
+        self.assertEqual(run["state"], "SPINDLE_STOP_REQUIRED")
+        self.assertEqual(run["available_actions"], ["confirm-spindle-stopped", "cancel"])
+        self.assertEqual(run["operations"][0]["execution_status"], "COMPLETED")
+        self.assertEqual(run["operations"][1]["execution_status"], "COMPLETED")
+        self.assertEqual(self.adapter.tool_change_moves, 0)
+        self.assertEqual(self.adapter.command_log, [])
+        self.assertIn("Apague manualmente el spindle", run["next_action"])
+
+    def test_confirm_spindle_stopped_rejects_active_print(self) -> None:
+        self.job_service.generate_project_compensation(project_id=self.project_id, setup_id=self.setup_id, face="superior")
+        self.job_service.start_run(project_id=self.project_id, setup_id=self.setup_id, face="superior")
+        self.job_service._threads[(self.project_id, self.setup_id, "superior")].join(timeout=5)  # type: ignore[attr-defined]
+        self.adapter.status_sequence = [{"state": "printing", "is_active": True}]
+
+        with self.assertRaisesRegex(Exception, "sigue imprimiendo"):
+            self.job_service.run_action(project_id=self.project_id, setup_id=self.setup_id, face="superior", action="confirm-spindle-stopped")
+
+        run = self.job_service.get_run(project_id=self.project_id, setup_id=self.setup_id, face="superior")
+        self.assertEqual(run["state"], "SPINDLE_STOP_REQUIRED")
+        self.assertEqual(self.adapter.tool_change_moves, 0)
+
+    def test_confirm_spindle_stopped_rejects_missing_homing(self) -> None:
+        self.job_service.generate_project_compensation(project_id=self.project_id, setup_id=self.setup_id, face="superior")
+        self.job_service.start_run(project_id=self.project_id, setup_id=self.setup_id, face="superior")
+        self.job_service._threads[(self.project_id, self.setup_id, "superior")].join(timeout=5)  # type: ignore[attr-defined]
+        self.runtime.snapshot_payload["klipper"]["homed_axes"] = "xy"
+
+        with self.assertRaisesRegex(Exception, "Falta homing XYZ"):
+            self.job_service.run_action(project_id=self.project_id, setup_id=self.setup_id, face="superior", action="confirm-spindle-stopped")
+
+        run = self.job_service.get_run(project_id=self.project_id, setup_id=self.setup_id, face="superior")
+        self.assertEqual(run["state"], "SPINDLE_STOP_REQUIRED")
+        self.assertEqual(self.adapter.tool_change_moves, 0)
+
+    def test_confirm_spindle_stopped_moves_z_before_xy_and_enters_tool_change_required(self) -> None:
+        self.job_service.generate_project_compensation(project_id=self.project_id, setup_id=self.setup_id, face="superior")
+        self.job_service.start_run(project_id=self.project_id, setup_id=self.setup_id, face="superior")
+        self.job_service._threads[(self.project_id, self.setup_id, "superior")].join(timeout=5)  # type: ignore[attr-defined]
+
+        self.job_service.run_action(project_id=self.project_id, setup_id=self.setup_id, face="superior", action="confirm-spindle-stopped")
+        self.job_service._threads[(self.project_id, self.setup_id, "superior")].join(timeout=5)  # type: ignore[attr-defined]
+        run = self.job_service.get_run(project_id=self.project_id, setup_id=self.setup_id, face="superior")
+
+        self.assertEqual(run["state"], "TOOL_CHANGE_REQUIRED")
+        self.assertEqual(run["available_actions"], ["confirm-tool-change", "cancel"])
+        self.assertEqual(self.adapter.tool_change_moves, 1)
+        self.assertLess(self.adapter.command_log.index("tool-change-z"), self.adapter.command_log.index("tool-change-xy"))
+        self.assertEqual(self.adapter.command_log[:4], ["tool-change-z", "M400", "tool-change-xy", "M400"])
+        self.assertTrue({"M3", "M4", "M5"}.isdisjoint(self.adapter.command_log))
+
     def test_prepare_run_binds_initial_reference_only_to_installed_tool(self) -> None:
         project_id, setup_id, map_id = self._create_same_diameter_distinct_tool_project()
         plan = self.job_service.generate_project_compensation(project_id=project_id, setup_id=setup_id, face="superior")
@@ -357,26 +433,34 @@ class JobServiceTest(unittest.TestCase):
         self.assertEqual(len(result["operations"]), 4)
         self.assertIsNotNone(result["operations"][0]["plan_hash"])
 
-    def test_job_run_executes_all_operations_with_two_tool_changes(self) -> None:
+    def test_job_run_executes_all_operations_with_two_manual_spindle_confirmations(self) -> None:
         self.job_service.generate_project_compensation(project_id=self.project_id, setup_id=self.setup_id, face="superior")
-        run = self.job_service.start_run(project_id=self.project_id, setup_id=self.setup_id, face="superior")
+        self.job_service.start_run(project_id=self.project_id, setup_id=self.setup_id, face="superior")
+        self.job_service._threads[(self.project_id, self.setup_id, "superior")].join(timeout=5)  # type: ignore[attr-defined]
+        run = self.job_service.get_run(project_id=self.project_id, setup_id=self.setup_id, face="superior")
+        self.assertEqual(run["state"], "SPINDLE_STOP_REQUIRED")
+
+        self.job_service.run_action(project_id=self.project_id, setup_id=self.setup_id, face="superior", action="confirm-spindle-stopped")
         self.job_service._threads[(self.project_id, self.setup_id, "superior")].join(timeout=5)  # type: ignore[attr-defined]
         run = self.job_service.get_run(project_id=self.project_id, setup_id=self.setup_id, face="superior")
         self.assertEqual(run["state"], "TOOL_CHANGE_REQUIRED")
-        self.assertEqual(run["operations"][0]["execution_status"], "COMPLETED")
-        self.assertEqual(run["operations"][1]["execution_status"], "COMPLETED")
-        self.assertEqual(self.adapter.tool_change_moves, 1)
 
         self.job_service.run_action(project_id=self.project_id, setup_id=self.setup_id, face="superior", action="confirm-tool-change")
         self.job_service._threads[(self.project_id, self.setup_id, "superior")].join(timeout=5)  # type: ignore[attr-defined]
         run = self.job_service.get_run(project_id=self.project_id, setup_id=self.setup_id, face="superior")
         self.assertEqual(run["state"], "READY_TO_RESUME")
         self.assertEqual(len(self.adapter.started), 0)
+
         self.job_service.run_action(project_id=self.project_id, setup_id=self.setup_id, face="superior", action="continue")
         self.job_service._threads[(self.project_id, self.setup_id, "superior")].join(timeout=5)  # type: ignore[attr-defined]
         run = self.job_service.get_run(project_id=self.project_id, setup_id=self.setup_id, face="superior")
-        self.assertEqual(run["state"], "TOOL_CHANGE_REQUIRED")
+        self.assertEqual(run["state"], "SPINDLE_STOP_REQUIRED")
         self.assertEqual(run["operations"][2]["execution_status"], "COMPLETED")
+
+        self.job_service.run_action(project_id=self.project_id, setup_id=self.setup_id, face="superior", action="confirm-spindle-stopped")
+        self.job_service._threads[(self.project_id, self.setup_id, "superior")].join(timeout=5)  # type: ignore[attr-defined]
+        run = self.job_service.get_run(project_id=self.project_id, setup_id=self.setup_id, face="superior")
+        self.assertEqual(run["state"], "TOOL_CHANGE_REQUIRED")
 
         self.job_service.run_action(project_id=self.project_id, setup_id=self.setup_id, face="superior", action="confirm-tool-change")
         self.job_service._threads[(self.project_id, self.setup_id, "superior")].join(timeout=5)  # type: ignore[attr-defined]
@@ -390,10 +474,11 @@ class JobServiceTest(unittest.TestCase):
         self.assertEqual(run["summary"]["operations_completed"], 4)
         self.assertEqual(self.adapter.probe_calls, 2)
         self.assertEqual(self.adapter.tool_change_moves, 2)
-        self.assertEqual(self.adapter.spindle_stops, 2)
+        self.assertEqual(self.adapter.spindle_stops, 0)
         self.assertEqual(self.adapter.reference_moves, [(100.0, 100.0), (100.0, 100.0)])
         self.assertEqual(len(self.adapter.started), 0)
         self.assertEqual(run["operations"][3]["execution_status"], "COMPLETED")
+        self.assertTrue({"M3", "M4", "M5"}.isdisjoint(self.adapter.command_log))
 
     def test_retry_tool_change_transition_does_not_repeat_completed_operation(self) -> None:
         self.job_service.generate_project_compensation(project_id=self.project_id, setup_id=self.setup_id, face="superior")
@@ -409,12 +494,20 @@ class JobServiceTest(unittest.TestCase):
         self.adapter.move_to_tool_change_position = fail_once  # type: ignore[assignment]
         self.job_service.start_run(project_id=self.project_id, setup_id=self.setup_id, face="superior")
         self.job_service._threads[(self.project_id, self.setup_id, "superior")].join(timeout=5)  # type: ignore[attr-defined]
+        self.job_service.run_action(project_id=self.project_id, setup_id=self.setup_id, face="superior", action="confirm-spindle-stopped")
+        self.job_service._threads[(self.project_id, self.setup_id, "superior")].join(timeout=5)  # type: ignore[attr-defined]
         run = self.job_service.get_run(project_id=self.project_id, setup_id=self.setup_id, face="superior")
         self.assertEqual(run["state"], "RECOVERY_REQUIRED")
         self.assertEqual(run["operations"][1]["execution_status"], "COMPLETED")
         uploads_before = list(self.adapter.uploads)
 
         self.job_service.run_action(project_id=self.project_id, setup_id=self.setup_id, face="superior", action="retry-tool-change-transition")
+        run = self.job_service.get_run(project_id=self.project_id, setup_id=self.setup_id, face="superior")
+        self.assertEqual(run["state"], "SPINDLE_STOP_REQUIRED")
+        self.assertEqual(run["operations"][1]["execution_status"], "COMPLETED")
+        self.assertEqual(self.adapter.uploads, uploads_before)
+
+        self.job_service.run_action(project_id=self.project_id, setup_id=self.setup_id, face="superior", action="confirm-spindle-stopped")
         self.job_service._threads[(self.project_id, self.setup_id, "superior")].join(timeout=5)  # type: ignore[attr-defined]
         run = self.job_service.get_run(project_id=self.project_id, setup_id=self.setup_id, face="superior")
 

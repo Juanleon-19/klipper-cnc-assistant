@@ -17,7 +17,8 @@ const ACTION_LABELS: Record<string, string> = {
   start: "Iniciar trabajo",
   pause: "Pausar",
   resume: "Reanudar",
-  cancel: "Cancelar proyecto",
+  cancel: "Cancelar",
+  "confirm-spindle-stopped": "Spindle detenido",
   "confirm-tool-change": "Herramienta cambiada",
   "retry-tool-change-transition": "Reintentar transición de herramienta",
   "measure-reference": "Medir referencia",
@@ -25,8 +26,8 @@ const ACTION_LABELS: Record<string, string> = {
 };
 
 const STARTABLE_STATES = new Set(["JOB_READY"]);
-const ARCHIVE_CANDIDATE_STATES = new Set(["JOB_VALIDATING", "JOB_STARTING", "OPERATION_PREFLIGHT", "OPERATION_UPLOADING", "WAITING_FOR_KLIPPER", "PRINT_QUEUED", "OPERATION_RUNNING", "RECOVERY_REQUIRED", "TOOL_CHANGE_REQUIRED", "READY_TO_RESUME", "OPERATION_PAUSED", "JOB_PAUSED", "NEXT_OPERATION_READY"]);
-const TOOL_WAIT_STATES = new Set(["TOOL_CHANGE_REQUIRED", "TOOL_CHANGE_CONFIRMED", "MOVING_TO_REFERENCE", "CALIBRATING_TOOL", "REGENERATING_COMPENSATION", "VALIDATING_REGENERATED_PLAN", "READY_TO_RESUME"]);
+const ARCHIVE_CANDIDATE_STATES = new Set(["JOB_VALIDATING", "JOB_STARTING", "OPERATION_PREFLIGHT", "OPERATION_UPLOADING", "WAITING_FOR_KLIPPER", "PRINT_QUEUED", "OPERATION_RUNNING", "RECOVERY_REQUIRED", "SPINDLE_STOP_REQUIRED", "TOOL_CHANGE_REQUIRED", "READY_TO_RESUME", "OPERATION_PAUSED", "JOB_PAUSED", "NEXT_OPERATION_READY"]);
+const TOOL_WAIT_STATES = new Set(["SPINDLE_STOP_REQUIRED", "TOOL_CHANGE_REQUIRED", "TOOL_CHANGE_CONFIRMED", "MOVING_TO_REFERENCE", "CALIBRATING_TOOL", "REGENERATING_COMPENSATION", "VALIDATING_REGENERATED_PLAN", "READY_TO_RESUME"]);
 
 function clamp(value: number | null | undefined): number {
   if (typeof value !== "number" || Number.isNaN(value)) {
@@ -62,7 +63,7 @@ function canArchiveStale(snapshot: LiveExecutionSnapshot | null, detail: JobRunC
 function executionTone(value: string | null | undefined): "success" | "warning" | "danger" | "info" | "neutral" {
   const state = String(value ?? "").toUpperCase();
   if (["JOB_COMPLETE", "COMPLETED", "READY_TO_RESUME"].includes(state)) return "success";
-  if (["TOOL_CHANGE_REQUIRED", "TOOL_CHANGE_CONFIRMED", "RETRACTING", "MOVING_TO_REFERENCE", "CALIBRATING_TOOL", "REGENERATING_COMPENSATION", "VALIDATING_REGENERATED_PLAN"].includes(state)) return "warning";
+  if (["SPINDLE_STOP_REQUIRED", "SPINDLE_STOP_CONFIRMED", "TOOL_CHANGE_REQUIRED", "TOOL_CHANGE_CONFIRMED", "RETRACTING", "MOVING_TO_REFERENCE", "CALIBRATING_TOOL", "REGENERATING_COMPENSATION", "VALIDATING_REGENERATED_PLAN"].includes(state)) return "warning";
   if (["JOB_ERROR", "FAILED", "ERROR", "CANCELLED", "JOB_CANCELLED"].includes(state)) return "danger";
   if (["OPERATION_RUNNING", "RUNNING", "WAITING_FOR_KLIPPER", "OPERATION_STARTING", "OPERATION_UPLOADING"].includes(state)) return "info";
   return "neutral";
@@ -114,6 +115,9 @@ export function ExecutionConsole({ snapshot, error, busy, onPrepare, onStart, on
   const overallPercent = percent(snapshot?.run.overall_progress ?? 0);
   const filename = snapshot?.moonraker.filename || snapshot?.operation.expected_remote_file || "pendiente";
   const desync = snapshot?.synchronization.ok === false;
+  const runStatus = snapshot?.run.status ?? snapshot?.operation.execution_status ?? "JOB_DRAFT";
+  const showSpindleStopRequired = runStatus === "SPINDLE_STOP_REQUIRED";
+  const showToolChangeRequired = runStatus === "TOOL_CHANGE_REQUIRED";
 
   return (
     <article className="panel execution-console-v2" aria-label="Consola de ejecución en vivo v2">
@@ -123,10 +127,22 @@ export function ExecutionConsole({ snapshot, error, busy, onPrepare, onStart, on
           <h3>{currentOperationLabel(snapshot)}</h3>
           <p className="execution-console-v2__subtitle">{snapshot?.operation.name ?? "Sin operación activa"} · Herramienta {snapshot?.operation.tool ?? "pendiente"}</p>
         </div>
-        <StatusBadge tone={executionTone(snapshot?.run.status ?? snapshot?.operation.execution_status)}>{snapshot?.run.status ?? "JOB_DRAFT"}</StatusBadge>
+        <StatusBadge tone={executionTone(runStatus)}>{snapshot?.run.status ?? "JOB_DRAFT"}</StatusBadge>
       </div>
 
       {desync ? <div className="alert alert--danger"><strong>DESINCRONIZACIÓN:</strong> Moonraker está ejecutando el archivo, pero JobRun no lo está siguiendo.</div> : null}
+      {showSpindleStopRequired ? (
+        <div className="alert alert--warning">
+          <strong>Apague manualmente el spindle</strong>
+          <p>Apague manualmente el spindle antes de continuar.</p>
+        </div>
+      ) : null}
+      {showToolChangeRequired ? (
+        <div className="alert alert--warning">
+          <strong>Cambie la herramienta</strong>
+          <p>Instale la herramienta requerida y pulse Herramienta cambiada.</p>
+        </div>
+      ) : null}
 
       {error ? (
         <section className="execution-panel">
