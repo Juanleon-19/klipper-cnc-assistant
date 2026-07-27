@@ -553,17 +553,53 @@ class JobServiceTest(unittest.TestCase):
         self.job_service._threads[(self.project_id, self.setup_id, "superior")].join(timeout=5)  # type: ignore[attr-defined]
 
     def test_live_execution_detects_filename_mismatch(self) -> None:
-        self.job_service.generate_project_compensation(project_id=self.project_id, setup_id=self.setup_id, face="superior")
+        self.job_service.generate_project_compensation(
+            project_id=self.project_id,
+            setup_id=self.setup_id,
+            face="superior",
+        )
+        run = self.job_service.prepare_run(
+            project_id=self.project_id,
+            setup_id=self.setup_id,
+            face="superior",
+        )
+        context = self.job_service._context(
+            self.project_id,
+            self.setup_id,
+            "superior",
+        )
+        operation = run["operations"][0]
+        expected = self.job_service._expected_remote_file(
+            context,
+            str(operation["generated_file"]),
+        )
+        operation["remote_file"] = expected
+        operation["execution_status"] = "RUNNING"
+        operation["observed_printing"] = True
+        operation["progress"] = 0.553
+        run["state"] = "OPERATION_RUNNING"
+        self.job_service._save_run(context, run)
+
         self.adapter.status_sequence = [
-            {"state": "printing", "filename": "otro/archivo.gcode", "progress": 0.553, "is_active": True},
+            {
+                "state": "printing",
+                "filename": "otro/archivo.gcode",
+                "progress": 0.553,
+                "is_active": True,
+            },
         ]
-        self.job_service.start_run(project_id=self.project_id, setup_id=self.setup_id, face="superior")
-        time.sleep(0.7)
-        live = self.job_service.live_execution(project_id=self.project_id, setup_id=self.setup_id, face="superior")
+
+        live = self.job_service.live_execution(
+            project_id=self.project_id,
+            setup_id=self.setup_id,
+            face="superior",
+        )
+
         self.assertFalse(live["synchronization"]["ok"])
-        self.assertEqual(live["synchronization"]["reason"], "filename_mismatch")
-        self.adapter.status_sequence = [{"state": "cancelled", "progress": 0.553, "is_active": False}]
-        self.job_service._threads[(self.project_id, self.setup_id, "superior")].join(timeout=5)  # type: ignore[attr-defined]
+        self.assertEqual(
+            live["synchronization"]["reason"],
+            "filename_mismatch",
+        )
 
     def test_watcher_error_is_persisted(self) -> None:
         self.job_service.generate_project_compensation(project_id=self.project_id, setup_id=self.setup_id, face="superior")

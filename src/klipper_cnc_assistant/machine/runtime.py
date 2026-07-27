@@ -1289,54 +1289,25 @@ class MachineRuntime:
             self._last_telemetry_at = time.monotonic()
 
     def _on_telemetry_state(self, state: str) -> None:
-        """Registra actividad real del canal WebSocket.
-
-        Un mensaje reciente confirma que Moonraker sigue comunicándose,
-        aunque la posición XYZ permanezca exactamente igual.
-        """
-        now = time.monotonic()
-        normalized_state = str(state)
-
         with self._lock:
-            self._telemetry_state = normalized_state
-
-            if normalized_state == "LIVE":
-                self._last_websocket_message_at = now
-                self._last_telemetry_at = now
-
+            self._telemetry_state = str(state)
+            if state == "LIVE":
+                self._last_websocket_message_at = time.monotonic()
 
     def _telemetry_status(self) -> str:
-        """Clasifica la conexión, no el tiempo que la máquina lleva quieta."""
         with self._lock:
             state = self._telemetry_state
-            last_websocket_message = self._last_websocket_message_at
-            last_telemetry = self._last_telemetry_at
-            machine_available = self._machine is not None
-
+            last_message = self._last_websocket_message_at
         if state == "DISCONNECTED":
-            return "DISCONNECTED"
-
-        if not machine_available:
+            return state
+        machine = self._machine
+        position = None if machine is None else machine.get_motion_snapshot()
+        live_position_age = None if position is None else position.get("live_position_age_s")
+        if live_position_age is None or live_position_age > self.config.telemetry_fresh_timeout_s:
             return "STALE"
-
-        now = time.monotonic()
-        timeout = float(self.config.telemetry_fresh_timeout_s)
-
-        websocket_recent = (
-            last_websocket_message is not None
-            and now - last_websocket_message <= timeout
-        )
-
-        telemetry_recent = (
-            last_telemetry is not None
-            and now - last_telemetry <= timeout
-        )
-
-        if websocket_recent or telemetry_recent:
-            return "LIVE"
-
-        return "STALE"
-
+        if state == "LIVE" and (last_message is None or time.monotonic() - last_message > self.config.telemetry_fresh_timeout_s):
+            return "STALE"
+        return state
 
     def _attach_telemetry_tracking(self, machine) -> None:
         original_update_motion = machine.update_motion
