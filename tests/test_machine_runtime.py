@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import re
 import tempfile
 import threading
@@ -8,12 +9,13 @@ import unittest
 from dataclasses import replace
 
 from klipper_cnc_assistant.input.command_mapper import CommandMapper, ControllerCommand
-from klipper_cnc_assistant.input.serial_driver import ControllerPacket
+from klipper_cnc_assistant.input.serial_driver import ControllerPacket, SerialDiagnostics
 from klipper_cnc_assistant.machine.config import MachineMode, MachineRuntimeConfig
-from klipper_cnc_assistant.machine.runtime import MachineRuntime, MachineRuntimeError
+from klipper_cnc_assistant.machine.runtime import MachineConnectionError, MachineRuntime, MachineRuntimeError
 import klipper_cnc_assistant.machine.runtime as runtime_module
 from klipper_cnc_assistant.machine.state import AxisLimits, MachinePosition, MachineState
 from klipper_cnc_assistant.moonraker.client import MoonrakerError, MoonrakerTimeout
+from serial.serialutil import SerialException
 
 
 def config(mode: MachineMode = MachineMode.SIMULATED, **overrides) -> MachineRuntimeConfig:
@@ -51,6 +53,102 @@ def config(mode: MachineMode = MachineMode.SIMULATED, **overrides) -> MachineRun
         probe_retract_speed_mm_s=2.0,
     )
     return replace(cfg, **overrides) if overrides else cfg
+
+
+class DummyConnectClient:
+    def __init__(self, machine: MachineState, *, klippy_state: str = "ready", fail_server_info: Exception | None = None) -> None:
+        self.machine = machine
+        self.klippy_state = klippy_state
+        self.fail_server_info = fail_server_info
+
+    def get_server_info(self) -> dict[str, str]:
+        if self.fail_server_info is not None:
+            raise self.fail_server_info
+        return {"klippy_state": self.klippy_state}
+
+
+class IdleTelemetry:
+    def __init__(self, *_args, **_kwargs) -> None:
+        self._stop = False
+
+    async def run(self) -> None:
+        while not self._stop:
+            await asyncio.sleep(0.01)
+
+    def stop(self) -> None:
+        self._stop = True
+
+
+class FailingArduinoDriver:
+    def __init__(self, *, port: str, baudrate: int, startup_delay: float = 0.0) -> None:
+        self.port = port
+        self.baudrate = baudrate
+        self.startup_delay = startup_delay
+        self.diagnostics = SerialDiagnostics(port=port, baudrate=baudrate)
+
+    def open(self) -> None:
+        raise SerialException(f"could not open port {self.port}: missing")
+
+    def close(self) -> None:
+        self.diagnostics.open = False
+        self.diagnostics.thread_active = False
+
+
+class SuccessfulArduinoDriver:
+    def __init__(self, *, port: str, baudrate: int, startup_delay: float = 0.0) -> None:
+        self.port = port
+        self.baudrate = baudrate
+        self.startup_delay = startup_delay
+        self.diagnostics = SerialDiagnostics(port=port, baudrate=baudrate)
+        self._closed = False
+
+    def open(self) -> None:
+        self.diagnostics.open = True
+        self.diagnostics.last_exception = None
+
+    def close(self) -> None:
+        self._closed = True
+        self.diagnostics.open = False
+        self.diagnostics.thread_active = False
+
+    def read_packet(self):
+        time.sleep(0.01)
+        return ControllerPacket(direction="CENTER", joystick_button=False, external_button=False, probe=False, x=512, y=512)
+
+
+class BlockingArduinoDriver(SuccessfulArduinoDriver):
+    def __init__(self, *, port: str, baudrate: int, startup_delay: float = 0.0, entered: threading.Event, release: threading.Event) -> None:
+        super().__init__(port=port, baudrate=baudrate, startup_delay=startup_delay)
+        self.entered = entered
+        self.release = release
+
+    def open(self) -> None:
+        self.entered.set()
+        if not self.release.wait(timeout=2.0):
+            raise RuntimeError("timeout esperando liberación de prueba")
+        super().open()
+
+
+class SerialFactorySequence:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def __call__(self, *, port: str, baudrate: int, startup_delay: float = 0.0):
+        self.calls += 1
+        if self.calls == 1:
+            return FailingArduinoDriver(port=port, baudrate=baudrate, startup_delay=startup_delay)
+        return SuccessfulArduinoDriver(port=port, baudrate=baudrate, startup_delay=startup_delay)
+
+
+class BlockingSerialFactory:
+    def __init__(self) -> None:
+        self.entered = threading.Event()
+        self.release = threading.Event()
+        self.calls = 0
+
+    def __call__(self, *, port: str, baudrate: int, startup_delay: float = 0.0):
+        self.calls += 1
+        return BlockingArduinoDriver(port=port, baudrate=baudrate, startup_delay=startup_delay, entered=self.entered, release=self.release)
 
 
 class FakeDiagnostics:
@@ -228,6 +326,62 @@ class RejectedZClient(MotionClient):
         return super().send_gcode(script, timeout=timeout)
 
 
+class NearZeroVelocityClient(MotionClient):
+    def send_gcode(self, script: str, *, timeout: float | None = None) -> dict[str, object]:
+        if "G28" in script:
+            return super().send_gcode(script, timeout=timeout)
+        self.scripts.append(script)
+        snapshot = self.machine.get_motion_snapshot()
+        x = float(snapshot["x"])
+        y = float(snapshot["y"])
+        z = float(snapshot["z"])
+        match_x = re.search(r"\bX(-?\d+(?:\.\d+)?)", script)
+        match_y = re.search(r"\bY(-?\d+(?:\.\d+)?)", script)
+        match_z = re.search(r"\bZ(-?\d+(?:\.\d+)?)", script)
+        if match_x:
+            x = float(match_x.group(1))
+        if match_y:
+            y = float(match_y.group(1))
+        if match_z:
+            z = float(match_z.group(1))
+        self.machine.update_toolhead(position=(x, y, z))
+        self.machine.update_motion(live_position=(x, y, z), live_velocity=-1.42e-14, source="websocket")
+        return {"result": "ok"}
+
+
+class PersistentVelocityClient(MotionClient):
+    def __init__(self, machine: MachineState, *, velocity_mm_s: float) -> None:
+        super().__init__(machine)
+        self.velocity_mm_s = velocity_mm_s
+
+    def send_gcode(self, script: str, *, timeout: float | None = None) -> dict[str, object]:
+        if "G28" in script:
+            return super().send_gcode(script, timeout=timeout)
+        match_x = re.search(r"\bX(-?\d+(?:\.\d+)?)", script)
+        match_y = re.search(r"\bY(-?\d+(?:\.\d+)?)", script)
+        if not match_x and not match_y:
+            return super().send_gcode(script, timeout=timeout)
+        self.scripts.append(script)
+        snapshot = self.machine.get_motion_snapshot()
+        x = float(snapshot["x"])
+        y = float(snapshot["y"])
+        z = float(snapshot["z"])
+        match_z = re.search(r"\bZ(-?\d+(?:\.\d+)?)", script)
+        if match_x:
+            x = float(match_x.group(1))
+        if match_y:
+            y = float(match_y.group(1))
+        if match_z:
+            z = float(match_z.group(1))
+        self.machine.update_toolhead(position=(x, y, z))
+        self.machine.update_motion(live_position=(x, y, z), live_velocity=self.velocity_mm_s, source="websocket")
+        return {"result": "ok"}
+
+
+class StaleVelocityTargetClient(PersistentVelocityClient):
+    pass
+
+
 class QueryFallbackClient(MotionClient):
     def __init__(self, machine: MachineState) -> None:
         super().__init__(machine)
@@ -245,6 +399,18 @@ class QueryFallbackClient(MotionClient):
             self.machine.update_motion(live_position=(0, 0, 0), live_velocity=0)
             return {"result": "ok"}
         return super().send_gcode(script, timeout=timeout)
+
+
+class QueryObjectsClient:
+    def __init__(self, status: dict[str, object]) -> None:
+        self.status = status
+        self.calls = 0
+        self.objects = None
+
+    def query_objects(self, objects):
+        self.calls += 1
+        self.objects = objects
+        return self.status
 
 
 class SampleSequenceZClient(MotionClient):
@@ -333,6 +499,8 @@ def physical_runtime_with_machine(machine: MachineState, cfg: MachineRuntimeConf
     runtime = MachineRuntime(cfg, discovery=lambda _client: machine)
     client = MotionClient(machine)
     runtime._client = client
+    machine.update_toolhead(position=machine.position.as_tuple(), homed_axes=machine.homed_axes)
+    machine.update_motion(live_position=machine.position.as_tuple(), live_velocity=machine.live_velocity, source="websocket")
     runtime._machine = machine
     runtime._driver = type("Driver", (), {"diagnostics": FakeDiagnostics()})()
     runtime._serial_thread = FakeThread()
@@ -359,6 +527,139 @@ class MachineRuntimeTest(unittest.TestCase):
         with self.assertRaisesRegex(MachineRuntimeError, "MOONRAKER_URL"):
             runtime.connect()
 
+
+    def test_partial_connection_when_arduino_is_absent_keeps_moonraker_and_klipper(self) -> None:
+        machine = MachineState(
+            position=MachinePosition(0, 0, 10),
+            x_limits=AxisLimits(0, 100),
+            y_limits=AxisLimits(0, 100),
+            z_limits=AxisLimits(0, 100),
+            homed_axes="xyz",
+            max_velocity=100,
+            max_accel=500,
+            live_velocity=0,
+        )
+        runtime = MachineRuntime(
+            config(MachineMode.PHYSICAL, moonraker_url="http://moonraker", moonraker_ws="ws://moonraker/websocket", serial_port="/dev/ttyUSB-arduino"),
+            client_factory=lambda _url, timeout=None: DummyConnectClient(machine),
+            telemetry_factory=lambda *_args, **_kwargs: IdleTelemetry(),
+            serial_factory=lambda **kwargs: FailingArduinoDriver(**kwargs),
+            discovery=lambda _client: machine,
+        )
+
+        with self.assertRaises(MachineConnectionError) as ctx:
+            runtime.connect()
+
+        self.assertEqual(ctx.exception.component, "arduino")
+        self.assertTrue(ctx.exception.retryable)
+        snapshot = ctx.exception.runtime_snapshot or runtime.snapshot()
+        self.assertEqual(snapshot["connection"]["status"], "partial")
+        self.assertTrue(snapshot["moonraker"]["http_connected"])
+        self.assertTrue(snapshot["moonraker"]["websocket_connected"])
+        self.assertTrue(snapshot["klipper"]["ready"])
+        self.assertEqual(snapshot["arduino"]["status"], "connection_failed")
+        self.assertEqual(snapshot["connection"]["last_error"]["port"], "/dev/ttyUSB-arduino")
+        runtime.stop()
+
+    def test_retry_connect_succeeds_after_arduino_becomes_available(self) -> None:
+        machine = MachineState(
+            position=MachinePosition(0, 0, 10),
+            x_limits=AxisLimits(0, 100),
+            y_limits=AxisLimits(0, 100),
+            z_limits=AxisLimits(0, 100),
+            homed_axes="xyz",
+            max_velocity=100,
+            max_accel=500,
+            live_velocity=0,
+        )
+        serial_factory = SerialFactorySequence()
+        runtime = MachineRuntime(
+            config(MachineMode.PHYSICAL, moonraker_url="http://moonraker", moonraker_ws="ws://moonraker/websocket", serial_port="/dev/ttyUSB-arduino"),
+            client_factory=lambda _url, timeout=None: DummyConnectClient(machine),
+            telemetry_factory=lambda *_args, **_kwargs: IdleTelemetry(),
+            serial_factory=serial_factory,
+            discovery=lambda _client: machine,
+        )
+
+        with self.assertRaises(MachineConnectionError):
+            runtime.connect()
+
+        snapshot = runtime.connect()
+        self.assertEqual(serial_factory.calls, 2)
+        self.assertEqual(snapshot["connection"]["status"], "connected")
+        self.assertTrue(snapshot["connection"]["fully_connected"])
+        self.assertEqual(snapshot["state"], "DIAGNOSTIC")
+        runtime.stop()
+
+    def test_connect_rejects_parallel_attempts_and_serial_factory_runs_once(self) -> None:
+        machine = MachineState(
+            position=MachinePosition(0, 0, 10),
+            x_limits=AxisLimits(0, 100),
+            y_limits=AxisLimits(0, 100),
+            z_limits=AxisLimits(0, 100),
+            homed_axes="xyz",
+            max_velocity=100,
+            max_accel=500,
+            live_velocity=0,
+        )
+        serial_factory = BlockingSerialFactory()
+        runtime = MachineRuntime(
+            config(MachineMode.PHYSICAL, moonraker_url="http://moonraker", moonraker_ws="ws://moonraker/websocket", serial_port="/dev/ttyUSB-arduino"),
+            client_factory=lambda _url, timeout=None: DummyConnectClient(machine),
+            telemetry_factory=lambda *_args, **_kwargs: IdleTelemetry(),
+            serial_factory=serial_factory,
+            discovery=lambda _client: machine,
+        )
+        first_error: list[BaseException] = []
+
+        def first_connect() -> None:
+            try:
+                runtime.connect()
+            except BaseException as error:
+                first_error.append(error)
+
+        thread = threading.Thread(target=first_connect)
+        thread.start()
+        self.assertTrue(serial_factory.entered.wait(timeout=1.0))
+
+        with self.assertRaises(MachineConnectionError) as ctx:
+            runtime.connect()
+        self.assertEqual(ctx.exception.component, "runtime")
+        self.assertEqual(ctx.exception.status, "connection_in_progress")
+        self.assertEqual(serial_factory.calls, 1)
+
+        serial_factory.release.set()
+        thread.join(timeout=2.0)
+        self.assertEqual(first_error, [])
+        runtime.stop()
+
+    def test_reference_and_mesh_remain_blocked_without_arduino(self) -> None:
+        machine = MachineState(
+            position=MachinePosition(0, 0, 10),
+            x_limits=AxisLimits(0, 100),
+            y_limits=AxisLimits(0, 100),
+            z_limits=AxisLimits(0, 100),
+            homed_axes="xyz",
+            max_velocity=100,
+            max_accel=500,
+            live_velocity=0,
+        )
+        runtime = MachineRuntime(
+            config(MachineMode.PHYSICAL, moonraker_url="http://moonraker", moonraker_ws="ws://moonraker/websocket", serial_port="/dev/ttyUSB-arduino"),
+            client_factory=lambda _url, timeout=None: DummyConnectClient(machine),
+            telemetry_factory=lambda *_args, **_kwargs: IdleTelemetry(),
+            serial_factory=lambda **kwargs: FailingArduinoDriver(**kwargs),
+            discovery=lambda _client: machine,
+        )
+
+        with self.assertRaises(MachineConnectionError):
+            runtime.connect()
+
+        with self.assertRaisesRegex(MachineRuntimeError, "Arduino"):
+            runtime.initialize()
+        with self.assertRaisesRegex(MachineRuntimeError, "Arduino"):
+            runtime.probe_mesh_point({"index": 0, "x_machine": 5.0, "y_machine": 6.0})
+        runtime.stop()
 
     def test_transport_timeout_is_cleared_when_homing_is_confirmed_by_state(self) -> None:
         class TimeoutClient:
@@ -557,6 +858,154 @@ class MachineRuntimeTest(unittest.TestCase):
         self.assertIn("Z115.000000", client.scripts[1])
         self.assertIn("X50.000000", client.scripts[2])
         self.assertAlmostEqual(machine.get_motion_snapshot()["z"], 115.0, places=3)
+
+    def test_identical_live_position_samples_refresh_sample_without_marking_motion_change(self) -> None:
+        machine = MachineState(
+            position=MachinePosition(1, 2, 3),
+            x_limits=AxisLimits(0, 100),
+            y_limits=AxisLimits(0, 100),
+            z_limits=AxisLimits(0, 100),
+            homed_axes="xyz",
+            max_velocity=100,
+            max_accel=500,
+            live_velocity=0,
+        )
+        machine.update_motion(live_position=(1, 2, 3), live_velocity=0, source="websocket")
+        machine.live_position_updated_at = time.monotonic() - 10.0
+        machine.live_position_changed_at = time.monotonic() - 5.0
+        machine.update_motion(live_position=(1, 2, 3), live_velocity=0, source="websocket")
+
+        snapshot = machine.get_motion_snapshot()
+
+        self.assertLess(float(snapshot["position_sample_age_s"]), 0.1)
+        self.assertGreater(float(snapshot["position_changed_age_s"]), 4.0)
+
+    def test_websocket_recent_without_new_live_sample_remains_blocked_for_motion(self) -> None:
+        machine = MachineState(
+            position=MachinePosition(0, 0, 10),
+            x_limits=AxisLimits(0, 100),
+            y_limits=AxisLimits(0, 100),
+            z_limits=AxisLimits(0, 100),
+            homed_axes="xyz",
+            max_velocity=100,
+            max_accel=500,
+            live_velocity=0,
+        )
+        runtime, _client = physical_runtime_with_machine(machine)
+        machine.live_position_updated_at = time.monotonic() - 5.0
+        runtime._last_telemetry_at = time.monotonic()
+        runtime._last_websocket_message_at = time.monotonic()
+
+        snapshot = runtime.snapshot()
+        self.assertTrue(snapshot["safety"]["websocket_recent"])
+        self.assertFalse(snapshot["safety"]["position_sample_recent"])
+        with self.assertRaisesRegex(MachineRuntimeError, "posición live de Moonraker está obsoleta"):
+            runtime._assert_safety_for_motion()
+
+    def test_stale_live_sample_is_reconciled_by_http_before_blocking_motion(self) -> None:
+        machine = MachineState(
+            position=MachinePosition(0, 0, 10),
+            x_limits=AxisLimits(0, 100),
+            y_limits=AxisLimits(0, 100),
+            z_limits=AxisLimits(0, 100),
+            homed_axes="xyz",
+            max_velocity=100,
+            max_accel=500,
+            live_velocity=0,
+        )
+        machine.update_toolhead(position=(0, 0, 10), homed_axes="xyz", axis_minimum=(0, 0, 0), axis_maximum=(100, 100, 100), max_velocity=100, max_accel=500)
+        machine.update_motion(live_position=(0, 0, 10), live_velocity=0, source="websocket")
+        machine.live_position_updated_at = time.monotonic() - 5.0
+        status = {
+            "motion_report": {"live_position": [0, 0, 10], "live_velocity": 0.0},
+            "toolhead": {
+                "position": [0, 0, 10],
+                "homed_axes": "xyz",
+                "axis_minimum": [0, 0, 0],
+                "axis_maximum": [100, 100, 100],
+                "max_velocity": 100,
+                "max_accel": 500,
+            },
+            "gcode_move": {
+                "gcode_position": [0, 0, 10],
+                "position": [0, 0, 10],
+                "absolute_coordinates": True,
+                "homing_origin": [0, 0, 0],
+            },
+            "configfile": {"settings": {"printer": {"max_z_velocity": 3.0}}},
+            "webhooks": {"state": "ready"},
+        }
+        query_client = QueryObjectsClient(status)
+        runtime = MachineRuntime(
+            config(MachineMode.PHYSICAL, moonraker_url="http://moonraker"),
+            client_factory=lambda _url, timeout=None: query_client,
+            discovery=lambda _client: machine,
+        )
+        runtime._machine = machine
+        runtime._client = query_client
+        runtime._driver = type("Driver", (), {"diagnostics": FakeDiagnostics()})()
+        runtime._serial_thread = FakeThread()
+        runtime._last_packet_at = time.monotonic()
+        runtime._last_telemetry_at = time.monotonic()
+        runtime._last_websocket_message_at = time.monotonic()
+
+        runtime._assert_safety_for_motion()
+
+        self.assertEqual(query_client.calls, 1)
+        self.assertLess(float(machine.get_motion_snapshot()["position_sample_age_s"]), 0.1)
+
+    def test_refresh_motion_snapshot_http_updates_stale_live_position_sample(self) -> None:
+        machine = MachineState(
+            position=MachinePosition(0, 0, 10),
+            x_limits=AxisLimits(0, 100),
+            y_limits=AxisLimits(0, 100),
+            z_limits=AxisLimits(0, 100),
+            homed_axes="xyz",
+            max_velocity=100,
+            max_accel=500,
+            live_velocity=0,
+        )
+        machine.update_toolhead(position=(0, 0, 10), homed_axes="xyz", axis_minimum=(0, 0, 0), axis_maximum=(100, 100, 100), max_velocity=100, max_accel=500)
+        machine.update_motion(live_position=(0, 0, 10), live_velocity=0, source="websocket")
+        machine.live_position_updated_at = time.monotonic() - 5.0
+        status = {
+            "motion_report": {"live_position": [0, 0, 10], "live_velocity": 0.0},
+            "toolhead": {
+                "position": [0, 0, 10],
+                "homed_axes": "xyz",
+                "axis_minimum": [0, 0, 0],
+                "axis_maximum": [100, 100, 100],
+                "max_velocity": 100,
+                "max_accel": 500,
+            },
+            "gcode_move": {
+                "gcode_position": [0, 0, 10],
+                "position": [0, 0, 10],
+                "absolute_coordinates": True,
+                "homing_origin": [0, 0, 0],
+            },
+            "configfile": {"settings": {"printer": {"max_z_velocity": 3.0}}},
+            "webhooks": {"state": "ready"},
+        }
+        query_client = QueryObjectsClient(status)
+        runtime = MachineRuntime(
+            config(MachineMode.PHYSICAL, moonraker_url="http://moonraker"),
+            client_factory=lambda _url, timeout=None: query_client,
+            discovery=lambda _client: machine,
+        )
+        runtime._machine = machine
+        runtime._client = query_client
+        runtime._driver = type("Driver", (), {"diagnostics": FakeDiagnostics()})()
+        runtime._serial_thread = FakeThread()
+        runtime._last_packet_at = time.monotonic()
+        runtime._last_telemetry_at = time.monotonic() - 5.0
+
+        snapshot = runtime.refresh_motion_snapshot_http(timeout_s=0.25)
+
+        self.assertEqual(query_client.calls, 1)
+        self.assertTrue(snapshot["safety"]["position_sample_recent"])
+        self.assertEqual(machine.max_z_velocity, 3.0)
+        self.assertLess(float(machine.get_motion_snapshot()["position_sample_age_s"]), 0.1)
 
     def test_reference_z_command_rejection_stops_before_center(self) -> None:
         machine = MachineState(
@@ -974,7 +1423,47 @@ class MachineRuntimeTest(unittest.TestCase):
         self.assertEqual(runtime._jog.calls[1]["speed"], 1.25)
         self.assertGreater(float(runtime._jog.calls[1]["distance"]), 0.0)
 
-    def test_mesh_probe_uses_saved_probe_recipe(self) -> None:
+    def test_confirm_probe_uses_shared_probe_helper(self) -> None:
+        machine = MachineState(
+            position=MachinePosition(10, 8, 5),
+            x_limits=AxisLimits(0, 100),
+            y_limits=AxisLimits(0, 100),
+            z_limits=AxisLimits(0, 200),
+            homed_axes="xyz",
+            max_velocity=100,
+            max_accel=500,
+            live_velocity=0,
+        )
+        runtime, _client = physical_runtime_with_machine(machine, cfg=config(MachineMode.PHYSICAL, probe_lower_speed_mm_s=1.25, probe_retract_mm=0.8))
+        runtime._state = runtime_module.MachineRuntimeState.REFERENCE_ARMED
+        runtime._probe_requested = True
+        runtime._last_command = ControllerCommand()
+        calls: list[dict[str, float | str | None]] = []
+
+        def fake_probe_current_position(*, label: str, probe_step_mm: float | None = None, probe_speed_mm_s: float | None = None, retract_mm: float | None = None, retract_speed_mm_s: float | None = None, progress_callback=None):
+            calls.append(
+                {
+                    "label": label,
+                    "probe_step_mm": probe_step_mm,
+                    "probe_speed_mm_s": probe_speed_mm_s,
+                    "retract_mm": retract_mm,
+                    "retract_speed_mm_s": retract_speed_mm_s,
+                }
+            )
+            return runtime_module.ProbeResult(x_mm=10.0, y_mm=8.0, z_mm=4.95, captured_at="2026-07-27T00:00:00Z")
+
+        runtime._probe_current_position = fake_probe_current_position
+
+        snapshot = runtime.confirm_probe()
+
+        self.assertEqual(snapshot["state"], "REFERENCE_CAPTURED")
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["label"], "reference_probe")
+        self.assertEqual(calls[0]["probe_speed_mm_s"], 1.25)
+        self.assertEqual(calls[0]["retract_speed_mm_s"], 1.25)
+        self.assertEqual(calls[0]["retract_mm"], 0.8)
+
+    def test_mesh_probe_uses_reference_probe_recipe_for_stability(self) -> None:
         machine = MachineState(
             position=MachinePosition(10, 8, 5),
             x_limits=AxisLimits(0, 100),
@@ -1003,10 +1492,86 @@ class MachineRuntimeTest(unittest.TestCase):
         self.assertIn("X25.000000", client.scripts[1])
         self.assertIn("Y35.000000", client.scripts[1])
         self.assertEqual(len(runtime._jog.calls), 2)
-        self.assertEqual(runtime._jog.calls[0]["speed"], 0.5)
-        self.assertEqual(runtime._jog.calls[1]["speed"], 0.5)
-        self.assertAlmostEqual(float(runtime._jog.calls[0]["distance"]), -0.05)
-        self.assertAlmostEqual(float(runtime._jog.calls[1]["distance"]), 0.8)
+        self.assertEqual(runtime._jog.calls[0]["speed"], 4.0)
+        self.assertEqual(runtime._jog.calls[1]["speed"], 4.0)
+        self.assertAlmostEqual(float(runtime._jog.calls[0]["distance"]), -0.25)
+        self.assertAlmostEqual(float(runtime._jog.calls[1]["distance"]), 0.4)
+
+    def test_tool_change_position_accepts_near_zero_velocity_noise(self) -> None:
+        machine = MachineState(
+            position=MachinePosition(40, 30, 115),
+            x_limits=AxisLimits(0, 100),
+            y_limits=AxisLimits(0, 100),
+            z_limits=AxisLimits(0, 200),
+            homed_axes="xyz",
+            max_velocity=100,
+            max_accel=500,
+            live_velocity=0,
+        )
+        runtime, _client = physical_runtime_with_machine(machine)
+        runtime._client = NearZeroVelocityClient(machine)
+
+        snapshot = runtime.move_to_tool_change_position()
+
+        self.assertEqual(snapshot["state"], "WAITING_FOR_XY_REFERENCE")
+        self.assertEqual(machine.get_motion_snapshot()["x"], 0.0)
+        self.assertEqual(machine.get_motion_snapshot()["y"], 0.0)
+
+    def test_tool_change_position_reconciles_stale_velocity_after_target_reached(self) -> None:
+        machine = MachineState(
+            position=MachinePosition(40, 30, 115),
+            x_limits=AxisLimits(0, 100),
+            y_limits=AxisLimits(0, 100),
+            z_limits=AxisLimits(0, 200),
+            homed_axes="xyz",
+            max_velocity=100,
+            max_accel=500,
+            live_velocity=0,
+        )
+        cfg = config(MachineMode.PHYSICAL, telemetry_fresh_timeout_s=0.05, settle_timeout_s=0.05, move_timeout_s=0.12, move_minimum_timeout_s=0.12, move_timeout_factor=1.0, move_settle_margin_s=0.0, stable_samples=1)
+        runtime, _client = physical_runtime_with_machine(machine, cfg=cfg)
+        runtime._client = StaleVelocityTargetClient(machine, velocity_mm_s=10.0)
+
+        snapshot = runtime.move_to_tool_change_position()
+
+        self.assertEqual(snapshot["state"], "WAITING_FOR_XY_REFERENCE")
+        self.assertEqual(runtime._last_movement["result"], "reconciliado_timeout_transporte")
+
+    def test_tool_change_position_fails_when_velocity_remains_active_with_recent_samples(self) -> None:
+        machine = MachineState(
+            position=MachinePosition(40, 30, 115),
+            x_limits=AxisLimits(0, 100),
+            y_limits=AxisLimits(0, 100),
+            z_limits=AxisLimits(0, 200),
+            homed_axes="xyz",
+            max_velocity=100,
+            max_accel=500,
+            live_velocity=0,
+        )
+        cfg = config(MachineMode.PHYSICAL, settle_timeout_s=0.05, move_timeout_s=0.2, move_minimum_timeout_s=0.2, move_timeout_factor=1.0, move_settle_margin_s=0.0, stable_samples=1)
+        runtime, _client = physical_runtime_with_machine(machine, cfg=cfg)
+        runtime._client = PersistentVelocityClient(machine, velocity_mm_s=1.0)
+
+        with self.assertRaisesRegex(MachineRuntimeError, "velocidad no se estabilizó"):
+            runtime.move_to_tool_change_position()
+
+    def test_tool_change_position_rejects_stale_live_telemetry_before_motion(self) -> None:
+        machine = MachineState(
+            position=MachinePosition(40, 30, 10),
+            x_limits=AxisLimits(0, 100),
+            y_limits=AxisLimits(0, 100),
+            z_limits=AxisLimits(0, 200),
+            homed_axes="xyz",
+            max_velocity=100,
+            max_accel=500,
+            live_velocity=0,
+        )
+        cfg = config(MachineMode.PHYSICAL, telemetry_fresh_timeout_s=0.01)
+        runtime, _client = physical_runtime_with_machine(machine, cfg=cfg)
+        time.sleep(0.02)
+
+        with self.assertRaisesRegex(MachineRuntimeError, "posición live de Moonraker está obsoleta"):
+            runtime.move_to_tool_change_position()
 
     def test_tool_change_position_moves_z_before_xy(self) -> None:
         machine = MachineState(
@@ -1031,6 +1596,33 @@ class MachineRuntimeTest(unittest.TestCase):
         self.assertEqual(machine.get_motion_snapshot()["z"], 115.0)
         self.assertEqual(machine.get_motion_snapshot()["x"], 0.0)
         self.assertEqual(machine.get_motion_snapshot()["y"], 0.0)
+
+    def test_go_to_reference_point_uses_saved_xy_without_rerunning_homing(self) -> None:
+        machine = MachineState(
+            position=MachinePosition(40, 30, 10),
+            x_limits=AxisLimits(0, 120),
+            y_limits=AxisLimits(0, 120),
+            z_limits=AxisLimits(0, 200),
+            homed_axes="xyz",
+            max_velocity=100,
+            max_accel=500,
+            live_velocity=0,
+        )
+        runtime, client = physical_runtime_with_machine(machine)
+
+        snapshot = runtime.go_to_reference_point(reference_x=60.0, reference_y=88.75)
+
+        self.assertEqual(snapshot["state"], "WAITING_FOR_XY_REFERENCE")
+        self.assertEqual(len(client.scripts), 2)
+        self.assertNotIn("G28", client.scripts)
+        self.assertIn("Z115.000000", client.scripts[0])
+        self.assertIn("F180.000", client.scripts[0])
+        self.assertIn("X60.000000", client.scripts[1])
+        self.assertIn("Y88.750000", client.scripts[1])
+        self.assertIn("F1800.000", client.scripts[1])
+        self.assertEqual(machine.get_motion_snapshot()["z"], 115.0)
+        self.assertEqual(machine.get_motion_snapshot()["x"], 60.0)
+        self.assertEqual(machine.get_motion_snapshot()["y"], 88.75)
 
     def test_command_mapper_discards_diagonal_jog(self) -> None:
         mapper = CommandMapper()

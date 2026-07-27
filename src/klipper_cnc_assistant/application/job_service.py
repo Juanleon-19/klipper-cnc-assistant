@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from klipper_cnc_assistant.application.compensated_gcode_service import CompensatedGCodeService
-from klipper_cnc_assistant.application.errors import ApplicationError, NotFoundError
+from klipper_cnc_assistant.application.errors import ApplicationError, ConflictError, NotFoundError
 from klipper_cnc_assistant.application.physical_map_service import PhysicalMapService
 from klipper_cnc_assistant.application.reference_service import ReferenceSessionService
 from klipper_cnc_assistant.domain import BoardFace, OperacionPCB, ProjectValidationError
@@ -20,22 +20,23 @@ from klipper_cnc_assistant.storage import JsonProjectRepository
 
 JOB_PLAN_SCHEMA = "job-plan-v1"
 JOB_RUN_SCHEMA = "job-run-v1"
-RUN_TERMINAL_STATES = {"JOB_COMPLETE", "JOB_CANCELLED", "JOB_ERROR"}
-RUN_WAITING_STATES = {"WAITING_TOOL_CHANGE", "TOOL_CHANGE_CONFIRMED", "OPERATION_PAUSED", "JOB_PAUSED"}
+RUN_TERMINAL_STATES = {"COMPLETED", "CANCELLED", "FAILED", "JOB_COMPLETED", "JOB_FAILED", "JOB_CANCELLED", "JOB_CANCELED", "STALE_RUN_ARCHIVED"}
+RUN_WAITING_STATES = {
+    "SPINDLE_STOP_REQUIRED",
+    "TOOL_CHANGE_REQUIRED",
+    "WAITING_TOOL_REFERENCE",
+    "READY_TO_RESUME",
+    "OPERATION_PAUSED",
+    "JOB_PAUSED",
+    "RECOVERY_REQUIRED",
+}
 RUN_ACTIVE_STATES = {
-    "JOB_STARTING",
-    "OPERATION_PREFLIGHT",
-    "OPERATION_UPLOADING",
-    "OPERATION_READY",
-    "OPERATION_RUNNING",
+    "RUNNING",
     "MOVING_TO_TOOL_CHANGE_SAFE_Z",
     "MOVING_TO_TOOL_CHANGE_XY",
-    "RETURNING_TO_REFERENCE_SAFE_Z",
-    "RETURNING_TO_REFERENCE_XY",
     "PROBING_TOOL_REFERENCE",
-    "COMPENSATING_NEXT_OPERATIONS",
-    "NEXT_OPERATION_READY",
 }
+RUN_NONTERMINAL_STATES = RUN_WAITING_STATES | RUN_ACTIVE_STATES | {"JOB_VALIDATING", "READY_TO_START"}
 
 
 def _utc_now() -> datetime:
@@ -52,6 +53,10 @@ def _tool_key(operation: OperacionPCB) -> str:
 
 def _safe_face(face: str) -> str:
     return str(face).strip().lower().replace(" ", "-")
+
+
+def _tool_identity(payload: dict[str, Any]) -> str:
+    return str(payload.get("tool_id") or payload.get("tool_key") or payload.get("tool_name") or "sin-herramienta")
 
 
 @dataclass(frozen=True)
@@ -148,6 +153,7 @@ class JobService:
         self.adapter_factory = adapter_factory
         self._lock = threading.RLock()
         self._threads: dict[tuple[str, str, str], threading.Thread] = {}
+        self._run_locks: dict[tuple[str, str, str], threading.RLock] = {}
 
     def get_plan(self, *, project_id: str, setup_id: str, face: str) -> dict[str, Any]:
         context = self._context(project_id, setup_id, face)
@@ -179,46 +185,83 @@ class JobService:
         self._save_plan(context, refreshed)
         return refreshed
 
+    def _context_run_lock(self, context: JobContext) -> threading.RLock:
+        key = (context.project_id, context.setup_id, context.face)
+        with self._lock:
+            lock = self._run_locks.get(key)
+            if lock is None:
+                lock = threading.RLock()
+                self._run_locks[key] = lock
+            return lock
+
     def prepare_run(self, *, project_id: str, setup_id: str, face: str) -> dict[str, Any]:
         context = self._context(project_id, setup_id, face)
-        plan = self._load_or_build_plan(context)
-        checks = self._build_run_checks(context, plan)
-        ready = all(check["ok"] for check in checks)
-        current = self._load_run(context)
-        run = self._base_run(context, plan) if current is None or current.get("state") in RUN_TERMINAL_STATES else current
-        run["checks"] = checks
-        run["state"] = "JOB_READY" if ready else "JOB_VALIDATING"
-        run["ready"] = ready
-        run["next_action"] = "Iniciar trabajo" if ready else "Resolver bloqueos"
-        run["available_actions"] = ["start"] if ready else []
-        run["updated_at"] = _iso_now()
-        self._save_run(context, run)
-        return run
+        with self._context_run_lock(context):
+            plan = self._load_or_build_plan(context)
+            checks = self._build_run_checks(context, plan)
+            ready = all(check["ok"] for check in checks)
+            current = self._load_run(context)
+            if current is not None and str(current.get("state") or "") not in RUN_TERMINAL_STATES:
+                run = current
+                run["checks"] = checks
+                run["ready"] = ready
+                if str(run.get("state") or "") in {"JOB_DRAFT", "JOB_VALIDATING", "READY_TO_START"}:
+                    run["state"] = "READY_TO_START" if ready else "JOB_VALIDATING"
+                    run["next_action"] = "Iniciar trabajo" if ready else "Resolver bloqueos"
+                    run["available_actions"] = ["start"] if ready else []
+                run["updated_at"] = _iso_now()
+                self._save_run(context, run)
+                return run
+            if current is not None and str(current.get("state") or "") in RUN_TERMINAL_STATES:
+                self._archive_run(context, current, keep_current=False)
+            run = self._base_run(context, plan)
+            run["checks"] = checks
+            run["state"] = "READY_TO_START" if ready else "JOB_VALIDATING"
+            run["ready"] = ready
+            run["next_action"] = "Iniciar trabajo" if ready else "Resolver bloqueos"
+            run["available_actions"] = ["start"] if ready else []
+            run["updated_at"] = _iso_now()
+            self._save_run(context, run)
+            return run
 
     def start_run(self, *, project_id: str, setup_id: str, face: str) -> dict[str, Any]:
         context = self._context(project_id, setup_id, face)
-        prepared = self.prepare_run(project_id=project_id, setup_id=setup_id, face=face)
-        if not prepared.get("ready"):
-            raise ApplicationError("El trabajo no está listo para iniciar. Revise el preflight general.")
-        run = prepared
-        if run.get("state") not in {"JOB_READY", "JOB_PAUSED", "OPERATION_PAUSED", "TOOL_REFERENCE_READY", "NEXT_OPERATION_READY"}:
-            raise ApplicationError(f"El trabajo no puede iniciar desde estado {run.get('state')}.")
-        run["state"] = "JOB_STARTING"
-        run["started_at"] = run.get("started_at") or _iso_now()
-        run["updated_at"] = _iso_now()
-        run["next_action"] = "Preparando primera operación"
-        run["available_actions"] = ["pause", "cancel"]
-        self._append_event(run, "info", "Trabajo iniciado; el backend continuará la secuencia.")
-        self._save_run(context, run)
+        with self._context_run_lock(context):
+            current = self._load_run(context)
+            if current is not None and str(current.get("state") or "") in RUN_TERMINAL_STATES:
+                raise ConflictError(
+                    "La corrida actual ya terminó. Prepare un nuevo trabajo antes de iniciar otra vez.",
+                    current_state=str(current.get("state") or ""),
+                    run_id=str(current.get("run_id") or ""),
+                    allowed_action="prepare-new-run",
+                )
+            prepared = current
+            if prepared is None:
+                prepared = self.prepare_run(project_id=project_id, setup_id=setup_id, face=face)
+            if not prepared.get("ready"):
+                raise ApplicationError("El trabajo no está listo para iniciar. Revise el preflight general.")
+            run = prepared
+            if run.get("state") == "RUNNING":
+                return run
+            if run.get("state") != "READY_TO_START":
+                raise ApplicationError(f"El trabajo no puede iniciar desde estado {run.get('state')}.")
+            run["state"] = "RUNNING"
+            run["started_at"] = run.get("started_at") or _iso_now()
+            run["updated_at"] = _iso_now()
+            run["next_action"] = "Preparando primera operación"
+            run["available_actions"] = ["pause", "cancel"]
+            self._append_event(run, "info", "Trabajo iniciado; el backend continuará la secuencia.")
+            self._save_run(context, run)
         self._start_worker(context)
         return run
 
     def get_run(self, *, project_id: str, setup_id: str, face: str) -> dict[str, Any]:
         context = self._context(project_id, setup_id, face)
-        run = self._load_run(context)
-        if run is None:
-            return self.prepare_run(project_id=project_id, setup_id=setup_id, face=face)
-        return run
+        with self._context_run_lock(context):
+            run = self._load_run(context)
+            if run is None:
+                raise NotFoundError("No existe una ejecución activa para este montaje/cara.")
+            return run
 
     def history(self, *, project_id: str, setup_id: str, face: str) -> list[dict[str, Any]]:
         history_dir = self._history_dir(self._context(project_id, setup_id, face))
@@ -242,87 +285,132 @@ class JobService:
 
     def run_action(self, *, project_id: str, setup_id: str, face: str, action: str) -> dict[str, Any]:
         context = self._context(project_id, setup_id, face)
-        run = self._load_run(context)
-        if run is None:
-            raise NotFoundError("No existe una ejecución de trabajo para este montaje/cara.")
-        adapter = self.adapter_factory(self.runtime)
-        if action == "pause":
-            try:
-                adapter.pause()
-            except Exception:
-                pass
-            run["state"] = "JOB_PAUSED"
-            run["next_action"] = "Reanudar trabajo"
-            run["available_actions"] = ["resume", "cancel"]
-            self._append_event(run, "warning", "Trabajo pausado por el operador.")
-        elif action == "resume":
-            if run["state"] not in {"JOB_PAUSED", "OPERATION_PAUSED", "TOOL_REFERENCE_READY", "NEXT_OPERATION_READY"}:
-                raise ApplicationError(f"No se puede reanudar desde {run['state']}.")
-            try:
-                if run["state"] == "OPERATION_PAUSED":
-                    adapter.resume()
-            except Exception:
-                pass
-            run["state"] = "JOB_STARTING" if run["state"] in {"JOB_PAUSED", "TOOL_REFERENCE_READY", "NEXT_OPERATION_READY"} else "OPERATION_RUNNING"
-            run["available_actions"] = ["pause", "cancel"]
-            run["next_action"] = "Reanudando trabajo"
-            self._append_event(run, "info", "Trabajo reanudado por el operador.")
-            self._start_worker(context)
-        elif action == "cancel":
-            try:
-                adapter.cancel()
-            except Exception:
-                pass
-            run["state"] = "JOB_CANCELLED"
-            run["completed_at"] = _iso_now()
-            run["available_actions"] = []
-            run["next_action"] = "Trabajo cancelado"
-            self._append_event(run, "warning", "Trabajo cancelado por el operador.")
-            self._archive_run(context, run)
-        elif action == "confirm-tool-change":
-            if run["state"] != "WAITING_TOOL_CHANGE":
-                raise ApplicationError("El cambio de herramienta solo puede confirmarse cuando el trabajo está esperando al operador.")
-            next_index = int(run["current_operation_index"]) + 1
-            next_operation = run["operations"][next_index]
-            plan = self._load_or_build_plan(context)
-            active_map = plan["active_map"]
-            self.physical_map_service.invalidate_tool_reference(
-                project_id=context.project_id,
-                map_id=active_map["map_id"],
-                operation_id=next_operation["operation_id"],
-            )
-            next_operation["reference_status"] = "REQUIERE_REFERENCIA"
-            next_operation["installation_revision"] = _utc_now().strftime("%Y%m%d-%H%M%S")
-            run["state"] = "TOOL_CHANGE_CONFIRMED"
-            run["next_action"] = "Medir referencia Z de la nueva herramienta"
-            run["available_actions"] = ["measure-reference", "cancel"]
-            self._append_event(run, "info", f"Herramienta confirmada para {next_operation['tool_name']}. Falta medir la nueva referencia Z.")
-        elif action == "measure-reference":
-            self._measure_tool_reference(context, run)
-        elif action == "continue":
-            if run["state"] not in {"TOOL_REFERENCE_READY", "NEXT_OPERATION_READY"}:
-                raise ApplicationError("Continuar solo aplica cuando ya existe referencia Z y hay una siguiente operación preparada.")
-            run["state"] = "JOB_STARTING"
-            run["next_action"] = "Continuando secuencia"
-            run["available_actions"] = ["pause", "cancel"]
-            self._append_event(run, "info", "Continuación manual confirmada por el operador.")
+        with self._context_run_lock(context):
+            run = self._load_run(context)
+            if run is None:
+                raise NotFoundError("No existe una ejecución de trabajo para este montaje/cara.")
+            adapter = self.adapter_factory(self.runtime)
+            if action == "continue":
+                action = "resume"
+            if action == "pause":
+                try:
+                    adapter.pause()
+                except Exception:
+                    pass
+                run["state"] = "JOB_PAUSED"
+                run["next_action"] = "Reanudar trabajo"
+                run["available_actions"] = ["resume", "cancel"]
+                self._append_event(run, "warning", "Trabajo pausado por el operador.")
+            elif action == "resume":
+                if run["state"] == "RUNNING":
+                    return run
+                if run["state"] not in {"JOB_PAUSED", "OPERATION_PAUSED", "READY_TO_RESUME"}:
+                    raise ApplicationError(f"No se puede reanudar desde {run['state']}.")
+                try:
+                    if run["state"] == "OPERATION_PAUSED":
+                        adapter.resume()
+                except Exception:
+                    pass
+                run["state"] = "RUNNING"
+                run["available_actions"] = ["pause", "cancel"]
+                run["next_action"] = "Reanudando trabajo"
+                self._append_event(run, "info", "Trabajo reanudado por el operador.")
+            elif action == "cancel":
+                try:
+                    adapter.cancel()
+                except Exception:
+                    pass
+                run["state"] = "CANCELLED"
+                run["completed_at"] = _iso_now()
+                run["available_actions"] = []
+                run["next_action"] = "Trabajo cancelado"
+                self._append_event(run, "warning", "Trabajo cancelado por el operador.")
+                self._archive_run(context, run)
+            elif action == "confirm-spindle-stopped":
+                if run["state"] in {"MOVING_TO_TOOL_CHANGE_SAFE_Z", "MOVING_TO_TOOL_CHANGE_XY", "TOOL_CHANGE_REQUIRED", "WAITING_TOOL_REFERENCE", "READY_TO_RESUME", "RUNNING"}:
+                    return run
+                if run["state"] != "SPINDLE_STOP_REQUIRED":
+                    raise ApplicationError("El spindle manual solo puede confirmarse cuando la ejecución está esperando esa transición.")
+                status = adapter.print_status()
+                state = str(status.get("state") or "").lower()
+                if bool(status.get("active")) or state in {"printing", "paused"}:
+                    raise ApplicationError("No se puede iniciar el cambio de herramienta mientras Moonraker siga con una impresión activa.")
+                run["state"] = "MOVING_TO_TOOL_CHANGE_SAFE_Z"
+                run["next_action"] = "Elevando Z y moviendo X/Y a la posición segura de cambio de herramienta"
+                run["available_actions"] = ["cancel"]
+                run["spindle_state"] = "stopped_confirmed"
+                self._append_event(run, "info", "Spindle detenido confirmado. Iniciando transición segura de cambio de herramienta.")
+                run["updated_at"] = _iso_now()
+                self._save_run(context, run)
+                try:
+                    adapter.move_to_tool_change_position()
+                except Exception as error:
+                    failed = self._load_run(context) or run
+                    failed["state"] = "RECOVERY_REQUIRED"
+                    failed["next_action"] = "Reintentar movimiento seguro de cambio de herramienta"
+                    failed["available_actions"] = ["confirm-spindle-stopped", "cancel"]
+                    failed["updated_at"] = _iso_now()
+                    self._append_event(failed, "error", f"Falló la transición segura de herramienta: {error}")
+                    self._save_run(context, failed)
+                    return failed
+                advanced = self._load_run(context) or run
+                next_index = int(advanced["current_operation_index"]) + 1
+                next_operation = advanced["operations"][next_index]
+                advanced["state"] = "TOOL_CHANGE_REQUIRED"
+                advanced["next_action"] = f"Cambie a {next_operation['tool_name']} y confirme cuando esté instalada."
+                advanced["available_actions"] = ["confirm-tool-change", "cancel"]
+                advanced["spindle_state"] = "stopped"
+                advanced["updated_at"] = _iso_now()
+                self._append_event(advanced, "warning", f"Cambie a {next_operation['tool_name']} y confirme cuando esté instalada.")
+                self._save_run(context, advanced)
+                return advanced
+            elif action == "confirm-tool-change":
+                if run["state"] in {"WAITING_TOOL_REFERENCE", "READY_TO_RESUME", "RUNNING"}:
+                    return run
+                if run["state"] != "TOOL_CHANGE_REQUIRED":
+                    raise ApplicationError("El cambio de herramienta solo puede confirmarse cuando el trabajo está esperando al operador.")
+                next_index = int(run["current_operation_index"]) + 1
+                next_operation = run["operations"][next_index]
+                plan = self._load_or_build_plan(context)
+                active_map = plan["active_map"]
+                if active_map is None:
+                    raise ApplicationError("No existe mapa físico activo para invalidar la referencia de la nueva herramienta.")
+                self.physical_map_service.invalidate_tool_reference(
+                    project_id=context.project_id,
+                    map_id=active_map["map_id"],
+                    operation_id=next_operation["operation_id"],
+                )
+                next_operation["reference_status"] = "REQUIERE_REFERENCIA"
+                next_operation["installation_revision"] = _utc_now().strftime("%Y%m%d-%H%M%S")
+                run["installed_tool_id"] = next_operation["tool_id"]
+                run["current_tool_id"] = next_operation["tool_id"]
+                run["current_tool_key"] = next_operation["tool_key"]
+                run["state"] = "WAITING_TOOL_REFERENCE"
+                run["next_action"] = f"Medir referencia Z de {next_operation['tool_name']}"
+                run["available_actions"] = ["measure-reference", "cancel"]
+                self._append_event(run, "info", f"Herramienta confirmada para {next_operation['tool_name']}. Falta medir la nueva referencia Z.")
+            elif action == "measure-reference":
+                return self._measure_tool_reference(context, run)
+            else:
+                raise ApplicationError(f"Acción de trabajo no soportada: {action}.")
+            run["updated_at"] = _iso_now()
             self._save_run(context, run)
-            self._start_worker(context)
-            return run
-        else:
-            raise ApplicationError(f"Acción de trabajo no soportada: {action}.")
-        run["updated_at"] = _iso_now()
-        self._save_run(context, run)
-        if action == "measure-reference":
+        if action == "resume":
             self._start_worker(context)
         return run
 
-    def _measure_tool_reference(self, context: JobContext, run: dict[str, Any]) -> None:
+    def _measure_tool_reference(self, context: JobContext, run: dict[str, Any]) -> dict[str, Any]:
+        if run["state"] == "READY_TO_RESUME":
+            return run
+        if run["state"] != "WAITING_TOOL_REFERENCE":
+            raise ApplicationError("La referencia de herramienta solo puede medirse después de confirmar el cambio físico.")
         plan = self._load_or_build_plan(context)
         active_map = plan["active_map"]
         if active_map is None:
             raise ApplicationError("No existe mapa físico activo para medir la referencia de herramienta.")
-        operation_index = int(run["current_operation_index"]) + 1 if run["state"] == "TOOL_CHANGE_CONFIRMED" else int(run.get("current_operation_index", 0) or 0)
+        operation_index = self._next_pending_operation_index(run)
+        if operation_index is None:
+            raise ApplicationError("No existe una operación pendiente para asociar la nueva referencia Z.")
         operation_payload = run["operations"][operation_index]
         adapter = self.adapter_factory(self.runtime)
         run["state"] = "PROBING_TOOL_REFERENCE"
@@ -330,39 +418,56 @@ class JobService:
         run["next_action"] = "Sondeando referencia Z de herramienta"
         self._append_event(run, "info", "Retornando al punto X0/Y0 para medir la nueva referencia Z.")
         self._save_run(context, run)
-        probe = adapter.probe_tool_reference(
-            x_mm=float(active_map["machine_origin_x"]),
-            y_mm=float(active_map["machine_origin_y"]),
-            probe_config=active_map.get("probe_config"),
-        )
-        snapshot = adapter.runtime_snapshot()
-        position = probe.get("probe") or self.runtime.last_probe_position()
-        self.reference_service.capture_physical_z_reference(
-            context.project_id,
-            operation_payload["operation_id"],
-            position=position,
-            machine_label=str(snapshot["moonraker"].get("url") or "physical"),
-            homed_axes=snapshot["klipper"].get("homed_axes"),
-            session_id=snapshot.get("started_at"),
-        )
-        self.physical_map_service.record_tool_reference(
-            project_id=context.project_id,
-            map_id=active_map["map_id"],
-            operation_id=operation_payload["operation_id"],
-            position=position,
-            machine_label=str(snapshot["moonraker"].get("url") or "physical"),
-            homed_axes=snapshot["klipper"].get("homed_axes"),
-            session_id=snapshot.get("started_at"),
-            installation_id=operation_payload.get("installation_revision"),
-        )
-        self.generate_project_compensation(project_id=context.project_id, setup_id=context.setup_id, face=context.face)
+        try:
+            probe = adapter.probe_tool_reference(
+                x_mm=float(active_map["machine_origin_x"]),
+                y_mm=float(active_map["machine_origin_y"]),
+                probe_config=active_map.get("probe_config"),
+            )
+            snapshot = adapter.runtime_snapshot()
+            position = probe.get("probe") or self.runtime.last_probe_position()
+            self.reference_service.capture_physical_z_reference(
+                context.project_id,
+                operation_payload["operation_id"],
+                position=position,
+                machine_label=str(snapshot["moonraker"].get("url") or "physical"),
+                homed_axes=snapshot["klipper"].get("homed_axes"),
+                session_id=snapshot.get("started_at"),
+            )
+            self.physical_map_service.record_tool_reference(
+                project_id=context.project_id,
+                map_id=active_map["map_id"],
+                operation_id=operation_payload["operation_id"],
+                position=position,
+                machine_label=str(snapshot["moonraker"].get("url") or "physical"),
+                homed_axes=snapshot["klipper"].get("homed_axes"),
+                session_id=snapshot.get("started_at"),
+                installation_id=operation_payload.get("installation_revision"),
+            )
+            self.generate_project_compensation(project_id=context.project_id, setup_id=context.setup_id, face=context.face)
+        except Exception as error:
+            failed = self._load_run(context) or run
+            failed["state"] = "RECOVERY_REQUIRED"
+            failed["next_action"] = "Reintentar medición de referencia Z"
+            failed["available_actions"] = ["measure-reference", "cancel"]
+            failed["updated_at"] = _iso_now()
+            self._append_event(failed, "error", f"Falló la medición de referencia Z: {error}")
+            self._save_run(context, failed)
+            return failed
+        completed = self._load_run(context) or run
+        operation_payload = completed["operations"][operation_index]
         operation_payload["reference_status"] = "LISTA"
-        run["current_tool_key"] = operation_payload["tool_key"]
-        run["summary"]["tool_changes_completed"] = int(run["summary"].get("tool_changes_completed", 0)) + 1
-        run["state"] = "JOB_STARTING"
-        run["next_action"] = "Continuando con la siguiente operación tras la nueva referencia Z"
-        run["available_actions"] = ["pause", "cancel"]
-        self._append_event(run, "info", f"Referencia Z medida para {operation_payload['tool_name']}; continuando automáticamente.")
+        completed["current_tool_id"] = operation_payload["tool_id"]
+        completed["installed_tool_id"] = operation_payload["tool_id"]
+        completed["current_tool_key"] = operation_payload["tool_key"]
+        completed["summary"]["tool_changes_completed"] = int(completed["summary"].get("tool_changes_completed", 0)) + 1
+        completed["state"] = "READY_TO_RESUME"
+        completed["next_action"] = "Reanudar trabajo con la herramienta referenciada"
+        completed["available_actions"] = ["resume", "cancel"]
+        completed["updated_at"] = _iso_now()
+        self._append_event(completed, "info", f"Referencia Z medida para {operation_payload['tool_name']}; lista para reanudar.")
+        self._save_run(context, completed)
+        return completed
 
     def _start_worker(self, context: JobContext) -> None:
         key = (context.project_id, context.setup_id, context.face)
@@ -382,11 +487,12 @@ class JobService:
                 if run is None or run.get("state") in RUN_TERMINAL_STATES | RUN_WAITING_STATES:
                     return
                 state = str(run.get("state"))
-                if state in {"JOB_STARTING", "NEXT_OPERATION_READY", "TOOL_REFERENCE_READY"}:
-                    self._execute_next_operation(context, run)
-                    continue
-                if state == "OPERATION_RUNNING":
-                    self._watch_operation(context, run)
+                if state == "RUNNING":
+                    index = self._next_pending_operation_index(run)
+                    if index is None or run["operations"][index]["execution_status"] != "RUNNING":
+                        self._execute_next_operation(context, run)
+                    else:
+                        self._watch_operation(context, run)
                     continue
                 return
         finally:
@@ -398,7 +504,7 @@ class JobService:
     def _execute_next_operation(self, context: JobContext, run: dict[str, Any]) -> None:
         index = self._next_pending_operation_index(run)
         if index is None:
-            run["state"] = "JOB_COMPLETE"
+            run["state"] = "COMPLETED"
             run["completed_at"] = _iso_now()
             run["summary"]["operations_completed"] = len(run["operations"])
             run["available_actions"] = []
@@ -409,16 +515,16 @@ class JobService:
             return
         operation = run["operations"][index]
         previous = run["operations"][index - 1] if index > 0 else None
-        current_tool_key = run.get("current_tool_key")
-        if previous and previous["tool_key"] != operation["tool_key"] and previous["execution_status"] == "COMPLETED" and current_tool_key != operation["tool_key"]:
+        current_tool = str(run.get("installed_tool_id") or run.get("current_tool_id") or run.get("current_tool_key") or "")
+        if previous and _tool_identity(previous) != _tool_identity(operation) and previous["execution_status"] == "COMPLETED" and current_tool != _tool_identity(operation):
             self._handle_tool_change_required(context, run, operation_index=index)
             return
         if operation["reference_status"] != "LISTA":
-            run["state"] = "TOOL_CHANGE_CONFIRMED" if index > 0 else "JOB_VALIDATING"
+            run["state"] = "WAITING_TOOL_REFERENCE" if index > 0 else "JOB_VALIDATING"
             run["current_operation_index"] = index - 1 if index > 0 else 0
             run["current_operation_id"] = previous["operation_id"] if previous else operation["operation_id"]
             run["next_action"] = "Medir referencia de herramienta" if index > 0 else "Mida la referencia Z inicial"
-            run["available_actions"] = ["measure-reference", "cancel"]
+            run["available_actions"] = ["measure-reference", "cancel"] if index > 0 else []
             self._append_event(run, "warning", f"La operación {operation['name']} requiere una referencia Z vigente antes de ejecutar.")
             self._save_run(context, run)
             return
@@ -430,8 +536,10 @@ class JobService:
         operation["execution_status"] = "PREFLIGHT"
         run["current_operation_index"] = index
         run["current_operation_id"] = operation["operation_id"]
+        run["current_tool_id"] = operation["tool_id"]
         run["current_tool_key"] = operation["tool_key"]
-        run["state"] = "OPERATION_UPLOADING"
+        run["installed_tool_id"] = operation["tool_id"]
+        run["state"] = "RUNNING"
         run["next_action"] = f"Subiendo {operation['generated_file_name']} a Moonraker"
         run["available_actions"] = ["pause", "cancel"]
         self._append_event(run, "info", f"Preparando operación {operation['order_label']} — {operation['name']}.")
@@ -446,7 +554,7 @@ class JobService:
         operation["generated_file"] = generated["relative_path"]
         operation["generated_metadata"] = generated.get("metadata_path")
         operation["execution_status"] = "UPLOADED"
-        run["state"] = "OPERATION_RUNNING"
+        run["state"] = "RUNNING"
         run["next_action"] = f"Ejecutando {operation['name']}"
         self._append_event(run, "info", f"Archivo subido a Moonraker: {operation['remote_file']}.")
         adapter.start_file(str(operation["remote_file"]))
@@ -481,15 +589,39 @@ class JobService:
                 operation["execution_status"] = "COMPLETED"
                 operation["completed_at"] = _iso_now()
                 current["summary"]["operations_completed"] = sum(1 for item in current["operations"] if item["execution_status"] == "COMPLETED")
-                current["state"] = "NEXT_OPERATION_READY"
-                current["next_action"] = "Preparando siguiente operación"
-                current["available_actions"] = ["pause", "cancel"]
+                current["current_tool_id"] = operation["tool_id"]
+                current["installed_tool_id"] = operation["tool_id"]
+                current["current_tool_key"] = operation["tool_key"]
                 self._append_event(current, "info", f"Operación {operation['name']} completada.")
+                next_index = self._next_pending_operation_index(current)
+                if next_index is None:
+                    current["state"] = "COMPLETED"
+                    current["completed_at"] = _iso_now()
+                    current["available_actions"] = []
+                    current["next_action"] = "Trabajo completo"
+                    self._save_run(context, current)
+                    self._archive_run(context, current)
+                    return
+                next_operation = current["operations"][next_index]
+                if _tool_identity(operation) != _tool_identity(next_operation):
+                    current["state"] = "SPINDLE_STOP_REQUIRED"
+                    current["next_action"] = "Apague manualmente el spindle y confirme cuando esté detenido"
+                    current["available_actions"] = ["confirm-spindle-stopped", "cancel"]
+                    current["spindle_state"] = "manual_stop_required"
+                    self._append_event(current, "warning", "Apague manualmente el spindle y confirme cuando esté detenido.")
+                elif next_operation["reference_status"] != "LISTA":
+                    current["state"] = "WAITING_TOOL_REFERENCE"
+                    current["next_action"] = f"Medir referencia Z de {next_operation['tool_name']}"
+                    current["available_actions"] = ["measure-reference", "cancel"]
+                else:
+                    current["state"] = "RUNNING"
+                    current["next_action"] = f"Preparando siguiente operación: {next_operation['name']}"
+                    current["available_actions"] = ["pause", "cancel"]
                 self._save_run(context, current)
                 return
             if state in {"cancelled", "canceling"}:
                 operation["execution_status"] = "CANCELLED"
-                current["state"] = "JOB_CANCELLED"
+                current["state"] = "CANCELLED"
                 current["completed_at"] = _iso_now()
                 current["available_actions"] = []
                 current["next_action"] = "Trabajo cancelado"
@@ -500,7 +632,7 @@ class JobService:
             if state in {"error"}:
                 operation["execution_status"] = "ERROR"
                 operation["error"] = str(status.get("message") or "Moonraker reportó error.")
-                current["state"] = "JOB_ERROR"
+                current["state"] = "FAILED"
                 current["completed_at"] = _iso_now()
                 current["available_actions"] = ["cancel"]
                 current["next_action"] = "Revisar error de ejecución"
@@ -512,19 +644,13 @@ class JobService:
             time.sleep(0.5)
 
     def _handle_tool_change_required(self, context: JobContext, run: dict[str, Any], *, operation_index: int) -> None:
-        adapter = self.adapter_factory(self.runtime)
         next_operation = run["operations"][operation_index]
-        run["state"] = "MOVING_TO_TOOL_CHANGE_SAFE_Z"
-        run["next_action"] = "Llevando la máquina a posición segura de cambio de herramienta"
-        run["available_actions"] = ["cancel"]
-        self._append_event(run, "info", f"Cambio de herramienta requerido antes de {next_operation['name']}.")
-        self._save_run(context, run)
-        adapter.move_to_tool_change_position()
-        run["state"] = "WAITING_TOOL_CHANGE"
-        run["next_action"] = "Confirmar cambio de herramienta"
-        run["available_actions"] = ["confirm-tool-change", "cancel"]
+        run["state"] = "SPINDLE_STOP_REQUIRED"
+        run["next_action"] = "Apague manualmente el spindle y confirme cuando esté detenido"
+        run["available_actions"] = ["confirm-spindle-stopped", "cancel"]
         run["summary"]["tool_changes_required"] = max(run["summary"].get("tool_changes_required", 0), 1)
-        self._append_event(run, "warning", f"Cambie a {next_operation['tool_name']} y confirme cuando esté instalada.")
+        run["spindle_state"] = "manual_stop_required"
+        self._append_event(run, "warning", f"Operación completada. Apague manualmente el spindle antes de cambiar a {next_operation['tool_name']}.")
         self._save_run(context, run)
 
     def _build_run_checks(self, context: JobContext, plan: dict[str, Any]) -> list[dict[str, Any]]:
@@ -681,7 +807,7 @@ class JobService:
         }
 
     def _base_run(self, context: JobContext, plan: dict[str, Any]) -> dict[str, Any]:
-        run_id = f"job-run/{context.setup_id}/{_safe_face(context.face)}/{_utc_now().strftime('%Y%m%d-%H%M%S')}"
+        run_id = f"job-run/{context.setup_id}/{_safe_face(context.face)}/{_utc_now().strftime('%Y%m%d-%H%M%S-%f')}"
         return {
             "schema_version": JOB_RUN_SCHEMA,
             "run_id": run_id,
@@ -699,7 +825,10 @@ class JobService:
             "updated_at": _iso_now(),
             "current_operation_index": 0,
             "current_operation_id": None,
+            "current_tool_id": None,
             "current_tool_key": None,
+            "installed_tool_id": None,
+            "spindle_state": "manual",
             "next_action": "Preparar trabajo",
             "available_actions": ["start"],
             "operations": [
@@ -877,11 +1006,15 @@ class JobService:
             tmp.write_text(payload, encoding="utf-8")
             tmp.replace(path)
 
-    def _archive_run(self, context: JobContext, run: dict[str, Any]) -> None:
+    def _archive_run(self, context: JobContext, run: dict[str, Any], *, keep_current: bool = True) -> None:
         archived = dict(run)
         history_file = self._history_dir(context) / (str(run["run_id"]).replace("/", "_") + ".json")
-        history_file.write_text(json.dumps(archived, ensure_ascii=True, indent=2, sort_keys=True), encoding="utf-8")
-        self._save_run(context, run)
+        payload = json.dumps(archived, ensure_ascii=True, indent=2, sort_keys=True)
+        tmp = history_file.with_suffix('.tmp')
+        tmp.write_text(payload, encoding="utf-8")
+        tmp.replace(history_file)
+        if keep_current:
+            self._save_run(context, run)
 
     def _relative_to_project(self, project_id: str, path: Path) -> str:
         return path.relative_to(self._project_dir(project_id)).as_posix()

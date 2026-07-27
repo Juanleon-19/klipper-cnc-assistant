@@ -39,11 +39,20 @@ def _tool_key(operation: OperacionPCB) -> str:
     return operation.tool_id or _slug(operation.herramienta) or "sin-herramienta"
 
 
+_TOOL_DIAMETER_FROM_ID = re.compile(r"(?:^|[-_])diam(?:eter)?[-_]?([0-9]+(?:[\.,][0-9]+)?)(?:[-_]?mm)?(?:$|[-_])", re.IGNORECASE)
+_TOOL_DIAMETER_FROM_LABEL = re.compile(r"(?<![0-9])([0-9]+(?:[\.,][0-9]+)?)\s*mm\b", re.IGNORECASE)
+
+
 def _tool_diameter(operation: OperacionPCB) -> float | None:
-    values = re.findall(r"\d+(?:[\.,]\d+)?", operation.herramienta or "")
-    if not values:
-        return None
-    return float(values[0].replace(",", "."))
+    tool_id = operation.tool_id or ""
+    match = _TOOL_DIAMETER_FROM_ID.search(tool_id)
+    if match:
+        return float(match.group(1).replace(",", "."))
+    label = operation.herramienta or ""
+    match = _TOOL_DIAMETER_FROM_LABEL.search(label)
+    if match:
+        return float(match.group(1).replace(",", "."))
+    return None
 
 
 @dataclass(frozen=True)
@@ -302,7 +311,9 @@ class PhysicalMapService:
             selected_config = replace(selected_config, rows=int(suggestion["rows"]), columns=int(suggestion["columns"]))
 
         existing = self._latest_surface_map(project_id, operation)
-        if existing and self._compatible_surface_map(existing, operation, machine_origin_x, machine_origin_y, selected_config):
+        compatible_existing = existing is not None and self._compatible_surface_map(existing, operation, machine_origin_x, machine_origin_y, selected_config)
+        reusable_existing = compatible_existing and self._can_reuse_surface_map_for_plan(existing)
+        if reusable_existing:
             payload = self._with_tool_reference(
                 existing,
                 operation=operation,
@@ -317,7 +328,7 @@ class PhysicalMapService:
             return payload
 
         previous_partial_message = None
-        if existing and not self._compatible_surface_map(existing, operation, machine_origin_x, machine_origin_y, selected_config):
+        if existing and (not compatible_existing or not reusable_existing):
             measured = sum(1 for point in existing.get("points", []) if point.get("status") == "MEASURED")
             if measured:
                 previous_partial_message = "Existe una medición parcial. Cambiar la cuadrícula creará una nueva versión de malla. Los puntos medidos anteriores se conservarán en el historial, pero no pertenecerán a la nueva cuadrícula."
@@ -1300,7 +1311,7 @@ class PhysicalMapService:
         return f"{_slug(setup_id)}/{_slug(_tool_key(operation))}"
 
     def _map_id(self, setup_id: str, operation: OperacionPCB, origin_x: float, origin_y: float, config: PhysicalMeshConfig) -> str:
-        stamp = utc_now().strftime("%Y%m%d-%H%M%S")
+        stamp = utc_now().strftime("%Y%m%d-%H%M%S-%f")
         return f"measured/{self._map_prefix(setup_id, operation)}/{stamp}_x{origin_x:.3f}_y{origin_y:.3f}_r{config.rows}_c{config.columns}_e{config.edge_margin_left_mm:.3f}-{config.edge_margin_right_mm:.3f}-{config.edge_margin_bottom_mm:.3f}-{config.edge_margin_top_mm:.3f}"
 
     def _latest_surface_map(self, project_id: str, operation: OperacionPCB) -> dict[str, Any] | None:
@@ -1345,6 +1356,12 @@ class PhysicalMapService:
             abs(float(mesh_config.get("edge_margin_top_mm", config.edge_margin_top_mm)) - config.edge_margin_top_mm) <= 0.001,
         )
         return all(checks)
+
+    def _can_reuse_surface_map_for_plan(self, payload: dict[str, Any]) -> bool:
+        status = str(payload.get("status") or "")
+        if status == "CANCELLED":
+            return False
+        return True
 
     def _tool_reference(
         self,

@@ -269,6 +269,15 @@ export type ReferenceSession = {
   motivo_invalidacion: string | null;
 };
 
+export type ReferenceMoveResult = {
+  accepted: boolean;
+  reference_x: number;
+  reference_y: number;
+  preparation_z: number;
+  final_state: string;
+  message: string;
+};
+
 export type CompensationPreviewPoint = {
   x_mm: number;
   y_mm: number;
@@ -393,6 +402,7 @@ export type MachineRuntime = {
   mode_label: string;
   state: string;
   health: string;
+  connection?: Record<string, unknown>;
   started_at: string;
   application: Record<string, unknown>;
   moonraker: Record<string, unknown>;
@@ -629,7 +639,10 @@ export type JobRun = {
   updated_at: string;
   current_operation_index: number;
   current_operation_id: string | null;
+  current_tool_id?: string | null;
   current_tool_key: string | null;
+  installed_tool_id?: string | null;
+  spindle_state?: string | null;
   next_action: string;
   available_actions: string[];
   operations: JobRunOperation[];

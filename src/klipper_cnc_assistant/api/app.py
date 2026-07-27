@@ -10,6 +10,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from klipper_cnc_assistant import __version__
 from klipper_cnc_assistant.application import (
     ApplicationError,
+    ConflictError,
     CompensatedGCodeService,
     HeightMapService,
     JobService,
@@ -23,7 +24,7 @@ from klipper_cnc_assistant.application import (
 )
 from klipper_cnc_assistant.domain import DomainError, ProjectValidationError
 from klipper_cnc_assistant.machine.config import load_machine_runtime_config
-from klipper_cnc_assistant.machine.runtime import MachineRuntime, MachineRuntimeError
+from klipper_cnc_assistant.machine.runtime import MachineConnectionError, MachineRuntime, MachineRuntimeError
 from klipper_cnc_assistant.storage import JsonProjectRepository
 
 from .machine_routes import build_machine_router
@@ -140,6 +141,19 @@ def create_app(
     async def handle_application_error(_request, exc: Exception) -> JSONResponse:
         return JSONResponse(status_code=400, content={"detalle": str(exc)})
 
+    async def handle_conflict_error(_request, exc: ConflictError) -> JSONResponse:
+        detail = dict(exc.payload)
+        return JSONResponse(status_code=exc.status_code, content={"detalle": detail.get("message", str(exc)), "detail": detail})
+
+    async def handle_machine_connection_error(_request, exc: MachineConnectionError) -> JSONResponse:
+        payload = exc.response_payload()
+        detail = payload.get("detail")
+        if isinstance(detail, dict) and "message" in detail:
+            payload.setdefault("detalle", detail["message"])
+        return JSONResponse(status_code=exc.status_code, content=payload)
+
+    app.add_exception_handler(MachineConnectionError, handle_machine_connection_error)
+    app.add_exception_handler(ConflictError, handle_conflict_error)
     app.add_exception_handler(ApplicationError, handle_application_error)
     app.add_exception_handler(DomainError, handle_application_error)
     app.add_exception_handler(MachineRuntimeError, handle_application_error)

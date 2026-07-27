@@ -21,6 +21,7 @@ const apiMock = vi.hoisted(() => ({
   confirmZReference: vi.fn(),
   capturePhysicalWorkOrigin: vi.fn(),
   capturePhysicalZReferenceFromProbe: vi.fn(),
+  goToReferencePoint: vi.fn(),
   validateHeightMap: vi.fn(),
   getCompensationPreview: vi.fn(),
   getPhysicalMap: vi.fn(),
@@ -147,7 +148,7 @@ const jobRun: JobRun = {
   face: "superior",
   placement_revision: "placement-1",
   active_map_id: "map-1",
-  state: "JOB_READY",
+  state: "READY_TO_START",
   ready: true,
   checks: [{ name: "mapa_activo", ok: true, detail: "Mapa físico activo del montaje." }],
   started_at: null,
@@ -442,12 +443,13 @@ describe("ProjectWorkspace", () => {
     apiMock.getJobRun.mockResolvedValue(jobRun);
     apiMock.prepareJobRun.mockResolvedValue(jobRun);
     apiMock.startJobRun.mockResolvedValue({ ...jobRun, state: "JOB_STARTING" });
-    apiMock.runJobAction.mockResolvedValue({ ...jobRun, state: "WAITING_TOOL_CHANGE", next_action: "Confirmar cambio de herramienta" });
+    apiMock.runJobAction.mockResolvedValue({ ...jobRun, state: "TOOL_CHANGE_REQUIRED", next_action: "Cambie la herramienta y confirme cuando esté instalada." });
     apiMock.getJobHistory.mockResolvedValue([{ run_id: jobRun.run_id, state: jobRun.state, started_at: null, completed_at: null, tool_changes_completed: 0, operations_completed: 0, manifest_path: jobRun.manifest_path }]);
     apiMock.confirmWorkOrigin.mockResolvedValue(referenceSession);
     apiMock.confirmZReference.mockResolvedValue(referenceSession);
     apiMock.capturePhysicalWorkOrigin.mockResolvedValue(referenceSession);
     apiMock.capturePhysicalZReferenceFromProbe.mockResolvedValue(referenceSession);
+    apiMock.goToReferencePoint.mockResolvedValue({ accepted: true, reference_x: 10, reference_y: 8, preparation_z: 115, final_state: "REFERENCE_MOVE_COMPLETE", message: "Máquina ubicada en el punto de referencia." });
     apiMock.executionPreflight.mockResolvedValue({ state: "PREFLIGHT", ready: false, checks: [], generated_file: null, detail: "Preflight incompleto." });
     apiMock.executionAction.mockResolvedValue({ state: "PREFLIGHT", ready: false, checks: [], generated_file: null, detail: "Acción registrada." });
     apiMock.getCompensationPreview.mockResolvedValue({
@@ -504,6 +506,12 @@ describe("ProjectWorkspace", () => {
     expect(screen.getByText(/Posición segura de cambio de herramienta/i)).toBeInTheDocument();
     expect(screen.getByText(/Z primero, luego X\/Y/i)).toBeInTheDocument();
 
+    expect(screen.queryByRole("button", { name: /Armar referencia/i })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: /Ir a referencia/i }));
+
+    await waitFor(() => expect(apiMock.goToReferencePoint).toHaveBeenCalledWith(project.id, project.operaciones[0].id));
+    await waitFor(() => expect(physicalMachine.refreshRuntime).toHaveBeenCalled());
+
     fireEvent.click(screen.getByRole("button", { name: /Ir a posición de cambio/i }));
 
     await waitFor(() => expect(physicalMachine.runMachineAction).toHaveBeenCalledWith("tool-change-position"));
@@ -514,7 +522,7 @@ describe("ProjectWorkspace", () => {
     renderWorkspace(physicalMachine);
 
     fireEvent.click(screen.getByRole("button", { name: /^Referencia$/i }));
-    const probeButton = await screen.findByRole("button", { name: /Sondear referencia ahora/i });
+    const probeButton = await screen.findByRole("button", { name: /^Medir referencia$/i });
     expect(probeButton).toBeEnabled();
 
     fireEvent.click(probeButton);
@@ -527,7 +535,7 @@ describe("ProjectWorkspace", () => {
 
   it("permite volver a medir la referencia cuando ya existe una captura previa", async () => {
     vi.mocked(physicalMachine.refreshRuntime).mockClear();
-    const capturedMachine = { ...physicalMachine, runtimeState: "REFERENCE_CAPTURED", runtime: { ...physicalMachine.runtime, state: "REFERENCE_CAPTURED" } };
+    const capturedMachine: MachineContextValue = { ...physicalMachine, runtimeState: "REFERENCE_CAPTURED", runtime: { ...physicalMachine.runtime!, state: "REFERENCE_CAPTURED" } };
     renderWorkspace(capturedMachine);
 
     fireEvent.click(screen.getByRole("button", { name: /^Referencia$/i }));
@@ -548,7 +556,7 @@ describe("ProjectWorkspace", () => {
     renderWorkspace(physicalMachine);
 
     fireEvent.click(screen.getByRole("button", { name: /^Referencia$/i }));
-    fireEvent.click(await screen.findByRole("button", { name: /Sondear referencia ahora/i }));
+    fireEvent.click(await screen.findByRole("button", { name: /^Medir referencia$/i }));
 
     await waitFor(() => expect(apiMock.confirmProbe).toHaveBeenCalled());
     expect(apiMock.capturePhysicalWorkOrigin).not.toHaveBeenCalled();
@@ -802,6 +810,140 @@ describe("ProjectWorkspace", () => {
     expect(await screen.findByText(/Heatmap mock · 4 puntos · medido/i)).toBeInTheDocument();
   });
 
+  it("limpiar vista previa libera el estado local y permite regenerar la malla", async () => {
+    apiMock.getPhysicalMap.mockResolvedValueOnce({
+      payload: {
+        map_id: "measured/manual-2x2",
+        status: "MESH_PLANNED",
+        source: "MEASURED",
+        point_count: 4,
+        rows: 2,
+        columns: 2,
+        points: [
+          { index: 0, role: "REFERENCE", row: 0, column: 0, x_local: 2, y_local: 2, x_machine: 62, y_machine: 90.75, status: "MEASURED", z_measured: 0, delta_z: 0 },
+          { index: 1, row: 0, column: 1, x_local: 78, y_local: 2, x_machine: 138, y_machine: 90.75, status: "PENDING" },
+          { index: 2, row: 1, column: 1, x_local: 78, y_local: 58, x_machine: 138, y_machine: 146.75, status: "PENDING" },
+          { index: 3, row: 1, column: 0, x_local: 2, y_local: 58, x_machine: 62, y_machine: 146.75, status: "PENDING" },
+        ],
+      },
+    });
+
+    renderWorkspace(physicalMachine);
+    fireEvent.click(screen.getByRole("button", { name: /Mapa de alturas/i }));
+    expect(await screen.findByText(/Mapa medido físicamente/i)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /Limpiar vista previa/i }));
+
+    expect(await screen.findByText(/Vista local limpiada/i)).toBeInTheDocument();
+    const armButton = screen.getByRole("button", { name: /3\. Armar sondeo/i });
+    expect(armButton).toBeDisabled();
+
+    fireEvent.click(screen.getByRole("button", { name: /1\. Generar vista previa de malla/i }));
+    await waitFor(() => expect(apiMock.planPhysicalMapFromReference).toHaveBeenCalledWith(
+      "proj_1",
+      "op_1",
+      expect.objectContaining({ rows: 7, columns: 6 })
+    ));
+  });
+
+  it("el polling del mapa no apila solicitudes concurrentes cuando una sigue en vuelo", async () => {
+    let resolveNextMap: ((value: { payload: Record<string, unknown> }) => void) | undefined;
+    apiMock.getPhysicalMap
+      .mockResolvedValueOnce({
+        payload: {
+          map_id: "measured/probing",
+          status: "MESH_PROBING",
+          source: "MEASURED",
+          point_count: 4,
+          rows: 2,
+          columns: 2,
+          execution: { worker_active: true, point_state: "POINT_MOVE_XY" },
+          points: [
+            { index: 0, role: "REFERENCE", row: 0, column: 0, x_local: 2, y_local: 2, x_machine: 62, y_machine: 90.75, status: "MEASURED", z_measured: 0, delta_z: 0 },
+            { index: 1, row: 0, column: 1, x_local: 78, y_local: 2, x_machine: 138, y_machine: 90.75, status: "MOVING" },
+          ],
+        },
+      })
+      .mockImplementation(() => new Promise((resolve) => {
+        resolveNextMap = resolve as (value: { payload: Record<string, unknown> }) => void;
+      }));
+
+    renderWorkspace(physicalMachine);
+    fireEvent.click(screen.getByRole("button", { name: /Mapa de alturas/i }));
+    expect(await screen.findByText(/Mapa medido físicamente/i)).toBeInTheDocument();
+    await waitFor(() => expect(apiMock.getPhysicalMap).toHaveBeenCalledTimes(2));
+
+    apiMock.getPhysicalMap.mockClear();
+    await new Promise((resolve) => window.setTimeout(resolve, 1300));
+    expect(apiMock.getPhysicalMap).not.toHaveBeenCalled();
+
+    const resolvePendingMap: ((value: { payload: Record<string, unknown> }) => void) | undefined = resolveNextMap;
+    expect(resolvePendingMap).toBeDefined();
+    if (resolvePendingMap !== undefined) {
+      resolvePendingMap({
+        payload: {
+          map_id: "measured/probing",
+          status: "MESH_PAUSED",
+          source: "MEASURED",
+          point_count: 4,
+          rows: 2,
+          columns: 2,
+          execution: { worker_active: false, point_state: "MESH_PAUSED" },
+          points: [
+            { index: 0, role: "REFERENCE", row: 0, column: 0, x_local: 2, y_local: 2, x_machine: 62, y_machine: 90.75, status: "MEASURED", z_measured: 0, delta_z: 0 },
+            { index: 1, row: 0, column: 1, x_local: 78, y_local: 2, x_machine: 138, y_machine: 90.75, status: "FAILED" },
+          ],
+        },
+      });
+    }
+    await waitFor(() => expect(screen.getByText(/MESH_PAUSED/i)).toBeInTheDocument());
+  });
+
+  it("cancelar la malla deja feedback visible y desarma el sondeo", async () => {
+    apiMock.getPhysicalMap.mockResolvedValueOnce({
+      payload: {
+        map_id: "measured/manual-2x2",
+        status: "MESH_PROBING",
+        source: "MEASURED",
+        point_count: 4,
+        rows: 2,
+        columns: 2,
+        execution: { worker_active: false, point_state: "POINT_PRECHECK" },
+        points: [
+          { index: 0, role: "REFERENCE", row: 0, column: 0, x_local: 2, y_local: 2, x_machine: 62, y_machine: 90.75, status: "MEASURED", z_measured: 0, delta_z: 0 },
+          { index: 1, row: 0, column: 1, x_local: 78, y_local: 2, x_machine: 138, y_machine: 90.75, status: "PENDING" },
+        ],
+      },
+    });
+    apiMock.cancelPhysicalMap.mockResolvedValue({
+      payload: {
+        map_id: "measured/manual-2x2",
+        status: "CANCELLED",
+        source: "MEASURED",
+        point_count: 4,
+        rows: 2,
+        columns: 2,
+        execution: { worker_active: false, point_state: "CANCELLED" },
+        points: [
+          { index: 0, role: "REFERENCE", row: 0, column: 0, x_local: 2, y_local: 2, x_machine: 62, y_machine: 90.75, status: "MEASURED", z_measured: 0, delta_z: 0 },
+          { index: 1, row: 0, column: 1, x_local: 78, y_local: 2, x_machine: 138, y_machine: 90.75, status: "PENDING" },
+        ],
+      },
+    });
+
+    renderWorkspace(physicalMachine);
+    fireEvent.click(screen.getByRole("button", { name: /Mapa de alturas/i }));
+    expect(await screen.findByText(/Mapa medido físicamente/i)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /3\. Armar sondeo/i }));
+    expect(screen.getByRole("button", { name: /4\. Iniciar sondeo automático/i })).toBeEnabled();
+
+    fireEvent.click(screen.getByRole("button", { name: /^Cancelar$/i }));
+
+    expect(await screen.findByText(/Malla cancelada/i)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /4\. Iniciar sondeo automático/i })).toBeDisabled();
+  });
+
   it("muestra propuesta automática, permite aceptarla y reiniciar solo el mapa", async () => {
     const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
     renderWorkspace(physicalMachine);
@@ -995,6 +1137,15 @@ describe("ProjectWorkspace", () => {
     expect(await screen.findByText("Esta operación todavía no tiene G-code.")).toBeInTheDocument();
     expect(screen.getAllByText(/Taladrado 1,0 mm/).length).toBeGreaterThan(0);
   });
+  it("permite volver a preparar cuando la corrida actual quedó archivada o cancelada en estado legado", async () => {
+    apiMock.getJobRun.mockResolvedValue({ ...jobRun, state: "STALE_RUN_ARCHIVED", available_actions: [], next_action: "Ejecución obsoleta archivada" });
+    renderWorkspace(physicalMachine);
+
+    fireEvent.click(screen.getByRole("button", { name: /^Ejecución$/i }));
+
+    expect(await screen.findByRole("button", { name: /Preparar trabajo/i })).toBeInTheDocument();
+  });
+
   it("muestra la ejecución unificada con compensación del proyecto y preparación del trabajo", async () => {
     renderWorkspace(physicalMachine);
 
@@ -1007,8 +1158,8 @@ describe("ProjectWorkspace", () => {
     fireEvent.click(screen.getByRole("button", { name: /Generar compensación del proyecto/i }));
     await waitFor(() => expect(apiMock.generateProjectCompensation).toHaveBeenCalledWith(project.id, project.montajes[0].id, "superior"));
 
-    fireEvent.click(screen.getByRole("button", { name: /Preparar trabajo/i }));
-    await waitFor(() => expect(apiMock.prepareJobRun).toHaveBeenCalledWith(project.id, project.montajes[0].id, "superior"));
+    expect(screen.queryByRole("button", { name: /Preparar trabajo/i })).toBeNull();
+    expect(screen.getByRole("button", { name: /Iniciar trabajo/i })).toBeInTheDocument();
   });
 
 });

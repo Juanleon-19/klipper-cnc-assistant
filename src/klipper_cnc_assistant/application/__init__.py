@@ -1,5 +1,5 @@
 from .compensated_gcode_service import CompensatedGCodeService
-from .errors import ApplicationError, NotFoundError
+from .errors import ApplicationError, ConflictError, NotFoundError
 from .heightmap_service import HeightMapService
 from .job_service import JobService
 from .mesh_execution_service import MeshExecutionService
@@ -10,6 +10,7 @@ from .services import MachineSessionService, ProjectService, SystemStatusService
 __all__ = [
     "ApplicationError",
     "CompensatedGCodeService",
+    "ConflictError",
     "HeightMapService",
     "JobService",
     "MachineSessionService",

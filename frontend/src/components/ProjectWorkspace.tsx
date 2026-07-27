@@ -27,9 +27,28 @@ import type {
   JobHistoryEntry,
   JobPlan,
   JobRun,
+  ReferenceMoveResult,
 } from "../types";
 import { ProjectForm } from "./ProjectForm";
 import { StatusBadge } from "./StatusBadge";
+
+function runtimeConnectionLabel(connection: Record<string, unknown> | null | undefined): string {
+  const status = typeof connection?.status === "string" ? connection.status : "disconnected";
+  const fullyConnected = connection?.fully_connected === true;
+  const retryable = connection?.retryable === true;
+  if (status === "connecting") return "Conectando...";
+  if (fullyConnected || status === "connected") return "Runtime conectado";
+  if (status === "partial") return "Reconectar componentes";
+  if (retryable || status === "connection_failed") return "Reintentar conexión";
+  return "Conectar runtime";
+}
+
+function runtimeConnectionTone(status: string): "success" | "warning" | "danger" | "info" {
+  if (status === "connected") return "success";
+  if (status === "partial" || status === "connecting") return "warning";
+  if (status === "connection_failed") return "danger";
+  return "info";
+}
 
 type ProjectWorkspaceProps = {
   project: Project | null;
@@ -150,6 +169,18 @@ function isPhysicalMapReady(payload: PhysicalMapPayload | null | undefined): pay
   return payload.map_ready_state === "MAP_READY";
 }
 
+function isPhysicalPreviewOnlyMap(payload: PhysicalMapPayload | null | undefined): boolean {
+  return Boolean(payload && payload.source !== "MEASURED" && payload.status === "MESH_PREVIEW");
+}
+
+function isPhysicalMapPollingActive(payload: PhysicalMapPayload | null | undefined): boolean {
+  if (!payload) {
+    return false;
+  }
+  const execution = (payload.execution ?? null) as { worker_active?: boolean } | null;
+  return payload.status === "MESH_PROBING" || execution?.worker_active === true;
+}
+
 export function ProjectWorkspace({
   project,
   busyKey,
@@ -185,6 +216,8 @@ export function ProjectWorkspace({
   const [referenceSession, setReferenceSession] = useState<ReferenceSession | null>(null);
   const [heightMapBusy, setHeightMapBusy] = useState(false);
   const [referenceBusy, setReferenceBusy] = useState(false);
+  const [referenceMoveResult, setReferenceMoveResult] = useState<ReferenceMoveResult | null>(null);
+  const referenceMoveInFlight = useRef(false);
   const [workspaceError, setWorkspaceError] = useState("");
   const [workOrigin, setWorkOrigin] = useState<InputState>({ x_mm: "0", y_mm: "0" });
   const [zReference, setZReference] = useState<ZInputState>({ x_mm: "0", y_mm: "0", z_mm: "0" });
@@ -218,6 +251,7 @@ export function ProjectWorkspace({
   const [jobPlan, setJobPlan] = useState<JobPlan | null>(null);
   const [jobRun, setJobRun] = useState<JobRun | null>(null);
   const [jobHistory, setJobHistory] = useState<JobHistoryEntry[]>([]);
+  const [jobActionPending, setJobActionPending] = useState<string | null>(null);
   const [machineSettingsInput, setMachineSettingsInput] = useState({
     reference_prep_z_mm: "115",
     reference_prep_z_feed_mm_min: "180",
@@ -237,6 +271,9 @@ export function ProjectWorkspace({
       return;
     }
     void api.getMachineSettings().then((settings) => {
+      const referenceProbeStep = String(settings.reference_probe_step_mm ?? 0.05);
+      const referenceProbeFeed = String(settings.reference_probe_feed_mm_min ?? 60);
+      const referenceProbeRetract = String(settings.reference_probe_retract_mm ?? 1.0);
       setMachineSettingsInput({
         reference_prep_z_mm: String(settings.reference_prep_z_mm ?? 115),
         reference_prep_z_feed_mm_min: String(settings.reference_prep_z_feed_mm_min ?? 180),
@@ -244,11 +281,14 @@ export function ProjectWorkspace({
         no_progress_timeout_s: String(settings.no_progress_timeout_s ?? 60),
         position_tolerance_mm: String(settings.position_tolerance_mm ?? 0.05),
         velocity_tolerance_mm_s: String(settings.velocity_tolerance_mm_s ?? 0.02),
-        reference_probe_step_mm: String(settings.reference_probe_step_mm ?? 0.05),
-        reference_probe_feed_mm_min: String(settings.reference_probe_feed_mm_min ?? 60),
-        reference_probe_retract_mm: String(settings.reference_probe_retract_mm ?? 1.0),
+        reference_probe_step_mm: referenceProbeStep,
+        reference_probe_feed_mm_min: referenceProbeFeed,
+        reference_probe_retract_mm: referenceProbeRetract,
         reference_probe_retract_feed_mm_min: String(settings.reference_probe_retract_feed_mm_min ?? 60),
       });
+      setProbeStepInput(referenceProbeStep);
+      setProbeSpeedInput(referenceProbeFeed);
+      setProbeRetractInput(referenceProbeRetract);
     }).catch(() => {
       setMachineSettingsMessage("No se pudo leer la configuración avanzada de máquina.");
     });
@@ -350,53 +390,71 @@ export function ProjectWorkspace({
   }, [machine.isPhysical, project, selectedOperation]);
 
   useEffect(() => {
-    if (!project || !selectedOperation || !physicalMap?.map_id) {
-      return;
-    }
-    const execution = (physicalMap.execution ?? null) as { worker_active?: boolean } | null;
-    const workerActive = execution?.worker_active === true;
-    const shouldPoll = physicalMap.status === "MESH_PROBING" || workerActive;
-    if (!shouldPoll) {
+    if (!project || !selectedOperation || !physicalMap?.map_id || !isPhysicalMapPollingActive(physicalMap)) {
       return;
     }
     let cancelled = false;
+    let timer: number | null = null;
+    let controller: AbortController | null = null;
+
+    const schedule = (delayMs: number) => {
+      if (cancelled) {
+        return;
+      }
+      timer = window.setTimeout(() => {
+        void poll();
+      }, delayMs);
+    };
+
     const poll = async () => {
+      if (cancelled) {
+        return;
+      }
+      controller?.abort();
+      controller = new AbortController();
+      let shouldContinue = true;
       try {
-        const nextMap = (await api.getPhysicalMap(project.id, selectedOperation.id)).payload;
+        const nextMap = (await api.getPhysicalMap(project.id, selectedOperation.id, { signal: controller.signal })).payload;
         if (cancelled) {
           return;
         }
+        shouldContinue = isPhysicalMapPollingActive(nextMap);
         setPhysicalMap(nextMap);
         setMapSource("MEASURED");
         if (isPhysicalMapReady(nextMap)) {
-          const [measured, refreshedReference] = await Promise.all([
+          const [measured, refreshedReference, history] = await Promise.all([
             api.getPhysicalHeightMap(project.id, selectedOperation.id),
             api.getReferenceSession(project.id, selectedOperation.id),
+            api.getPhysicalMapHistory(project.id, selectedOperation.id),
           ]);
           if (cancelled) {
             return;
           }
           setHeightMap(measured);
           setReferenceSession(refreshedReference);
+          setPhysicalMapHistory(history);
           setActiveMapTab("mapa2d");
           setMeshValidationMessage("Malla completada. Cobertura validada automáticamente; la compensación ya puede generarse si no existen otros bloqueos.");
-          void api.getPhysicalMapHistory(project.id, selectedOperation.id).then((history) => {
-            if (!cancelled) {
-              setPhysicalMapHistory(history);
-            }
-          }).catch(() => undefined);
         }
-      } catch {
-        // Keep the last visible state and try again on the next tick.
+      } catch (error) {
+        if (error instanceof DOMException && error.name === "AbortError") {
+          return;
+        }
+      } finally {
+        controller = null;
+        if (shouldContinue && !cancelled) {
+          schedule(1000);
+        }
       }
     };
-    const timer = window.setInterval(() => {
-      void poll();
-    }, 1000);
+
     void poll();
     return () => {
       cancelled = true;
-      window.clearInterval(timer);
+      if (timer !== null) {
+        window.clearTimeout(timer);
+      }
+      controller?.abort();
     };
   }, [project, selectedOperation, physicalMap?.map_id, physicalMap?.status, physicalMap?.execution]);
 
@@ -455,7 +513,7 @@ export function ProjectWorkspace({
     if (!project || !selectedSetup || !activeJobFace || !jobRun) {
       return;
     }
-    if (!["JOB_STARTING", "OPERATION_UPLOADING", "OPERATION_RUNNING", "MOVING_TO_TOOL_CHANGE_SAFE_Z", "MOVING_TO_TOOL_CHANGE_XY", "RETURNING_TO_REFERENCE_SAFE_Z", "RETURNING_TO_REFERENCE_XY", "PROBING_TOOL_REFERENCE", "COMPENSATING_NEXT_OPERATIONS", "NEXT_OPERATION_READY"].includes(jobRun.state)) {
+    if (!["RUNNING", "MOVING_TO_TOOL_CHANGE_SAFE_Z", "MOVING_TO_TOOL_CHANGE_XY", "PROBING_TOOL_REFERENCE"].includes(jobRun.state)) {
       return;
     }
     let cancelled = false;
@@ -1094,6 +1152,24 @@ export function ProjectWorkspace({
     });
   };
 
+  const goToReferencePoint = async () => {
+    if (!project || !selectedOperation || referenceMoveInFlight.current) return;
+    referenceMoveInFlight.current = true;
+    setReferenceBusy(true);
+    setWorkspaceError("");
+    setReferenceMoveResult(null);
+    try {
+      const result = await api.goToReferencePoint(project.id, selectedOperation.id);
+      setReferenceMoveResult(result);
+      await machine.refreshRuntime();
+    } catch (error) {
+      setWorkspaceError(error instanceof Error ? error.message : "No fue posible mover al punto de referencia.");
+    } finally {
+      referenceMoveInFlight.current = false;
+      setReferenceBusy(false);
+    }
+  };
+
   const renderPhysicalReference = () => {
     const runtime = machine.runtime;
     const position = runtime?.klipper?.position as Record<string, unknown> | null | undefined;
@@ -1114,11 +1190,19 @@ export function ProjectWorkspace({
     const toolChangeY = typeof toolChange.y_mm === "number" ? toolChange.y_mm : 0;
     const toolChangeZ = typeof toolChange.z_mm === "number" ? toolChange.z_mm : 115;
     const toolChangeZFeed = typeof toolChange.z_feed_mm_min === "number" ? toolChange.z_feed_mm_min : 180;
-    const canConnect = machine.isPhysical && machine.runtimeState === "DISCONNECTED";
-    const canInitialize = machine.isPhysical && ["DIAGNOSTIC", "READY_FOR_HOME", "HOMED", "ERROR", "CANCELLED"].includes(machine.runtimeState);
+    const connection = runtime?.connection as Record<string, unknown> | null | undefined;
+    const connectionStatus = typeof connection?.status === "string" ? connection.status : "disconnected";
+    const connectionLabel = runtimeConnectionLabel(connection);
+    const connectionTone = runtimeConnectionTone(connectionStatus);
+    const connectionFullyConnected = connection?.fully_connected === true;
+    const canConnect = machine.isPhysical && connectionStatus !== "connecting" && !connectionFullyConnected;
+    const moonrakerStatus = typeof (runtime?.moonraker as Record<string, unknown> | undefined)?.status === "string" ? String((runtime?.moonraker as Record<string, unknown>).status) : (machine.connected ? "connected" : "disconnected");
+    const klipperStatus = typeof (runtime?.klipper as Record<string, unknown> | undefined)?.status === "string" ? String((runtime?.klipper as Record<string, unknown>).status) : (machine.klipperReady ? "connected" : "disconnected");
+    const arduinoStatus = typeof arduino.status === "string" ? String(arduino.status) : (machine.serialRecent ? "connected" : "disconnected");
+    const canInitialize = machine.isPhysical && ["DIAGNOSTIC", "READY_FOR_HOME", "HOMED", "WAITING_FOR_XY_REFERENCE", "REFERENCE_ARMED", "REFERENCE_CAPTURED", "ERROR", "CANCELLED"].includes(machine.runtimeState);
     const canEnableJog = machine.isPhysical && machine.runtimeState === "WAITING_FOR_XY_REFERENCE";
-    const canArm = machine.isPhysical && ["WAITING_FOR_XY_REFERENCE", "REFERENCE_CAPTURED"].includes(machine.runtimeState);
     const canProbe = machine.isPhysical && ["WAITING_FOR_XY_REFERENCE", "REFERENCE_ARMED", "REFERENCE_CAPTURED"].includes(machine.runtimeState);
+    const canGoToReference = machine.isPhysical && Boolean(referenceSession?.referencia_z) && Boolean(selectedOperation);
     return (
       <div className="stack gap-md">
         <article className="panel">
@@ -1145,8 +1229,14 @@ export function ProjectWorkspace({
           <div className="section-heading"><h3>1. Conexión y diagnóstico</h3></div>
           <p className="muted">Conecta Moonraker HTTP, WebSocket, Klipper y Arduino. En diagnóstico puede observar joystick, botón externo y sonda sin movimiento.</p>
           <div className="action-grid action-grid--inline">
-            <button className="button" type="button" disabled={!canConnect || machine.refreshing} onClick={() => void machine.runMachineAction("connect")}>Conectar runtime</button>
-            <button className="button button--ghost" type="button" disabled={!machine.isPhysical || machine.refreshing || machine.runtimeState === "DISCONNECTED"} onClick={() => void machine.runMachineAction("diagnostic")}>Modo diagnóstico</button>
+            <button className="button" type="button" disabled={!machine.isPhysical || machine.refreshing || connectionStatus === "connecting" || connectionFullyConnected} onClick={() => void machine.runMachineAction("connect")}>{connectionLabel}</button>
+            <button className="button button--ghost" type="button" disabled={!machine.isPhysical || machine.refreshing || runtime?.moonraker?.http_connected !== true} onClick={() => void machine.runMachineAction("diagnostic")}>Modo diagnóstico</button>
+          </div>
+          <div className="info-grid info-grid--double compact-grid">
+            <div className="metric-box"><span>Runtime</span><strong>{connectionStatus}</strong><StatusBadge tone={connectionTone}>{connectionLabel}</StatusBadge></div>
+            <div className="metric-box"><span>Moonraker</span><strong>{moonrakerStatus}</strong></div>
+            <div className="metric-box"><span>Klipper</span><strong>{klipperStatus}</strong></div>
+            <div className="metric-box"><span>Arduino</span><strong>{arduinoStatus}</strong></div>
           </div>
           <dl className="definition-grid definition-grid--compact">
             <div><dt>Puerto Arduino</dt><dd>{String(arduino.port ?? "-")}</dd></div>
@@ -1195,7 +1285,9 @@ export function ProjectWorkspace({
             </div>
             {machineSettingsMessage ? <p className="muted">{machineSettingsMessage}</p> : null}
           </details>
-          <button className="button" type="button" disabled={!canInitialize || referenceBusy || machine.refreshing} onClick={() => void withPhysicalReferenceAction(async () => { await machine.runMachineAction("initialize", referencePrepZ); })}>Realizar homing, subir Z e ir al centro</button>
+          <div className="action-grid action-grid--inline">
+            <button className="button" type="button" disabled={!canInitialize || referenceBusy || machine.refreshing} onClick={() => void withPhysicalReferenceAction(async () => { await machine.runMachineAction("initialize", referencePrepZ); })}>Realizar homing, subir Z e ir al centro</button>
+          </div>
           <div className="workflow-steps-grid">
             {(runtime?.initialization_steps ?? []).map((step, index) => (
               <div className="workflow-step-card" key={`${String(step.name)}-${index}`}>
@@ -1245,13 +1337,14 @@ export function ProjectWorkspace({
           </div>
           <p className="muted">Velocidad efectiva: {Number.isFinite(referenceProbeFeed) ? `${referenceProbeFeed.toFixed(2)} mm/min · ${(referenceProbeFeed / 60).toFixed(3)} mm/s` : "valor inválido"}</p>
           <button className="button button--ghost" type="button" disabled={!machine.isPhysical || referenceBusy || machine.refreshing || machine.runtimeState === "PROBING_REFERENCE"} onClick={() => void saveMachineSettings()}>Guardar parámetros de sonda</button>
-          <p className="muted">Puede armar la referencia para usar el botón externo o lanzar el sondeo directamente desde pantalla. Si la primera toma quedó mal, use "Volver a medir referencia" para repetir el mismo flujo seguro y sobrescribir la referencia Z activa con una nueva captura física.</p>
+          <p className="muted">Con la herramienta ya ubicada sobre la referencia, puede medir directamente desde pantalla o volver al punto guardado sin rehacer homing. Si la primera toma quedó mal, use "Volver a medir referencia" para sobrescribir la referencia Z activa con una nueva captura física.</p>
           <div className="action-grid action-grid--inline">
-            <button className="button button--ghost" type="button" disabled={!canArm || referenceBusy || machine.refreshing} onClick={() => void machine.runMachineAction("probe-request")}>Armar referencia</button>
-            <button className="button" type="button" disabled={!canProbe || referenceBusy || machine.refreshing || !selectedOperation} onClick={() => void remeasurePhysicalReference()}>Sondear referencia ahora</button>
+            <button className="button" type="button" disabled={!canProbe || referenceBusy || machine.refreshing || !selectedOperation} onClick={() => void remeasurePhysicalReference()}>Medir referencia</button>
             <button className="button button--ghost" type="button" disabled={!canProbe || referenceBusy || machine.refreshing || !selectedOperation} onClick={() => void remeasurePhysicalReference()}>Volver a medir referencia</button>
+            <button className="button button--ghost" type="button" disabled={!canGoToReference || referenceBusy || machine.refreshing} onClick={() => void goToReferencePoint()}>{referenceBusy ? "Yendo al punto de referencia…" : "Ir a referencia"}</button>
             <button className="button button--ghost" type="button" disabled={!machine.isPhysical || machine.refreshing} onClick={() => void machine.runMachineAction("cancel")}>Cancelar</button>
           </div>
+          {referenceMoveResult ? <div className="alert alert--success"><strong>{referenceMoveResult.message}</strong><br />CNC X: {formatMillimeters(referenceMoveResult.reference_x, 3)} · CNC Y: {formatMillimeters(referenceMoveResult.reference_y, 3)} · Z segura: {formatMillimeters(referenceMoveResult.preparation_z, 3)} · {referenceMoveResult.final_state}</div> : null}
           <div className="info-grid info-grid--double compact-grid">
             <div className="metric-box"><span>Origen X/Y</span><strong>{referenceSession?.origen_trabajo ? `${referenceSession.origen_trabajo.x_mm}, ${referenceSession.origen_trabajo.y_mm}` : "pendiente"}</strong></div>
             <div className="metric-box"><span>Captura origen</span><strong>{formatCapturedPosition(referenceSession?.origen_trabajo?.posicion_captura)}</strong></div>
@@ -1332,6 +1425,10 @@ export function ProjectWorkspace({
       if (result) {
         setPhysicalMap(result);
         setMapSource("MEASURED");
+        if (result.status === "CANCELLED") {
+          setMeshArmed(false);
+          setMeshValidationMessage("Malla cancelada. El sondeo automático se detuvo y puede generar una nueva vista previa o repetir la medición completa.");
+        }
       }
       if (project && selectedOperation && isPhysicalMapReady(nextMap)) {
         const [measured, refreshedReference] = await Promise.all([
@@ -1602,7 +1699,17 @@ export function ProjectWorkspace({
                 const result = await api.repeatPhysicalMap(project.id, physicalMapId);
                 setActiveMapTab("mapa2d"); setMeshArmed(false); setMeshValidationMessage("Mapa anterior archivado. Nueva versión vacía generada con punto #0 X0/Y0 y todos los nodos pendientes. Confirme antes de mover."); return result.payload;
               })} title="Conserva origen X/Y y receta; archiva el mapa actual y vuelve a medir referencia y nodos.">Repetir medición completa</button>
-              <button className="button button--ghost" type="button" disabled={!physicalMap} onClick={() => { setPhysicalMap(null); setHeightMap(null); setMeshArmed(false); setMeshValidationMessage("Vista previa limpia. La configuración y los mapas medidos no se borraron."); }}>Limpiar vista previa</button>
+              <button className="button button--ghost" type="button" disabled={!physicalMap || isPhysicalMapPollingActive(physicalMap)} onClick={() => {
+                const hadMeasuredPoints = Boolean(physicalMap?.points?.some((point) => point.status === "MEASURED"));
+                setHeightMap(null);
+                setPhysicalMap(null);
+                setMeshArmed(false);
+                setMeshSuggestion(null);
+                setMapSource("MEASURED");
+                setMeshValidationMessage(hadMeasuredPoints
+                  ? "Vista local limpiada. El mapa activo del backend no se borró; si regenera con la misma configuración se recuperará la malla existente, y si cambia la cuadrícula se creará una nueva versión."
+                  : "Vista previa limpia. Puede generar otra vista previa de malla inmediatamente.");
+              }}>Limpiar vista previa</button>
               <button className="button button--ghost" type="button" disabled={heightMapBusy || !physicalMapId} onClick={() => void withPhysicalMapAction(async () => (await api.pausePhysicalMap(project.id, physicalMapId)).payload)}>Pausar</button>
               <button className="button button--ghost" type="button" disabled={heightMapBusy || !physicalMapId} onClick={() => void withPhysicalMapAction(async () => (await api.resumePhysicalMap(project.id, physicalMapId)).payload)}>Reanudar</button>
               <button className="button button--ghost" type="button" disabled={heightMapBusy || !physicalMapId || physicalFailedPoints === 0} onClick={() => void withPhysicalMapAction(async () => (await api.executeAllPhysicalMapPoints(project.id, physicalMapId)).payload)}>Reintentar puntos fallidos</button>
@@ -1709,9 +1816,10 @@ export function ProjectWorkspace({
   };
 
   const prepareJobRun = async () => {
-    if (!project || !selectedSetup || !activeJobFace) {
+    if (!project || !selectedSetup || !activeJobFace || jobActionPending) {
       return;
     }
+    setJobActionPending("prepare");
     setReferenceBusy(true);
     setWorkspaceError("");
     try {
@@ -1722,13 +1830,15 @@ export function ProjectWorkspace({
       setWorkspaceError(error instanceof Error ? error.message : "No fue posible preparar el trabajo.");
     } finally {
       setReferenceBusy(false);
+      setJobActionPending(null);
     }
   };
 
   const startJobRun = async () => {
-    if (!project || !selectedSetup || !activeJobFace) {
+    if (!project || !selectedSetup || !activeJobFace || jobActionPending) {
       return;
     }
+    setJobActionPending("start");
     setReferenceBusy(true);
     setWorkspaceError("");
     try {
@@ -1739,13 +1849,15 @@ export function ProjectWorkspace({
       setWorkspaceError(error instanceof Error ? error.message : "No fue posible iniciar el trabajo multioperación.");
     } finally {
       setReferenceBusy(false);
+      setJobActionPending(null);
     }
   };
 
   const runJobAction = async (action: string) => {
-    if (!project || !selectedSetup || !activeJobFace) {
+    if (!project || !selectedSetup || !activeJobFace || jobActionPending) {
       return;
     }
+    setJobActionPending(action);
     setReferenceBusy(true);
     setWorkspaceError("");
     try {
@@ -1760,6 +1872,7 @@ export function ProjectWorkspace({
       setWorkspaceError(error instanceof Error ? error.message : "No fue posible actualizar el trabajo multioperación.");
     } finally {
       setReferenceBusy(false);
+      setJobActionPending(null);
     }
   };
 
@@ -1833,13 +1946,19 @@ export function ProjectWorkspace({
       return null;
     }
     const currentOperation = jobRun?.current_operation_id ? jobRun.operations.find((item) => item.operation_id === jobRun.current_operation_id) ?? null : null;
+    const nextOperation = jobRun?.operations.find((item) => item.execution_status !== "COMPLETED" && item.execution_status !== "CANCELLED") ?? null;
+    const installedToolName = jobRun?.installed_tool_id ? jobRun.operations.find((item) => item.tool_id === jobRun.installed_tool_id)?.tool_name ?? jobRun.installed_tool_id : currentOperation?.tool_name ?? "pendiente";
+    const terminalRunStates = ["COMPLETED", "CANCELLED", "FAILED", "JOB_COMPLETED", "JOB_FAILED", "JOB_CANCELLED", "JOB_CANCELED", "STALE_RUN_ARCHIVED"];
+    const hasTerminalRun = Boolean(jobRun && terminalRunStates.includes(jobRun.state));
+    const hasActiveRun = Boolean(jobRun && !terminalRunStates.includes(jobRun.state));
     const actionLabels: Record<string, string> = {
       start: "Iniciar trabajo",
       pause: "Pausar",
       resume: "Reanudar",
       cancel: "Cancelar proyecto",
-      'confirm-tool-change': "Confirmar cambio de herramienta",
-      'measure-reference': "Medir referencia",
+      'confirm-spindle-stopped': "Spindle detenido",
+      'confirm-tool-change': "Herramienta cambiada",
+      'measure-reference': "Referencia completada",
       continue: "Continuar",
     };
     return (
@@ -1849,24 +1968,26 @@ export function ProjectWorkspace({
             <p className="eyebrow">2. Ejecución del proyecto</p>
             <h3>Secuencia automática por operaciones — {translateFace(activeJobFace)}</h3>
           </div>
-          <StatusBadge tone={jobRun?.state === "JOB_COMPLETE" ? "success" : jobRun?.state === "JOB_ERROR" ? "danger" : jobRun?.state === "WAITING_TOOL_CHANGE" ? "warning" : "info"}>{jobRun?.state ?? "JOB_DRAFT"}</StatusBadge>
+          <StatusBadge tone={jobRun?.state === "COMPLETED" ? "success" : jobRun?.state === "FAILED" ? "danger" : ["SPINDLE_STOP_REQUIRED", "TOOL_CHANGE_REQUIRED", "WAITING_TOOL_REFERENCE", "RECOVERY_REQUIRED"].includes(jobRun?.state ?? "") ? "warning" : "info"}>{jobRun?.state ?? "JOB_DRAFT"}</StatusBadge>
         </div>
         <div className="info-grid info-grid--double compact-grid">
-          <div className="metric-box"><span>Operación actual</span><strong>{currentOperation?.name ?? "pendiente"}</strong></div>
-          <div className="metric-box"><span>Herramienta actual</span><strong>{currentOperation?.tool_name ?? "pendiente"}</strong></div>
+          <div className="metric-box"><span>Operación actual</span><strong>{currentOperation?.name ?? nextOperation?.name ?? "pendiente"}</strong></div>
+          <div className="metric-box"><span>Herramienta instalada</span><strong>{installedToolName}</strong></div>
+          <div className="metric-box"><span>Siguiente herramienta</span><strong>{nextOperation?.tool_name ?? "sin pendiente"}</strong></div>
+          <div className="metric-box"><span>Estado spindle</span><strong>{jobRun?.spindle_state ?? "manual"}</strong></div>
           <div className="metric-box"><span>Progreso general</span><strong>{jobRun ? `${jobRun.summary.operations_completed}/${jobRun.summary.operations_total}` : "0/0"}</strong></div>
           <div className="metric-box"><span>Cambios de herramienta</span><strong>{jobRun ? `${jobRun.summary.tool_changes_completed}/${jobRun.summary.tool_changes_required}` : "0/0"}</strong></div>
           <div className="metric-box"><span>Mapa activo</span><strong>{jobPlan?.active_map_id ?? "pendiente"}</strong></div>
           <div className="metric-box"><span>Siguiente acción</span><strong>{jobRun?.next_action ?? "Prepare el trabajo"}</strong></div>
         </div>
         <div className="action-grid">
-          <button className="button button--ghost" type="button" disabled={referenceBusy} onClick={() => void prepareJobRun()}>Preparar trabajo</button>
-          <button className="button" type="button" disabled={referenceBusy || Boolean(jobRun?.ready === false)} onClick={() => void startJobRun()}>Iniciar trabajo</button>
+          {!hasActiveRun ? <button className="button" type="button" disabled={referenceBusy || Boolean(jobActionPending)} onClick={() => void prepareJobRun()}>{hasTerminalRun ? "Preparar nuevo trabajo" : "Preparar trabajo"}</button> : null}
+          {jobRun?.state === "READY_TO_START" ? <button className="button" type="button" disabled={referenceBusy || Boolean(jobActionPending) || Boolean(jobRun?.ready === false)} onClick={() => void startJobRun()}>Iniciar trabajo</button> : null}
           {(jobRun?.available_actions ?? []).map((action) => (
-            <button key={action} className={`button${action === "cancel" ? " button--ghost button--danger" : " button--ghost"}`} type="button" disabled={referenceBusy} onClick={() => void runJobAction(action)}>{actionLabels[action] ?? action}</button>
+            <button key={action} className={`button${action === "cancel" ? " button--ghost button--danger" : " button--ghost"}`} type="button" disabled={referenceBusy || Boolean(jobActionPending)} onClick={() => void runJobAction(action)}>{actionLabels[action] ?? action}</button>
           ))}
         </div>
-        <p className="muted">El backend ejecuta una sola secuencia: primera operación, cambio de herramienta seguro, confirmación del operador, nueva referencia Z, recompensación de lo pendiente y continuación hasta finalizar.</p>{jobRun?.checks?.length ? <ul className="compact-check-list">{jobRun.checks.map((check, index) => <li key={String(check.name ?? index)} data-ok={Boolean(check.ok)}>{String(check.name)}: {String(check.detail)}</li>)}</ul> : null}
+        <p className="muted">Secuencia activa: ejecutar, detener spindle manualmente, mover a cambio seguro, confirmar herramienta, medir nueva referencia Z y reanudar sin crear una corrida nueva.</p>{jobRun?.checks?.length ? <ul className="compact-check-list">{jobRun.checks.map((check, index) => <li key={String(check.name ?? index)} data-ok={Boolean(check.ok)}>{String(check.name)}: {String(check.detail)}</li>)}</ul> : null}
         {jobRun?.operations?.length ? <div className="point-card-grid">{jobRun.operations.map((item) => <div className="mesh-point-card" key={item.operation_id}><strong>{item.order_label} — {item.name}</strong><span>Herramienta: {item.tool_name}</span><span>Estado: {item.execution_status}</span><span>Referencia Z: {item.reference_status}</span><span>Archivo: {item.generated_file_name ?? "pendiente"}</span><span>Progreso: {typeof item.progress === "number" ? `${(item.progress * 100).toFixed(1)} %` : "-"}</span>{item.error ? <span>Error: {item.error}</span> : null}</div>)}</div> : null}
         {jobRun?.events?.length ? <div className="machine-event-list">{jobRun.events.slice(-8).map((event) => <div className="machine-event" key={`${event.timestamp}-${event.message}`}><strong>{event.level}</strong><span>{event.message}</span></div>)}</div> : null}
         {jobHistory.length > 0 ? (

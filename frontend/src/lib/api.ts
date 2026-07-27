@@ -18,6 +18,7 @@ import type {
   JobPlan,
   JobRun,
   ReferenceConfirmation,
+  ReferenceMoveResult,
   ReferenceSession,
   SystemInfoResponse,
   Setup,
@@ -71,12 +72,14 @@ export type PhysicalMapPlanPayload = {
 export class ApiError extends Error {
   status: number;
   fieldErrors: Record<string, string>;
+  payload: Record<string, unknown>;
 
-  constructor(message: string, status: number, fieldErrors: Record<string, string> = {}) {
+  constructor(message: string, status: number, fieldErrors: Record<string, string> = {}, payload: Record<string, unknown> = {}) {
     super(message);
     this.name = "ApiError";
     this.status = status;
     this.fieldErrors = fieldErrors;
+    this.payload = payload;
   }
 }
 
@@ -95,6 +98,18 @@ function translateFastApiDetail(detail: unknown, structuredErrors?: unknown): { 
     }).filter((value): value is string => Boolean(value));
     if (messages.length > 0) {
       return { message: `Solicitud inválida. ${messages.join(" ")}`, fieldErrors };
+    }
+  }
+
+  if (detail && typeof detail === "object") {
+    const record = detail as Record<string, unknown>;
+    const message = typeof record.message === "string" && record.message.trim()
+      ? record.message
+      : typeof record.detalle === "string" && record.detalle.trim()
+        ? record.detalle
+        : null;
+    if (message) {
+      return { message, fieldErrors: {} };
     }
   }
 
@@ -153,16 +168,27 @@ async function request<T>(input: RequestInfo, init?: RequestInit): Promise<T> {
     };
     const rawDetail = payload.detalle ?? payload.detail;
     const { message, fieldErrors } = translateFastApiDetail(rawDetail, payload.errores);
-    throw new ApiError(message, response.status, fieldErrors);
+    throw new ApiError(message, response.status, fieldErrors, payload as Record<string, unknown>);
   }
   return (await response.json()) as T;
+}
+
+async function requestOrNullOn404<T>(input: RequestInfo, init?: RequestInit): Promise<T | null> {
+  try {
+    return await request<T>(input, init);
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 404) {
+      return null;
+    }
+    throw error;
+  }
 }
 
 export const api = {
   getHealth: () => request<HealthResponse>("/api/health"),
   getSystemInfo: () => request<SystemInfoResponse>("/api/system/info"),
   getMachineSession: () => request<MachineSession>("/api/machine/session"),
-  getMachineRuntime: () => request<MachineRuntime>("/api/machine/status"),
+  getMachineRuntime: (init?: RequestInit) => request<MachineRuntime>("/api/machine/status", init),
   getMachineSettings: () => request<Record<string, number>>("/api/machine/settings"),
   updateMachineSettings: (payload: Record<string, number>) =>
     request<Record<string, number>>("/api/machine/settings", { method: "PUT", body: JSON.stringify(payload) }),
@@ -249,8 +275,8 @@ export const api = {
     request<OperationAnalysis>(`/api/projects/${projectId}/operations/${operationId}/analyze`, {
       method: "POST",
     }),
-  getReferenceSession: (projectId: string, operationId: string) =>
-    request<ReferenceSession>(`/api/projects/${projectId}/operations/${operationId}/reference-session`),
+  getReferenceSession: (projectId: string, operationId: string, init?: RequestInit) =>
+    request<ReferenceSession>(`/api/projects/${projectId}/operations/${operationId}/reference-session`, init),
   confirmMachineReference: (projectId: string, operationId: string) =>
     request<ReferenceSession>(`/api/projects/${projectId}/operations/${operationId}/reference-session/machine-reference`, {
       method: "POST",
@@ -273,6 +299,8 @@ export const api = {
     request<ReferenceSession>(`/api/projects/${projectId}/operations/${operationId}/reference-session/physical-z-reference-from-probe`, {
       method: "POST",
     }),
+  goToReferencePoint: (projectId: string, operationId: string) =>
+    request<ReferenceMoveResult>(`/api/projects/${projectId}/operations/${operationId}/reference/go-to`, { method: "POST" }),
   suggestPhysicalMap: (projectId: string, operationId: string, payload: PhysicalMapPlanPayload) =>
     request<MeshSuggestion>(`/api/projects/${projectId}/operations/${operationId}/physical-map/suggest`, {
       method: "POST",
@@ -294,12 +322,12 @@ export const api = {
     request<Record<string, unknown>>(`/api/projects/${projectId}/setups/${setupId}/reset-map`, { method: "POST", body: JSON.stringify({ motivo }) }),
   resetSetupPreparation: (projectId: string, setupId: string, motivo?: string) =>
     request<Record<string, unknown>>(`/api/projects/${projectId}/setups/${setupId}/reset-preparation`, { method: "POST", body: JSON.stringify({ motivo }) }),
-  getPhysicalMap: (projectId: string, operationId: string) =>
-    request<PhysicalMapResponse>(`/api/projects/${projectId}/operations/${operationId}/physical-map`),
-  getPhysicalHeightMap: (projectId: string, operationId: string) =>
-    request<HeightMap>(`/api/projects/${projectId}/operations/${operationId}/physical-map/height-map`),
-  getPhysicalMapHistory: (projectId: string, operationId: string) =>
-    request<Array<Record<string, unknown>>>(`/api/projects/${projectId}/operations/${operationId}/physical-map/history`),
+  getPhysicalMap: (projectId: string, operationId: string, init?: RequestInit) =>
+    request<PhysicalMapResponse>(`/api/projects/${projectId}/operations/${operationId}/physical-map`, init),
+  getPhysicalHeightMap: (projectId: string, operationId: string, init?: RequestInit) =>
+    request<HeightMap>(`/api/projects/${projectId}/operations/${operationId}/physical-map/height-map`, init),
+  getPhysicalMapHistory: (projectId: string, operationId: string, init?: RequestInit) =>
+    request<Array<Record<string, unknown>>>(`/api/projects/${projectId}/operations/${operationId}/physical-map/history`, init),
   repeatPhysicalMap: (projectId: string, mapId: string) =>
     request<PhysicalMapResponse>(`/api/projects/${projectId}/physical-maps/${mapId}/repeat`, { method: "POST" }),
   executeNextPhysicalMapPoint: (projectId: string, mapId: string) =>
@@ -373,7 +401,7 @@ export const api = {
   generateProjectCompensation: (projectId: string, setupId: string, face: string) =>
     request<JobPlan>(`/api/projects/${projectId}/job-plan/generate`, { method: "POST", body: JSON.stringify({ setup_id: setupId, face }) }),
   getJobRun: (projectId: string, setupId: string, face: string) =>
-    request<JobRun>(`/api/projects/${projectId}/job-run?setup_id=${encodeURIComponent(setupId)}&face=${encodeURIComponent(face)}`),
+    requestOrNullOn404<JobRun>(`/api/projects/${projectId}/job-run?setup_id=${encodeURIComponent(setupId)}&face=${encodeURIComponent(face)}`),
   prepareJobRun: (projectId: string, setupId: string, face: string) =>
     request<JobRun>(`/api/projects/${projectId}/job-run/prepare`, { method: "POST", body: JSON.stringify({ setup_id: setupId, face }) }),
   startJobRun: (projectId: string, setupId: string, face: string) =>

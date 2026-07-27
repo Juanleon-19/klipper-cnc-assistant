@@ -12,6 +12,8 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any, Callable
 
+from serial.serialutil import SerialException
+
 from klipper_cnc_assistant.input.command_mapper import CommandMapper, ControllerCommand
 from klipper_cnc_assistant.input.serial_driver import ControllerPacket, SerialDriver, SerialProtocolError
 from klipper_cnc_assistant.jog.controller import JogController, JogError
@@ -60,6 +62,41 @@ class MachineHealth(StrEnum):
 
 class MachineRuntimeError(RuntimeError):
     pass
+
+
+class MachineConnectionError(MachineRuntimeError):
+    def __init__(
+        self,
+        *,
+        component: str,
+        status: str,
+        retryable: bool,
+        message: str,
+        runtime_snapshot: dict[str, Any] | None = None,
+        port: str | None = None,
+        status_code: int = 503,
+    ) -> None:
+        super().__init__(message)
+        self.component = component
+        self.status = status
+        self.retryable = retryable
+        self.port = port
+        self.status_code = status_code
+        self.runtime_snapshot = runtime_snapshot
+
+    def response_payload(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "detail": {
+                "component": self.component,
+                "status": self.status,
+                "retryable": self.retryable,
+                "port": self.port,
+                "message": str(self),
+            }
+        }
+        if self.runtime_snapshot is not None:
+            payload["runtime"] = self.runtime_snapshot
+        return payload
 
 
 @dataclass
@@ -127,7 +164,7 @@ class MachineRuntime:
         config: MachineRuntimeConfig,
         *,
         client_factory: Callable[[str], MoonrakerClient] = MoonrakerClient,
-        telemetry_factory: Callable[[str, Any], MoonrakerTelemetry] = MoonrakerTelemetry,
+        telemetry_factory: Callable[..., MoonrakerTelemetry] = MoonrakerTelemetry,
         serial_factory: Callable[..., SerialDriver] = SerialDriver,
         discovery: Callable[[MoonrakerClient], Any] = discover_machine,
         settings_path: Path | None = None,
@@ -139,6 +176,7 @@ class MachineRuntime:
         self._serial_factory = serial_factory
         self._discovery = discovery
         self._lock = threading.RLock()
+        self._connect_lock = threading.Lock()
         self._movement_lock = threading.Lock()
         self._cancel_requested = threading.Event()
         self._serial_stop = threading.Event()
@@ -162,6 +200,8 @@ class MachineRuntime:
         self._last_command = ControllerCommand()
         self._last_packet_at: float | None = None
         self._last_telemetry_at: float | None = None
+        self._last_websocket_message_at: float | None = None
+        self._last_klipper_state: str | None = None
         self._last_command_text: str | None = None
         self._last_movement: dict[str, Any] | None = None
         self._last_error: str | None = None
@@ -170,6 +210,7 @@ class MachineRuntime:
         self._initialization_steps: list[InitializationStep] = []
         self._events: list[RuntimeEvent] = []
         self._counters = RuntimeCounters()
+        self._connection_error: dict[str, Any] | None = None
 
 
     _MACHINE_SETTINGS_FIELDS = {
@@ -296,52 +337,129 @@ class MachineRuntime:
             self._driver = None
             self._jog = None
             self._manual = None
+            self._telemetry_thread = None
+            self._serial_thread = None
+            self._telemetry_failures = []
+            self._last_packet_at = None
+            self._last_telemetry_at = None
+            self._last_websocket_message_at = None
+            self._last_klipper_state = None
+            self._connection_error = None
             self._state = MachineRuntimeState.DISCONNECTED
             self._event("info", "Runtime detenido.")
 
     def connect(self) -> dict[str, Any]:
-        with self._lock:
-            if self.config.mode is MachineMode.SIMULATED:
-                self._state = MachineRuntimeState.READY_FOR_HOME
-                self._event("info", "Conexión simulada confirmada.")
-                return self.snapshot()
-            self._require_physical_config()
-            if self._client is not None:
-                return self.snapshot()
-            self._state = MachineRuntimeState.CONNECTING
         try:
-            assert self.config.moonraker_url is not None
-            assert self.config.moonraker_ws is not None
-            assert self.config.serial_port is not None
-            client = self._client_factory(self.config.moonraker_url, timeout=self.config.moonraker_request_timeout_s)
-            server_info = client.get_server_info()
-            if server_info.get("klippy_state") != "ready":
-                raise MachineRuntimeError("Klipper no está ready.")
-            machine = self._discovery(client)
-            self._attach_telemetry_tracking(machine)
-            telemetry = self._telemetry_factory(self.config.moonraker_ws, machine)
-            driver = self._serial_factory(port=self.config.serial_port, baudrate=self.config.serial_baudrate, startup_delay=self.config.serial_startup_delay_s)
-            driver.open()
-            telemetry_thread = threading.Thread(target=_run_telemetry, args=(telemetry, self._telemetry_failures), daemon=True)
-            serial_thread = threading.Thread(target=self._serial_loop, daemon=True)
             with self._lock:
-                self._client = client
-                self._machine = machine
-                self._telemetry = telemetry
-                self._driver = driver
-                self._jog = JogController(client, machine)
-                self._manual = ManualJogController(self._jog, mode=JogMode.FINE)
-                self._state = MachineRuntimeState.DIAGNOSTIC
-                self._diagnostic_input_only = True
-                self._serial_stop.clear()
-                self._event("info", "Moonraker, Klipper y Arduino conectados en modo diagnóstico.")
-            telemetry_thread.start()
-            serial_thread.start()
-            with self._lock:
-                self._telemetry_thread = telemetry_thread
-                self._serial_thread = serial_thread
-                self._last_telemetry_at = time.monotonic()
-            return self.snapshot()
+                if self.config.mode is MachineMode.SIMULATED:
+                    self._state = MachineRuntimeState.READY_FOR_HOME
+                    self._event("info", "Conexión simulada confirmada.")
+                    return self.snapshot()
+            self._require_physical_config()
+            if not self._connect_lock.acquire(blocking=False):
+                raise MachineConnectionError(
+                    component="runtime",
+                    status="connection_in_progress",
+                    retryable=True,
+                    message="Ya existe un intento de conexión del runtime en curso.",
+                    runtime_snapshot=self.snapshot(),
+                    status_code=409,
+                )
+            try:
+                with self._lock:
+                    fully_connected = self._is_fully_connected_locked()
+                    has_partial = self._has_connected_components_locked()
+                if fully_connected:
+                    return self.snapshot()
+                if has_partial:
+                    self.stop()
+                with self._lock:
+                    self._state = MachineRuntimeState.CONNECTING
+                    self._manual_enabled = False
+                    self._diagnostic_input_only = True
+                    self._last_error = None
+                    self._connection_error = None
+                    self._telemetry_failures = []
+                assert self.config.moonraker_url is not None
+                assert self.config.moonraker_ws is not None
+                assert self.config.serial_port is not None
+                client = self._client_factory(self.config.moonraker_url, timeout=self.config.moonraker_request_timeout_s)
+                try:
+                    server_info = client.get_server_info()
+                except Exception as error:
+                    raise self._connection_failure(
+                        component="moonraker",
+                        message=f"No fue posible conectar Moonraker HTTP: {error}",
+                    ) from error
+                with self._lock:
+                    self._client = client
+                klippy_state = str(server_info.get("klippy_state") or "unknown")
+                with self._lock:
+                    self._last_klipper_state = klippy_state
+                if klippy_state != "ready":
+                    with self._lock:
+                        self._state = MachineRuntimeState.DEGRADED
+                    raise self._connection_failure(
+                        component="klipper",
+                        message=f"Klipper no está ready (estado reportado: {klippy_state}).",
+                    )
+                try:
+                    machine = self._discovery(client)
+                except Exception as error:
+                    with self._lock:
+                        self._state = MachineRuntimeState.DEGRADED
+                    raise self._connection_failure(
+                        component="klipper",
+                        message=f"No fue posible descubrir el estado de Klipper: {error}",
+                    ) from error
+                self._attach_telemetry_tracking(machine)
+                telemetry = self._telemetry_factory(self.config.moonraker_ws, machine, on_message=self._mark_websocket_message)
+                telemetry_thread = threading.Thread(target=_run_telemetry, args=(telemetry, self._telemetry_failures), daemon=True)
+                with self._lock:
+                    self._machine = machine
+                    self._telemetry = telemetry
+                    self._jog = JogController(client, machine)
+                    self._manual = ManualJogController(self._jog, mode=JogMode.FINE)
+                    self._serial_stop.clear()
+                    self._state = MachineRuntimeState.DEGRADED
+                telemetry_thread.start()
+                with self._lock:
+                    self._telemetry_thread = telemetry_thread
+                    self._last_telemetry_at = time.monotonic()
+                driver = self._serial_factory(
+                    port=self.config.serial_port,
+                    baudrate=self.config.serial_baudrate,
+                    startup_delay=self.config.serial_startup_delay_s,
+                )
+                try:
+                    driver.open()
+                except SerialException as error:
+                    raise self._connection_failure(
+                        component="arduino",
+                        message=f"No fue posible abrir el puerto serie del Arduino: {error}",
+                        port=self.config.serial_port,
+                    ) from error
+                except Exception as error:
+                    raise self._connection_failure(
+                        component="arduino",
+                        message=f"No fue posible inicializar el Arduino: {error}",
+                        port=self.config.serial_port,
+                    ) from error
+                serial_thread = threading.Thread(target=self._serial_loop, daemon=True)
+                with self._lock:
+                    self._driver = driver
+                serial_thread.start()
+                with self._lock:
+                    self._serial_thread = serial_thread
+                    self._state = MachineRuntimeState.DIAGNOSTIC
+                    self._last_error = None
+                    self._connection_error = None
+                    self._event("info", "Moonraker, Klipper y Arduino conectados en modo diagnóstico.")
+                return self.snapshot()
+            finally:
+                self._connect_lock.release()
+        except MachineConnectionError:
+            raise
         except Exception as error:
             with self._lock:
                 self._state = MachineRuntimeState.ERROR
@@ -363,6 +481,8 @@ class MachineRuntime:
             self._last_packet = None
             self._last_command = ControllerCommand()
             self._last_packet_at = None
+            self._last_websocket_message_at = None
+            self._last_klipper_state = None
             self._last_command_text = None
             self._last_movement = None
             self._last_error = None
@@ -513,6 +633,55 @@ class MachineRuntime:
         finally:
             self._movement_lock.release()
 
+    def go_to_reference_point(self, *, reference_x: float, reference_y: float) -> dict[str, Any]:
+        self._require_physical_ready()
+        if not self._movement_lock.acquire(blocking=False):
+            raise MachineRuntimeError("Ya hay un movimiento u operación física activa.")
+        preparation_z = float(self.config.reference_prep_z_mm)
+        try:
+            with self._lock:
+                self._manual_enabled = False
+                self._diagnostic_input_only = True
+                self._state = MachineRuntimeState.MOVING_TO_SAFE_Z
+            self._assert_safety_for_motion()
+            self._refresh_machine()
+            machine = self._machine
+            if machine is None:
+                raise MachineRuntimeError("No hay estado de máquina descubierto.")
+            missing = sorted(axis for axis in ("x", "y", "z") if not machine.axis_is_homed(axis))
+            if missing:
+                raise MachineRuntimeError("Falta homing de ejes: " + ", ".join(axis.upper() for axis in missing) + ".")
+            if self._last_command.probe_triggered:
+                raise MachineRuntimeError("No se puede mover al punto de referencia: la sonda está TRIGGERED.")
+            self._validate_machine_target(z=preparation_z, label="Z de preparación de referencia")
+            self._validate_machine_target(x=float(reference_x), y=float(reference_y), label="punto de referencia CNC")
+            self._event("info", f"REFERENCE_MOVE_SAFE_Z: moviendo Z a preparación {preparation_z:.3f} mm.")
+            self._move_absolute(z=preparation_z, label="reference_move_safe_z", feed_mm_min=self.config.reference_prep_z_feed_mm_min)
+            with self._lock:
+                self._state = MachineRuntimeState.MOVING_TO_CENTER
+            self._event("info", f"REFERENCE_MOVE_XY: moviendo a X={float(reference_x):.3f} Y={float(reference_y):.3f} mm.")
+            self._move_absolute(x=float(reference_x), y=float(reference_y), label="reference_move_xy", feed_mm_min=REFERENCE_PREP_XY_FEED_MM_MIN)
+            with self._lock:
+                self._state = MachineRuntimeState.WAITING_FOR_XY_REFERENCE
+                self._event("info", "REFERENCE_MOVE_COMPLETE: máquina ubicada en el punto de referencia.")
+            return self.snapshot() | {
+                "accepted": True,
+                "reference_x": float(reference_x),
+                "reference_y": float(reference_y),
+                "preparation_z": preparation_z,
+                "final_state": "REFERENCE_MOVE_COMPLETE",
+                "message": "Máquina ubicada en el punto de referencia.",
+            }
+        except Exception as error:
+            with self._lock:
+                cancelled = "cancelada por el operador" in str(error).lower()
+                self._state = MachineRuntimeState.CANCELLED if cancelled else MachineRuntimeState.ERROR
+                self._last_error = str(error)
+                self._event("warning" if cancelled else "error", f"{'REFERENCE_MOVE_CANCELLED' if cancelled else 'REFERENCE_MOVE_FAILED'}: {error}")
+            raise
+        finally:
+            self._movement_lock.release()
+
     def request_probe(self) -> dict[str, Any]:
         self._require_physical_ready()
         with self._lock:
@@ -546,47 +715,20 @@ class MachineRuntime:
                 self._state = MachineRuntimeState.PROBING_REFERENCE
             self._assert_safety_for_motion()
             self._refresh_machine()
-            machine = self._machine
-            jog = self._jog
-            if machine is None or jog is None:
+            if self._machine is None:
                 raise MachineRuntimeError("No hay control físico inicializado.")
-            if not machine.axis_is_homed("z"):
-                raise MachineRuntimeError("Z debe tener homing antes de sondear.")
-            start = machine.get_motion_snapshot()
-            start_x = float(start["x"])
-            start_y = float(start["y"])
-            while True:
-                with self._lock:
-                    if self._last_command.probe_triggered:
-                        break
-                snapshot = machine.get_motion_snapshot()
-                current_z = float(snapshot["z"])
-                remaining = current_z - machine.z_limits.minimum
-                if remaining <= self.config.settle_tolerance_mm:
-                    raise MachineRuntimeError("Se alcanzó el límite mínimo Z sin contacto de sonda.")
-                step = min(self.config.probe_step_mm, remaining)
-                result = jog.move_relative("z", -step, self.config.probe_lower_speed_mm_s)
-                with self._lock:
-                    self._last_movement = result
-                    self._last_command_text = "probe_lower_step"
-                self._wait_for_axis("z", float(result["target"]), "paso de sonda", start_position=current_z)
-            snapshot = machine.get_motion_snapshot()
-            contact_z = float(snapshot["z"])
-            retract_available = machine.z_limits.maximum - contact_z
-            if retract_available <= self.config.settle_tolerance_mm:
-                raise MachineRuntimeError("No hay margen Z para retraer después del contacto.")
-            retract = min(self.config.probe_retract_mm, retract_available)
-            result = jog.move_relative("z", retract, self.config.probe_lower_speed_mm_s)
-            with self._lock:
-                self._last_movement = result
-                self._last_command_text = "probe_retract"
-            self._wait_for_axis("z", float(result["target"]), "retracto de sonda", start_position=contact_z)
-            probe = ProbeResult(x_mm=start_x, y_mm=start_y, z_mm=contact_z, captured_at=_iso_now())
+            probe = self._probe_current_position(
+                label="reference_probe",
+                probe_step_mm=self.config.probe_step_mm,
+                probe_speed_mm_s=self.config.probe_lower_speed_mm_s,
+                retract_mm=self.config.probe_retract_mm,
+                retract_speed_mm_s=self.config.probe_lower_speed_mm_s,
+            )
             with self._lock:
                 self._last_probe_result = probe
                 self._probe_requested = False
                 self._state = MachineRuntimeState.REFERENCE_CAPTURED
-                self._event("info", f"Sonda de referencia capturada X={start_x:.3f} Y={start_y:.3f} Z={contact_z:.3f}.")
+                self._event("info", f"Sonda de referencia capturada X={probe.x_mm:.3f} Y={probe.y_mm:.3f} Z={probe.z_mm:.3f}.")
             return self.snapshot()
         except Exception as error:
             with self._lock:
@@ -618,13 +760,13 @@ class MachineRuntime:
             self._move_absolute(z=safe_z, label="mesh_z_segura")
             self._notify_probe_progress(progress_callback, "POINT_MOVE_XY", x_mm=float(point["x_machine"]), y_mm=float(point["y_machine"]))
             self._move_absolute(x=float(point["x_machine"]), y=float(point["y_machine"]), label=f"mesh_xy_{point['index']}")
-            probe_feed_mm_min = self._probe_config_float(probe_config, "probe_feed_mm_min")
             self._notify_probe_progress(progress_callback, "POINT_VERIFY_PROBE_OPEN")
             probe = self._probe_current_position(
                 label=f"mesh_probe_{point['index']}",
-                probe_step_mm=self._probe_config_float(probe_config, "probe_step_mm"),
-                probe_speed_mm_s=None if probe_feed_mm_min is None else probe_feed_mm_min / 60.0,
-                retract_mm=self._probe_config_float(probe_config, "retract_mm"),
+                probe_step_mm=self.config.probe_step_mm,
+                probe_speed_mm_s=self.config.probe_lower_speed_mm_s,
+                retract_mm=self.config.probe_retract_mm,
+                retract_speed_mm_s=self.config.probe_lower_speed_mm_s,
                 progress_callback=progress_callback,
             )
             with self._lock:
@@ -651,6 +793,7 @@ class MachineRuntime:
         probe_step_mm: float | None = None,
         probe_speed_mm_s: float | None = None,
         retract_mm: float | None = None,
+        retract_speed_mm_s: float | None = None,
         progress_callback: Callable[[str, dict[str, Any]], None] | None = None,
     ) -> ProbeResult:
         self._assert_safety_for_motion()
@@ -694,7 +837,12 @@ class MachineRuntime:
         if retract_available <= self.config.settle_tolerance_mm:
             raise MachineRuntimeError("No hay margen Z para retraer después del contacto.")
         retract = min(retract_distance, retract_available)
-        retract_speed = self.config.probe_retract_speed_mm_s if probe_speed_mm_s is None else probe_speed
+        if retract_speed_mm_s is not None and retract_speed_mm_s > 0:
+            retract_speed = retract_speed_mm_s
+        elif probe_speed_mm_s is None:
+            retract_speed = self.config.probe_retract_speed_mm_s
+        else:
+            retract_speed = probe_speed
         self._notify_probe_progress(progress_callback, "POINT_RETRACT", retract_mm=retract, feed_mm_min=retract_speed * 60.0)
         result = jog.move_relative("z", retract, retract_speed)
         with self._lock:
@@ -761,14 +909,18 @@ class MachineRuntime:
             machine_snapshot = self._machine.get_motion_snapshot() if self._machine is not None else None
             serial_age = None if self._last_packet_at is None else now - self._last_packet_at
             telemetry_age = None if self._last_telemetry_at is None else now - self._last_telemetry_at
+            websocket_age = None if self._last_websocket_message_at is None else now - self._last_websocket_message_at
+            telemetry = self._telemetry_status(now=now, machine_snapshot=machine_snapshot, telemetry_age=telemetry_age, websocket_age=websocket_age)
             profile = get_jog_profile(self._manual.mode) if self._manual is not None else get_jog_profile(JogMode.FINE)
-            safety = self._safety_snapshot(serial_age=serial_age, telemetry_age=telemetry_age)
+            safety = self._safety_snapshot(serial_age=serial_age, telemetry=telemetry)
             health = self._health_from_safety(safety)
+            connection = self._connection_snapshot_locked()
             return {
                 "mode": self.config.mode.value.upper(),
                 "mode_label": self.config.mode_label,
                 "state": self._state.value,
                 "health": health.value,
+                "connection": connection,
                 "started_at": self._started_at.isoformat(),
                 "application": {"api_active": True, "mode": self.config.mode.value, "uptime_s": max(0.0, (utc_now() - self._started_at).total_seconds())},
                 "moonraker": {
@@ -777,9 +929,10 @@ class MachineRuntime:
                     "http_connected": self._client is not None,
                     "websocket_connected": self._telemetry_thread is not None and self._telemetry_thread.is_alive(),
                     "last_error": self._last_error,
+                    "status": connection["components"]["moonraker"]["status"],
                 },
                 "klipper": {
-                    "ready": self._client is not None and self._state not in {MachineRuntimeState.ERROR, MachineRuntimeState.DISCONNECTED},
+                    "ready": self.config.mode is MachineMode.SIMULATED or (self._client is not None and self._machine is not None and (self._last_klipper_state in {None, "ready"})),
                     "position": machine_snapshot,
                     "homed_axes": None if self._machine is None else self._machine.homed_axes,
                     "limits": None if self._machine is None else {
@@ -790,6 +943,8 @@ class MachineRuntime:
                     "max_velocity": None if self._machine is None else self._machine.max_velocity,
                     "max_z_velocity": None if self._machine is None else self._machine.max_z_velocity,
                     "max_accel": None if self._machine is None else self._machine.max_accel,
+                    "state": self._last_klipper_state,
+                    "status": connection["components"]["klipper"]["status"],
                 },
                 "preparation": {
                     "reference_prep_z_mm": self.config.reference_prep_z_mm,
@@ -813,7 +968,7 @@ class MachineRuntime:
                     "z_feed_mm_min": self.config.tool_change_z_feed_mm_min,
                     "z_speed_mm_s": self.config.tool_change_z_feed_mm_min / 60.0,
                 },
-                "arduino": self._arduino_snapshot(now=now, serial_age=serial_age),
+                "arduino": {**self._arduino_snapshot(now=now, serial_age=serial_age), "status": connection["components"]["arduino"]["status"]},
                 "controller": {
                     "direction": self._last_packet.direction if self._last_packet else "CENTER",
                     "x": self._last_packet.x if self._last_packet else None,
@@ -829,6 +984,10 @@ class MachineRuntime:
                     "diagnostic_input_only": self._diagnostic_input_only,
                     "probe_requested": self._probe_requested,
                 },
+                "telemetry_age_s": telemetry_age,
+                "websocket_age_s": websocket_age,
+                "serial_age_s": serial_age,
+                "telemetry": telemetry,
                 "safety": safety,
                 "last_command": self._last_command_text,
                 "last_movement": self._last_movement,
@@ -837,6 +996,39 @@ class MachineRuntime:
                 "initialization_steps": [step.__dict__ for step in self._initialization_steps],
                 "events": [event.__dict__ for event in self._events[-30:]],
             }
+
+    def _mark_websocket_message(self) -> None:
+        with self._lock:
+            self._last_websocket_message_at = time.monotonic()
+
+    def _telemetry_status(self, *, now: float, machine_snapshot: dict[str, Any] | None, telemetry_age: float | None, websocket_age: float | None) -> dict[str, Any]:
+        if self.config.mode is MachineMode.SIMULATED:
+            return {
+                "telemetry_age_s": 0.0,
+                "websocket_age_s": 0.0,
+                "websocket_recent": True,
+                "position_sample_age_s": 0.0,
+                "position_sample_recent": True,
+                "position_changed_age_s": 0.0,
+                "position_changed_recent": True,
+                "commanded_position_age_s": 0.0,
+                "gcode_position_age_s": 0.0,
+            }
+        position_sample_age = None if machine_snapshot is None else machine_snapshot.get("position_sample_age_s")
+        position_changed_age = None if machine_snapshot is None else machine_snapshot.get("position_changed_age_s")
+        commanded_position_age = None if machine_snapshot is None else machine_snapshot.get("commanded_position_age_s")
+        gcode_position_age = None if machine_snapshot is None else machine_snapshot.get("gcode_position_age_s")
+        return {
+            "telemetry_age_s": telemetry_age,
+            "websocket_age_s": websocket_age,
+            "websocket_recent": websocket_age is not None and websocket_age <= self.config.telemetry_fresh_timeout_s,
+            "position_sample_age_s": position_sample_age,
+            "position_sample_recent": position_sample_age is not None and float(position_sample_age) <= self.config.telemetry_fresh_timeout_s,
+            "position_changed_age_s": position_changed_age,
+            "position_changed_recent": position_changed_age is not None and float(position_changed_age) <= self.config.telemetry_fresh_timeout_s,
+            "commanded_position_age_s": commanded_position_age,
+            "gcode_position_age_s": gcode_position_age,
+        }
 
     def _serial_loop(self) -> None:
         if self._driver is not None:
@@ -944,6 +1136,108 @@ class MachineRuntime:
         if self._client is None:
             raise MachineRuntimeError("Conecte Moonraker/Klipper/Arduino antes de usar controles físicos.")
 
+    def _connection_failure(self, *, component: str, message: str, port: str | None = None, retryable: bool = True) -> MachineConnectionError:
+        with self._lock:
+            if component in {"arduino", "klipper"} and self._client is not None:
+                self._state = MachineRuntimeState.DEGRADED
+            else:
+                self._state = MachineRuntimeState.DISCONNECTED
+            self._last_error = message
+            self._connection_error = {
+                "component": component,
+                "status": "connection_failed",
+                "retryable": retryable,
+                "port": port,
+                "message": message,
+            }
+            self._event("warning", message)
+            snapshot = self.snapshot()
+        return MachineConnectionError(
+            component=component,
+            status="connection_failed",
+            retryable=retryable,
+            message=message,
+            runtime_snapshot=snapshot,
+            port=port,
+        )
+
+    def _has_connected_components_locked(self) -> bool:
+        return self._client is not None or self._machine is not None or self._telemetry is not None or self._driver is not None
+
+    def _is_fully_connected_locked(self) -> bool:
+        return (
+            self._client is not None
+            and self._machine is not None
+            and self._telemetry_thread is not None
+            and self._telemetry_thread.is_alive()
+            and self._driver is not None
+            and self._serial_thread is not None
+            and self._serial_thread.is_alive()
+        )
+
+    def _connection_snapshot_locked(self) -> dict[str, Any]:
+        moonraker_connected = self._client is not None
+        klipper_connected = moonraker_connected and self._machine is not None
+        websocket_connected = self._telemetry_thread is not None and self._telemetry_thread.is_alive()
+        arduino_connected = self._driver is not None and self._serial_thread is not None and self._serial_thread.is_alive()
+        fully_connected = moonraker_connected and klipper_connected and websocket_connected and arduino_connected
+        last_error = None if self._connection_error is None else dict(self._connection_error)
+        connect_in_progress = self._state is MachineRuntimeState.CONNECTING
+        any_component_connected = moonraker_connected or klipper_connected or websocket_connected or arduino_connected
+        if connect_in_progress:
+            overall_status = "connecting"
+        elif fully_connected:
+            overall_status = "connected"
+        elif any_component_connected:
+            overall_status = "partial"
+        elif last_error is not None:
+            overall_status = "connection_failed"
+        else:
+            overall_status = "disconnected"
+
+        def component_status(name: str) -> str:
+            if name == "moonraker":
+                connected = moonraker_connected
+            elif name == "klipper":
+                connected = klipper_connected and websocket_connected
+            elif name == "arduino":
+                connected = arduino_connected
+            else:
+                connected = fully_connected
+            if connected:
+                return "connected"
+            if connect_in_progress:
+                return "connecting"
+            if last_error is not None and last_error.get("component") == name:
+                return str(last_error.get("status") or "connection_failed")
+            return "disconnected"
+
+        return {
+            "status": overall_status,
+            "fully_connected": fully_connected,
+            "partial": overall_status == "partial",
+            "retryable": bool(last_error and last_error.get("retryable")),
+            "active_attempt": connect_in_progress,
+            "last_error": last_error,
+            "components": {
+                "runtime": {"status": overall_status, "connected": fully_connected},
+                "moonraker": {
+                    "status": component_status("moonraker"),
+                    "connected": moonraker_connected,
+                    "websocket_connected": websocket_connected,
+                },
+                "klipper": {
+                    "status": component_status("klipper"),
+                    "connected": klipper_connected and websocket_connected,
+                },
+                "arduino": {
+                    "status": component_status("arduino"),
+                    "connected": arduino_connected,
+                    "port": self.config.serial_port,
+                },
+            },
+        }
+
     def _assert_serial_thread_visible(self) -> None:
         if self._driver is None or self._serial_thread is None:
             raise MachineRuntimeError("Arduino no inicializado.")
@@ -986,10 +1280,61 @@ class MachineRuntime:
     def _assert_safety_for_motion(self) -> None:
         self._assert_safety_for_connection()
         self._assert_serial_recent()
-        if self._machine is None:
+        machine = self._machine
+        if machine is None:
             raise MachineRuntimeError("No hay estado de máquina.")
-        if not self._machine.is_homed:
+        if not machine.is_homed:
             raise MachineRuntimeError("Falta homing de ejes antes de autorizar movimiento.")
+        now = time.monotonic()
+        snapshot = machine.get_motion_snapshot()
+        with self._lock:
+            telemetry_age = None if self._last_telemetry_at is None else now - self._last_telemetry_at
+            websocket_age = None if self._last_websocket_message_at is None else now - self._last_websocket_message_at
+            klipper_state = self._last_klipper_state
+        if self.config.mode is not MachineMode.SIMULATED and klipper_state not in {None, "ready"}:
+            raise MachineRuntimeError(f"Klipper no está ready (estado reportado: {klipper_state}).")
+        telemetry = self._telemetry_status(now=now, machine_snapshot=snapshot, telemetry_age=telemetry_age, websocket_age=websocket_age)
+        if telemetry.get("position_sample_recent"):
+            return
+        telemetry = self._refresh_stale_motion_sample(telemetry)
+        if telemetry.get("position_sample_recent"):
+            return
+        sample_age = telemetry.get("position_sample_age_s")
+        if sample_age is None:
+            raise MachineRuntimeError("Moonraker no ha entregado una muestra live_position válida; no se autoriza movimiento físico.")
+        raise MachineRuntimeError(
+            f"La posición live de Moonraker está obsoleta; última muestra hace {float(sample_age):.2f} s; no se autoriza movimiento físico."
+        )
+
+    def _refresh_stale_motion_sample(self, telemetry: dict[str, Any]) -> dict[str, Any]:
+        if telemetry.get("position_sample_recent"):
+            return telemetry
+        if self.config.mode is MachineMode.SIMULATED:
+            return telemetry
+        if self._machine is None or self.config.moonraker_url is None:
+            return telemetry
+        try:
+            snapshot = self.refresh_motion_snapshot_http(timeout_s=0.25)
+        except Exception:
+            return telemetry
+        safety = snapshot.get("safety")
+        if not isinstance(safety, dict):
+            return telemetry
+        refreshed = dict(telemetry)
+        for key in (
+            "telemetry_age_s",
+            "websocket_age_s",
+            "websocket_recent",
+            "position_sample_age_s",
+            "position_sample_recent",
+            "position_changed_age_s",
+            "position_changed_recent",
+            "commanded_position_age_s",
+            "gcode_position_age_s",
+        ):
+            if key in safety:
+                refreshed[key] = safety[key]
+        return refreshed
 
     def _refresh_machine(self) -> None:
         if self._client is None:
@@ -1021,6 +1366,64 @@ class MachineRuntime:
                     homing_origin=None if refreshed.homing_origin is None else refreshed.homing_origin.as_tuple(),
                 )
             self._last_telemetry_at = time.monotonic()
+            self._last_klipper_state = "ready"
+
+    def refresh_motion_snapshot_http(self, *, timeout_s: float = 0.25) -> dict[str, Any]:
+        if self.config.mode is MachineMode.SIMULATED:
+            return self.snapshot()
+        if self._machine is None:
+            raise MachineRuntimeError("No hay estado de máquina descubierto.")
+        if self.config.moonraker_url is None:
+            raise MachineRuntimeError("MOONRAKER_URL no configurado para reconciliar telemetría.")
+        client = self._client_factory(self.config.moonraker_url, timeout=timeout_s)
+        status = client.query_objects(
+            {
+                "motion_report": ["live_position", "live_velocity"],
+                "toolhead": ["position", "homed_axes", "axis_minimum", "axis_maximum", "max_velocity", "max_accel"],
+                "gcode_move": ["gcode_position", "position", "absolute_coordinates", "homing_origin"],
+                "configfile": ["settings"],
+                "webhooks": ["state"],
+            }
+        )
+        toolhead = status.get("toolhead")
+        if not isinstance(toolhead, dict):
+            raise MachineRuntimeError("Klipper toolhead state is unavailable")
+        motion_report = status.get("motion_report") if isinstance(status.get("motion_report"), dict) else {}
+        gcode_move = status.get("gcode_move") if isinstance(status.get("gcode_move"), dict) else {}
+        configfile = status.get("configfile") if isinstance(status.get("configfile"), dict) else {}
+        webhooks = status.get("webhooks") if isinstance(status.get("webhooks"), dict) else {}
+        settings = configfile.get("settings") if isinstance(configfile.get("settings"), dict) else {}
+        printer_settings = settings.get("printer") if isinstance(settings.get("printer"), dict) else {}
+        raw_max_z_velocity = printer_settings.get("max_z_velocity")
+        max_z_velocity = None if raw_max_z_velocity is None else float(raw_max_z_velocity)
+        with self._lock:
+            machine = self._machine
+            if machine is None:
+                raise MachineRuntimeError("No hay estado de máquina descubierto.")
+            machine.update_toolhead(
+                position=toolhead.get("position"),
+                homed_axes=toolhead.get("homed_axes"),
+                axis_minimum=toolhead.get("axis_minimum"),
+                axis_maximum=toolhead.get("axis_maximum"),
+                max_velocity=toolhead.get("max_velocity"),
+                max_accel=toolhead.get("max_accel"),
+                max_z_velocity=max_z_velocity,
+            )
+            live_position = motion_report.get("live_position") if isinstance(motion_report, dict) else None
+            live_velocity = motion_report.get("live_velocity") if isinstance(motion_report, dict) else None
+            if live_position is not None or live_velocity is not None:
+                machine.update_motion(live_position=live_position, live_velocity=live_velocity, source="http")
+            if isinstance(gcode_move, dict):
+                machine.update_gcode_move(
+                    gcode_position=gcode_move.get("gcode_position"),
+                    position=gcode_move.get("position"),
+                    absolute_coordinates=gcode_move.get("absolute_coordinates"),
+                    homing_origin=gcode_move.get("homing_origin"),
+                )
+            self._last_telemetry_at = time.monotonic()
+            state = webhooks.get("state") if isinstance(webhooks, dict) else None
+            self._last_klipper_state = "ready" if state in {None, "ready"} else str(state)
+        return self.snapshot()
 
     def _attach_telemetry_tracking(self, machine) -> None:
         original_update_motion = machine.update_motion
@@ -1192,14 +1595,25 @@ class MachineRuntime:
             f"observado {observed_detail}; resultado {movement.get('result', 'confirmado')}."
         )
 
-    def _targets_reached(self, snapshot: dict[str, Any], targets: dict[str, float]) -> tuple[bool, bool, float]:
+    def _targets_reached(self, snapshot: dict[str, Any], targets: dict[str, float]) -> tuple[bool, bool, float, bool, bool]:
         velocity = abs(float(snapshot["velocity"]))
         positions_ok = all(
             abs(float(snapshot[axis]) - target) <= self.config.settle_tolerance_mm
             for axis, target in targets.items()
         )
-        stopped = velocity <= self.config.velocity_tolerance_mm_s
-        return positions_ok and stopped, positions_ok, velocity
+        sample_age = snapshot.get("live_position_age_s")
+        position_sample_recent = sample_age is not None and float(sample_age) <= self.config.telemetry_fresh_timeout_s
+        motion_stopped = velocity <= self.config.velocity_tolerance_mm_s
+        return positions_ok and position_sample_recent and motion_stopped, positions_ok, velocity, position_sample_recent, motion_stopped
+
+    def _target_frames_reached(self, snapshot: dict[str, Any], targets: dict[str, float]) -> bool:
+        def frame_matches(frame: dict[str, Any] | None) -> bool:
+            return isinstance(frame, dict) and all(abs(float(frame[axis]) - target) <= self.config.settle_tolerance_mm for axis, target in targets.items() if axis in frame)
+
+        live_ok = frame_matches(snapshot.get("live_position"))
+        commanded_frames = [snapshot.get("commanded_position"), snapshot.get("gcode_position"), snapshot.get("gcode_move_position")]
+        commanded_ok = any(frame_matches(frame) for frame in commanded_frames)
+        return live_ok and commanded_ok
 
     def _remaining_distance(self, snapshot: dict[str, Any], targets: dict[str, float]) -> float:
         return math.sqrt(sum((float(snapshot[axis]) - target) ** 2 for axis, target in targets.items()))
@@ -1232,7 +1646,7 @@ class MachineRuntime:
                 self._refresh_machine_best_effort()
                 last_refresh = now
             last_snapshot = self._machine.get_motion_snapshot()
-            reached, positions_ok, last_velocity = self._targets_reached(last_snapshot, targets)
+            reached, positions_ok, last_velocity, position_sample_recent, motion_stopped = self._targets_reached(last_snapshot, targets)
             remaining = self._remaining_distance(last_snapshot, targets)
             live_sample_source = str(last_snapshot.get("live_position_source") or "unknown")
             current_live_sample = {axis: float(last_snapshot[axis]) for axis in targets}
@@ -1258,6 +1672,8 @@ class MachineRuntime:
                         "no_progress_elapsed_s": now - last_progress_at,
                         "progress_remaining_mm": remaining,
                         "stable_samples": stable_samples,
+                        "position_sample_recent": position_sample_recent,
+                        "motion_stopped": motion_stopped,
                         "previous_live_z": None if previous_live_sample is None or "z" not in previous_live_sample else previous_live_sample["z"],
                         "current_live_z": current_live_sample.get("z"),
                         "target_z": targets.get("z"),
@@ -1289,16 +1705,36 @@ class MachineRuntime:
                     consecutive_away_samples = 0
                 previous_live_sample = current_live_sample
                 previous_live_source = live_sample_source
-            if positions_ok:
+            if positions_ok and position_sample_recent:
                 reached_position_at = reached_position_at or now
-                if now - reached_position_at > self.config.settle_timeout_s:
-                    detail = self._observed_detail(last_snapshot)
-                    raise MachineRuntimeError(f"{label}: objetivo alcanzado pero la velocidad no se estabilizó. Observado {detail}; velocidad={last_velocity:.3f} mm/s.")
+                if motion_stopped:
+                    stable_samples += 1
+                else:
+                    stable_samples = 0
+                    if now - reached_position_at > self.config.settle_timeout_s:
+                        self._refresh_machine_best_effort()
+                        checked_snapshot = self._machine.get_motion_snapshot()
+                        checked_reached, checked_positions_ok, checked_velocity, checked_sample_recent, checked_motion_stopped = self._targets_reached(checked_snapshot, targets)
+                        if checked_reached:
+                            self._clear_resolved_transport_timeout(label)
+                            return {
+                                "observed_position": {axis: float(checked_snapshot[axis]) for axis in ("x", "y", "z")},
+                                "observed_velocity_mm_s": checked_velocity,
+                                "position_source": checked_snapshot.get("source"),
+                                "live_position": checked_snapshot.get("live_position"),
+                                "commanded_position": checked_snapshot.get("commanded_position"),
+                                "stable_samples": stable_samples,
+                                "elapsed_s": time.monotonic() - start,
+                                "progress_remaining_mm": self._remaining_distance(checked_snapshot, targets),
+                                "result": "reconciliado",
+                            }
+                        if not checked_sample_recent and checked_positions_ok and self._target_frames_reached(checked_snapshot, targets):
+                            reached_position_at = None
+                        else:
+                            detail = self._observed_detail(checked_snapshot)
+                            raise MachineRuntimeError(f"{label}: objetivo alcanzado pero la velocidad no se estabilizó. Observado {detail}; velocidad={checked_velocity:.3f} mm/s.")
             else:
                 reached_position_at = None
-            if reached and not self._telemetry_is_stale(now):
-                stable_samples += 1
-            else:
                 stable_samples = 0
             if stable_samples >= required_stable_samples:
                 self._clear_resolved_transport_timeout(label)
@@ -1317,7 +1753,7 @@ class MachineRuntime:
                 self._refresh_machine_best_effort()
                 checked_snapshot = self._machine.get_motion_snapshot()
                 checked_remaining = self._remaining_distance(checked_snapshot, targets)
-                checked_reached, _checked_positions_ok, checked_velocity = self._targets_reached(checked_snapshot, targets)
+                checked_reached, _checked_positions_ok, checked_velocity, _checked_sample_recent, _checked_motion_stopped = self._targets_reached(checked_snapshot, targets)
                 if checked_reached:
                     self._clear_resolved_transport_timeout(label)
                     return {
@@ -1336,7 +1772,7 @@ class MachineRuntime:
             time.sleep(0.05)
         self._refresh_machine_best_effort()
         final_snapshot = self._machine.get_motion_snapshot()
-        reached, _positions_ok, final_velocity = self._targets_reached(final_snapshot, targets)
+        reached, positions_ok, final_velocity, position_sample_recent, motion_stopped = self._targets_reached(final_snapshot, targets)
         if reached:
             self._clear_resolved_transport_timeout(label)
             with self._lock:
@@ -1351,6 +1787,25 @@ class MachineRuntime:
                 "elapsed_s": time.monotonic() - start,
                 "progress_remaining_mm": self._remaining_distance(final_snapshot, targets),
                 "result": "reconciliado",
+            }
+        transport_sample_stale = not position_sample_recent
+        with self._lock:
+            if not transport_sample_stale and self._last_movement is not None and self._last_movement.get("label") == label:
+                transport_sample_stale = self._last_movement.get("position_sample_recent") is False
+        if positions_ok and transport_sample_stale and self._target_frames_reached(final_snapshot, targets):
+            self._clear_resolved_transport_timeout(label)
+            with self._lock:
+                self._event("info", f"{label}: timeout de transporte reconciliado por objetivo confirmado en los frames de Klipper y muestra live envejecida.")
+            return {
+                "observed_position": {axis: float(final_snapshot[axis]) for axis in ("x", "y", "z")},
+                "observed_velocity_mm_s": final_velocity,
+                "position_source": final_snapshot.get("source"),
+                "live_position": final_snapshot.get("live_position"),
+                "commanded_position": final_snapshot.get("commanded_position"),
+                "stable_samples": stable_samples,
+                "elapsed_s": time.monotonic() - start,
+                "progress_remaining_mm": self._remaining_distance(final_snapshot, targets),
+                "result": "reconciliado_timeout_transporte",
             }
         raise MachineRuntimeError(
             f"Timeout esperando confirmación de {label} ({self._target_detail(targets)}) tras {operation_timeout_s:.3f} s. "
@@ -1511,32 +1966,69 @@ class MachineRuntime:
             "blocked_reason": reason,
         }
 
-    def _safety_snapshot(self, *, serial_age: float | None, telemetry_age: float | None) -> dict[str, Any]:
-        telemetry_recent = self.config.mode is MachineMode.SIMULATED or (telemetry_age is not None and telemetry_age <= self.config.telemetry_fresh_timeout_s)
-        serial_recent = self.config.mode is MachineMode.SIMULATED or (serial_age is not None and serial_age <= self.config.serial_fresh_timeout_s)
-        klipper_ready = self.config.mode is MachineMode.SIMULATED or self._client is not None
-        homed = self.config.mode is MachineMode.SIMULATED or (self._machine is not None and self._machine.is_homed)
-        movement_authorized = self._manual_enabled and telemetry_recent and serial_recent and klipper_ready and homed and self._state == MachineRuntimeState.WAITING_FOR_XY_REFERENCE
+    def _safety_snapshot(self, *, serial_age: float | None, telemetry: dict[str, Any]) -> dict[str, Any]:
+        if self.config.mode is MachineMode.SIMULATED:
+            return {
+                "telemetry_recent": True,
+                "websocket_recent": True,
+                "position_sample_recent": True,
+                "position_changed_recent": True,
+                "position_sample_age_s": 0.0,
+                "position_changed_age_s": 0.0,
+                "serial_recent": True,
+                "klipper_ready": True,
+                "homed_axes_required": True,
+                "no_active_error": True,
+                "no_incompatible_operation": True,
+                "movement_authorized": self._manual_enabled and self._state == MachineRuntimeState.WAITING_FOR_XY_REFERENCE,
+                "blocked_reason": None,
+            }
+        position_sample_recent = bool(telemetry.get("position_sample_recent"))
+        websocket_recent = bool(telemetry.get("websocket_recent"))
+        position_changed_recent = bool(telemetry.get("position_changed_recent"))
+        serial_recent = serial_age is not None and serial_age <= self.config.serial_fresh_timeout_s
+        klipper_ready = self._client is not None and self._machine is not None and self._last_klipper_state in {None, "ready"}
+        homed = self._machine is not None and self._machine.is_homed
+        no_active_error = self._state is not MachineRuntimeState.ERROR
+        no_incompatible_operation = self._state not in {MachineRuntimeState.PROBING_REFERENCE, MachineRuntimeState.HOMING}
+        movement_authorized = (
+            self._manual_enabled
+            and position_sample_recent
+            and serial_recent
+            and klipper_ready
+            and homed
+            and no_active_error
+            and no_incompatible_operation
+            and self._state == MachineRuntimeState.WAITING_FOR_XY_REFERENCE
+        )
         reasons = []
         if not klipper_ready:
-            reasons.append("Klipper/Moonraker no conectado.")
-        if not telemetry_recent:
-            reasons.append("Telemetría obsoleta.")
+            reasons.append("Klipper/Moonraker no conectado o no ready.")
+        if not position_sample_recent:
+            if websocket_recent:
+                reasons.append("Moonraker conectado pero sin muestra live_position reciente.")
+            else:
+                reasons.append("Telemetría live_position obsoleta.")
         if not serial_recent:
             reasons.append("Arduino obsoleto.")
         if not homed:
             reasons.append("Falta homing.")
-        if self._state in {MachineRuntimeState.ERROR, MachineRuntimeState.PROBING_REFERENCE, MachineRuntimeState.HOMING}:
+        if not no_incompatible_operation:
             reasons.append(f"Estado incompatible: {self._state.value}.")
         if not self._manual_enabled:
             reasons.append("Control manual no habilitado.")
         return {
-            "telemetry_recent": telemetry_recent,
+            "telemetry_recent": position_sample_recent,
+            "websocket_recent": websocket_recent,
+            "position_sample_recent": position_sample_recent,
+            "position_changed_recent": position_changed_recent,
+            "position_sample_age_s": telemetry.get("position_sample_age_s"),
+            "position_changed_age_s": telemetry.get("position_changed_age_s"),
             "serial_recent": serial_recent,
             "klipper_ready": klipper_ready,
             "homed_axes_required": homed,
-            "no_active_error": self._state is not MachineRuntimeState.ERROR,
-            "no_incompatible_operation": self._state not in {MachineRuntimeState.PROBING_REFERENCE, MachineRuntimeState.HOMING},
+            "no_active_error": no_active_error,
+            "no_incompatible_operation": no_incompatible_operation,
             "movement_authorized": movement_authorized,
             "blocked_reason": " ".join(reasons) if reasons else None,
         }

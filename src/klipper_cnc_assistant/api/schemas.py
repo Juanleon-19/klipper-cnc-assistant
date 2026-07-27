@@ -318,7 +318,7 @@ class ReferenceSessionResponse(BaseModel):
     motivo_invalidacion: str | None
 
 
-def project_to_response(project: ProyectoPCB) -> ProjectResponse:
+def project_to_response(project: ProyectoPCB, *, include_analysis: bool = True) -> ProjectResponse:
     return ProjectResponse(
         id=project.id,
         nombre=project.nombre,
@@ -338,7 +338,7 @@ def project_to_response(project: ProyectoPCB) -> ProjectResponse:
             for hole in project.configuracion_alineacion.agujeros_alineacion
         ],
         montajes=[setup_to_response(setup) for setup in project.montajes],
-        operaciones=[operation_to_response(operation) for operation in project.operaciones],
+        operaciones=[operation_to_response(operation, include_analysis=include_analysis) for operation in project.operaciones],
         creado_en=project.creado_en.isoformat(),
         actualizado_en=project.actualizado_en.isoformat(),
         created_at=project.created_at.isoformat(),
@@ -366,7 +366,7 @@ def setup_to_response(setup: MontajePCB) -> SetupResponse:
     )
 
 
-def operation_to_response(operation: OperacionPCB) -> OperationResponse:
+def operation_to_response(operation: OperacionPCB, *, include_analysis: bool = True) -> OperationResponse:
     return OperationResponse(
         id=operation.id,
         nombre=operation.nombre,
@@ -381,7 +381,7 @@ def operation_to_response(operation: OperacionPCB) -> OperationResponse:
         tool_id=operation.tool_id,
         herramienta=operation.herramienta,
         estado=operation.estado,
-        analisis=None if operation.analisis is None else analysis_to_response(operation.analisis),
+        analisis=None if (operation.analisis is None or not include_analysis) else analysis_to_response(operation.analisis),
     )
 
 

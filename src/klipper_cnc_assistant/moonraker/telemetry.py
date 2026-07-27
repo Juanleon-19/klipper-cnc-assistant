@@ -1,5 +1,6 @@
 import asyncio
 import json
+from typing import Any, Callable
 
 import websockets
 
@@ -9,11 +10,12 @@ class MoonrakerTelemetry:
         self,
         websocket_url,
         machine_state,
+        *,
+        on_message: Callable[[], None] | None = None,
     ):
         self.websocket_url = websocket_url
-
         self.machine_state = machine_state
-
+        self.on_message = on_message
         self._running = False
 
     async def _subscribe(
@@ -51,6 +53,14 @@ class MoonrakerTelemetry:
         await websocket.send(
             json.dumps(request)
         )
+
+    def _mark_message(self) -> None:
+        if self.on_message is None:
+            return
+        try:
+            self.on_message()
+        except Exception:
+            return
 
     def _process_motion_report(
         self,
@@ -99,6 +109,9 @@ class MoonrakerTelemetry:
         self,
         data,
     ):
+        if not isinstance(data, dict):
+            return
+        self._mark_message()
         if data.get("id") == 1:
             result = data.get("result")
 

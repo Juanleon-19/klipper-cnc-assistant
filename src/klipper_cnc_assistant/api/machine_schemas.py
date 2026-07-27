@@ -8,6 +8,7 @@ class MachineRuntimeResponse(BaseModel):
     mode_label: str
     state: str
     health: str
+    connection: dict = Field(default_factory=dict)
     started_at: str
     application: dict
     moonraker: dict

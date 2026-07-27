@@ -140,7 +140,7 @@ def build_router() -> APIRouter:
     @router.get("/projects", response_model=list[ProjectResponse])
     def list_projects(request: Request) -> list[ProjectResponse]:
         service = request.app.state.project_service
-        return [project_to_response(project) for project in service.list_projects()]
+        return [project_to_response(project, include_analysis=False) for project in service.list_projects()]
 
     @router.post("/projects", response_model=ProjectResponse, status_code=201)
     def create_project(payload: ProjectCreateRequest, request: Request) -> ProjectResponse:
@@ -380,6 +380,11 @@ def build_router() -> APIRouter:
         position = runtime.last_probe_position()
         snapshot = runtime.snapshot()
         return _reference_session_to_response(reference_service.capture_physical_z_reference(project_id, operation_id, position=position, machine_label=str(snapshot["moonraker"].get("url") or "physical"), homed_axes=snapshot["klipper"].get("homed_axes"), session_id=snapshot.get("started_at")))
+
+    @router.post("/projects/{project_id}/operations/{operation_id}/reference/go-to", response_model=dict[str, object])
+    def go_to_reference_point(project_id: str, operation_id: str, request: Request) -> dict[str, object]:
+        reference = request.app.state.reference_session_service.get_saved_reference_point(project_id, operation_id)
+        return request.app.state.machine_runtime.go_to_reference_point(**reference)
 
     @router.post("/projects/{project_id}/operations/{operation_id}/physical-map/suggest", response_model=dict[str, object])
     def suggest_physical_map(project_id: str, operation_id: str, payload: PhysicalMapPlanRequest, request: Request) -> dict[str, object]:

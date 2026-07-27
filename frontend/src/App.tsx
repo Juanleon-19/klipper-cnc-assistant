@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { DashboardPage } from "./components/DashboardPage";
 import { ProjectForm } from "./components/ProjectForm";
@@ -8,7 +8,7 @@ import { StatusBadge } from "./components/StatusBadge";
 import { SystemBanner } from "./components/SystemBanner";
 import { MachineContext, buildMachineContextValue, type MachineAction } from "./context/MachineContext";
 import { SystemPage } from "./components/SystemPage";
-import { api, type OperationInput, type OperationUpdateInput } from "./lib/api";
+import { ApiError, api, type OperationInput, type OperationUpdateInput } from "./lib/api";
 import { getRecentProject, toneForStatus, translateStatus } from "./lib/ui";
 import type {
   HealthResponse,
@@ -438,6 +438,8 @@ Después deberá volver a conectar el Arduino, hacer homing, posicionar X0/Y0 y 
     }
   };
 
+  const machineActionInFlight = useRef(false);
+
   const refreshSystem = useCallback(async () => {
     setRefreshingSystem(true);
     setError("");
@@ -451,6 +453,8 @@ Después deberá volver a conectar el Arduino, hacer homing, posicionar X0/Y0 y 
   }, [loadSystem]);
 
   const handleMachineAction = async (action: MachineAction | string, targetZ?: number) => {
+    if (machineActionInFlight.current) return;
+    machineActionInFlight.current = true;
     setRefreshingSystem(true);
     setError("");
     try {
@@ -471,8 +475,17 @@ Después deberá volver a conectar el Arduino, hacer homing, posicionar X0/Y0 y 
       setMachineRuntime(runtime);
       await loadSystem();
     } catch (requestError) {
-      setError(requestError instanceof Error ? requestError.message : "No fue posible completar la acción física.");
+      if (requestError instanceof ApiError) {
+        const runtime = requestError.payload.runtime;
+        if (runtime && typeof runtime === "object") {
+          setMachineRuntime(runtime as MachineRuntime);
+        }
+        setError(requestError.message);
+      } else {
+        setError(requestError instanceof Error ? requestError.message : "No fue posible completar la acción física.");
+      }
     } finally {
+      machineActionInFlight.current = false;
       setRefreshingSystem(false);
     }
   };

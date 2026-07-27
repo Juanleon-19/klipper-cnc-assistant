@@ -23,6 +23,17 @@ function value(record: Record<string, unknown> | undefined, key: string) {
   return String(current);
 }
 
+function runtimeConnectionLabel(connection: Record<string, unknown> | null | undefined): string {
+  const status = typeof connection?.status === "string" ? connection.status : "disconnected";
+  const fullyConnected = connection?.fully_connected === true;
+  const retryable = connection?.retryable === true;
+  if (status === "connecting") return "Conectando...";
+  if (fullyConnected || status === "connected") return "Runtime conectado";
+  if (status === "partial") return "Reconectar componentes";
+  if (retryable || status === "connection_failed") return "Reintentar conexión";
+  return "Conectar runtime";
+}
+
 function DiagnosticCard({ title, status, rows }: { title: string; status?: string; rows: Array<[string, string]> }) {
   return (
     <article className="panel info-card diagnostic-card">
@@ -44,7 +55,11 @@ export function SystemPage({ health, systemInfo, machineSession, machineRuntime,
   const mode = physical ? "FÍSICO" : machineRuntime?.mode_label ?? summarizeMachineMode(health?.modo_maquina).toUpperCase();
   const movementAuthorized = machineRuntime?.safety?.movement_authorized === true;
   const runtimeState = machineRuntime?.state ?? "DISCONNECTED";
-  const canConnect = physical && runtimeState === "DISCONNECTED";
+  const connection = machineRuntime?.connection as Record<string, unknown> | null | undefined;
+  const connectionStatus = typeof connection?.status === "string" ? connection.status : "disconnected";
+  const connectionLabel = runtimeConnectionLabel(connection);
+  const fullyConnected = connection?.fully_connected === true;
+  const canConnect = physical && connectionStatus !== "connecting" && !fullyConnected;
 
   useEffect(() => {
     let stopped = false;
@@ -61,7 +76,7 @@ export function SystemPage({ health, systemInfo, machineSession, machineRuntime,
       }
     };
     void refreshRuntime();
-    const id = window.setInterval(() => { void refreshRuntime(); }, 200);
+    const id = window.setInterval(() => { void refreshRuntime(); }, 1000);
     return () => {
       stopped = true;
       window.clearInterval(id);
@@ -90,7 +105,7 @@ export function SystemPage({ health, systemInfo, machineSession, machineRuntime,
       </article>
 
       <div className="machine-action-strip">
-        <button className="button" type="button" onClick={() => void onMachineAction("connect")} disabled={!canConnect || refreshing}>Conectar diagnóstico</button>
+        <button className="button" type="button" onClick={() => void onMachineAction("connect")} disabled={!canConnect || refreshing}>{connectionLabel}</button>
         <button className="button button--ghost" type="button" onClick={() => void onMachineAction("diagnostic")} disabled={!physical || refreshing || runtimeState === "DISCONNECTED"}>Modo diagnóstico</button>
         <button className="button button--ghost" type="button" onClick={() => void onRuntimeRefresh()} disabled={refreshing}>Actualizar runtime</button>
         <button className="button button--ghost" type="button" onClick={() => void onMachineAction("cancel")} disabled={!physical || refreshing || runtimeState === "DISCONNECTED"}>Cancelar operación técnica</button>
@@ -103,6 +118,7 @@ export function SystemPage({ health, systemInfo, machineSession, machineRuntime,
           ["API", translateStatus(health?.estado)],
           ["Versión", systemInfo?.version_aplicacion ?? "-"],
           ["Modo", mode],
+          ["Runtime", String(connectionStatus)],
           ["Uptime", value(machineRuntime?.application, "uptime_s") + " s"],
           ["Esquema", systemInfo?.schema_version ?? "-"],
         ]} />

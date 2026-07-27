@@ -3,12 +3,17 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
+
+from klipper_cnc_assistant.machine.config import MachineMode
 from pathlib import Path
 from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
 from klipper_cnc_assistant.api import create_app
+from tests.test_machine_runtime import DummyConnectClient, FailingArduinoDriver, IdleTelemetry, config
+from klipper_cnc_assistant.machine.runtime import MachineRuntime
+from klipper_cnc_assistant.machine.state import AxisLimits, MachinePosition, MachineState
 
 
 class ApiTest(unittest.TestCase):
@@ -80,6 +85,40 @@ class ApiTest(unittest.TestCase):
         self.assertEqual(payload["analysis_version"], payload["current_analysis_version"])
         self.assertFalse(payload["analisis_desactualizado"])
 
+
+    def test_project_list_omits_heavy_operation_analysis_but_detail_keeps_it(self) -> None:
+        project_id = self._create_project()
+        operation_id = self._create_operation(project_id)
+        self.client.post(
+            f"/api/projects/{project_id}/operations/{operation_id}/gcode",
+            json={
+                "nombre_archivo": "job.nc",
+                "contenido": "G21\nG90\nG1 X10 Y10 F120\nM3\nT1\n",
+            },
+        )
+        self.client.post(f"/api/projects/{project_id}/operations/{operation_id}/analyze")
+
+        list_payload = self.client.get("/api/projects").json()
+        listed_operation = list_payload[0]["operaciones"][0]
+        self.assertIsNone(listed_operation["analisis"])
+
+        detail_payload = self.client.get(f"/api/projects/{project_id}").json()
+        detail_analysis = detail_payload["operaciones"][0]["analisis"]
+        self.assertIsNotNone(detail_analysis)
+        self.assertIn("segmentos_lineales", detail_analysis)
+
+
+    def test_get_job_run_is_read_only_and_returns_404_without_creating_run(self) -> None:
+        project_id = self._create_project()
+        project = self.client.get(f"/api/projects/{project_id}").json()
+        setup_id = project["montajes"][0]["id"]
+        run_path = self.data_dir / "projects" / project_id / "reports" / "jobs" / setup_id / "superior" / "current_run.json"
+
+        response = self.client.get(f"/api/projects/{project_id}/job-run?setup_id={setup_id}&face=superior")
+
+        self.assertEqual(response.status_code, 404)
+        self.assertIn("No existe una ejecución activa", response.json()["detalle"])
+        self.assertFalse(run_path.exists())
 
     def test_execution_preflight_reports_concrete_blockers_without_hardware(self) -> None:
         project_id = self._create_project()
@@ -214,6 +253,81 @@ class ApiTest(unittest.TestCase):
         self.assertEqual(payload["origen_trabajo"]["posicion_captura"]["z_mm"], 10.05)
         self.assertEqual(payload["referencia_z"]["fuente"], "MEASURED")
         self.assertEqual(payload["referencia_z"]["sesion"], "physical-session")
+
+
+    def test_go_to_reference_point_endpoint_uses_saved_reference_coordinates(self) -> None:
+        project_id = self._create_project()
+        operation_id = self._create_operation(project_id)
+
+        class ReferenceServiceStub:
+            def __init__(self) -> None:
+                self.calls: list[tuple[str, str]] = []
+
+            def get_saved_reference_point(self, project: str, operation: str) -> dict[str, float]:
+                self.calls.append((project, operation))
+                return {"reference_x": 60.0, "reference_y": 88.75}
+
+        class RuntimeStub:
+            def __init__(self) -> None:
+                self.calls: list[dict[str, float]] = []
+
+            def go_to_reference_point(self, **kwargs):
+                self.calls.append(kwargs)
+                return {
+                    "accepted": True,
+                    "reference_x": kwargs["reference_x"],
+                    "reference_y": kwargs["reference_y"],
+                    "preparation_z": 115.0,
+                    "final_state": "REFERENCE_MOVE_COMPLETE",
+                    "message": "Máquina ubicada en el punto de referencia.",
+                }
+
+        reference_service = ReferenceServiceStub()
+        runtime = RuntimeStub()
+        self.app.state.reference_session_service = reference_service
+        self.app.state.machine_runtime = runtime
+
+        response = self.client.post(f"/api/projects/{project_id}/operations/{operation_id}/reference/go-to")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(reference_service.calls, [(project_id, operation_id)])
+        self.assertEqual(runtime.calls, [{"reference_x": 60.0, "reference_y": 88.75}])
+        self.assertEqual(response.json()["final_state"], "REFERENCE_MOVE_COMPLETE")
+        self.assertEqual(response.json()["reference_x"], 60.0)
+        self.assertEqual(response.json()["reference_y"], 88.75)
+
+    def test_machine_connect_returns_structured_arduino_error_instead_of_500(self) -> None:
+        machine = MachineState(
+            position=MachinePosition(0, 0, 10),
+            x_limits=AxisLimits(0, 100),
+            y_limits=AxisLimits(0, 100),
+            z_limits=AxisLimits(0, 100),
+            homed_axes="xyz",
+            max_velocity=100,
+            max_accel=500,
+            live_velocity=0,
+        )
+        runtime = MachineRuntime(
+            config(MachineMode.PHYSICAL, moonraker_url="http://moonraker", moonraker_ws="ws://moonraker/websocket", serial_port="/dev/ttyUSB-arduino"),
+            client_factory=lambda _url, timeout=None: DummyConnectClient(machine),
+            telemetry_factory=lambda *_args, **_kwargs: IdleTelemetry(),
+            serial_factory=lambda **kwargs: FailingArduinoDriver(**kwargs),
+            discovery=lambda _client: machine,
+        )
+        self.app.state.machine_runtime = runtime
+
+        response = self.client.post("/api/machine/connect")
+
+        self.assertEqual(response.status_code, 503)
+        payload = response.json()
+        self.assertEqual(payload["detail"]["component"], "arduino")
+        self.assertEqual(payload["detail"]["status"], "connection_failed")
+        self.assertTrue(payload["detail"]["retryable"])
+        self.assertEqual(payload["detail"]["port"], "/dev/ttyUSB-arduino")
+        self.assertEqual(payload["runtime"]["connection"]["status"], "partial")
+        self.assertTrue(payload["runtime"]["moonraker"]["http_connected"])
+        self.assertTrue(payload["runtime"]["klipper"]["ready"])
+        runtime.stop()
 
     def test_machine_session_is_simulated_and_home_is_unknown_until_confirmed(self) -> None:
         response = self.client.get("/api/machine/session")

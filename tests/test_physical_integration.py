@@ -56,11 +56,61 @@ class FakeSerial:
 
 
 class FakeMeshRuntime:
-    def __init__(self, *, fail_first: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        fail_first: bool = False,
+        stale_position_sample: bool = False,
+        refresh_result: str | None = None,
+        position_changed_recent: bool = True,
+    ) -> None:
         self.calls: list[int] = []
         self.probe_configs: list[dict | None] = []
         self.fail_first = fail_first
         self.failed_once = False
+        self.refresh_result = refresh_result
+        self.refresh_calls = 0
+        self.position_changed_recent = position_changed_recent
+        self._snapshot = self._build_snapshot(position_sample_recent=not stale_position_sample)
+
+    def _build_snapshot(self, *, position_sample_recent: bool) -> dict:
+        position_age = 0.01 if position_sample_recent else 5.0
+        changed_age = 0.01 if self.position_changed_recent else 5.0
+        return {
+            "state": "MESH_PROBING",
+            "position": {"x": 0.0, "y": 0.0, "z": 10.0, "velocity": 0.0},
+            "homed_axes": "xyz",
+            "last_command_text": "probe_mesh_point",
+            "telemetry_age_s": 0.01,
+            "websocket_age_s": 0.01,
+            "serial_age_s": 0.01,
+            "position_sample_age_s": position_age,
+            "position_changed_age_s": changed_age,
+            "gcode_position_age_s": 0.01,
+            "telemetry": {
+                "websocket_recent": True,
+                "position_sample_recent": position_sample_recent,
+                "position_sample_age_s": position_age,
+                "position_changed_recent": self.position_changed_recent,
+                "position_changed_age_s": changed_age,
+                "gcode_position_age_s": 0.01,
+            },
+            "safety": {
+                "telemetry_recent": position_sample_recent,
+                "websocket_recent": True,
+                "position_sample_recent": position_sample_recent,
+                "position_changed_recent": self.position_changed_recent,
+                "blocked_reason": None if position_sample_recent else "Moonraker conectado pero sin muestra live_position reciente.",
+            },
+        }
+
+    def refresh_motion_snapshot_http(self, *, timeout_s: float = 0.25) -> dict:
+        self.refresh_calls += 1
+        if self.refresh_result == "fail":
+            raise RuntimeError("timeout HTTP refrescando motion_report")
+        if self.refresh_result == "success":
+            self._snapshot = self._build_snapshot(position_sample_recent=True)
+        return self.snapshot()
 
     def probe_mesh_point(self, point: dict, probe_config: dict | None = None, progress_callback=None) -> dict:
         if progress_callback is not None:
@@ -74,12 +124,8 @@ class FakeMeshRuntime:
 
     def snapshot(self) -> dict:
         return {
-            "state": "MESH_PROBING",
-            "position": {"x": 0.0, "y": 0.0, "z": 10.0, "velocity": 0.0},
-            "homed_axes": "xyz",
-            "last_command_text": "probe_mesh_point",
-            "telemetry_age_s": 0.01,
-            "serial_age_s": 0.01,
+            key: (value.copy() if isinstance(value, dict) else value)
+            for key, value in self._snapshot.items()
         }
 
 
@@ -204,6 +250,44 @@ class PhysicalIntegrationTest(unittest.TestCase):
             )
             self.assertEqual(second_reference["map_id"], plan["map_id"])
             self.assertIn("tool-10", second_reference["tool_references"])
+
+    def test_cancelled_physical_map_is_not_reused_when_generating_same_plan_again(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            repository, _project_service, project, operation = self._physical_project(temp)
+            service = PhysicalMapService(repository)
+            first = service.capture_reference_and_plan(
+                project_id=project.id,
+                operation_id=operation.id,
+                machine_origin_x=100.0,
+                machine_origin_y=200.0,
+                reference_z=1.0,
+                machine_position={"x_mm": 100.0, "y_mm": 200.0, "z_mm": 1.0},
+                homed_axes="xyz",
+                machine_label="test",
+                session_id="session-1",
+                config=PhysicalMeshConfig(grid_mode="manual", rows=2, columns=2, edge_margin_left_mm=0.0, edge_margin_right_mm=0.0, edge_margin_bottom_mm=0.0, edge_margin_top_mm=0.0),
+            )
+            cancelled = service.mark_status(project_id=project.id, map_id=first["map_id"], status="CANCELLED")
+            self.assertEqual(cancelled["status"], "CANCELLED")
+
+            second = service.capture_reference_and_plan(
+                project_id=project.id,
+                operation_id=operation.id,
+                machine_origin_x=100.0,
+                machine_origin_y=200.0,
+                reference_z=1.1,
+                machine_position={"x_mm": 100.0, "y_mm": 200.0, "z_mm": 1.1},
+                homed_axes="xyz",
+                machine_label="test",
+                session_id="session-2",
+                config=PhysicalMeshConfig(grid_mode="manual", rows=2, columns=2, edge_margin_left_mm=0.0, edge_margin_right_mm=0.0, edge_margin_bottom_mm=0.0, edge_margin_top_mm=0.0),
+            )
+
+            self.assertNotEqual(second["map_id"], first["map_id"])
+            archived_first = service.get_by_id(project.id, first["map_id"])
+            self.assertIsNotNone(archived_first.get("archived_at"))
+            self.assertEqual(second["status"], "MESH_PLANNED")
+            self.assertAlmostEqual(float(second["reference_z"]), 1.1)
 
     def test_physical_mesh_uses_material_edge_retreat_rows_columns_and_serpentine(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -473,7 +557,7 @@ class PhysicalIntegrationTest(unittest.TestCase):
                 config=PhysicalMeshConfig(grid_mode="manual", rows=2, columns=2, edge_margin_left_mm=0.0, edge_margin_right_mm=0.0, edge_margin_bottom_mm=0.0, edge_margin_top_mm=0.0, safe_z_mm=12.0, probe_step_mm=0.05, probe_feed_mm_min=30.0, retract_mm=0.8),
             )
             worker = MeshExecutionService(service, max_point_retries=2)
-            runtime = FakeMeshRuntime(fail_first=True)
+            runtime = FakeMeshRuntime(fail_first=True, position_changed_recent=False)
             started = worker.start_all(project_id=project.id, map_id=plan["map_id"], runtime=runtime)
             self.assertEqual(started["status"], "MESH_PROBING")
             self.assertTrue(worker.wait_until_idle(timeout_s=3.0))
@@ -501,6 +585,125 @@ class PhysicalIntegrationTest(unittest.TestCase):
             self.assertIn("POINT_RETRY", {event.get("next_state") for event in log["events"]})
             self.assertIn("POINT_COMPLETE", {event.get("next_state") for event in log["events"]})
             self.assertTrue(worker.wait_until_idle(timeout_s=1.0))
+
+    def test_mesh_execution_worker_keeps_running_with_repeated_identical_samples(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            repository, _project_service, project, operation = self._physical_project(temp)
+            service = PhysicalMapService(repository)
+            plan = service.capture_reference_and_plan(
+                project_id=project.id,
+                operation_id=operation.id,
+                machine_origin_x=0.0,
+                machine_origin_y=0.0,
+                reference_z=1.0,
+                machine_position={"x_mm": 0.0, "y_mm": 0.0, "z_mm": 1.0},
+                homed_axes="xyz",
+                machine_label="test",
+                session_id="session",
+                config=PhysicalMeshConfig(grid_mode="manual", rows=2, columns=2, edge_margin_left_mm=0.0, edge_margin_right_mm=0.0, edge_margin_bottom_mm=0.0, edge_margin_top_mm=0.0),
+            )
+            worker = MeshExecutionService(service, max_point_retries=0)
+            runtime = FakeMeshRuntime(position_changed_recent=False)
+
+            worker.start_all(project_id=project.id, map_id=plan["map_id"], runtime=runtime)
+            self.assertTrue(worker.wait_until_idle(timeout_s=3.0))
+            completed = service.get_by_id(project.id, plan["map_id"])
+
+            self.assertEqual(completed["status"], "MESH_COMPLETE")
+            self.assertEqual(sum(1 for point in completed["points"] if point["status"] == "MEASURED"), 4)
+            self.assertEqual(runtime.refresh_calls, 0)
+
+    def test_mesh_execution_worker_refreshes_stale_position_sample_and_continues(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            repository, _project_service, project, operation = self._physical_project(temp)
+            service = PhysicalMapService(repository)
+            plan = service.capture_reference_and_plan(
+                project_id=project.id,
+                operation_id=operation.id,
+                machine_origin_x=0.0,
+                machine_origin_y=0.0,
+                reference_z=1.0,
+                machine_position={"x_mm": 0.0, "y_mm": 0.0, "z_mm": 1.0},
+                homed_axes="xyz",
+                machine_label="test",
+                session_id="session",
+                config=PhysicalMeshConfig(grid_mode="manual", rows=2, columns=2, edge_margin_left_mm=0.0, edge_margin_right_mm=0.0, edge_margin_bottom_mm=0.0, edge_margin_top_mm=0.0),
+            )
+            worker = MeshExecutionService(service, max_point_retries=0)
+            runtime = FakeMeshRuntime(stale_position_sample=True, refresh_result="success", position_changed_recent=False)
+
+            worker.start_all(project_id=project.id, map_id=plan["map_id"], runtime=runtime)
+            self.assertTrue(worker.wait_until_idle(timeout_s=3.0))
+            completed = service.get_by_id(project.id, plan["map_id"])
+
+            self.assertEqual(completed["status"], "MESH_COMPLETE")
+            self.assertGreaterEqual(runtime.refresh_calls, 1)
+            self.assertEqual(sum(1 for point in completed["points"] if point["status"] == "MEASURED"), 4)
+
+    def test_mesh_execution_worker_pauses_when_http_refresh_fails_and_keeps_same_point_pending(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            repository, _project_service, project, operation = self._physical_project(temp)
+            service = PhysicalMapService(repository)
+            plan = service.capture_reference_and_plan(
+                project_id=project.id,
+                operation_id=operation.id,
+                machine_origin_x=0.0,
+                machine_origin_y=0.0,
+                reference_z=1.0,
+                machine_position={"x_mm": 0.0, "y_mm": 0.0, "z_mm": 1.0},
+                homed_axes="xyz",
+                machine_label="test",
+                session_id="session",
+                config=PhysicalMeshConfig(grid_mode="manual", rows=2, columns=2, edge_margin_left_mm=0.0, edge_margin_right_mm=0.0, edge_margin_bottom_mm=0.0, edge_margin_top_mm=0.0),
+            )
+            worker = MeshExecutionService(service, max_point_retries=0)
+            runtime = FakeMeshRuntime(stale_position_sample=True, refresh_result="fail")
+
+            worker.start_all(project_id=project.id, map_id=plan["map_id"], runtime=runtime)
+            self.assertTrue(worker.wait_until_idle(timeout_s=3.0))
+            paused = service.get_by_id(project.id, plan["map_id"])
+
+            self.assertEqual(paused["status"], "MESH_PAUSED")
+            self.assertEqual(runtime.calls, [])
+            self.assertEqual(paused["points"][1]["status"], "PENDING")
+            self.assertEqual(paused["execution"]["point_index"], 1)
+            self.assertIn("refresco HTTP acotado falló", paused["execution"]["error"])
+            self.assertEqual(paused["execution"]["last_result"]["target"]["point_index"], 1)
+
+    def test_physical_map_uses_structured_tool_id_for_0_8_diameter(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            repository = JsonProjectRepository(Path(temp))
+            project_service = ProjectService(repository)
+            project = project_service.create_project(nombre="PCB", ancho_mm=60, alto_mm=60, espesor_mm=1.6)
+            operation = project_service.add_operation(
+                project_id=project.id,
+                nombre="Aislamiento 0.8",
+                tipo="aislamiento",
+                cara="superior",
+                orden=0,
+                tool_id="tool-diam-0.8-mm",
+                herramienta="0.8",
+            )
+            project_service.upload_operation_gcode(project_id=project.id, operation_id=operation.id, filename="job.nc", content="G21\nG90\nG1 X0 Y0\nG1 X10 Y10\n")
+            project_service.analyze_operation(project.id, operation.id)
+            service = PhysicalMapService(repository)
+
+            plan = service.capture_reference_and_plan(
+                project_id=project.id,
+                operation_id=operation.id,
+                machine_origin_x=0.0,
+                machine_origin_y=0.0,
+                reference_z=1.0,
+                machine_position={"x_mm": 0.0, "y_mm": 0.0, "z_mm": 1.0},
+                homed_axes="xyz",
+                machine_label="test",
+                session_id="session",
+                config=PhysicalMeshConfig(grid_mode="manual", rows=2, columns=2, edge_margin_left_mm=0.0, edge_margin_right_mm=0.0, edge_margin_bottom_mm=0.0, edge_margin_top_mm=0.0),
+            )
+
+            self.assertEqual(plan["tool_id"], "tool-diam-0.8-mm")
+            self.assertEqual(plan["tool_diameter"], 0.8)
+            self.assertEqual(plan["acquisition_tool_diameter"], 0.8)
 
     def test_reference_session_accepts_map_ready_active_map_without_reasking_validation(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

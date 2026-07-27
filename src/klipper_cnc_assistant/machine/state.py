@@ -49,6 +49,7 @@ class MachineState:
     absolute_coordinates: bool | None = None
     homing_origin: MachinePosition | None = None
     live_position_updated_at: float | None = None
+    live_position_changed_at: float | None = None
     live_position_source: str | None = None
     commanded_position_updated_at: float | None = None
     gcode_position_updated_at: float | None = None
@@ -94,8 +95,16 @@ class MachineState:
         with self._lock:
             now = time.monotonic()
             if live_position is not None:
-                self.live_position = MachinePosition.from_iterable(live_position)
+                next_position = MachinePosition.from_iterable(live_position)
+                previous = self.live_position
+                changed = previous is None or any(
+                    abs(float(getattr(previous, axis)) - float(getattr(next_position, axis))) > 1e-9
+                    for axis in ("x", "y", "z")
+                )
+                self.live_position = next_position
                 self.live_position_updated_at = now
+                if changed:
+                    self.live_position_changed_at = now
                 self.live_position_source = None if source is None else str(source)
                 self.position = MachinePosition(self.live_position.x, self.live_position.y, self.live_position.z)
             if live_velocity is not None:
@@ -117,10 +126,15 @@ class MachineState:
 
     def get_motion_snapshot(self):
         with self._lock:
+            now = time.monotonic()
             live = self.live_position or self.position
             commanded = self.commanded_position
             gcode = self.gcode_position
             gcode_move = self.gcode_move_position
+            live_age = None if self.live_position_updated_at is None else max(0.0, now - self.live_position_updated_at)
+            changed_age = None if self.live_position_changed_at is None else max(0.0, now - self.live_position_changed_at)
+            commanded_age = None if self.commanded_position_updated_at is None else max(0.0, now - self.commanded_position_updated_at)
+            gcode_age = None if self.gcode_position_updated_at is None else max(0.0, now - self.gcode_position_updated_at)
             return {
                 "x": live.x,
                 "y": live.y,
@@ -134,7 +148,10 @@ class MachineState:
                 "gcode_move_position": None if gcode_move is None else {"x": gcode_move.x, "y": gcode_move.y, "z": gcode_move.z},
                 "absolute_coordinates": self.absolute_coordinates,
                 "homing_origin": None if self.homing_origin is None else {"x": self.homing_origin.x, "y": self.homing_origin.y, "z": self.homing_origin.z},
-                "live_position_age_s": None if self.live_position_updated_at is None else max(0.0, time.monotonic() - self.live_position_updated_at),
-                "commanded_position_age_s": None if self.commanded_position_updated_at is None else max(0.0, time.monotonic() - self.commanded_position_updated_at),
-                "gcode_position_age_s": None if self.gcode_position_updated_at is None else max(0.0, time.monotonic() - self.gcode_position_updated_at),
+                "live_position_age_s": live_age,
+                "position_sample_age_s": live_age,
+                "live_position_changed_age_s": changed_age,
+                "position_changed_age_s": changed_age,
+                "commanded_position_age_s": commanded_age,
+                "gcode_position_age_s": gcode_age,
             }
