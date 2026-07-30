@@ -1,131 +1,150 @@
 # Klipper CNC Assistant
 
-Klipper CNC Assistant es una aplicación para preparar trabajos PCB sobre una CNC adaptada a Klipper, priorizando seguridad de máquina y separación estricta entre análisis digital y control físico.
+Estado de esta rama: Fase 1 de auditoria, arquitectura y organizacion.
+Fecha de referencia: Thursday, July 30, 2026.
 
-## Estado actual
+Klipper CNC Assistant es una aplicacion web para preparar trabajos CNC basados en G-code sobre una maquina adaptada a Klipper. El producto combina un backend FastAPI, un frontend React, persistencia JSON local y una frontera fisica que interactua con Moonraker, Klipper y un controlador Arduino.
 
-La entrega actual implementa la **Fase 3: rediseño UX completo y visor técnico 2D V2**.
+## Estado actual verificado
 
-Incluye:
+En esta rama se audito el estado real del repositorio, se verifico la ruta servida por `systemd` y se reorganizo el codigo sin introducir cambios funcionales deliberados.
 
-- backend FastAPI en `src/klipper_cnc_assistant/`;
-- frontend React + TypeScript + Vite en `frontend/`;
-- persistencia JSON real de proyectos PCB;
-- gestión visual de proyectos y operaciones;
-- carga segura de G-code por archivo;
-- análisis G-code con `G0`, `G1`, `G2`, `G3`, `G20`, `G21`, `G90`, `G91` y `G94`;
-- segmentos enriquecidos con línea, avance, Z, distancia y geometría para vista previa;
-- visor técnico 2D V2 con `react-konva`, zoom, desplazamiento, encuadres, capas, inspector y recorrido visual;
-- dashboard operativo y pantalla de sistema secundaria;
-- servicio systemd preparado;
-- acceso remoto privado documentado para Tailscale Serve.
+Capacidades comprobadas en software:
 
-No incluye todavía:
+- gestion de proyectos, montajes y operaciones;
+- analisis de G-code y visor tecnico;
+- persistencia JSON local en `data/projects/`;
+- backend FastAPI servido desde `src/klipper_cnc_assistant/`;
+- frontend React/Vite servido desde `frontend/dist` cuando existe build;
+- integracion de modulos fisicos para Moonraker, estado de maquina, serie y jog;
+- consola de ejecucion y servicios de ejecucion presentes en codigo;
+- documentacion de auditoria y arquitectura actualizada.
 
-- movimiento real;
-- homing;
-- jog;
-- probe;
-- mapa de alturas real;
-- ejecución de G-code;
-- spindle;
-- visualización 3D;
-- Gerber;
-- comunicación nueva de mecanizado con Moonraker.
+Funciones que existen en codigo pero no quedan cerradas en esta fase:
 
-## Arquitectura
+- Referencias;
+- Arduino y reconexion serie;
+- mapa de alturas medido y compensacion fisica;
+- ejecucion fisica de trabajos y recuperacion.
 
-```text
-Frontend React/Vite
-        |
-        v
-FastAPI /api + SPA estática
-        |
-        v
-ProjectService / SystemStatusService
-        |
-        v
-Dominio + Repositorio JSON + Analizador G-code
-```
-
-Detalles ampliados: [docs/architecture.md](docs/architecture.md)
+Esas areas se preservan y documentan, pero su reparacion funcional queda diferida a las Fases 2 a 4.
 
 ## Seguridad
 
-Todo permanece en **modo simulado**.
+Reglas permanentes del repositorio:
 
-- No se ejecuta G-code.
-- No se envían comandos a la CNC.
-- No se llama a endpoints reales de movimiento en Moonraker.
-- El visor es informativo, no una simulación de mecanizado.
-- Las acciones de husillo externo siguen marcadas como manuales.
+- no trabajar directamente en `main`;
+- no enviar G-code, homing, jog, probe, spindle ni ejecucion de trabajos sin autorizacion explicita del usuario;
+- no reiniciar ni reconfigurar `systemd`, Klipper, Moonraker, Arduino ni la maquina durante una fase de auditoria o reorganizacion;
+- no publicar secretos, `.env`, datos reales de produccion, mapas fisicos, referencias reales ni G-code privado;
+- mantener la configuracion operativa fuera del repositorio, en `/etc/klipper-cnc-assistant/klipper-cnc-assistant.env`;
+- usar `deploy/klipper-cnc-assistant.env.example` solo como plantilla segura en modo simulado.
 
-## Instalación del backend
+El host auditado en Thursday, July 30, 2026 tiene un servicio activo en modo fisico. Por esa razon la validacion automatizada de esta fase se limito a comandos seguros que no envian movimiento.
+
+## Estructura principal
+
+```text
+src/klipper_cnc_assistant/
+├── api/
+├── application/
+├── domain/
+├── execution/
+├── gcode/
+├── heightmap/
+├── input/
+├── jog/
+├── machine/
+├── moonraker/
+└── storage/
+
+frontend/src/
+├── components/
+├── features/
+│   ├── execution/
+│   ├── height-map/
+│   ├── projects/
+│   ├── system/
+│   └── viewer/
+├── lib/
+└── test/
+
+firmware/
+tests/
+deploy/
+docs/
+```
+
+Arquitectura detallada: [docs/architecture.md](docs/architecture.md)
+
+Auditoria y procedencia funcional: [docs/recovery/current-project-audit.md](docs/recovery/current-project-audit.md)
+
+Despliegue y migracion de configuracion: [docs/deployment.md](docs/deployment.md)
+
+Plan por fases: [PLAN.md](PLAN.md)
+
+## Instalacion
+
+Backend:
 
 ```bash
+python -m venv .venv
 source .venv/bin/activate
 python -m pip install -e .
 python -m pip check
 ```
 
-## Desarrollo del backend
-
-```bash
-source .venv/bin/activate
-PYTHONPATH=src python -m unittest discover -s tests -v
-python -m klipper_cnc_assistant serve --host 127.0.0.1 --port 8000 --data-dir data
-```
-
-## Desarrollo del frontend
+Frontend:
 
 ```bash
 cd frontend
-npm install
+npm ci
+```
+
+## Desarrollo
+
+Backend local:
+
+```bash
+source .venv/bin/activate
+PYTHONPATH=src python -m klipper_cnc_assistant serve --host 127.0.0.1 --port 8010 --data-dir /tmp/kca-dev-data
+```
+
+Analisis de G-code sin hardware:
+
+```bash
+source .venv/bin/activate
+PYTHONPATH=src python -m klipper_cnc_assistant check-gcode ruta/al/archivo.nc
+```
+
+Frontend local:
+
+```bash
+cd frontend
 npm run dev
 ```
 
-Más detalles: [docs/frontend.md](docs/frontend.md)
-
-## Producción local
-
-```bash
-cd frontend
-npm run build
-cd ..
-source .venv/bin/activate
-python -m klipper_cnc_assistant serve --host 127.0.0.1 --port 8000 --data-dir data
-```
-
-Resultado esperado:
-
-- `http://127.0.0.1:8000/`
-- `http://127.0.0.1:8000/docs`
-- `http://127.0.0.1:8000/api/health`
-
-## Servicio systemd
-
-Archivos:
-
-- `deploy/systemd/klipper-cnc-assistant.service`
-- `deploy/install_service.sh`
-- `deploy/uninstall_service.sh`
-
-Más detalles: [docs/deployment.md](docs/deployment.md)
-
-## Acceso remoto privado
-
-La aplicación debe exponerse solo mediante Tailscale Serve, manteniendo FastAPI en `127.0.0.1:8000`.
-
-Guía: [docs/remote-access.md](docs/remote-access.md)
-
 ## Pruebas
 
-Backend:
+Linea base backend pedida por el proyecto:
 
 ```bash
-source .venv/bin/activate
 PYTHONPATH=src python -m unittest discover -s tests -v
-python -m pip check
+```
+
+En un host con runtime fisico activo, ejecutar solo en un entorno controlado que garantice `MACHINE_MODE=simulated` y que no inicialice hardware.
+
+Linea segura usada en esta fase:
+
+```bash
+MACHINE_MODE=simulated PYTHONPATH=src .venv/bin/python -m unittest -v \
+  tests.test_api \
+  tests.test_gcode_analysis \
+  tests.test_heightmap \
+  tests.test_job_service \
+  tests.test_moonraker_client \
+  tests.test_project_service \
+  tests.test_web_mvp
 ```
 
 Frontend:
@@ -137,11 +156,21 @@ npm run test
 npm run build
 ```
 
-## Limitaciones actuales del análisis G-code
+## Ejecucion
 
-- soporta líneas `G0` y `G1`;
-- soporta representación geométrica determinista de `G2` y `G3` con `I/J`;
-- rechaza arcos ambiguos o no representables con advertencia explícita;
-- detecta `G28` y `G92` como errores críticos;
-- registra acciones manuales de husillo y cambios de herramienta;
-- no ejecuta ni simula mecanizado real.
+CLI soportada:
+
+```bash
+python -m klipper_cnc_assistant serve --host 127.0.0.1 --port 8000 --data-dir data
+python -m klipper_cnc_assistant check-gcode archivo.nc
+```
+
+El despliegue real auditado en Thursday, July 30, 2026 corre desde `/home/impresora/klipper-cnc-assistant`, usa la venv local y escucha en `127.0.0.1:8000`. Esta fase no reinicia ese servicio ni cambia su configuracion real.
+
+## Estado de la fase
+
+- Fase 1 activa en `fase-1/auditoria-arquitectura`.
+- Pull request de Fase 1 abierto en borrador contra `main`.
+- No se hizo merge a `main`.
+- La reorganizacion es estructural; las reparaciones funcionales siguen pendientes.
+- La configuracion operativa ya no es canonica dentro del repositorio, pero debe migrarse de forma supervisada antes de desplegar la unidad versionada nueva.

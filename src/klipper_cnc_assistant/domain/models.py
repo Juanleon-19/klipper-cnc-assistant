@@ -7,7 +7,7 @@ from enum import StrEnum
 from .errors import ProjectValidationError
 
 
-PROJECT_SCHEMA_VERSION = "1.2"
+PROJECT_SCHEMA_VERSION = "1.6"
 
 
 def utc_now() -> datetime:
@@ -15,6 +15,10 @@ def utc_now() -> datetime:
 
 
 class OperationType(StrEnum):
+    FRESADO_SUPERIOR = "fresado_superior"
+    FRESADO_INFERIOR = "fresado_inferior"
+    CONTORNO = "contorno"
+    PERSONALIZADO = "personalizado"
     AISLAMIENTO = "aislamiento"
     LIMPIEZA_COBRE = "limpieza de cobre"
     TALADRADO = "taladrado"
@@ -45,6 +49,20 @@ class IssueSeverity(StrEnum):
     INFORMACION = "informacion"
     ADVERTENCIA = "advertencia"
     ERROR_CRITICO = "error critico"
+
+
+class PreparationState(StrEnum):
+    SIN_INICIAR = "sin_iniciar"
+    REFERENCIA_MAQUINA_PENDIENTE = "referencia_maquina_pendiente"
+    REFERENCIA_MAQUINA_CONFIRMADA = "referencia_maquina_confirmada"
+    ORIGEN_XY_PENDIENTE = "origen_xy_pendiente"
+    ORIGEN_XY_CONFIRMADO = "origen_xy_confirmado"
+    REFERENCIA_Z_PENDIENTE = "referencia_z_pendiente"
+    REFERENCIA_Z_CONFIRMADA = "referencia_z_confirmada"
+    REGION_SONDEABLE_CONFIGURADA = "region_sondeable_configurada"
+    MAPA_DISPONIBLE = "mapa_disponible"
+    MAPA_VALIDADO = "mapa_validado"
+    COMPENSACION_PREVISUALIZADA = "compensacion_previsualizada"
 
 
 @dataclass(frozen=True)
@@ -141,6 +159,60 @@ class MaterialOverflow:
 
 
 @dataclass(frozen=True)
+class CapturedPosition:
+    x_mm: float
+    y_mm: float
+    z_mm: float | None = None
+
+
+@dataclass(frozen=True)
+class CoordinateReference:
+    x_mm: float
+    y_mm: float
+    z_mm: float | None = None
+    confirmado_en: datetime | None = None
+    fuente: str = "SIMULATED"
+    maquina: str | None = None
+    homed_axes: str | None = None
+    posicion_captura: CapturedPosition | None = None
+    sesion: str | None = None
+
+
+@dataclass(frozen=True)
+class OperationPreparation:
+    origen_trabajo: CoordinateReference | None = None
+    referencia_z: CoordinateReference | None = None
+    region_sondeable_configurada_en: datetime | None = None
+    mapa_disponible_en: datetime | None = None
+    mapa_validado_en: datetime | None = None
+    compensacion_previsualizada_en: datetime | None = None
+    motivo_invalidacion: str | None = None
+
+
+@dataclass(frozen=True)
+class MontajePCB:
+    id: str
+    nombre: str
+    orden: int
+    preparacion: OperationPreparation = field(default_factory=OperationPreparation)
+    placement_revision: str = "placement-1"
+    active_reference_id: str | None = None
+    active_map_id: str | None = None
+    preparation_status: str = PreparationState.SIN_INICIAR
+    last_prepared_at: datetime | None = None
+
+    def __post_init__(self) -> None:
+        if not self.id.strip():
+            raise ProjectValidationError("El montaje debe tener un identificador.")
+        if not self.nombre.strip():
+            raise ProjectValidationError("El montaje debe tener un nombre.")
+        if self.orden < 0:
+            raise ProjectValidationError("El orden del montaje no puede ser negativo.")
+        if not self.placement_revision.strip():
+            raise ProjectValidationError("La revisión de colocación del montaje no puede estar vacía.")
+
+
+@dataclass(frozen=True)
 class PreviewSegment:
     tipo: str
     tipo_movimiento: str
@@ -172,6 +244,8 @@ class PreviewSegment:
 
 @dataclass(frozen=True)
 class OperationAnalysis:
+    analysis_version: str
+    current_analysis_version: str
     limites: Bounds3D | None
     avances_mm_min: tuple[float, ...] = ()
     profundidad_min_mm: float | None = None
@@ -191,6 +265,10 @@ class OperationAnalysis:
     segmentos_vista_previa: tuple[PreviewSegment, ...] = ()
     desbordes_material: tuple[MaterialOverflow, ...] = ()
     tolerancia_arco_mm: float | None = None
+
+    @property
+    def analisis_desactualizado(self) -> bool:
+        return self.analysis_version != self.current_analysis_version
 
     @property
     def ancho_mm(self) -> float | None:
@@ -237,10 +315,12 @@ class OperacionPCB:
     tipo: OperationType
     cara: BoardFace
     orden: int
+    setup_id: str = "setup-main"
     archivo_gcode: str | None = None
     nombre_archivo_original: str | None = None
     tamano_archivo_bytes: int | None = None
     sha256: str | None = None
+    tool_id: str | None = None
     herramienta: str | None = None
     analisis: OperationAnalysis | None = None
     estado: OperationStatus = OperationStatus.ESPERANDO_ARCHIVO
@@ -253,6 +333,10 @@ class OperacionPCB:
         if not self.nombre.strip():
             raise ProjectValidationError(
                 "La operacion debe tener un nombre."
+            )
+        if not self.setup_id.strip():
+            raise ProjectValidationError(
+                "La operacion debe pertenecer a un montaje."
             )
         if self.orden < 0:
             raise ProjectValidationError(
@@ -314,9 +398,19 @@ class ProyectoPCB:
     id: str
     nombre: str
     material: MaterialBruto
+    montajes: tuple[MontajePCB, ...] = field(
+        default_factory=lambda: (
+            MontajePCB(id="setup-main", nombre="Montaje principal", orden=0),
+        )
+    )
     operaciones: tuple[OperacionPCB, ...] = ()
     creado_en: datetime = field(default_factory=utc_now)
     actualizado_en: datetime = field(default_factory=utc_now)
+    last_opened_at: datetime | None = None
+    archived_at: datetime | None = None
+    trashed_at: datetime | None = None
+    status: str = "active"
+    current_setup_id: str = "setup-main"
     version_esquema: str = PROJECT_SCHEMA_VERSION
     configuracion_alineacion: ConfiguracionAlineacion = field(
         default_factory=ConfiguracionAlineacion
@@ -331,29 +425,41 @@ class ProyectoPCB:
             raise ProjectValidationError(
                 "El proyecto debe tener un nombre."
             )
+        if self.current_setup_id and self.current_setup_id not in {setup.id for setup in self.montajes}:
+            object.__setattr__(self, "current_setup_id", self.montajes[0].id)
+        self._validate_setups()
         self._validate_operations()
 
+    def _validate_setups(self) -> None:
+        if not self.montajes:
+            raise ProjectValidationError("El proyecto debe tener al menos un montaje.")
+        ids = [setup.id for setup in self.montajes]
+        orders = [setup.orden for setup in self.montajes]
+        if len(ids) != len(set(ids)):
+            raise ProjectValidationError("No se permiten montajes con el mismo identificador.")
+        if len(orders) != len(set(orders)):
+            raise ProjectValidationError("No se permiten montajes con el mismo orden.")
+
     def _validate_operations(self) -> None:
-        ids = set()
-        orders = set()
-        operation_keys = set()
+        ids: set[str] = set()
+        orders: set[tuple[str, int]] = set()
+        setup_ids = {setup.id for setup in self.montajes}
         for operacion in self.operaciones:
             if operacion.id in ids:
                 raise ProjectValidationError(
                     "No se permiten operaciones con el mismo identificador."
                 )
             ids.add(operacion.id)
-            if operacion.orden in orders:
+            if operacion.setup_id not in setup_ids:
                 raise ProjectValidationError(
-                    "No se permiten operaciones con el mismo orden."
+                    f"La operacion {operacion.id} pertenece a un montaje inexistente."
                 )
-            orders.add(operacion.orden)
-            operation_key = (operacion.tipo, operacion.cara)
-            if operation_key in operation_keys:
+            order_key = (operacion.setup_id, operacion.orden)
+            if order_key in orders:
                 raise ProjectValidationError(
-                    "No se permiten operaciones duplicadas para el mismo tipo y cara."
+                    "No se permiten operaciones con el mismo orden dentro de un montaje."
                 )
-            operation_keys.add(operation_key)
+            orders.add(order_key)
             if (
                 not self.configuracion_alineacion.doble_cara
                 and operacion.cara == BoardFace.INFERIOR
@@ -363,7 +469,19 @@ class ProyectoPCB:
                 )
 
     @property
+    def created_at(self) -> datetime:
+        return self.creado_en
+
+    @property
+    def updated_at(self) -> datetime:
+        return self.actualizado_en
+
+    @property
     def estado_general(self) -> str:
+        if self.trashed_at is not None or self.status == "trashed":
+            return "papelera"
+        if self.archived_at is not None or self.status == "archived":
+            return "archivado"
         if not self.operaciones:
             return "sin configurar"
         estados = {operacion.estado for operacion in self.operaciones}
@@ -385,16 +503,16 @@ class ProyectoPCB:
             raise ProjectValidationError(
                 f"La operacion '{operacion.id}' ya existe."
             )
-        if any(current.orden == operacion.orden for current in self.operaciones):
-            raise ProjectValidationError(
-                f"Ya existe una operacion con orden {operacion.orden}."
-            )
         if any(
-            current.tipo == operacion.tipo and current.cara == operacion.cara
+            current.setup_id == operacion.setup_id and current.orden == operacion.orden
             for current in self.operaciones
         ):
             raise ProjectValidationError(
-                "Ya existe una operacion del mismo tipo para esa cara."
+                f"Ya existe una operacion con orden {operacion.orden} en ese montaje."
+            )
+        if not any(setup.id == operacion.setup_id for setup in self.montajes):
+            raise ProjectValidationError(
+                f"El montaje {operacion.setup_id} no existe."
             )
         if (
             not self.configuracion_alineacion.doble_cara
@@ -406,7 +524,7 @@ class ProyectoPCB:
         operaciones = tuple(
             sorted(
                 (*self.operaciones, operacion),
-                key=lambda item: item.orden,
+                key=lambda item: (self.get_setup(item.setup_id).orden, item.orden),
             )
         )
         return replace(
@@ -450,7 +568,7 @@ class ProyectoPCB:
             raise ProjectValidationError(
                 f"La operacion '{operacion.id}' no existe."
             )
-        operations.sort(key=lambda item: item.orden)
+        operations.sort(key=lambda item: (self.get_setup(item.setup_id).orden, item.orden))
         updated_project = replace(
             self,
             operaciones=tuple(operations),
@@ -488,10 +606,53 @@ class ProyectoPCB:
         )
 
 
+    def get_setup(self, setup_id: str) -> MontajePCB:
+        for setup in self.montajes:
+            if setup.id == setup_id:
+                return setup
+        raise ProjectValidationError(f"El montaje {setup_id} no existe.")
+
+    def setup_for_operation(self, operation_id: str) -> MontajePCB:
+        return self.get_setup(self.get_operation(operation_id).setup_id)
+
+    def operations_for_setup(self, setup_id: str) -> tuple[OperacionPCB, ...]:
+        self.get_setup(setup_id)
+        return tuple(
+            sorted(
+                (item for item in self.operaciones if item.setup_id == setup_id),
+                key=lambda item: item.orden,
+            )
+        )
+
+    def add_setup(self, setup: MontajePCB) -> "ProyectoPCB":
+        if any(current.id == setup.id for current in self.montajes):
+            raise ProjectValidationError(f"El montaje {setup.id} ya existe.")
+        if any(current.orden == setup.orden for current in self.montajes):
+            raise ProjectValidationError(f"Ya existe un montaje con orden {setup.orden}.")
+        return replace(
+            self,
+            montajes=tuple(sorted((*self.montajes, setup), key=lambda item: item.orden)),
+            actualizado_en=utc_now(),
+        )
+
+    def replace_setup(self, setup: MontajePCB) -> "ProyectoPCB":
+        setups = tuple(setup if current.id == setup.id else current for current in self.montajes)
+        if all(current.id != setup.id for current in self.montajes):
+            raise ProjectValidationError(f"El montaje {setup.id} no existe.")
+        updated = replace(
+            self,
+            montajes=tuple(sorted(setups, key=lambda item: item.orden)),
+            actualizado_en=utc_now(),
+        )
+        updated._validate_setups()
+        return updated
+
+
 @dataclass(frozen=True)
 class MachineSessionStatus:
     estado: str
     home_realizado: bool
+    referencia_maquina_confirmada_en: datetime | None
     z_en_altura_segura: bool
     herramienta_en_centro_cama: bool
     material_montado: bool

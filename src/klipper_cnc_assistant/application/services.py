@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import os
 import platform
+import re
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path, PurePath
@@ -14,10 +16,12 @@ from klipper_cnc_assistant.domain import (
     FlipAxis,
     MachineSessionStatus,
     MaterialBruto,
+    MontajePCB,
     OperationType,
     OperacionPCB,
     ProyectoPCB,
     ProjectValidationError,
+    PROJECT_SCHEMA_VERSION,
 )
 from klipper_cnc_assistant.gcode import analyze_gcode_text
 from klipper_cnc_assistant.storage import JsonProjectRepository
@@ -27,6 +31,39 @@ from .errors import ApplicationError, NotFoundError
 
 ALLOWED_GCODE_EXTENSIONS = {".nc", ".gcode", ".tap"}
 DEFAULT_MAX_GCODE_FILE_BYTES = 5 * 1024 * 1024
+
+
+def _format_tool_diameter(value: float) -> str:
+    text = f"{value:.4f}".rstrip("0").rstrip(".")
+    return text or "0"
+
+
+def _label_tool_id(herramienta: str | None) -> str | None:
+    if herramienta is None or not herramienta.strip():
+        return None
+    slug = re.sub(r"[^a-zA-Z0-9._-]+", "-", herramienta.strip()).strip("-").lower() or "sin-herramienta"
+    return f"tool-label-{slug}"
+
+
+def _legacy_diameter_tool_id(herramienta: str | None) -> str | None:
+    if herramienta is None or not herramienta.strip():
+        return None
+    values = re.findall(r"\d+(?:[\.,]\d+)?", herramienta)
+    if not values:
+        return None
+    diameter = float(values[0].replace(",", "."))
+    return f"tool-diam-{_format_tool_diameter(diameter)}-mm"
+
+
+def _canonical_tool_id(tool_id: str | None, herramienta: str | None) -> str | None:
+    explicit = None if tool_id is None else str(tool_id).strip()
+    legacy = _legacy_diameter_tool_id(herramienta)
+    if explicit and explicit != legacy:
+        return explicit
+    fallback = _label_tool_id(herramienta)
+    if fallback is not None:
+        return fallback
+    return explicit or None
 
 
 class ProjectService:
@@ -42,7 +79,7 @@ class ProjectService:
     def list_projects(self) -> list[ProyectoPCB]:
         return sorted(
             self.repository.list_projects(),
-            key=lambda project: project.actualizado_en,
+            key=lambda project: project.last_opened_at or project.actualizado_en,
             reverse=True,
         )
 
@@ -107,7 +144,43 @@ class ProjectService:
         self,
         project_id: str,
     ) -> ProyectoPCB:
-        return self._load_project(project_id)
+        project = self._load_project(project_id)
+        opened = replace(
+            project,
+            last_opened_at=datetime.now(timezone.utc),
+            current_setup_id=project.current_setup_id or project.montajes[0].id,
+        )
+        self.repository.save_project(opened)
+        return opened
+
+    def add_setup(
+        self,
+        *,
+        project_id: str,
+        nombre: str,
+    ) -> MontajePCB:
+        project = self._load_project(project_id)
+        setup = MontajePCB(
+            id=_new_id("setup"),
+            nombre=nombre,
+            orden=len(project.montajes),
+        )
+        updated = project.add_setup(setup)
+        self.repository.save_project(updated)
+        return updated.get_setup(setup.id)
+
+    def update_setup(
+        self,
+        *,
+        project_id: str,
+        setup_id: str,
+        nombre: str,
+    ) -> MontajePCB:
+        project = self._load_project(project_id)
+        updated_setup = replace(project.get_setup(setup_id), nombre=nombre)
+        updated = project.replace_setup(updated_setup)
+        self.repository.save_project(updated)
+        return updated.get_setup(setup_id)
 
     def add_operation(
         self,
@@ -115,22 +188,107 @@ class ProjectService:
         project_id: str,
         nombre: str,
         tipo: str,
-        cara: str,
-        orden: int,
+        cara: str | None = None,
+        orden: int | None = None,
+        setup_id: str | None = None,
+        tool_id: str | None = None,
         herramienta: str | None = None,
     ) -> OperacionPCB:
         project = self._load_project(project_id)
+        target_setup_id = setup_id or project.montajes[0].id
+        project.get_setup(target_setup_id)
+        operation_type = OperationType(tipo)
+        operation_face = BoardFace(
+            cara
+            or (
+                BoardFace.INFERIOR
+                if operation_type == OperationType.FRESADO_INFERIOR
+                else BoardFace.SUPERIOR
+            )
+        )
+        setup_operations = project.operations_for_setup(target_setup_id)
+        next_order = len(setup_operations) if orden is None else orden
         operation = OperacionPCB(
             id=_new_id("op"),
             nombre=nombre,
-            tipo=OperationType(tipo),
-            cara=BoardFace(cara),
-            orden=orden,
+            tipo=operation_type,
+            cara=operation_face,
+            orden=next_order,
+            setup_id=target_setup_id,
+            tool_id=_canonical_tool_id(tool_id, herramienta),
             herramienta=herramienta,
         )
         updated = project.add_operation(operation)
         self.repository.save_project(updated)
         return updated.get_operation(operation.id)
+
+    def update_operation(
+        self,
+        *,
+        project_id: str,
+        operation_id: str,
+        nombre: str,
+        tool_id: str | None = None,
+        herramienta: str | None = None,
+    ) -> OperacionPCB:
+        project = self._load_project(project_id)
+        operation = project.get_operation(operation_id)
+        updated_operation = replace(
+            operation,
+            nombre=nombre,
+            tool_id=_canonical_tool_id(tool_id, herramienta),
+            herramienta=herramienta,
+        )
+        updated = project.replace_operation(updated_operation)
+        self.repository.save_project(updated)
+        return updated.get_operation(operation_id)
+
+    def duplicate_operation(
+        self,
+        *,
+        project_id: str,
+        operation_id: str,
+    ) -> OperacionPCB:
+        project = self._load_project(project_id)
+        source = project.get_operation(operation_id)
+        return self.add_operation(
+            project_id=project_id,
+            nombre=f"{source.nombre} (copia)",
+            tipo=source.tipo,
+            cara=source.cara,
+            setup_id=source.setup_id,
+            tool_id=source.tool_id,
+            herramienta=source.herramienta,
+        )
+
+    def move_operation(
+        self,
+        *,
+        project_id: str,
+        operation_id: str,
+        direction: str,
+    ) -> OperacionPCB:
+        if direction not in {"up", "down"}:
+            raise ApplicationError("La direccion debe ser up o down.")
+        project = self._load_project(project_id)
+        operation = project.get_operation(operation_id)
+        ordered = list(project.operations_for_setup(operation.setup_id))
+        index = next(index for index, item in enumerate(ordered) if item.id == operation_id)
+        target = index - 1 if direction == "up" else index + 1
+        if target < 0 or target >= len(ordered):
+            return operation
+        ordered[index], ordered[target] = ordered[target], ordered[index]
+        reordered = {item.id: replace(item, orden=order) for order, item in enumerate(ordered)}
+        updated = replace(
+            project,
+            operaciones=tuple(
+                reordered.get(item.id, item)
+                for item in project.operaciones
+            ),
+            actualizado_en=datetime.now(timezone.utc),
+        )
+        self.repository.save_project(updated)
+        return updated.get_operation(operation_id)
 
     def delete_operation(
         self,
@@ -138,8 +296,16 @@ class ProjectService:
         operation_id: str,
     ) -> None:
         project = self._load_project(project_id)
+        operation = project.get_operation(operation_id)
         updated = project.remove_operation(operation_id)
-        self.repository.save_project(updated)
+        ordered = updated.operations_for_setup(operation.setup_id)
+        reordered = {item.id: replace(item, orden=order) for order, item in enumerate(ordered)}
+        normalized = replace(
+            updated,
+            operaciones=tuple(reordered.get(item.id, item) for item in updated.operaciones),
+            actualizado_en=datetime.now(timezone.utc),
+        )
+        self.repository.save_project(normalized)
 
     def remove_operation_gcode(
         self,
@@ -228,6 +394,59 @@ class ProjectService:
     ):
         content = file_path.read_text(encoding="utf-8")
         return analyze_gcode_text(content)
+
+    def archive_project(self, project_id: str) -> ProyectoPCB:
+        project = self._load_project(project_id)
+        now = datetime.now(timezone.utc)
+        updated = replace(project, status="archived", archived_at=now, trashed_at=None, actualizado_en=now)
+        self.repository.save_project(updated)
+        self._audit(updated, "archive_project")
+        return updated
+
+    def trash_project(self, project_id: str) -> ProyectoPCB:
+        project = self._load_project(project_id)
+        now = datetime.now(timezone.utc)
+        updated = replace(project, status="trashed", trashed_at=now, actualizado_en=now)
+        self.repository.save_project(updated)
+        self._audit(updated, "trash_project")
+        return updated
+
+    def restore_project(self, project_id: str) -> ProyectoPCB:
+        project = self._load_project(project_id)
+        now = datetime.now(timezone.utc)
+        updated = replace(project, status="active", archived_at=None, trashed_at=None, actualizado_en=now)
+        self.repository.save_project(updated)
+        self._audit(updated, "restore_project")
+        return updated
+
+    def permanently_delete_project(self, project_id: str, *, confirm_name: str) -> None:
+        project = self._load_project(project_id)
+        if confirm_name != project.nombre:
+            raise ApplicationError("Para eliminar permanentemente debe escribir exactamente el nombre del proyecto.")
+        self._audit(project, "permanently_delete_project")
+        self.repository.delete_project_storage(project_id)
+
+    def continue_project_step(self, project_id: str) -> dict[str, str | None]:
+        project = self._load_project(project_id)
+        if not project.operaciones:
+            return {"view": "archivo", "operation_id": None, "reason": "sin operaciones"}
+        operation = next((item for item in project.operaciones if not item.archivo_gcode), None)
+        if operation is not None:
+            return {"view": "archivo", "operation_id": operation.id, "reason": "sin G-code"}
+        operation = next((item for item in project.operaciones if item.analisis is None or item.analisis.analisis_desactualizado), None)
+        if operation is not None:
+            return {"view": "trayectoria", "operation_id": operation.id, "reason": "sin analisis vigente"}
+        operation = project.operaciones[0]
+        setup = project.get_setup(operation.setup_id)
+        if setup.preparacion.origen_trabajo is None or setup.preparacion.referencia_z is None:
+            return {"view": "referencia", "operation_id": operation.id, "reason": "sin referencia"}
+        if setup.active_map_id is None and setup.preparacion.mapa_disponible_en is None:
+            return {"view": "mapa", "operation_id": operation.id, "reason": "sin mapa"}
+        generated_dir = self.repository.project_dir(project.id) / "generated" / "compensated"
+        generated = list(generated_dir.glob("*_compensated.gcode")) if generated_dir.exists() else []
+        if not generated:
+            return {"view": "validacion", "operation_id": operation.id, "reason": "sin compensacion"}
+        return {"view": "ejecucion", "operation_id": operation.id, "reason": "listo para ejecutar"}
 
     def storage_available(self) -> bool:
         return self.repository.storage_available()
@@ -320,6 +539,13 @@ class ProjectService:
                 "El archivo G-code excede el tamano maximo permitido."
             )
 
+    def _audit(self, project: ProyectoPCB, action: str) -> None:
+        audit_file = self.repository.base_dir / "audit.log"
+        audit_file.parent.mkdir(parents=True, exist_ok=True)
+        with audit_file.open("a", encoding="utf-8") as handle:
+            handle.write(f"{datetime.now(timezone.utc).isoformat()} project={project.id} name={project.nombre} action={action} status={project.status}\n")
+
+
     def _decode_uploaded_content(self, content_bytes: bytes) -> str:
         self._validate_upload_size(len(content_bytes))
         try:
@@ -333,10 +559,25 @@ class ProjectService:
 class MachineSessionService:
     machine_mode = "simulado"
 
+    def __init__(self) -> None:
+        self.referencia_maquina_confirmada_en: datetime | None = None
+
+    def confirm_reference_in_simulation(self) -> MachineSessionStatus:
+        if self.referencia_maquina_confirmada_en is None:
+            self.referencia_maquina_confirmada_en = datetime.now(timezone.utc)
+        return self.get_status()
+
+    def reset_session(self) -> MachineSessionStatus:
+        self.referencia_maquina_confirmada_en = None
+        return self.get_status()
+
     def get_status(self) -> MachineSessionStatus:
+        home_realizado = self.referencia_maquina_confirmada_en is not None
+        physical = self.machine_mode == "fisico"
         return MachineSessionStatus(
-            estado="simulada_lista_para_preparacion",
-            home_realizado=True,
+            estado=("fisica_lista_para_preparacion" if physical else "simulada_lista_para_preparacion"),
+            home_realizado=home_realizado,
+            referencia_maquina_confirmada_en=self.referencia_maquina_confirmada_en,
             z_en_altura_segura=True,
             herramienta_en_centro_cama=True,
             material_montado=False,
@@ -346,6 +587,7 @@ class MachineSessionService:
                 "crear proyecto",
                 "cargar gcode",
                 "analizar gcode",
+                "preparacion fisica" if physical else "confirmar referencias en simulacion",
             ),
             z_puede_bajar_durante=(
                 "captura del cero",
@@ -383,6 +625,10 @@ class SystemStatusService:
             "estado_api": "operativa",
             "modo_maquina": self.machine_session_service.machine_mode,
             "hora_servidor": now.isoformat(),
+            "backend_version": __version__,
+            "frontend_build": os.getenv("KCA_FRONTEND_BUILD", "dev"),
+            "git_commit": os.getenv("KCA_GIT_COMMIT"),
+            "schema_version": PROJECT_SCHEMA_VERSION,
         }
 
     def _storage_label(self) -> str:

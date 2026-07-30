@@ -6,72 +6,103 @@
 - TypeScript
 - Vite 5
 - CSS propio responsive
-- `react-konva` + `konva`
+- `react-konva` + `konva` para visor 2D
+- `plotly.js-dist-min` para superficie 3D
 - Vitest + Testing Library
 - ESLint
 
-## Estructura principal
+## Fuente única de estado de máquina
+
+La UI usa `MachineContext` (`frontend/src/features/system/MachineContext.tsx`) como fuente visible de estado físico. El flujo es:
 
 ```text
-frontend/
-  src/
-    components/
-    features/viewer/
-    lib/
-    test/
-    App.tsx
-    main.tsx
-    styles.css
+MachineRuntime -> /api/machine/runtime|status -> App -> MachineContext -> Sidebar/Sistema/Proyecto
 ```
 
-## Vista funcional
+Cuando `MachineRuntime.mode` es `PHYSICAL`, la UI normaliza el texto a `FÍSICO` aunque el backend devuelva `FISICO`. Sidebar, Sistema y workspace usan el mismo contexto y dejan de mezclar textos de sesión simulada con runtime físico.
 
-La interfaz está completamente en español e incluye:
+## Navegación del producto
 
-- barra lateral compacta y colapsable;
-- encabezado superior compacto;
-- etiqueta permanente `MÁQUINA EN MODO SIMULADO`;
-- dashboard de trabajo;
-- listado real de proyectos;
-- formulario de creación y edición;
-- flujo visual de operaciones por proyecto;
-- carga de G-code por archivo real;
-- análisis técnico por operación;
-- visor técnico 2D V2 con toolbar integrada, capas, inspector y recorrido visual;
-- pantalla de sistema como diagnóstico secundario.
+El producto se recorre desde el proyecto y montaje activo:
 
-## Visor técnico 2D V2
-
-El visor en `features/viewer/` usa canvas vía `react-konva` y separa:
-
-- matemáticas de encuadre y transformación;
-- tema visual del visor;
-- toolbar y capas;
-- inspector de segmentos;
-- render de trayectorias y advertencias.
-
-Capacidades actuales:
-
-- ajuste al material, trayectoria y todo;
-- proporción 1:1 entre X/Y;
-- inversión de Y solo en pantalla;
-- zoom con rueda;
-- desplazamiento por arrastre;
-- pinch zoom táctil;
-- inspector de segmento con línea, Z, avance y distancia;
-- color opcional por profundidad Z;
-- recorrido visual por segmento;
-- cuadrícula adaptativa y capas activables.
-
-## Desarrollo local
-
-```bash
-cd frontend
-npm install
-npm run dev
+```text
+Proyecto -> Montaje -> Operaciones -> Referencia -> Mapa de alturas -> Compensación -> Ejecución
 ```
 
-Durante desarrollo, Vite usa proxy a `http://127.0.0.1:8000/api`.
+`Sistema` queda como diagnóstico técnico: aplicación, Moonraker HTTP/WebSocket, Klipper, posición, homing, límites, Arduino, joystick, botones, sonda, seguridad, eventos, cancelación técnica y emergencia `M112`. Ya no contiene el flujo productivo principal de homing, Z segura, centro, joystick, referencia y malla.
+
+## Referencia
+
+En modo simulado se conserva el stepper de referencia manual. En modo físico se muestra una guía real dentro del montaje:
+
+1. conexión y diagnóstico;
+2. homing, Z segura de traslado y centro;
+3. posicionamiento X/Y con joystick discreto;
+4. armado de referencia;
+5. sondeo por botón externo o confirmación supervisada;
+6. guardado de origen X/Y y referencia Z medida para la herramienta actual.
+
+La Z segura se etiqueta como traslado; no se confunde con referencia Z, profundidad ni contacto.
+
+## Mapa de alturas
+
+La pestaña tiene selector funcional:
+
+- `SIMULADO`: configuración, simulación e importación matemática.
+- `MEDIDO FÍSICAMENTE`: mapa físico del montaje/cara/revisión de colocación, referencia Z de herramienta, grid, puntos, progreso y acciones punto a punto.
+
+Acciones visibles en `MEDIDO FÍSICAMENTE`:
+
+- `Usar área desde operaciones / Generar malla`;
+- `Iniciar sondeo` o `Continuar malla incompleta`;
+- `Pausar`;
+- `Reanudar`;
+- `Reintentar/continuar punto`;
+- `Cancelar`.
+
+La región se calcula desde operaciones analizadas y conserva la convención:
+
+```text
+machine_x = machine_origin_x + gcode_x
+machine_y = machine_origin_y + gcode_y
+```
+
+## Visor 2D
+
+`HeightMapHeatmap.tsx` muestra ejes X/Y, ticks adaptativos, mm, rejilla mayor/menor, cursor, material, trayectoria, región, muestras y malla física. La malla se dibuja con recorrido serpentino, puntos pendientes/medidos/fallidos y selector de coordenadas `Local G-code` / `Máquina`.
+
+La pantalla completa usa el canvas como superficie principal y mantiene controles de encuadre. En Firefox headless el API fullscreen puede denegarse; se validó visualmente el layout con captura headless de la vista fullscreen solicitada.
+
+## Compensación
+
+La pestaña `Compensación` permite previsualizar y generar un archivo real. El archivo se guarda en `generated/compensated/`, conserva X/Y y aplica:
+
+```text
+z_compensado = z_original + delta_superficie(x,y)
+```
+
+La descarga usa `/api/projects/{project_id}/generated/{file_path}`.
+
+## Ejecución
+
+La pestaña `Ejecución` expone preflight Moonraker/Klipper con checks visibles de modo físico, runtime, Klipper, homing, mapa, referencia y archivo compensado. Las acciones visibles son subir archivo, confirmar archivo, confirmar herramienta, confirmar spindle, iniciar ejecución supervisada, pausar, reanudar, cancelar y emergencia. El inicio real queda bloqueado por software hasta prueba física supervisada.
+
+## Capturas verificadas
+
+Las capturas de la aplicación servida por FastAPI con fixture local están en `docs/artifacts/visual-verification/`:
+
+1. `01-sidebar-modo-fisico.png`
+2. `02-referencia-fisica-montaje.png`
+3. `03-malla-configurada.png`
+4. `04-malla-superpuesta-visor.png`
+5. `05-sondeo-progreso-fixture-medida.png`
+6. `06-mapa-medido-superficie-3d.png`
+7. `07-visor-ejes-ticks.png`
+8. `08-pantalla-completa.png`
+9. `09-compensacion.png`
+10. `10-ejecucion-preflight.png`
+
+Firefox headless no tuvo WebGL disponible para Plotly, por lo que la inspección final de superficie 3D debe repetirse en navegador normal con WebGL durante validación supervisada.
 
 ## Validación
 
@@ -82,10 +113,21 @@ npm run test
 npm run build
 ```
 
-## Limitaciones actuales
+El build final verificado generó `frontend/dist/index.html`, `assets/index-DiGQGU_B.js`, `assets/index-C_RZSt3A.css` y `assets/plotly.min-CofRTlwV.js`.
 
-- no hay frontend 3D;
-- no hay Gerber;
-- no hay mapa de alturas;
-- no hay ejecución ni simulación física de la máquina;
-- el visor sigue siendo informativo, no una simulación exacta de mecanizado.
+
+## Verificación de integración visible 2026-07-14
+
+El frontend consume `CoordinateReference.posicion_captura` como `CapturedPosition` estructurado y lo muestra en Referencia física. En modo físico, Mapa de alturas no presenta `SIMULADO` como acción principal; muestra directamente `Mapa medido físicamente` con controles compactos, configuración física, armado e inicio de sondeo.
+
+El visor 2D incorpora ejes X/Y, ticks en mm, rejilla mayor/menor, selector Local/Máquina, región, trayectoria, malla, recorrido serpentino, punto activo e inspector colapsable. Pantalla completa usa barra inferior e inspector flotante.
+
+Build servido verificado por `curl`: `/assets/index-DNVlB1UT.js` y `/assets/index-yhqof53C.css`.
+
+## Mapa físico y visor técnico 2D
+
+En `MACHINE_MODE=physical`, Mapa de alturas muestra directamente `Mapa medido físicamente`; la creación de mapas simulados queda relegada a comparación. El flujo principal permite configurar filas, columnas, retiro de bordes, exclusiones, Z segura, paso, velocidad y retracto, generar vista previa, armar e iniciar `INICIAR SONDEO AUTOMÁTICO`.
+
+La pestaña Mapa de alturas no dibuja operaciones. Solo muestra material, región interior de sondeo, exclusiones, cuadrícula, puntos, recorrido serpentino y superficie. Las trayectorias se muestran en el visor técnico 2D de la pestaña Trayectoria, con selector `Operación seleccionada` / `Todas las operaciones`, ejes X/Y, ticks adaptativos en mm, reglas y selector `Coordenadas PCB` / `Coordenadas CNC`.
+
+La superficie 3D usa `Plotly.react` con `uirevision` estable para evitar remontajes durante polling de máquina. Solo cambia cuando cambian los puntos medidos, el mapa o el modo de superficie.

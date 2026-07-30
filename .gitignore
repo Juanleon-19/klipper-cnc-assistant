@@ -54,6 +54,11 @@ config.local.json
 .env.*
 !.env.example
 
+# Deployment-local configuration
+deploy/klipper-cnc-assistant.env
+deploy/klipper-cnc-assistant.local.env
+!deploy/klipper-cnc-assistant.env.example
+
 # Credentials and local secrets
 secrets/
 credentials/

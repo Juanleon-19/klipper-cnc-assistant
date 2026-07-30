@@ -27,6 +27,7 @@ MANUAL_TOOLCHANGE_CODES = {"M6"}
 ARC_CHORD_TOLERANCE_MM = 0.05
 ARC_MAX_SEGMENTS = 720
 FULL_CIRCLE_EPSILON = 1e-6
+CURRENT_ANALYSIS_VERSION = "gcode-analysis-v2"
 
 
 def _normalize_g_code(token: GCodeToken) -> str:
@@ -380,6 +381,8 @@ def analyze_gcode_text(
 
     limits = _build_bounds(bounds)
     analysis = OperationAnalysis(
+        analysis_version=CURRENT_ANALYSIS_VERSION,
+        current_analysis_version=CURRENT_ANALYSIS_VERSION,
         limites=limits,
         avances_mm_min=tuple(sorted(feeds)),
         profundidad_min_mm=None if limits is None else limits.min_z_mm,

@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import shutil
 from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
@@ -13,18 +14,25 @@ from klipper_cnc_assistant.domain import (
     BoardFace,
     Bounds3D,
     ConfiguracionAlineacion,
+    CapturedPosition,
+    CoordinateReference,
     FlipAxis,
     IssueSeverity,
     MaterialBruto,
     MaterialOverflow,
+    MontajePCB,
     OperationAnalysis,
+    OperationPreparation,
     OperationStatus,
     OperationType,
     OperacionPCB,
     PreviewPoint,
     PreviewSegment,
     ProyectoPCB,
+    PROJECT_SCHEMA_VERSION,
+    ProjectValidationError,
 )
+from klipper_cnc_assistant.gcode import CURRENT_ANALYSIS_VERSION
 
 
 def _slugify(value: str) -> str:
@@ -34,6 +42,38 @@ def _slugify(value: str) -> str:
         value.strip(),
     ).strip("-")
     return slug or "archivo"
+
+
+def _format_tool_diameter(value: float) -> str:
+    text = f"{value:.4f}".rstrip("0").rstrip(".")
+    return text or "0"
+
+
+def _label_tool_id(herramienta: str | None) -> str | None:
+    if herramienta is None or not herramienta.strip():
+        return None
+    return f"tool-label-{_slugify(herramienta).lower()}"
+
+
+def _legacy_diameter_tool_id(herramienta: str | None) -> str | None:
+    if herramienta is None or not herramienta.strip():
+        return None
+    values = re.findall(r"\d+(?:[\.,]\d+)?", herramienta)
+    if not values:
+        return None
+    diameter = float(values[0].replace(",", "."))
+    return f"tool-diam-{_format_tool_diameter(diameter)}-mm"
+
+
+def _canonical_tool_id(tool_id: str | None, herramienta: str | None) -> str | None:
+    explicit = None if tool_id is None else str(tool_id).strip()
+    legacy = _legacy_diameter_tool_id(herramienta)
+    if explicit and explicit != legacy:
+        return explicit
+    fallback = _label_tool_id(herramienta)
+    if fallback is not None:
+        return fallback
+    return explicit or None
 
 
 class JsonProjectRepository:
@@ -51,11 +91,11 @@ class JsonProjectRepository:
     def list_projects(self) -> list[ProyectoPCB]:
         projects: list[ProyectoPCB] = []
         for project_file in sorted(self.projects_dir.glob("*/project.json")):
-            projects.append(
-                self._deserialize_project(
-                    json.loads(project_file.read_text(encoding="utf-8"))
-                )
-            )
+            payload = json.loads(project_file.read_text(encoding="utf-8"))
+            project = self._deserialize_project(payload)
+            if self._needs_project_migration(payload):
+                self.save_project(project)
+            projects.append(project)
         return projects
 
     def save_project(
@@ -85,15 +125,42 @@ class JsonProjectRepository:
             raise FileNotFoundError(
                 f"El proyecto '{project_id}' no existe."
             )
-        return self._deserialize_project(
-            json.loads(project_file.read_text(encoding="utf-8"))
+        payload = json.loads(project_file.read_text(encoding="utf-8"))
+        project = self._deserialize_project(payload)
+        if self._needs_project_migration(payload):
+            self.save_project(project)
+        return project
+
+    def _needs_project_migration(self, payload: dict) -> bool:
+        return (
+            payload.get("version_esquema") != PROJECT_SCHEMA_VERSION
+            or not payload.get("montajes")
+            or any("setup_id" not in item for item in payload.get("operaciones", []))
+            or "status" not in payload
+            or "current_setup_id" not in payload
+            or any("placement_revision" not in item for item in payload.get("montajes", []))
+            or any(_canonical_tool_id(item.get("tool_id"), item.get("herramienta")) != item.get("tool_id") for item in payload.get("operaciones", []))
         )
 
     def project_dir(
         self,
         project_id: str,
     ) -> Path:
-        return self.projects_dir / project_id
+        if not project_id or project_id in {".", ".."} or "/" in project_id or "\\" in project_id:
+            raise RuntimeError("Identificador de proyecto inválido.")
+        target = (self.projects_dir / project_id).resolve()
+        root = self.projects_dir.resolve()
+        if target != root and root not in target.parents:
+            raise RuntimeError("La ruta del proyecto sale del directorio de proyectos.")
+        return target
+
+    def delete_project_storage(self, project_id: str) -> None:
+        target = self.project_dir(project_id).resolve()
+        root = self.projects_dir.resolve()
+        if target == root or root not in target.parents:
+            raise RuntimeError("La eliminación permanente quedó bloqueada por seguridad de ruta.")
+        if target.exists():
+            shutil.rmtree(target)
 
     def storage_available(self) -> bool:
         try:
@@ -143,13 +210,61 @@ class JsonProjectRepository:
         target = self._resolve_project_file(project_id, relative_path)
         return target.read_text(encoding="utf-8")
 
+    def save_height_map_payload(
+        self,
+        project_id: str,
+        operation_id: str,
+        payload: dict,
+    ) -> dict:
+        target = self._height_map_file(project_id, operation_id)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(
+            json.dumps(
+                payload,
+                ensure_ascii=True,
+                indent=2,
+                sort_keys=True,
+            ),
+            encoding="utf-8",
+        )
+        return payload
+
+    def load_height_map_payload(
+        self,
+        project_id: str,
+        operation_id: str,
+    ) -> dict:
+        target = self._height_map_file(project_id, operation_id)
+        if not target.exists():
+            target = self._shared_height_map_file(project_id, operation_id)
+        if target is None or not target.exists():
+            raise FileNotFoundError(
+                f"El mapa de alturas para la operacion {operation_id} no existe."
+            )
+        return json.loads(target.read_text(encoding="utf-8"))
+
+    def delete_height_map(
+        self,
+        project_id: str,
+        operation_id: str,
+    ) -> None:
+        target = self._height_map_file(project_id, operation_id)
+        if not target.exists():
+            raise FileNotFoundError(
+                f"El mapa de alturas para la operacion '{operation_id}' no existe."
+            )
+        target.unlink()
+
     def _resolve_project_file(
         self,
         project_id: str,
         relative_path: str,
     ) -> Path:
         project_dir = self.project_dir(project_id)
-        target = project_dir / relative_path
+        relative = Path(relative_path)
+        if relative.is_absolute() or ".." in relative.parts:
+            raise RuntimeError("La ruta solicitada sale del directorio del proyecto.")
+        target = project_dir / relative
         resolved = target.resolve()
         project_root = project_dir.resolve()
         if resolved != project_root and project_root not in resolved.parents:
@@ -192,10 +307,31 @@ class JsonProjectRepository:
                     for hole in project.configuracion_alineacion.agujeros_alineacion
                 ],
             },
+            "montajes": [self._serialize_setup(setup) for setup in project.montajes],
             "operaciones": [self._serialize_operation(operation) for operation in project.operaciones],
             "creado_en": project.creado_en.isoformat(),
             "actualizado_en": project.actualizado_en.isoformat(),
+            "created_at": project.created_at.isoformat(),
+            "updated_at": project.updated_at.isoformat(),
+            "last_opened_at": None if project.last_opened_at is None else project.last_opened_at.isoformat(),
+            "archived_at": None if project.archived_at is None else project.archived_at.isoformat(),
+            "trashed_at": None if project.trashed_at is None else project.trashed_at.isoformat(),
+            "status": project.status,
+            "current_setup_id": project.current_setup_id,
             "version_esquema": project.version_esquema,
+        }
+
+    def _serialize_setup(self, setup: MontajePCB) -> dict:
+        return {
+            "id": setup.id,
+            "nombre": setup.nombre,
+            "orden": setup.orden,
+            "preparacion": self._serialize_preparation(setup.preparacion),
+            "placement_revision": setup.placement_revision,
+            "active_reference_id": setup.active_reference_id,
+            "active_map_id": setup.active_map_id,
+            "preparation_status": str(setup.preparation_status),
+            "last_prepared_at": None if setup.last_prepared_at is None else setup.last_prepared_at.isoformat(),
         }
 
     def _serialize_operation(
@@ -208,10 +344,12 @@ class JsonProjectRepository:
             "tipo": operation.tipo,
             "cara": operation.cara,
             "orden": operation.orden,
+            "setup_id": operation.setup_id,
             "archivo_gcode": operation.archivo_gcode,
             "nombre_archivo_original": operation.nombre_archivo_original,
             "tamano_archivo_bytes": operation.tamano_archivo_bytes,
             "sha256": operation.sha256,
+            "tool_id": operation.tool_id,
             "herramienta": operation.herramienta,
             "analisis": self._serialize_analysis(operation.analisis),
             "estado": operation.estado,
@@ -224,6 +362,8 @@ class JsonProjectRepository:
         if analysis is None:
             return None
         return {
+            "analysis_version": analysis.analysis_version,
+            "current_analysis_version": analysis.current_analysis_version,
             "limites": None if analysis.limites is None else {
                 "min_x_mm": analysis.limites.min_x_mm,
                 "max_x_mm": analysis.limites.max_x_mm,
@@ -252,6 +392,74 @@ class JsonProjectRepository:
             "tolerancia_arco_mm": analysis.tolerancia_arco_mm,
         }
 
+    def _serialize_preparation(self, preparation: OperationPreparation) -> dict:
+        return {
+            "origen_trabajo": self._serialize_reference(preparation.origen_trabajo),
+            "referencia_z": self._serialize_reference(preparation.referencia_z),
+            "region_sondeable_configurada_en": None if preparation.region_sondeable_configurada_en is None else preparation.region_sondeable_configurada_en.isoformat(),
+            "mapa_disponible_en": None if preparation.mapa_disponible_en is None else preparation.mapa_disponible_en.isoformat(),
+            "mapa_validado_en": None if preparation.mapa_validado_en is None else preparation.mapa_validado_en.isoformat(),
+            "compensacion_previsualizada_en": None if preparation.compensacion_previsualizada_en is None else preparation.compensacion_previsualizada_en.isoformat(),
+            "motivo_invalidacion": preparation.motivo_invalidacion,
+        }
+
+    def _serialize_reference(self, reference: CoordinateReference | None) -> dict | None:
+        if reference is None:
+            return None
+        return {
+            "x_mm": reference.x_mm,
+            "y_mm": reference.y_mm,
+            "z_mm": reference.z_mm,
+            "confirmado_en": None if reference.confirmado_en is None else reference.confirmado_en.isoformat(),
+            "fuente": reference.fuente,
+            "maquina": reference.maquina,
+            "homed_axes": reference.homed_axes,
+            "posicion_captura": self._serialize_captured_position(reference.posicion_captura),
+            "sesion": reference.sesion,
+        }
+
+    def _serialize_captured_position(self, position: CapturedPosition | None) -> dict[str, float | None] | None:
+        if position is None:
+            return None
+        return {"x_mm": position.x_mm, "y_mm": position.y_mm, "z_mm": position.z_mm}
+
+    def _deserialize_captured_position(self, value) -> CapturedPosition | None:
+        if value is None:
+            return None
+        if isinstance(value, CapturedPosition):
+            return value
+        if isinstance(value, dict):
+            try:
+                x_mm = float(value["x_mm"])
+                y_mm = float(value["y_mm"])
+                raw_z = value.get("z_mm")
+                z_mm = None if raw_z is None else float(raw_z)
+                return CapturedPosition(x_mm=x_mm, y_mm=y_mm, z_mm=z_mm)
+            except (KeyError, TypeError, ValueError):
+                return None
+        if isinstance(value, str):
+            stripped = value.strip()
+            if not stripped:
+                return None
+            try:
+                import json
+                parsed = json.loads(stripped)
+            except Exception:
+                parsed = None
+            if isinstance(parsed, dict):
+                return self._deserialize_captured_position(parsed)
+            parts = [part.strip() for part in stripped.replace(";", ",").split(",")]
+            if len(parts) in {2, 3}:
+                try:
+                    return CapturedPosition(
+                        x_mm=float(parts[0]),
+                        y_mm=float(parts[1]),
+                        z_mm=None if len(parts) == 2 or parts[2] == "" else float(parts[2]),
+                    )
+                except ValueError:
+                    return None
+        return None
+
     def _serialize_segment(self, segment: PreviewSegment) -> dict:
         return {
             "tipo": segment.tipo,
@@ -273,17 +481,59 @@ class JsonProjectRepository:
         payload: dict,
     ) -> ProyectoPCB:
         alignment_data = payload.get("configuracion_alineacion", {})
+        operation_payloads = payload.get("operaciones", [])
+        setup_payloads = payload.get("montajes", [])
+        if setup_payloads:
+            setups = tuple(
+                MontajePCB(
+                    id=item["id"],
+                    nombre=item["nombre"],
+                    orden=item["orden"],
+                    preparacion=self._deserialize_preparation(item.get("preparacion")),
+                    placement_revision=item.get("placement_revision", "placement-1"),
+                    active_reference_id=item.get("active_reference_id"),
+                    active_map_id=item.get("active_map_id"),
+                    preparation_status=item.get("preparation_status", "sin_iniciar"),
+                    last_prepared_at=self._parse_datetime(item.get("last_prepared_at")),
+                )
+                for item in setup_payloads
+            )
+        else:
+            legacy_preparations = [
+                self._deserialize_preparation(item.get("preparacion"))
+                for item in operation_payloads
+            ]
+            preparation = max(
+                legacy_preparations,
+                key=self._preparation_score,
+                default=OperationPreparation(),
+            )
+            setups = (
+                MontajePCB(
+                    id="setup-main",
+                    nombre="Montaje principal",
+                    orden=0,
+                    preparacion=preparation,
+                ),
+            )
+        default_setup_id = setups[0].id
         return ProyectoPCB(
             id=payload["id"],
             nombre=payload["nombre"],
             material=MaterialBruto(**payload["material"]),
+            montajes=setups,
             operaciones=tuple(
-                self._deserialize_operation(item)
-                for item in payload.get("operaciones", [])
+                self._deserialize_operation(item, default_setup_id=default_setup_id)
+                for item in operation_payloads
             ),
-            creado_en=datetime.fromisoformat(payload["creado_en"]),
-            actualizado_en=datetime.fromisoformat(payload["actualizado_en"]),
-            version_esquema=payload.get("version_esquema", "1.0"),
+            creado_en=datetime.fromisoformat(payload.get("creado_en") or payload.get("created_at")),
+            actualizado_en=datetime.fromisoformat(payload.get("actualizado_en") or payload.get("updated_at")),
+            last_opened_at=self._parse_datetime(payload.get("last_opened_at")),
+            archived_at=self._parse_datetime(payload.get("archived_at")),
+            trashed_at=self._parse_datetime(payload.get("trashed_at")),
+            status=payload.get("status", "active"),
+            current_setup_id=payload.get("current_setup_id", default_setup_id),
+            version_esquema=PROJECT_SCHEMA_VERSION,
             configuracion_alineacion=ConfiguracionAlineacion(
                 doble_cara=alignment_data.get("doble_cara", False),
                 eje_volteo=(
@@ -298,9 +548,24 @@ class JsonProjectRepository:
             ),
         )
 
+    def _preparation_score(self, preparation: OperationPreparation) -> int:
+        return sum(
+            value is not None
+            for value in (
+                preparation.origen_trabajo,
+                preparation.referencia_z,
+                preparation.region_sondeable_configurada_en,
+                preparation.mapa_disponible_en,
+                preparation.mapa_validado_en,
+                preparation.compensacion_previsualizada_en,
+            )
+        )
+
     def _deserialize_operation(
         self,
         payload: dict,
+        *,
+        default_setup_id: str,
     ) -> OperacionPCB:
         return OperacionPCB(
             id=payload["id"],
@@ -308,10 +573,12 @@ class JsonProjectRepository:
             tipo=OperationType(payload["tipo"]),
             cara=BoardFace(payload["cara"]),
             orden=payload["orden"],
+            setup_id=payload.get("setup_id", default_setup_id),
             archivo_gcode=payload.get("archivo_gcode"),
             nombre_archivo_original=payload.get("nombre_archivo_original"),
             tamano_archivo_bytes=payload.get("tamano_archivo_bytes"),
             sha256=payload.get("sha256"),
+            tool_id=_canonical_tool_id(payload.get("tool_id"), payload.get("herramienta")),
             herramienta=payload.get("herramienta"),
             analisis=self._deserialize_analysis(payload.get("analisis")),
             estado=OperationStatus(payload.get("estado", OperationStatus.ESPERANDO_ARCHIVO)),
@@ -329,7 +596,11 @@ class JsonProjectRepository:
         linear_payload = payload.get("segmentos_lineales", [])
         if preview_payload is None:
             preview_payload = linear_payload
+        analysis_version = payload.get("analysis_version", "legacy")
+        current_analysis_version = CURRENT_ANALYSIS_VERSION
         return OperationAnalysis(
+            analysis_version=analysis_version,
+            current_analysis_version=current_analysis_version,
             limites=limits,
             avances_mm_min=tuple(payload.get("avances_mm_min", [])),
             profundidad_min_mm=payload.get("profundidad_min_mm"),
@@ -363,6 +634,49 @@ class JsonProjectRepository:
             tolerancia_arco_mm=payload.get("tolerancia_arco_mm"),
         )
 
+    def _deserialize_preparation(self, payload: dict | None) -> OperationPreparation:
+        if payload is None:
+            return OperationPreparation()
+        return OperationPreparation(
+            origen_trabajo=self._deserialize_reference(payload.get("origen_trabajo")),
+            referencia_z=self._deserialize_reference(payload.get("referencia_z")),
+            region_sondeable_configurada_en=self._parse_datetime(payload.get("region_sondeable_configurada_en")),
+            mapa_disponible_en=self._parse_datetime(payload.get("mapa_disponible_en")),
+            mapa_validado_en=self._parse_datetime(payload.get("mapa_validado_en")),
+            compensacion_previsualizada_en=self._parse_datetime(payload.get("compensacion_previsualizada_en")),
+            motivo_invalidacion=payload.get("motivo_invalidacion"),
+        )
+
+    def _deserialize_reference(self, payload: dict | None) -> CoordinateReference | None:
+        if payload is None:
+            return None
+        captured = self._deserialize_captured_position(payload.get("posicion_captura"))
+        if "x_mm" not in payload or "y_mm" not in payload:
+            if captured is None:
+                return None
+            x_mm = captured.x_mm
+            y_mm = captured.y_mm
+            z_mm = captured.z_mm
+        else:
+            x_mm = float(payload["x_mm"])
+            y_mm = float(payload["y_mm"])
+            raw_z = payload.get("z_mm")
+            z_mm = None if raw_z is None else float(raw_z)
+        return CoordinateReference(
+            x_mm=x_mm,
+            y_mm=y_mm,
+            z_mm=z_mm,
+            confirmado_en=self._parse_datetime(payload.get("confirmado_en") or payload.get("fecha")),
+            fuente=payload.get("fuente", "SIMULATED"),
+            maquina=payload.get("maquina"),
+            homed_axes=payload.get("homed_axes"),
+            posicion_captura=captured,
+            sesion=payload.get("sesion"),
+        )
+
+    def _parse_datetime(self, value: str | None):
+        return None if value is None else datetime.fromisoformat(value)
+
     def _deserialize_segment(
         self,
         payload: dict,
@@ -391,3 +705,27 @@ class JsonProjectRepository:
             advertencias=tuple(payload.get("advertencias", [])),
             puntos=tuple(PreviewPoint(**point) for point in points_payload),
         )
+
+    def _shared_height_map_file(self, project_id: str, operation_id: str) -> Path | None:
+        try:
+            project = self.load_project(project_id)
+            setup_id = project.get_operation(operation_id).setup_id
+        except (FileNotFoundError, ProjectValidationError):
+            return None
+        return self._height_map_file(project_id, setup_id)
+
+    def _height_map_file(
+        self,
+        project_id: str,
+        operation_id: str,
+    ) -> Path:
+        project_dir = self.project_dir(project_id)
+        self._ensure_project_layout(project_dir)
+        relative = Path("maps") / operation_id / "height_map.json"
+        if relative.is_absolute() or ".." in relative.parts:
+            raise RuntimeError("La ruta del mapa sale del directorio del proyecto.")
+        target = (project_dir / relative).resolve()
+        root = project_dir.resolve()
+        if target != root and root not in target.parents:
+            raise RuntimeError("La ruta del mapa sale del directorio del proyecto.")
+        return target

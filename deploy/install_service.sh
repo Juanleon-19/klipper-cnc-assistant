@@ -7,6 +7,9 @@ SERVICE_NAME="klipper-cnc-assistant.service"
 SERVICE_SRC="$ROOT_DIR/deploy/systemd/$SERVICE_NAME"
 SERVICE_DST="/etc/systemd/system/$SERVICE_NAME"
 PYTHON_BIN="$ROOT_DIR/.venv/bin/python"
+CONFIG_EXAMPLE="$ROOT_DIR/deploy/klipper-cnc-assistant.env.example"
+CONFIG_DIR="/etc/klipper-cnc-assistant"
+CONFIG_FILE="$CONFIG_DIR/klipper-cnc-assistant.env"
 
 require_command() {
   if ! command -v "$1" >/dev/null 2>&1; then
@@ -29,6 +32,7 @@ require_command curl
 require_command ss
 require_path "$PYTHON_BIN"
 require_path "$SERVICE_SRC"
+require_path "$CONFIG_EXAMPLE"
 require_path "$FRONTEND_DIR/package.json"
 
 if ss -ltn '( sport = :8000 )' | grep -q ':8000'; then
@@ -44,6 +48,15 @@ cd "$ROOT_DIR"
 npm ci --prefix "$FRONTEND_DIR"
 npm run build --prefix "$FRONTEND_DIR"
 
+sudo install -d -m 0750 -o root -g impresora "$CONFIG_DIR"
+if [[ ! -f "$CONFIG_FILE" ]]; then
+  sudo install -m 0640 -o root -g impresora "$CONFIG_EXAMPLE" "$CONFIG_FILE"
+  echo "Configuracion segura creada en $CONFIG_FILE (modo simulado)."
+  echo "Edite ese archivo fuera del repositorio antes de cualquier validacion fisica."
+else
+  echo "Se conserva la configuracion existente en $CONFIG_FILE."
+fi
+
 sudo install -m 0644 "$SERVICE_SRC" "$SERVICE_DST"
 sudo systemctl daemon-reload
 sudo systemctl enable --now "$SERVICE_NAME"
@@ -54,7 +67,7 @@ for _ in $(seq 1 20); do
     exit 0
   fi
   sleep 1
- done
+done
 
- echo "El servicio no respondio a tiempo. Revise: sudo journalctl -u $SERVICE_NAME -n 100 --no-pager" >&2
- exit 1
+echo "El servicio no respondio a tiempo. Revise: sudo journalctl -u $SERVICE_NAME -n 100 --no-pager" >&2
+exit 1

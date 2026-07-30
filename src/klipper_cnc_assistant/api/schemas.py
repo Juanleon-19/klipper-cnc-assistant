@@ -5,6 +5,7 @@ from pydantic import BaseModel, Field
 from klipper_cnc_assistant.domain import (
     AnalysisIssue,
     MachineSessionStatus,
+    MontajePCB,
     MaterialOverflow,
     OperacionPCB,
     OperationAnalysis,
@@ -29,6 +30,10 @@ class SystemInfoResponse(BaseModel):
     estado_api: str
     modo_maquina: str
     hora_servidor: str
+    backend_version: str
+    frontend_build: str
+    git_commit: str | None
+    schema_version: str
 
 
 class ErrorResponse(BaseModel):
@@ -59,12 +64,41 @@ class ProjectUpdateRequest(ProjectCreateRequest):
     pass
 
 
+class SetupCreateRequest(BaseModel):
+    nombre: str = Field(min_length=1)
+
+
+class SetupUpdateRequest(SetupCreateRequest):
+    pass
+
+
 class OperationCreateRequest(BaseModel):
     nombre: str = Field(min_length=1)
     tipo: str
-    cara: str
-    orden: int = Field(ge=0)
+    cara: str | None = None
+    orden: int | None = Field(default=None, ge=0)
+    setup_id: str | None = None
+    tool_id: str | None = None
     herramienta: str | None = None
+
+
+class OperationUpdateRequest(BaseModel):
+    nombre: str = Field(min_length=1)
+    tool_id: str | None = None
+    herramienta: str | None = None
+
+
+class OperationMoveRequest(BaseModel):
+    direccion: str
+
+
+class ProjectPermanentDeleteRequest(BaseModel):
+    confirm_name: str = Field(min_length=1)
+
+
+class SetupResetRequest(BaseModel):
+    motivo: str | None = None
+    session: str | None = None
 
 
 class GCodeUploadRequest(BaseModel):
@@ -134,6 +168,9 @@ class PreviewSegmentResponse(BaseModel):
 
 
 class OperationAnalysisResponse(BaseModel):
+    analysis_version: str
+    current_analysis_version: str
+    analisis_desactualizado: bool
     limites: BoundsResponse | None
     avances_mm_min: list[float]
     profundidad_min_mm: float | None
@@ -158,16 +195,29 @@ class OperationAnalysisResponse(BaseModel):
     tolerancia_arco_mm: float | None
 
 
+class SetupResponse(BaseModel):
+    id: str
+    nombre: str
+    orden: int
+    placement_revision: str
+    active_reference_id: str | None
+    active_map_id: str | None
+    preparation_status: str
+    last_prepared_at: str | None
+
+
 class OperationResponse(BaseModel):
     id: str
     nombre: str
     tipo: str
     cara: str
     orden: int
+    setup_id: str
     archivo_gcode: str | None
     nombre_archivo_original: str | None
     tamano_archivo_bytes: int | None
     sha256: str | None
+    tool_id: str | None
     herramienta: str | None
     estado: str
     analisis: OperationAnalysisResponse | None
@@ -180,9 +230,17 @@ class ProjectResponse(BaseModel):
     doble_cara: bool
     eje_volteo: str | None
     agujeros_alineacion: list[AgujeroAlineacionResponse]
+    montajes: list[SetupResponse]
     operaciones: list[OperationResponse]
     creado_en: str
     actualizado_en: str
+    created_at: str
+    updated_at: str
+    last_opened_at: str | None
+    archived_at: str | None
+    trashed_at: str | None
+    status: str
+    current_setup_id: str
     version_esquema: str
     estado_general: str
 
@@ -190,6 +248,7 @@ class ProjectResponse(BaseModel):
 class MachineSessionResponse(BaseModel):
     estado: str
     home_realizado: bool
+    referencia_maquina_confirmada_en: str | None
     z_en_altura_segura: bool
     herramienta_en_centro_cama: bool
     material_montado: bool
@@ -197,6 +256,66 @@ class MachineSessionResponse(BaseModel):
     cero_z_capturado: bool
     operaciones_permitidas: list[str]
     z_puede_bajar_durante: list[str]
+
+
+class ReferenceStepResponse(BaseModel):
+    id: str
+    titulo: str
+    estado: str
+    confirmado: bool
+    fecha: str | None
+    detalle: str | None = None
+
+
+class ReferencePointResponse(BaseModel):
+    x_mm: float | None
+    y_mm: float | None
+    z_mm: float | None
+
+
+class ReferenceWorkOriginRequest(BaseModel):
+    x_mm: float | None = None
+    y_mm: float | None = None
+
+
+class ReferenceZRequest(BaseModel):
+    x_mm: float | None = None
+    y_mm: float | None = None
+    z_mm: float | None = None
+
+
+class CapturedPositionResponse(BaseModel):
+    x_mm: float
+    y_mm: float
+    z_mm: float | None = None
+
+
+class CoordinateReferenceResponse(BaseModel):
+    x_mm: float
+    y_mm: float
+    z_mm: float | None = None
+    fecha: str | None = None
+    fuente: str = "SIMULATED"
+    maquina: str | None = None
+    homed_axes: str | None = None
+    posicion_captura: CapturedPositionResponse | None = None
+    sesion: str | None = None
+
+
+class ReferenceSessionResponse(BaseModel):
+    estado: str
+    machine_reference: dict[str, bool | str | None]
+    origen_maquina: ReferencePointResponse
+    origen_material: ReferencePointResponse
+    origen_gcode: ReferencePointResponse
+    origen_trabajo: CoordinateReferenceResponse | None
+    referencia_z: CoordinateReferenceResponse | None
+    pasos: list[ReferenceStepResponse]
+    compensacion_previsualizada_en: str | None
+    analysis_stale: bool
+    lista_para_compensacion: bool
+    bloqueos_compensacion: list[str]
+    motivo_invalidacion: str | None
 
 
 def project_to_response(project: ProyectoPCB) -> ProjectResponse:
@@ -218,11 +337,32 @@ def project_to_response(project: ProyectoPCB) -> ProjectResponse:
             )
             for hole in project.configuracion_alineacion.agujeros_alineacion
         ],
+        montajes=[setup_to_response(setup) for setup in project.montajes],
         operaciones=[operation_to_response(operation) for operation in project.operaciones],
         creado_en=project.creado_en.isoformat(),
         actualizado_en=project.actualizado_en.isoformat(),
+        created_at=project.created_at.isoformat(),
+        updated_at=project.updated_at.isoformat(),
+        last_opened_at=None if project.last_opened_at is None else project.last_opened_at.isoformat(),
+        archived_at=None if project.archived_at is None else project.archived_at.isoformat(),
+        trashed_at=None if project.trashed_at is None else project.trashed_at.isoformat(),
+        status=project.status,
+        current_setup_id=project.current_setup_id,
         version_esquema=project.version_esquema,
         estado_general=project.estado_general,
+    )
+
+
+def setup_to_response(setup: MontajePCB) -> SetupResponse:
+    return SetupResponse(
+        id=setup.id,
+        nombre=setup.nombre,
+        orden=setup.orden,
+        placement_revision=setup.placement_revision,
+        active_reference_id=setup.active_reference_id,
+        active_map_id=setup.active_map_id,
+        preparation_status=str(setup.preparation_status),
+        last_prepared_at=None if setup.last_prepared_at is None else setup.last_prepared_at.isoformat(),
     )
 
 
@@ -233,10 +373,12 @@ def operation_to_response(operation: OperacionPCB) -> OperationResponse:
         tipo=operation.tipo,
         cara=operation.cara,
         orden=operation.orden,
+        setup_id=operation.setup_id,
         archivo_gcode=operation.archivo_gcode,
         nombre_archivo_original=operation.nombre_archivo_original,
         tamano_archivo_bytes=operation.tamano_archivo_bytes,
         sha256=operation.sha256,
+        tool_id=operation.tool_id,
         herramienta=operation.herramienta,
         estado=operation.estado,
         analisis=None if operation.analisis is None else analysis_to_response(operation.analisis),
@@ -245,6 +387,9 @@ def operation_to_response(operation: OperacionPCB) -> OperationResponse:
 
 def analysis_to_response(analysis: OperationAnalysis) -> OperationAnalysisResponse:
     return OperationAnalysisResponse(
+        analysis_version=analysis.analysis_version,
+        current_analysis_version=analysis.current_analysis_version,
+        analisis_desactualizado=analysis.analisis_desactualizado,
         limites=None
         if analysis.limites is None
         else BoundsResponse(
@@ -331,6 +476,7 @@ def machine_session_to_response(session: MachineSessionStatus) -> MachineSession
     return MachineSessionResponse(
         estado=session.estado,
         home_realizado=session.home_realizado,
+        referencia_maquina_confirmada_en=None if session.referencia_maquina_confirmada_en is None else session.referencia_maquina_confirmada_en.isoformat(),
         z_en_altura_segura=session.z_en_altura_segura,
         herramienta_en_centro_cama=session.herramienta_en_centro_cama,
         material_montado=session.material_montado,

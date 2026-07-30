@@ -13,6 +13,10 @@ export type SystemInfoResponse = {
   estado_api: string;
   modo_maquina: string;
   hora_servidor: string;
+  backend_version: string;
+  frontend_build: string;
+  git_commit: string | null;
+  schema_version: string;
 };
 
 export type Material = {
@@ -77,6 +81,9 @@ export type AnalysisIssue = {
 };
 
 export type OperationAnalysis = {
+  analysis_version: string;
+  current_analysis_version: string;
+  analisis_desactualizado: boolean;
   limites: Bounds | null;
   avances_mm_min: number[];
   profundidad_min_mm: number | null;
@@ -101,16 +108,246 @@ export type OperationAnalysis = {
   tolerancia_arco_mm: number | null;
 };
 
+export type ProbeRegion = {
+  min_x_mm: number;
+  min_y_mm: number;
+  max_x_mm: number;
+  max_y_mm: number;
+};
+
+export type ExclusionZone = {
+  id: string;
+  nombre: string;
+  min_x_mm: number;
+  min_y_mm: number;
+  max_x_mm: number;
+  max_y_mm: number;
+};
+
+export type HeightMapGrid = {
+  filas: number;
+  columnas: number;
+  ancho_mm: number;
+  alto_mm: number;
+  paso_x_mm: number;
+  paso_y_mm: number;
+};
+
+export type HeightMapSample = {
+  id: string;
+  x_mm: number;
+  y_mm: number;
+  z_mm: number | null;
+  fila: number;
+  columna: number;
+  origen_datos: string;
+  estado_calidad: string;
+  observacion: string | null;
+  incluida: boolean;
+  residuo_plano_mm: number | null;
+};
+
+export type HeightMapPlane = {
+  a: number;
+  b: number;
+  c: number;
+  inclinacion_x_mm_por_mm: number;
+  inclinacion_y_mm_por_mm: number;
+  rms_residuos_mm: number;
+  residuo_maximo_mm: number;
+  residuo_minimo_mm: number;
+};
+
+export type HeightMapStatistics = {
+  cantidad_puntos: number;
+  cantidad_puntos_incluidos: number;
+  cantidad_puntos_faltantes: number;
+  cantidad_puntos_atipicos: number;
+  altura_min_mm: number | null;
+  altura_max_mm: number | null;
+  rango_alturas_mm: number | null;
+  valor_referencia_mm: number | null;
+  desviacion_rms_respecto_plano_mm: number | null;
+  residuo_maximo_mm: number | null;
+  ancho_cubierto_mm: number | null;
+  alto_cubierto_mm: number | null;
+};
+
+export type HeightMapSurfacePoint = {
+  fila: number;
+  columna: number;
+  x_mm: number;
+  y_mm: number;
+  z_mm: number | null;
+  estado: string;
+  observacion: string | null;
+};
+
+export type HeightMapSurface = {
+  filas: number;
+  columnas: number;
+  modo: string;
+  puntos: HeightMapSurfacePoint[];
+};
+
+export type HeightMap = {
+  proyecto_id: string;
+  operacion_id: string;
+  version: number;
+  version_algoritmo: string;
+  estado: string;
+  fuente_datos: string;
+  superficie_simulada: string | null;
+  repeticion_simulacion: number | null;
+  etiqueta_simulada: boolean;
+  grid: HeightMapGrid;
+  probe_region: ProbeRegion;
+  exclusion_zones: ExclusionZone[];
+  muestras: HeightMapSample[];
+  estadisticas: HeightMapStatistics;
+  plano: HeightMapPlane | null;
+  superficies: Record<string, HeightMapSurface>;
+  creado_en: string;
+  actualizado_en: string;
+};
+
+export type ReferencePoint = {
+  x_mm: number | null;
+  y_mm: number | null;
+  z_mm: number | null;
+};
+
+export type CapturedPosition = {
+  x_mm: number;
+  y_mm: number;
+  z_mm: number | null;
+};
+
+export type CoordinateReference = {
+  x_mm: number;
+  y_mm: number;
+  z_mm: number | null;
+  fecha: string | null;
+  fuente: string;
+  maquina: string | null;
+  homed_axes: string | null;
+  posicion_captura: CapturedPosition | null;
+  sesion: string | null;
+};
+
+export type ReferenceConfirmation = {
+  x_mm: number;
+  y_mm: number;
+  z_mm?: number;
+};
+
+export type ReferenceStep = {
+  id: string;
+  titulo: string;
+  estado: string;
+  confirmado: boolean;
+  fecha: string | null;
+  detalle: string | null;
+};
+
+export type ReferenceSession = {
+  estado: string;
+  machine_reference: {
+    confirmada: boolean;
+    fecha: string | null;
+  };
+  origen_maquina: ReferencePoint;
+  origen_material: ReferencePoint;
+  origen_gcode: ReferencePoint;
+  origen_trabajo: CoordinateReference | null;
+  referencia_z: CoordinateReference | null;
+  pasos: ReferenceStep[];
+  compensacion_previsualizada_en: string | null;
+  analysis_stale: boolean;
+  lista_para_compensacion: boolean;
+  bloqueos_compensacion: string[];
+  motivo_invalidacion: string | null;
+};
+
+export type ReferenceMoveResult = {
+  accepted: boolean;
+  reference_x: number;
+  reference_y: number;
+  preparation_z: number;
+  final_state: string;
+  message: string;
+};
+
+export type CompensationPreviewPoint = {
+  x_mm: number;
+  y_mm: number;
+  z_original_mm: number | null;
+  z_superficie_mm: number | null;
+  correccion_mm: number | null;
+  z_compensada_mm: number | null;
+  estado: string;
+  observacion: string | null;
+};
+
+export type CompensationPreviewSegment = {
+  tipo: string;
+  tipo_movimiento: string;
+  numero_linea: number | null;
+  estado: string;
+  distancia_mm: number;
+  puntos: CompensationPreviewPoint[];
+};
+
+export type CompensationPreview = {
+  convencion_matematica: string;
+  z_referencia_mm: number;
+  paso_muestreo_virtual_mm: number;
+  tolerancia_dominio_mm: number;
+  puntos_dentro_dominio: number;
+  puntos_fuera_dominio: number;
+  puntos_fuera_dominio_bloqueantes: number;
+  distancia_maxima_fuera_dominio_mm: number;
+  cobertura_suficiente: boolean;
+  puntos_fuera_dominio_detalle: Array<{
+    operation_id: string;
+    operation_name: string;
+    segment_index: number;
+    point_index: number;
+    x_mm: number;
+    y_mm: number;
+    distance_mm: number;
+    reason: string;
+    numerical_only: boolean;
+  }>;
+  puntos_virtuales_agregados: number;
+  resumen_z_original: { min_mm: number | null; max_mm: number | null };
+  resumen_z_compensada: { min_mm: number | null; max_mm: number | null };
+  segmentos: CompensationPreviewSegment[];
+};
+
+export type Setup = {
+  id: string;
+  nombre: string;
+  orden: number;
+  placement_revision?: string;
+  active_reference_id?: string | null;
+  active_map_id?: string | null;
+  preparation_status?: string;
+  last_prepared_at?: string | null;
+};
+
 export type Operation = {
   id: string;
   nombre: string;
   tipo: string;
   cara: string;
   orden: number;
+  setup_id: string;
   archivo_gcode: string | null;
   nombre_archivo_original: string | null;
   tamano_archivo_bytes: number | null;
   sha256: string | null;
+  tool_id: string | null;
   herramienta: string | null;
   estado: string;
   analisis: OperationAnalysis | null;
@@ -123,16 +360,82 @@ export type Project = {
   doble_cara: boolean;
   eje_volteo: string | null;
   agujeros_alineacion: AgujeroAlineacion[];
+  montajes: Setup[];
   operaciones: Operation[];
   creado_en: string;
   actualizado_en: string;
+  created_at?: string;
+  updated_at?: string;
+  last_opened_at?: string | null;
+  archived_at?: string | null;
+  trashed_at?: string | null;
+  status?: string;
+  current_setup_id?: string;
   version_esquema: string;
   estado_general: string;
+};
+
+export type ContinueProjectResult = {
+  view: string;
+  operation_id: string | null;
+  reason: string | null;
+};
+
+export type MeshSuggestion = {
+  grid_mode: "suggested";
+  rows: number;
+  columns: number;
+  point_count: number;
+  excluded_count: number;
+  executable_point_count: number;
+  dx_mm: number;
+  dy_mm: number;
+  estimated_distance_mm: number | null;
+  estimated_time_s: number | null;
+  reason: string;
+  local_region: { min_x_mm: number; min_y_mm: number; max_x_mm: number; max_y_mm: number };
+};
+
+
+export type MachineRuntime = {
+  mode: string;
+  mode_label: string;
+  state: string;
+  health: string;
+  started_at: string;
+  application: Record<string, unknown>;
+  moonraker: Record<string, unknown>;
+  klipper: Record<string, unknown>;
+  preparation?: {
+    reference_prep_z_mm?: number;
+    reference_prep_z_feed_mm_min?: number;
+    reference_prep_z_speed_mm_s?: number;
+    reference_prep_xy_feed_mm_min?: number;
+    reference_prep_xy_speed_mm_s?: number;
+    center_x_mm?: number | null;
+    center_y_mm?: number | null;
+    target?: { x_mm?: number | null; y_mm?: number | null; z_mm?: number | null } | null;
+    sequence?: string[];
+  };
+  tool_change?: { x_mm?: number; y_mm?: number; z_mm?: number; z_feed_mm_min?: number; z_speed_mm_s?: number };
+  arduino: Record<string, unknown>;
+  probe_live?: Record<string, unknown>;
+  last_probe_failure?: Record<string, unknown> | null;
+  controller: Record<string, unknown>;
+  safety: Record<string, unknown>;
+  last_command: string | null;
+  last_movement: Record<string, unknown> | null;
+  last_error: string | null;
+  last_probe_result: Record<string, unknown> | null;
+  active_operation?: Record<string, unknown> | null;
+  initialization_steps: Array<Record<string, unknown>>;
+  events: Array<Record<string, unknown>>;
 };
 
 export type MachineSession = {
   estado: string;
   home_realizado: boolean;
+  referencia_maquina_confirmada_en: string | null;
   z_en_altura_segura: boolean;
   herramienta_en_centro_cama: boolean;
   material_montado: boolean;
@@ -148,4 +451,350 @@ export type ProjectPayload = {
   doble_cara: boolean;
   eje_volteo: string | null;
   agujeros_alineacion: AgujeroAlineacion[];
+};
+
+export type PhysicalMeshPoint = {
+  index: number;
+  row: number | null;
+  column: number | null;
+  role?: "GRID" | "REFERENCE" | string;
+  x_local: number;
+  y_local: number;
+  x_machine?: number | null;
+  y_machine?: number | null;
+  z_measured?: number | null;
+  z_measured_abs?: number | null;
+  delta_z?: number | null;
+  status: string;
+  attempts?: number;
+  duration?: number | null;
+  duration_s?: number | null;
+  error?: string | null;
+  last_error?: string | null;
+};
+
+export type PhysicalMapExclusion = {
+  id: string;
+  name: string;
+  shape: "rectangle" | "circle";
+  enabled: boolean;
+  x_min_mm?: number | null;
+  x_max_mm?: number | null;
+  y_min_mm?: number | null;
+  y_max_mm?: number | null;
+  center_x_mm?: number | null;
+  center_y_mm?: number | null;
+  radius_mm?: number | null;
+};
+
+export type PhysicalMapPayload = Record<string, unknown> & {
+  map_id?: string | null;
+  preview_id?: string;
+  preview_version?: string;
+  status?: string;
+  source?: string;
+  point_count?: number;
+  excluded_count?: number;
+  executable_point_count?: number;
+  estimated_distance_mm?: number | null;
+  estimated_time_s?: number | null;
+  edge_margins?: { left_mm: number; right_mm: number; bottom_mm: number; top_mm: number };
+  exclusions?: PhysicalMapExclusion[];
+  points?: PhysicalMeshPoint[];
+  grid_mode?: "manual" | "suggested";
+  rows?: number;
+  columns?: number;
+  dx?: number;
+  dy?: number;
+  configuration_change_warning?: string;
+  grid?: { rows: number; columns: number; dx_mm: number; dy_mm: number };
+  local_region?: { min_x_mm: number; min_y_mm: number; max_x_mm: number; max_y_mm: number };
+  probe_region?: { min_x_mm: number; min_y_mm: number; max_x_mm: number; max_y_mm: number };
+  material_bounds?: { min_x_mm: number; min_y_mm: number; max_x_mm: number; max_y_mm: number };
+  machine_region?: { min_x_mm: number; min_y_mm: number; max_x_mm: number; max_y_mm: number } | null;
+  local_points?: PhysicalMeshPoint[];
+  machine_points?: PhysicalMeshPoint[] | null;
+  serpentine_path?: PhysicalMeshPoint[];
+  reference_point?: PhysicalMeshPoint;
+  valid_for_execution?: boolean;
+  warnings?: string[];
+  probe_config?: { safe_z_mm?: number | null; probe_step_mm?: number | null; probe_feed_mm_min?: number | null; retract_mm?: number | null };
+  tool_references?: Record<string, unknown>;
+};
+
+export type PhysicalMapResponse = {
+  payload: PhysicalMapPayload;
+};
+
+export type CompensatedGCodeResult = {
+  relative_path: string;
+  metadata_path: string;
+  metadata: Record<string, unknown>;
+  preview: Record<string, unknown>;
+};
+
+export type ExecutionCheck = {
+  name: string;
+  ok: boolean;
+  detail: string;
+};
+
+export type ExecutionPreflight = {
+  state: string;
+  ready: boolean;
+  checks: ExecutionCheck[];
+  generated_file: string | null;
+};
+
+export type ExecutionActionResult = {
+  state: string;
+  action: string;
+  detail: string | null;
+  preflight?: ExecutionPreflight | null;
+};
+
+
+export type JobOperationPlan = {
+  operation_id: string;
+  order: number;
+  order_label: string;
+  name: string;
+  type: string;
+  tool_id: string | null;
+  tool_name: string;
+  tool_key: string;
+  tool_changed: boolean;
+  map_status: string;
+  coverage_status: string;
+  coverage_detail: string | null;
+  reference_status: string;
+  generated_file: string | null;
+  generated_file_name: string | null;
+  generated_metadata_path?: string | null;
+  compensation_status: string;
+  preflight_status: string;
+  execution_status: string;
+  blocking: boolean;
+  blocking_reasons: string[];
+};
+
+export type JobPlan = {
+  schema_version: string;
+  plan_id: string;
+  project_id: string;
+  setup_id: string;
+  face: string;
+  placement_revision: string;
+  active_map_id: string | null;
+  active_map?: PhysicalMapPayload | null;
+  operations: JobOperationPlan[];
+  summary: {
+    operations_total: number;
+    operations_ready: number;
+    generated_files: number;
+    tool_changes: number;
+    distinct_tools: number;
+    blocked_operations: number;
+  };
+  manifest_path: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type JobRunOperation = {
+  operation_id: string;
+  order: number;
+  order_label: string;
+  name: string;
+  type: string;
+  tool_id: string | null;
+  tool_name: string;
+  tool_key: string;
+  tool_changed: boolean;
+  reference_status: string;
+  generated_file: string | null;
+  generated_file_name: string | null;
+  execution_status: string;
+  started_at: string | null;
+  completed_at: string | null;
+  error: string | null;
+  progress: number | null;
+  installation_revision?: string | null;
+  remote_file?: string | null;
+  machine_status?: Record<string, unknown> | null;
+  observed_printing?: boolean;
+};
+
+export type JobRunEvent = {
+  event_id?: string;
+  run_id?: string;
+  operation_id?: string | null;
+  timestamp: string;
+  level: string;
+  stage?: string;
+  message: string;
+};
+
+export type JobRun = {
+  schema_version: string;
+  run_id: string;
+  plan_id: string;
+  project_id: string;
+  setup_id: string;
+  face: string;
+  placement_revision: string;
+  active_map_id: string | null;
+  state: string;
+  ready: boolean;
+  checks: ExecutionCheck[];
+  started_at: string | null;
+  completed_at: string | null;
+  updated_at: string;
+  current_operation_index: number;
+  current_operation_id: string | null;
+  current_tool_key: string | null;
+  next_action: string;
+  available_actions: string[];
+  operations: JobRunOperation[];
+  summary: {
+    operations_total: number;
+    operations_completed: number;
+    tool_changes_required: number;
+    tool_changes_completed: number;
+  };
+  timeline: Array<Record<string, unknown>>;
+  events: JobRunEvent[];
+  manifest_path: string | null;
+  last_watcher_error?: string | null;
+  recovery_state?: string | null;
+};
+
+export type JobDryRun = {
+  mode: "DRY_RUN";
+  movement_lock_acquired: false;
+  moonraker_commands_sent: 0;
+  ok: boolean;
+  operations: Array<Record<string, unknown>>;
+};
+
+export type JobHistoryEntry = {
+  run_id: string;
+  state: string;
+  started_at: string | null;
+  completed_at: string | null;
+  tool_changes_completed: number;
+  operations_completed: number;
+  manifest_path: string | null;
+};
+
+
+export type JobRunConflictDetail = {
+  code: string;
+  message: string;
+  conflict_condition: string;
+  existing_run: {
+    run_id: string | null;
+    project_id: string;
+    setup: string;
+    side: string;
+    placement_revision: string | null;
+    status: string;
+    current_operation: {
+      operation_id: string | null;
+      name: string | null;
+      execution_status: string | null;
+      remote_file: string | null;
+    };
+    remote_file: string | null;
+    worker_alive: boolean;
+    watcher_alive: boolean;
+    supervisor_registered: boolean;
+    movement_lock: boolean | null;
+    job_lock: boolean;
+    updated_at: string | null;
+    last_error: string | null;
+    available_actions: string[];
+  };
+  moonraker: {
+    connected: boolean;
+    webhooks_state: string | null;
+    klipper_state: string | null;
+    print_state: string | null;
+    filename: string | null;
+    progress: number;
+    is_active: boolean;
+    file_position: number | null;
+    file_size: number | null;
+    print_duration: number | null;
+    message: string | null;
+    updated_at: string;
+  };
+  available_actions: string[];
+  can_archive_stale: boolean;
+};
+
+export type StaleRunArchiveResult = {
+  archived_run_id: string | null;
+  previous_status: string;
+  archive_path: string;
+  locks_released: string[];
+  can_start_new_run: boolean;
+};
+
+export type LiveExecutionSnapshot = {
+  moonraker: {
+    connected: boolean;
+    klipper_state: string | null;
+    print_state: string | null;
+    filename: string | null;
+    progress: number;
+    is_active: boolean;
+    file_position: number | null;
+    file_size: number | null;
+    print_duration: number | null;
+    message: string | null;
+    updated_at: string;
+  };
+  run: {
+    run_id: string | null;
+    status: string;
+    current_operation_index: number;
+    total_operations: number;
+    completed_operations: number;
+    overall_progress: number;
+    next_action: string;
+    available_actions: string[];
+    worker_alive: boolean;
+    watcher_alive: boolean;
+    supervisor_registered?: boolean;
+    movement_lock?: boolean | null;
+    job_lock?: boolean;
+    last_watcher_error: string | null;
+    recovery_state?: string | null;
+    stale_candidate?: boolean;
+    updated_at: string | null;
+  };
+  operation: {
+    operation_id: string | null;
+    name: string | null;
+    tool: string | null;
+    execution_status: string;
+    expected_remote_file: string | null;
+    observed_filename: string | null;
+    filename_match: boolean;
+    observed_printing: boolean;
+    progress: number;
+  };
+  operations: JobRunOperation[];
+  transition: {
+    state: string;
+    required_tool: string | null;
+    operator_confirmation_required: boolean;
+  };
+  synchronization: {
+    ok: boolean;
+    reason: string | null;
+  };
+  events: JobRunEvent[];
+  job_run: JobRun | null;
 };

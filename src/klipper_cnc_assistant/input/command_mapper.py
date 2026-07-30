@@ -45,21 +45,9 @@ class CommandMapper:
             case "DOWN":
                 jog_y = -1
 
-            case "UP_LEFT":
-                jog_x = -1
-                jog_y = 1
-
-            case "UP_RIGHT":
-                jog_x = 1
-                jog_y = 1
-
-            case "DOWN_LEFT":
-                jog_x = -1
-                jog_y = -1
-
-            case "DOWN_RIGHT":
-                jog_x = 1
-                jog_y = -1
+            case "UP_LEFT" | "UP_RIGHT" | "DOWN_LEFT" | "DOWN_RIGHT":
+                jog_x = 0
+                jog_y = 0
 
         return ControllerCommand(
             jog_x=jog_x,

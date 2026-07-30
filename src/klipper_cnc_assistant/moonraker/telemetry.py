@@ -15,6 +15,14 @@ class MoonrakerTelemetry:
         self.machine_state = machine_state
 
         self._running = False
+        self._state_callback = None
+
+    def set_state_callback(self, callback):
+        self._state_callback = callback
+
+    def _state(self, state):
+        if self._state_callback is not None:
+            self._state_callback(state)
 
     async def _subscribe(
         self,
@@ -28,6 +36,20 @@ class MoonrakerTelemetry:
                     "motion_report": [
                         "live_position",
                         "live_velocity",
+                    ],
+                    "toolhead": [
+                        "position",
+                        "homed_axes",
+                        "axis_minimum",
+                        "axis_maximum",
+                        "max_velocity",
+                        "max_accel",
+                    ],
+                    "gcode_move": [
+                        "gcode_position",
+                        "position",
+                        "absolute_coordinates",
+                        "homing_origin",
                     ]
                 }
             },
@@ -53,12 +75,39 @@ class MoonrakerTelemetry:
         self.machine_state.update_motion(
             live_position=live_position,
             live_velocity=live_velocity,
+            source="websocket",
+        )
+
+    def _process_toolhead(
+        self,
+        toolhead,
+    ):
+        self.machine_state.update_toolhead(
+            position=toolhead.get("position"),
+            homed_axes=toolhead.get("homed_axes"),
+            axis_minimum=toolhead.get("axis_minimum"),
+            axis_maximum=toolhead.get("axis_maximum"),
+            max_velocity=toolhead.get("max_velocity"),
+            max_accel=toolhead.get("max_accel"),
+        )
+
+
+    def _process_gcode_move(
+        self,
+        gcode_move,
+    ):
+        self.machine_state.update_gcode_move(
+            gcode_position=gcode_move.get("gcode_position"),
+            position=gcode_move.get("position"),
+            absolute_coordinates=gcode_move.get("absolute_coordinates"),
+            homing_origin=gcode_move.get("homing_origin"),
         )
 
     def _process_message(
         self,
         data,
     ):
+        self._state("LIVE")
         if data.get("id") == 1:
             result = data.get("result")
 
@@ -81,6 +130,16 @@ class MoonrakerTelemetry:
                 self._process_motion_report(
                     motion_report
                 )
+
+            toolhead = status.get("toolhead")
+
+            if isinstance(toolhead, dict):
+                self._process_toolhead(toolhead)
+
+            gcode_move = status.get("gcode_move")
+
+            if isinstance(gcode_move, dict):
+                self._process_gcode_move(gcode_move)
 
             return
 
@@ -112,26 +171,42 @@ class MoonrakerTelemetry:
                 motion_report
             )
 
+        toolhead = status.get("toolhead")
+
+        if isinstance(toolhead, dict):
+            self._process_toolhead(toolhead)
+
+        gcode_move = status.get("gcode_move")
+
+        if isinstance(gcode_move, dict):
+            self._process_gcode_move(gcode_move)
+
     async def run(self):
         self._running = True
-
-        async with websockets.connect(
-            self.websocket_url
-        ) as websocket:
-
-            await self._subscribe(
-                websocket
-            )
-
-            async for message in websocket:
+        while self._running:
+            try:
+                self._state("RECONNECTING")
+                async with websockets.connect(self.websocket_url) as websocket:
+                    await self._subscribe(websocket)
+                    while self._running:
+                        # A TCP socket can remain open while Moonraker stops publishing.
+                        # Treat an idle subscription as stale so the outer loop reconnects.
+                        message = await asyncio.wait_for(websocket.recv(), timeout=3.0)
+                        self._process_message(json.loads(message))
+            except Exception:
+                self._state("STALE")
                 if not self._running:
                     break
-
-                data = json.loads(message)
-
-                self._process_message(
-                    data
-                )
+                await asyncio.sleep(1.0)
 
     def stop(self):
         self._running = False
+        self._state("DISCONNECTED")
+        self._state_callback = None
+
+    def set_state_callback(self, callback):
+        self._state_callback = callback
+
+    def _state(self, state):
+        if self._state_callback is not None:
+            self._state_callback(state)

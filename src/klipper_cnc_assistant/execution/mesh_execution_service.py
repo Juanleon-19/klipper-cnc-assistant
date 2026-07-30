@@ -1,0 +1,355 @@
+from __future__ import annotations
+
+import logging
+import threading
+import time
+from typing import Any
+
+from klipper_cnc_assistant.application.errors import ApplicationError
+from klipper_cnc_assistant.application.physical_map_service import PhysicalMapService
+
+
+logger = logging.getLogger(__name__)
+
+
+POINT_STATES = (
+    "POINT_PRECHECK",
+    "POINT_MOVE_SAFE_Z",
+    "POINT_CONFIRM_SAFE_Z",
+    "POINT_MOVE_XY",
+    "POINT_CONFIRM_XY",
+    "POINT_SETTLE",
+    "POINT_VERIFY_PROBE_OPEN",
+    "POINT_LOWER_STEP",
+    "POINT_CONFIRM_STEP",
+    "POINT_CONTACT_DETECTED",
+    "POINT_CAPTURE_Z",
+    "POINT_RETRACT",
+    "POINT_CONFIRM_RETRACT",
+    "POINT_PERSIST",
+    "POINT_COMPLETE",
+    "POINT_RETRY",
+    "POINT_FAILED",
+)
+
+
+class MeshExecutionService:
+    """Runs physical mesh probing outside the HTTP request lifecycle."""
+
+    def __init__(self, physical_map_service: PhysicalMapService, *, max_point_retries: int = 2) -> None:
+        self.physical_map_service = physical_map_service
+        # Los reintentos requieren decisión explícita del operador; nunca son implícitos.
+        self.max_point_retries = 0
+        self._lock = threading.Lock()
+        self._threads: dict[tuple[str, str], threading.Thread] = {}
+        self._cancel_requests: dict[tuple[str, str], threading.Event] = {}
+
+    def start_all(self, *, project_id: str, map_id: str, runtime: Any) -> dict[str, Any]:
+        payload = self.physical_map_service.get_by_id(project_id, map_id)
+        if payload.get("status") in {"CANCELLED", "MESH_COMPLETE"}:
+            raise ApplicationError("La malla no está en un estado ejecutable.")
+        key = (project_id, map_id)
+        with self._lock:
+            self._cancel_requests[key] = threading.Event()
+        with self._lock:
+            for other_key, thread in list(self._threads.items()):
+                if not thread.is_alive():
+                    self._threads.pop(other_key, None)
+            if self._threads:
+                raise ApplicationError("Ya hay una operación física de malla en curso.")
+            self.physical_map_service.mark_status(project_id=project_id, map_id=map_id, status="MESH_PROBING")
+            self.physical_map_service.update_execution_state(
+                project_id=project_id,
+                map_id=map_id,
+                worker_active=True,
+                point_state="POINT_PRECHECK",
+                last_event="Sondeo automático iniciado; el backend continuará aunque se cierre el navegador.",
+            )
+            thread = threading.Thread(target=self._run, args=(project_id, map_id, runtime), name=f"mesh-{map_id}", daemon=True)
+            self._threads[key] = thread
+            thread.start()
+        self._log_transition("MESH_WORKER_START", project_id, map_id)
+        return self.physical_map_service.get_by_id(project_id, map_id)
+
+    def resume(self, *, project_id: str, map_id: str, runtime: Any) -> dict[str, Any]:
+        self.physical_map_service.mark_status(project_id=project_id, map_id=map_id, status="MESH_READY")
+        return self.start_all(project_id=project_id, map_id=map_id, runtime=runtime)
+
+    def cancel(self, *, project_id: str, map_id: str, runtime: Any) -> dict[str, Any]:
+        key = (project_id, map_id)
+        with self._lock:
+            self._cancel_requests[key] = threading.Event()
+        with self._lock:
+            cancel_request = self._cancel_requests.get(key)
+            if cancel_request is not None:
+                cancel_request.set()
+        try:
+            runtime.cancel_operation()
+        except Exception:
+            pass
+        return self.physical_map_service.mark_status(project_id=project_id, map_id=map_id, status="CANCELLED")
+
+    def wait_until_idle(self, *, timeout_s: float = 5.0) -> bool:
+        deadline = time.monotonic() + timeout_s
+        while True:
+            with self._lock:
+                threads = list(self._threads.values())
+            live = [thread for thread in threads if thread.is_alive()]
+            if not live:
+                return True
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            for thread in live:
+                thread.join(min(0.05, remaining))
+
+    def _run(self, project_id: str, map_id: str, runtime: Any) -> None:
+        key = (project_id, map_id)
+        with self._lock:
+            self._cancel_requests.setdefault(key, threading.Event())
+        try:
+            while True:
+                with self._lock:
+                    cancel_requested = self._cancel_requests.get(key)
+                if cancel_requested is not None and cancel_requested.is_set():
+                    self.physical_map_service.mark_status(project_id=project_id, map_id=map_id, status="CANCELLED")
+                    return
+                payload = self.physical_map_service.get_by_id(project_id, map_id)
+                status = payload.get("status")
+                execution = payload.get("execution") or {}
+                if status in {"CANCELLED", "MESH_COMPLETE"}:
+                    self.physical_map_service.update_execution_state(
+                        project_id=project_id,
+                        map_id=map_id,
+                        worker_active=False,
+                        point_state=str(status),
+                        last_event=f"Ejecución de malla terminada en estado {status}.",
+                    )
+                    return
+                if status == "MESH_PAUSED" or execution.get("pause_requested"):
+                    self.physical_map_service.mark_status(project_id=project_id, map_id=map_id, status="MESH_PAUSED")
+                    self.physical_map_service.update_execution_state(
+                        project_id=project_id,
+                        map_id=map_id,
+                        worker_active=False,
+                        point_state="MESH_PAUSED",
+                        last_event="Pausa solicitada; no se iniciará otro punto.",
+                    )
+                    return
+                try:
+                    snapshot = self._require_current_machine_state(runtime)
+                except Exception as error:
+                    self.physical_map_service.mark_status(project_id=project_id, map_id=map_id, status="MESH_PAUSED")
+                    self.physical_map_service.update_execution_state(
+                        project_id=project_id, map_id=map_id, worker_active=False, point_state="MESH_PAUSED",
+                        error=f"No se pudo confirmar estado reciente de Moonraker: {error}",
+                        observed=self._observed_from_snapshot(snapshot if "snapshot" in locals() else {}),
+                        last_event="Malla pausada: Moonraker no respondió con estado reciente; reconecte y reanude explícitamente.",
+                    )
+                    self._log_transition("POINT_FAILED", project_id, map_id, error=str(error))
+                    return
+                try:
+                    point = self.physical_map_service.next_pending_point(project_id, map_id)
+                except ApplicationError:
+                    self.physical_map_service.update_execution_state(
+                        project_id=project_id,
+                        map_id=map_id,
+                        worker_active=False,
+                        point_state="MESH_COMPLETE" if payload.get("status") == "MESH_COMPLETE" else "MESH_READY",
+                        last_event="No quedan puntos pendientes ejecutables.",
+                    )
+                    self._log_transition("MESH_COMPLETE", project_id, map_id)
+                    return
+                self._log_transition("POINT_START", project_id, map_id, point_index=int(point["index"]), target=point)
+                self._probe_one_point(project_id, map_id, runtime, point, probe_config=payload.get("probe_config"))
+        finally:
+            with self._lock:
+                thread = self._threads.get(key)
+                if thread is threading.current_thread():
+                    self._threads.pop(key, None)
+                    self._cancel_requests.pop(key, None)
+            self._log_transition("MESH_WORKER_END", project_id, map_id)
+
+    def _probe_one_point(self, project_id: str, map_id: str, runtime: Any, point: dict[str, Any], *, probe_config: dict[str, Any] | None = None) -> None:
+        point_index = int(point["index"])
+        attempts = int(point.get("attempts", 0))
+        target = {"x_mm": point.get("x_machine"), "y_mm": point.get("y_machine"), "point_index": point_index}
+        # Cada inicio o reintento explícito ejecuta exactamente un intento.
+        while attempts < int(point.get("attempts", 0)) + 1:
+            attempts += 1
+            self.physical_map_service.update_execution_state(
+                project_id=project_id,
+                map_id=map_id,
+                worker_active=True,
+                point_state="POINT_PRECHECK",
+                point_index=point_index,
+                retry_count=attempts - 1,
+                target=target,
+                last_event=f"Punto {point_index + 1}: verificando condiciones antes de mover.",
+            )
+            started = time.monotonic()
+            try:
+                self.physical_map_service.update_execution_state(
+                    project_id=project_id,
+                    map_id=map_id,
+                    worker_active=True,
+                    point_state="POINT_MOVE_SAFE_Z",
+                    point_index=point_index,
+                    retry_count=attempts - 1,
+                    command="probe_mesh_point",
+                    target=target,
+                    last_event=f"Punto {point_index + 1}: operación física exclusiva iniciada.",
+                )
+                def progress(state: str, detail: dict[str, Any]) -> None:
+                    observed_now = self._observed_from_runtime(runtime)
+                    self.physical_map_service.update_execution_state(
+                        project_id=project_id, map_id=map_id, worker_active=True, point_state=state,
+                        point_index=point_index, retry_count=attempts - 1, command=str(detail.get("command") or state),
+                        target={**target, **detail}, observed=observed_now,
+                        last_event=f"Punto {point_index + 1}: {state}.",
+                    )
+                    transition = {
+                        "POINT_MOVE_SAFE_Z": "MOVE_SAFE_Z",
+                        "POINT_CONFIRM_SAFE_Z": "MOVE_SAFE_Z_DONE",
+                        "POINT_VERIFY_PROBE_OPEN": "VERIFY_PROBE_OPEN",
+                        "POINT_MOVE_XY": "MOVE_XY",
+                        "POINT_CONFIRM_XY": "MOVE_XY_DONE",
+                        "POINT_LOWER_STEP": "LOWER_STEP",
+                        "POINT_CONTACT_DETECTED": "CONTACT",
+                        "POINT_RETRACT": "RETRACT",
+                    }.get(state)
+                    if transition:
+                        self._log_transition(transition, project_id, map_id, point_index=point_index, target={**target, **detail}, observed=observed_now, started=started)
+                try:
+                    result = runtime.probe_mesh_point(point, probe_config=probe_config, progress_callback=progress)
+                except TypeError as error:
+                    if "progress_callback" not in str(error):
+                        raise
+                    result = runtime.probe_mesh_point(point, probe_config=probe_config)
+                observed = self._observed_from_runtime(runtime)
+                self.physical_map_service.update_execution_state(
+                    project_id=project_id,
+                    map_id=map_id,
+                    worker_active=True,
+                    point_state="POINT_CAPTURE_Z",
+                    point_index=point_index,
+                    retry_count=attempts - 1,
+                    target=target,
+                    observed=observed,
+                    last_event=f"Punto {point_index + 1}: contacto capturado; persistiendo Z.",
+                )
+                updated = self.physical_map_service.record_point(
+                    project_id=project_id,
+                    map_id=map_id,
+                    point_index=point_index,
+                    z_measured=float(result["z_measured"]),
+                    status="MEASURED",
+                    attempts=attempts,
+                    duration_s=float(result.get("duration_s", time.monotonic() - started)),
+                    error=None,
+                )
+                self.physical_map_service.update_execution_state(
+                    project_id=project_id,
+                    map_id=map_id,
+                    worker_active=updated.get("status") != "MESH_COMPLETE",
+                    point_state="POINT_COMPLETE",
+                    point_index=point_index,
+                    retry_count=attempts - 1,
+                    target=target,
+                    observed=observed,
+                    last_event=f"Punto {point_index + 1}: completado; avanzando automáticamente.",
+                )
+                self._log_transition("POINT_COMPLETE", project_id, map_id, point_index=point_index, target=target, observed=observed, started=started)
+                return
+            except Exception as error:
+                observed = self._observed_from_runtime(runtime)
+                with self._lock:
+                    cancelled = bool(self._cancel_requests.get((project_id, map_id)) and self._cancel_requests[(project_id, map_id)].is_set())
+                if cancelled:
+                    self.physical_map_service.mark_status(project_id=project_id, map_id=map_id, status="CANCELLED")
+                    self.physical_map_service.update_execution_state(
+                        project_id=project_id, map_id=map_id, worker_active=False, point_state="CANCELLED",
+                        point_index=point_index, error=str(error), target=target, observed=observed,
+                        last_event="Malla cancelada por el operador; no se iniciará otro paso.",
+                    )
+                    return
+                if attempts <= self.max_point_retries:
+                    self.physical_map_service.update_execution_state(
+                        project_id=project_id,
+                        map_id=map_id,
+                        worker_active=True,
+                        point_state="POINT_RETRY",
+                        point_index=point_index,
+                        retry_count=attempts,
+                        error=str(error),
+                        target=target,
+                        observed=observed,
+                        last_event=f"Punto {point_index + 1}: error recuperable; reintento {attempts}/{self.max_point_retries} tras reconciliar estado.",
+                    )
+                    continue
+                self.physical_map_service.mark_point_failed(project_id=project_id, map_id=map_id, point_index=point_index, error=str(error))
+                self.physical_map_service.update_execution_state(
+                    project_id=project_id,
+                    map_id=map_id,
+                    worker_active=False,
+                    point_state="POINT_FAILED",
+                    point_index=point_index,
+                    retry_count=attempts,
+                    error=str(error),
+                    target=target,
+                    observed=observed,
+                    last_event=f"Punto {point_index + 1}: falló después de {attempts} intentos; la malla queda pausada.",
+                )
+                self._log_transition("POINT_FAILED", project_id, map_id, point_index=point_index, target=target, observed=observed, error=str(error), started=started)
+                return
+
+    def _require_current_machine_state(self, runtime: Any) -> dict[str, Any]:
+        """Require a fresh HTTP observation before a physical point.
+
+        A quiet WebSocket alone is not proof that Moonraker is unavailable: the
+        discovery response contains the toolhead state used by movement guards.
+        A failed HTTP refresh remains a hard stop.
+        """
+        refresh_state = getattr(runtime, "refresh_observed_state", None)
+        if refresh_state is not None:
+            snapshot = refresh_state()
+        else:
+            snapshot_fn = getattr(runtime, "snapshot", None)
+            snapshot = snapshot_fn() if snapshot_fn is not None else {}
+        safety = snapshot.get("safety") if isinstance(snapshot, dict) else {}
+        if isinstance(safety, dict) and safety.get("serial_recent") is False:
+            raise ApplicationError("Arduino obsoleto; no se inicia el sondeo.")
+        return snapshot if isinstance(snapshot, dict) else {}
+
+    def _log_transition(self, event: str, project_id: str, map_id: str, *, point_index: int | None = None, target: dict[str, Any] | None = None, observed: dict[str, Any] | None = None, error: str | None = None, started: float | None = None) -> None:
+        observed = observed or {}
+        logger.info(
+            "%s map_id=%s point_index=%s target=%s observed=%s probe=%s telemetry_age_s=%s elapsed_s=%.3f error=%s",
+            event, map_id, point_index, target or {}, observed.get("position"), observed.get("probe") or observed.get("probe_filtered"),
+            observed.get("telemetry_age_s"), 0.0 if started is None else time.monotonic() - started, error,
+        )
+
+    @staticmethod
+    def _observed_from_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "state": snapshot.get("state"), "position": snapshot.get("position") or snapshot.get("machine_position"),
+            "telemetry_age_s": snapshot.get("telemetry_age_s"), "serial_age_s": snapshot.get("serial_age_s"),
+        }
+
+    def _observed_from_runtime(self, runtime: Any) -> dict[str, Any] | None:
+        snapshot_fn = getattr(runtime, "snapshot", None)
+        if snapshot_fn is None:
+            return None
+        try:
+            snapshot = snapshot_fn()
+        except Exception:
+            return None
+        return {
+            "state": snapshot.get("state"),
+            "position": snapshot.get("position") or snapshot.get("machine_position"),
+            "homed_axes": snapshot.get("homed_axes"),
+            "last_command": snapshot.get("last_command") or snapshot.get("last_command_text"),
+            "probe": snapshot.get("probe") or snapshot.get("last_packet"),
+            "telemetry_age_s": snapshot.get("telemetry_age_s"),
+            "serial_age_s": snapshot.get("serial_age_s"),
+        }

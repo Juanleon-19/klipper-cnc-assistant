@@ -1,0 +1,79 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  backend-safe:
+    name: Backend safe tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      MACHINE_MODE: simulated
+      MACHINE_AUTO_CONNECT: "false"
+      PYTHONPATH: src
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install backend
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e .
+          python -m pip check
+
+      - name: Run safe backend suite
+        run: |
+          python -m unittest -v \
+            tests.test_api \
+            tests.test_gcode_analysis \
+            tests.test_heightmap \
+            tests.test_job_service \
+            tests.test_moonraker_client \
+            tests.test_project_service \
+            tests.test_web_mvp
+
+  frontend:
+    name: Frontend lint, test and build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    defaults:
+      run:
+        working-directory: frontend
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Test
+        run: npm run test
+
+      - name: Build
+        run: npm run build

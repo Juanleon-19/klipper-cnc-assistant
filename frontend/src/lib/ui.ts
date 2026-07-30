@@ -4,6 +4,10 @@ export type UiTone = "neutral" | "success" | "warning" | "danger" | "info";
 
 const DIRECT_LABELS: Record<string, string> = {
   "simulada lista para preparacion": "Lista para preparación simulada",
+  "fisica lista para preparacion": "Lista para preparación física",
+  "preparacion fisica": "Preparación física",
+  "papelera": "Papelera",
+  "archivado": "Archivado",
   "sin configurar": "Sin configurar",
   "esperando archivo": "Esperando archivo",
   "lista para analizar": "Esperando análisis",
@@ -14,7 +18,11 @@ const DIRECT_LABELS: Record<string, string> = {
   "bloqueada por errores": "Bloqueada por errores",
   "bloqueado por errores": "Bloqueado por errores",
   aislamiento: "Fresado",
-  taladrado: "Perforado",
+  taladrado: "Taladrado",
+  "fresado superior": "Fresado superior",
+  "fresado inferior": "Fresado inferior",
+  contorno: "Contorno",
+  personalizado: "Personalizado",
   "corte exterior": "Corte del contorno",
   superior: "Cara superior",
   inferior: "Cara inferior",
@@ -29,6 +37,13 @@ const DIRECT_LABELS: Record<string, string> = {
   arco_antihorario: "Arco antihorario",
   minimo: "Mínimo",
   maximo: "Máximo",
+  material: "Material",
+  toolpath: "Trayectoria",
+  all: "Todo",
+  bruto: "Altura bruta",
+  plano: "Plano estimado",
+  residuo: "Residuo local",
+  simulado: "Simulado",
 };
 
 function normalizeToken(value: string): string {
@@ -65,7 +80,7 @@ export function toneForStatus(value: string | null | undefined): UiTone {
   if (["bloqueado por errores", "bloqueada por errores", "error critico"].includes(normalized)) {
     return "danger";
   }
-  if (["simulado", "operativa", "operativa api"].includes(normalized) || normalized.startsWith("simulada ")) {
+  if (["simulado", "fisico", "preparacion fisica", "operativa", "operativa api"].includes(normalized) || normalized.startsWith("simulada ") || normalized.startsWith("fisica ")) {
     return "info";
   }
   return "neutral";
@@ -80,7 +95,7 @@ export function translateFace(value: string): string {
 }
 
 export function getRecentProject(projects: Project[]): Project | null {
-  return [...projects].sort((left, right) => right.actualizado_en.localeCompare(left.actualizado_en))[0] ?? null;
+  return [...projects].filter((project) => project.status !== "trashed").sort((left, right) => (right.last_opened_at ?? right.actualizado_en).localeCompare(left.last_opened_at ?? left.actualizado_en))[0] ?? null;
 }
 
 export function countPendingOperations(projects: Project[]): number {
@@ -162,8 +177,8 @@ export function splitIssues(analysis: OperationAnalysis | null) {
 
 export function summarizeMachineMode(value: string | null | undefined): string {
   const normalized = normalizeToken(value ?? "simulado");
-  if (normalized === "simulado") {
-    return "Modo simulado";
-  }
+  if (normalized === "simulado") return "Modo simulado";
+  if (normalized === "fisico" || normalized === "physical") return "Modo físico";
+  if (normalized.startsWith("fisica ")) return translateStatus(value);
   return translateStatus(value);
 }
