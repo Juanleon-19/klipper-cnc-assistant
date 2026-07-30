@@ -127,7 +127,7 @@ Cambios estructurales ya aplicados en Fase 1:
 ### Duplicidades tecnicas observadas
 
 - existen rutas fisicas cercanas en significado, por ejemplo `cancel` y `safe-stop`, o vistas de estado similares.
-- la descripcion del servicio versionado sugiere modo simulado, mientras el override real del host fuerza modo fisico.
+- durante la auditoria, la unidad instalada y su override no coincidian plenamente con la unidad versionada.
 - la documentacion historica mezcla capacidades confirmadas con objetivos todavia abiertos.
 
 ### Acoplamientos no deseados
@@ -139,7 +139,8 @@ Cambios estructurales ya aplicados en Fase 1:
 ### Riesgos de seguridad
 
 - la maquina visible esta configurada en modo fisico en el host auditado.
-- `deploy/klipper-cnc-assistant.env` contiene configuracion operativa local heredada.
+- la configuracion operativa estuvo versionada historicamente en `deploy/klipper-cnc-assistant.env`; en esta rama deja de ser la fuente canonica y se externaliza a `/etc/klipper-cnc-assistant/klipper-cnc-assistant.env`.
+- `deploy/klipper-cnc-assistant.env.example` contiene solo valores seguros de simulacion.
 - existe codigo capaz de mover la maquina; por eso la seguridad no puede descansar en la UI ni en supuestos de entorno.
 
 ## 4. Arquitectura objetivo
@@ -197,7 +198,15 @@ Restricciones para fases siguientes:
 - no mover `data/` al control de versiones;
 - no tratar mapas fisicos ni referencias reales como datos de prueba publicables.
 
-## 7. Fronteras de seguridad
+## 7. Despliegue y configuracion
+
+- la unidad versionada carga `/etc/klipper-cnc-assistant/klipper-cnc-assistant.env`;
+- el archivo operativo se administra fuera del repositorio;
+- la plantilla versionada permanece en modo simulado y no contiene posiciones, referencias ni limites de la maquina;
+- una actualizacion Git no autoriza copiar configuracion, reinstalar la unidad, reiniciar el servicio ni activar modo fisico;
+- la migracion de una instalacion anterior esta documentada en `docs/deployment.md`.
+
+## 8. Fronteras de seguridad
 
 - el frontend no debe ser autoridad de seguridad fisica;
 - los endpoints `POST` fisicos son operaciones de riesgo y deben seguir en la frontera backend;
@@ -206,7 +215,7 @@ Restricciones para fases siguientes:
 - una conexion WebSocket abierta no equivale a telemetria valida para mover la maquina;
 - la ausencia de hardware o la ejecucion en `MACHINE_MODE=simulated` solo valida software.
 
-## 8. Componentes previstos para las siguientes fases
+## 9. Componentes previstos para las siguientes fases
 
 ### Fase 2
 
