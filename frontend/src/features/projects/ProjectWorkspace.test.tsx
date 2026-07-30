@@ -357,7 +357,7 @@ const physicalMachine: MachineContextValue = {
     state: "WAITING_FOR_XY_REFERENCE",
     mode: "PHYSICAL",
     mode_label: "FÍSICO",
-    moonraker: { http_connected: true, websocket_connected: true },
+    moonraker: { http_connected: true, websocket_connected: true, http_state: "AVAILABLE", websocket_state: "CONNECTED", telemetry_state: "LIVE", last_http_observation_age_s: 0.2, last_websocket_message_age_s: 4.5, last_position_age_s: 0.1 },
     klipper: { ready: true, homed_axes: "xyz", position: { x: 60, y: 88.75, z: 10.05 } },
     preparation: {
       reference_prep_z_mm: 115,
@@ -369,7 +369,7 @@ const physicalMachine: MachineContextValue = {
       sequence: ["HOME", "MOVE_Z_PREP", "MOVE_XY_CENTER", "WAITING_FOR_REFERENCE"],
     },
     tool_change: { x_mm: 0, y_mm: 0, z_mm: 115, z_feed_mm_min: 180, z_speed_mm_s: 3 },
-    arduino: { port: "/dev/ttyUSB0", valid_packets: 12 },
+    arduino: { port: "/dev/ttyUSB0", configured_port: "/dev/ttyUSB0", connected_port: "/dev/ttyUSB0", connection_state: "CONNECTED", generation: 2, reconnects: 1, valid_packets: 12, usb_identity: { serial_number: "arduino-1" } },
     controller: { direction: "CENTER", jog_mode: "FINE", external_button: false, probe: false },
     safety: { serial_recent: true, telemetry_recent: true, movement_authorized: false },
     health: "ok",
@@ -586,6 +586,39 @@ describe("ProjectWorkspace", () => {
     expect(screen.queryByText(/Flujo simulado de preparación/i)).toBeNull();
     expect(screen.getByText(/Captura referencia/i)).toBeInTheDocument();
     expect(screen.getByText(/X 10.000 mm · Y 8.000 mm · Z 0.000 mm/i)).toBeInTheDocument();
+  });
+
+
+  it("muestra estados separados de HTTP, WebSocket y Arduino y permite reconectar", async () => {
+    vi.mocked(physicalMachine.runMachineAction).mockClear();
+    renderWorkspace(physicalMachine);
+
+    fireEvent.click(screen.getByRole("button", { name: /^Referencia$/i }));
+
+    expect(await screen.findAllByText(/Moonraker HTTP/i)).toHaveLength(2);
+    expect(screen.getByText(/^WebSocket$/i)).toBeInTheDocument();
+    expect(screen.getByText(/AVAILABLE/i)).toBeInTheDocument();
+    expect(screen.getAllByText(/CONNECTED/i).length).toBeGreaterThan(0);
+    expect(screen.getByText(/arduino-1/i)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /Reconectar Arduino/i }));
+
+    await waitFor(() => expect(physicalMachine.runMachineAction).toHaveBeenCalledWith("reconnect-arduino"));
+  });
+
+  it("bloquea Reconectar Arduino cuando existe una operación física activa", async () => {
+    const activeMachine: MachineContextValue = {
+      ...physicalMachine,
+      runtime: {
+        ...physicalMachine.runtime,
+        active_operation: { operation_type: "reference_move", generation: 7 },
+      },
+    };
+    renderWorkspace(activeMachine);
+
+    fireEvent.click(screen.getByRole("button", { name: /^Referencia$/i }));
+
+    expect(await screen.findByRole("button", { name: /Reconectar Arduino/i })).toBeDisabled();
   });
 
   it("muestra Z de preparación, centro y posición de cambio en referencia física", async () => {

@@ -188,6 +188,7 @@ export const api = {
     request<Record<string, number>>("/api/machine/settings", { method: "PUT", body: JSON.stringify(payload) }),
   connectMachine: () => request<MachineRuntime>("/api/machine/connect", { method: "POST" }),
   disconnectMachine: () => request<MachineRuntime>("/api/machine/disconnect", { method: "POST" }),
+  reconnectArduino: () => request<MachineRuntime>("/api/machine/reconnect-arduino", { method: "POST" }),
   setMachineDiagnosticMode: (enabled: boolean) =>
     request<MachineRuntime>("/api/machine/diagnostic-mode", { method: "POST", body: JSON.stringify({ enabled }) }),
   initializeMachine: (target_z_mm?: number) =>
