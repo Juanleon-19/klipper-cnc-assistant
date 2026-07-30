@@ -37,7 +37,8 @@ Reglas permanentes del repositorio:
 - no enviar G-code, homing, jog, probe, spindle ni ejecucion de trabajos sin autorizacion explicita del usuario;
 - no reiniciar ni reconfigurar `systemd`, Klipper, Moonraker, Arduino ni la maquina durante una fase de auditoria o reorganizacion;
 - no publicar secretos, `.env`, datos reales de produccion, mapas fisicos, referencias reales ni G-code privado;
-- tratar `deploy/klipper-cnc-assistant.env` como configuracion operativa local heredada, no como plantilla canonica.
+- mantener la configuracion operativa fuera del repositorio, en `/etc/klipper-cnc-assistant/klipper-cnc-assistant.env`;
+- usar `deploy/klipper-cnc-assistant.env.example` solo como plantilla segura en modo simulado.
 
 El host auditado en Thursday, July 30, 2026 tiene un servicio activo en modo fisico. Por esa razon la validacion automatizada de esta fase se limito a comandos seguros que no envian movimiento.
 
@@ -77,6 +78,8 @@ docs/
 Arquitectura detallada: [docs/architecture.md](docs/architecture.md)
 
 Auditoria y procedencia funcional: [docs/recovery/current-project-audit.md](docs/recovery/current-project-audit.md)
+
+Despliegue y migracion de configuracion: [docs/deployment.md](docs/deployment.md)
 
 Plan por fases: [PLAN.md](PLAN.md)
 
@@ -134,7 +137,14 @@ En un host con runtime fisico activo, ejecutar solo en un entorno controlado que
 Linea segura usada en esta fase:
 
 ```bash
-MACHINE_MODE=simulated PYTHONPATH=src .venv/bin/python -m unittest -v   tests.test_api   tests.test_gcode_analysis   tests.test_heightmap   tests.test_job_service   tests.test_moonraker_client   tests.test_project_service   tests.test_web_mvp
+MACHINE_MODE=simulated PYTHONPATH=src .venv/bin/python -m unittest -v \
+  tests.test_api \
+  tests.test_gcode_analysis \
+  tests.test_heightmap \
+  tests.test_job_service \
+  tests.test_moonraker_client \
+  tests.test_project_service \
+  tests.test_web_mvp
 ```
 
 Frontend:
@@ -160,6 +170,7 @@ El despliegue real auditado en Thursday, July 30, 2026 corre desde `/home/impres
 ## Estado de la fase
 
 - Fase 1 activa en `fase-1/auditoria-arquitectura`.
+- Pull request de Fase 1 abierto en borrador contra `main`.
 - No se hizo merge a `main`.
 - La reorganizacion es estructural; las reparaciones funcionales siguen pendientes.
-- La publicacion de la rama debe revisarse con especial cuidado por la existencia historica de configuracion operativa local en `deploy/`.
+- La configuracion operativa ya no es canonica dentro del repositorio, pero debe migrarse de forma supervisada antes de desplegar la unidad versionada nueva.
