@@ -4,38 +4,38 @@ Esta lista controla la revisión del pull request `fase-1/auditoria-arquitectura
 
 ## Alcance
 
-- [ ] La auditoría identifica la copia realmente servida por systemd.
-- [ ] La matriz de procedencia distingue KEEP, RECOVER, REFACTOR, ARCHIVE y UNKNOWN.
-- [ ] La reorganización backend no cambia comportamiento deliberadamente.
-- [ ] La reorganización frontend conserva las funciones visibles.
-- [ ] README, PLAN, AGENTS y arquitectura describen el código real.
+- [x] La auditoría identifica la copia realmente servida por systemd.
+- [x] La matriz de procedencia distingue KEEP, RECOVER, REFACTOR, ARCHIVE y UNKNOWN.
+- [ ] Confirmar mediante revisión final que la reorganización backend no cambia comportamiento deliberadamente.
+- [ ] Confirmar mediante revisión final que la reorganización frontend conserva las funciones visibles.
+- [x] README, PLAN, AGENTS y arquitectura describen la estructura actual de la rama.
 
 ## Configuración y despliegue
 
-- [ ] La configuración operativa no está versionada.
-- [ ] `deploy/klipper-cnc-assistant.env.example` permanece en modo simulado.
-- [ ] El servicio versionado carga `/etc/klipper-cnc-assistant/klipper-cnc-assistant.env`.
-- [ ] Antes del despliegue se copia y verifica la configuración local existente.
-- [ ] El servicio activo no se reinicia como parte de la revisión del PR.
+- [x] La configuración operativa dejó de estar versionada como fuente canónica.
+- [x] `deploy/klipper-cnc-assistant.env.example` permanece en modo simulado.
+- [x] El servicio versionado carga `/etc/klipper-cnc-assistant/klipper-cnc-assistant.env`.
+- [ ] Antes del despliegue, copiar y verificar la configuración local existente en el servidor.
+- [x] El servicio activo no se reinició como parte de la revisión del PR.
 
 ## Validación de software
 
-- [ ] Backend seguro: 94/94 pruebas aprobadas con `MACHINE_MODE=simulated`.
-- [ ] Frontend: lint aprobado.
-- [ ] Frontend: 63/63 pruebas aprobadas.
-- [ ] Frontend: build aprobado.
-- [ ] Importación del paquete aprobada.
-- [ ] Backend temporal y `/api/health` aprobados sin hardware.
+- [x] CI backend segura aprobada con `MACHINE_MODE=simulated`.
+- [x] CI frontend: lint aprobado.
+- [x] CI frontend: pruebas aprobadas.
+- [x] CI frontend: build aprobado.
+- [x] Dependencias runtime importadas por Moonraker, Arduino y telemetría están declaradas.
+- [x] La validación local previa documentó importación, backend temporal, `/api/health` y SPA.
 
 ## Seguridad física
 
-- [ ] No hubo G-code, homing, jog, probe, spindle, mapa físico ni ejecución.
-- [ ] No se modificó Klipper, Moonraker, Arduino ni systemd activo.
-- [ ] No se autoriza la Fase 2 hasta cerrar este PR.
+- [x] No hubo G-code, homing, jog, probe, spindle, mapa físico ni ejecución.
+- [x] No se modificó Klipper, Moonraker, Arduino ni systemd activo.
+- [x] La Fase 2 no comenzó.
 
 ## Cierre
 
-- [ ] Revisar los 86 commits respecto a `main` por grupos funcionales.
-- [ ] Resolver observaciones del PR en la misma rama.
-- [ ] Confirmar migración de la configuración antes de desplegar la rama fusionada.
+- [ ] Revisar la diferencia respecto a `main` por grupos funcionales.
+- [ ] Resolver observaciones de código o documentación en la misma rama.
+- [ ] Confirmar la migración de configuración antes de desplegar la rama fusionada.
 - [ ] Aprobar explícitamente el merge commit a `main`.
