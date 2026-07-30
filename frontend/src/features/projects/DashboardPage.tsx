@@ -1,4 +1,4 @@
-import { formatDate } from "../lib/format";
+import { formatDate } from "../../lib/format";
 import {
   countBlockedOperations,
   countPendingOperations,
@@ -6,9 +6,9 @@ import {
   summarizeMachineMode,
   toneForStatus,
   translateStatus,
-} from "../lib/ui";
-import type { HealthResponse, MachineSession, Project } from "../types";
-import { StatusBadge } from "./StatusBadge";
+} from "../../lib/ui";
+import type { HealthResponse, MachineSession, Project } from "../../types";
+import { StatusBadge } from "../../components/StatusBadge";
 
 type DashboardPageProps = {
   projects: Project[];

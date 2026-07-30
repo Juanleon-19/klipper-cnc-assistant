@@ -1,10 +1,10 @@
 import type { ChangeEvent } from "react";
 
-import { formatFileSize, formatMillimeters } from "../lib/format";
-import { operationPresets } from "../lib/presets";
-import type { Operation, Project } from "../types";
-import { StatusBadge } from "./StatusBadge";
-import { ToolpathPreview } from "./ToolpathPreview";
+import { formatFileSize, formatMillimeters } from "../../lib/format";
+import { operationPresets } from "../../lib/presets";
+import type { Operation, Project } from "../../types";
+import { StatusBadge } from "../../components/StatusBadge";
+import { ToolpathPreview } from "../viewer/ToolpathPreview";
 
 type OperationPanelProps = {
   project: Project;

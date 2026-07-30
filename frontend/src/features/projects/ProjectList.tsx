@@ -1,9 +1,9 @@
 import { useMemo, useState } from "react";
 
-import { formatDate } from "../lib/format";
-import { toneForStatus, translateStatus } from "../lib/ui";
-import type { Project } from "../types";
-import { StatusBadge } from "./StatusBadge";
+import { formatDate } from "../../lib/format";
+import { toneForStatus, translateStatus } from "../../lib/ui";
+import type { Project } from "../../types";
+import { StatusBadge } from "../../components/StatusBadge";
 
 type ProjectListProps = {
   projects: Project[];

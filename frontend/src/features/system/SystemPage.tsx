@@ -1,8 +1,8 @@
 import { useEffect } from "react";
 
-import { summarizeMachineMode, toneForStatus, translateStatus } from "../lib/ui";
-import type { HealthResponse, MachineRuntime, MachineSession, SystemInfoResponse } from "../types";
-import { StatusBadge } from "./StatusBadge";
+import { summarizeMachineMode, toneForStatus, translateStatus } from "../../lib/ui";
+import type { HealthResponse, MachineRuntime, MachineSession, SystemInfoResponse } from "../../types";
+import { StatusBadge } from "../../components/StatusBadge";
 
 type SystemPageProps = {
   health: HealthResponse | null;

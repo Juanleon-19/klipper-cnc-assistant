@@ -1,4 +1,4 @@
-import { useMachineStatus } from "../context/MachineContext";
+import { useMachineStatus } from "./MachineContext";
 
 export function SystemBanner() {
   const machine = useMachineStatus();

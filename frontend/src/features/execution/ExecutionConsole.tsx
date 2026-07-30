@@ -1,7 +1,7 @@
 import type { ApiError } from "../../lib/api";
 import { formatDate, formatFileSize } from "../../lib/format";
 import type { JobRunConflictDetail, JobRunEvent, JobRunOperation, LiveExecutionSnapshot } from "../../types";
-import { StatusBadge } from "../StatusBadge";
+import { StatusBadge } from "../../components/StatusBadge";
 
 type ExecutionConsoleProps = {
   snapshot: LiveExecutionSnapshot | null;

@@ -1,14 +1,14 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 
-import { useMachineStatus } from "../context/MachineContext";
-import { HeightMapControlPanel } from "../features/heightmap/HeightMapControlPanel";
-import { HeightMapHeatmap } from "../features/heightmap/HeightMapHeatmap";
-import { HeightMapSurface3D } from "../features/heightmap/HeightMapSurface3D";
-import { ToolpathViewer } from "../features/viewer/ToolpathViewer";
-import { formatDate, formatFileSize, formatMillimeters } from "../lib/format";
-import { ApiError, api, type OperationInput, type OperationUpdateInput } from "../lib/api";
-import { parseFiniteNumber } from "../lib/numbers";
-import { toneForStatus, translateFace, translateOperationType, translateStatus } from "../lib/ui";
+import { useMachineStatus } from "../system/MachineContext";
+import { HeightMapControlPanel } from "../height-map/HeightMapControlPanel";
+import { HeightMapHeatmap } from "../height-map/HeightMapHeatmap";
+import { HeightMapSurface3D } from "../height-map/HeightMapSurface3D";
+import { ToolpathViewer } from "../viewer/ToolpathViewer";
+import { formatDate, formatFileSize, formatMillimeters } from "../../lib/format";
+import { ApiError, api, type OperationInput, type OperationUpdateInput } from "../../lib/api";
+import { parseFiniteNumber } from "../../lib/numbers";
+import { toneForStatus, translateFace, translateOperationType, translateStatus } from "../../lib/ui";
 import type {
   HeightMap,
   Operation,
@@ -26,10 +26,10 @@ import type {
   OperationAnalysis,
   JobPlan,
   LiveExecutionSnapshot,
-} from "../types";
+} from "../../types";
 import { ProjectForm } from "./ProjectForm";
-import { StatusBadge } from "./StatusBadge";
-import { ExecutionConsole } from "./execution/ExecutionConsole";
+import { StatusBadge } from "../../components/StatusBadge";
+import { ExecutionConsole } from "../execution/ExecutionConsole";
 
 type ProjectWorkspaceProps = {
   project: Project | null;

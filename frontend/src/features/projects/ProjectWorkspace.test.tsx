@@ -1,9 +1,9 @@
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { MachineContext, type MachineContextValue } from "../context/MachineContext";
-import { ApiError } from "../lib/api";
-import type { HeightMap, JobPlan, JobRun, LiveExecutionSnapshot, Project, ReferenceSession } from "../types";
+import { MachineContext, type MachineContextValue } from "../system/MachineContext";
+import { ApiError } from "../../lib/api";
+import type { HeightMap, JobPlan, JobRun, LiveExecutionSnapshot, Project, ReferenceSession } from "../../types";
 import { ProjectWorkspace } from "./ProjectWorkspace";
 
 const apiMock = vi.hoisted(() => ({
@@ -58,23 +58,23 @@ const apiMock = vi.hoisted(() => ({
   goToReferencePoint: vi.fn(),
 }));
 
-vi.mock("../lib/api", async () => {
-  const actual = await vi.importActual<typeof import("../lib/api")>("../lib/api");
+vi.mock("../../lib/api", async () => {
+  const actual = await vi.importActual<typeof import("../../lib/api")>("../../lib/api");
   return {
     ...actual,
     api: apiMock,
   };
 });
 
-vi.mock("../features/viewer/ToolpathViewer", () => ({
+vi.mock("../viewer/ToolpathViewer", () => ({
   ToolpathViewer: () => <div>ToolpathViewer mock</div>,
 }));
 
-vi.mock("../features/heightmap/HeightMapHeatmap", () => ({
+vi.mock("../height-map/HeightMapHeatmap", () => ({
   HeightMapHeatmap: (props: { meshPoints?: unknown[]; heightMap?: unknown }) => <div>Heatmap mock · {props.meshPoints?.length ?? 0} puntos · {props.heightMap ? "medido" : "preview"}</div>,
 }));
 
-vi.mock("../features/heightmap/HeightMapSurface3D", () => ({
+vi.mock("../height-map/HeightMapSurface3D", () => ({
   HeightMapSurface3D: () => <div>Surface 3D mock</div>,
 }));
 

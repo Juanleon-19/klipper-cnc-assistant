@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 
-import type { AgujeroAlineacion, ProjectPayload } from "../types";
+import type { AgujeroAlineacion, ProjectPayload } from "../../types";
 
 const emptyHole: AgujeroAlineacion = {
   x_mm: 0,

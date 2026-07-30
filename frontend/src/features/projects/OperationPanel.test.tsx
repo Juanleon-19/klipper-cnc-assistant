@@ -4,7 +4,7 @@
 
         import { ProjectWorkspace } from "./ProjectWorkspace";
 
-        vi.mock("../features/viewer/ToolpathViewer", () => ({
+        vi.mock("../viewer/ToolpathViewer", () => ({
           ToolpathViewer: () => <div data-testid="toolpath-viewer">viewer</div>,
         }));
 

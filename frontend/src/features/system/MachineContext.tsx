@@ -1,6 +1,6 @@
 import { createContext, useContext } from "react";
 
-import type { MachineRuntime } from "../types";
+import type { MachineRuntime } from "../../types";
 
 export type MachineAction = "connect" | "disconnect" | "diagnostic" | "initialize" | "manual-on" | "manual-off" | "probe-request" | "probe-confirm" | "tool-change-position" | "cancel" | "safe-stop" | "emergency" | "refresh";
 

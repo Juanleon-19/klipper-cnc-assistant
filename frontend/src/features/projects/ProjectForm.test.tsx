@@ -1,7 +1,7 @@
 import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
-import type { ProjectPayload } from "../types";
+import type { ProjectPayload } from "../../types";
 import { ProjectForm } from "./ProjectForm";
 
 const initialValue: ProjectPayload = {

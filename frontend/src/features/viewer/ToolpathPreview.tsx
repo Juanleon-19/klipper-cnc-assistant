@@ -1,5 +1,5 @@
-import type { Material, OperationAnalysis } from "../types";
-import { ToolpathViewer } from "../features/viewer/ToolpathViewer";
+import type { Material, OperationAnalysis } from "../../types";
+import { ToolpathViewer } from "./ToolpathViewer";
 
 type ToolpathPreviewProps = {
   material: Material;

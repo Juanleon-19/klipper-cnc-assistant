@@ -1,13 +1,13 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 
-import { DashboardPage } from "./components/DashboardPage";
-import { ProjectForm } from "./components/ProjectForm";
-import { ProjectList } from "./components/ProjectList";
-import { ProjectWorkspace, type WorkspaceView } from "./components/ProjectWorkspace";
+import { DashboardPage } from "./features/projects/DashboardPage";
+import { ProjectForm } from "./features/projects/ProjectForm";
+import { ProjectList } from "./features/projects/ProjectList";
+import { ProjectWorkspace, type WorkspaceView } from "./features/projects/ProjectWorkspace";
 import { StatusBadge } from "./components/StatusBadge";
-import { SystemBanner } from "./components/SystemBanner";
-import { MachineContext, buildMachineContextValue, type MachineAction } from "./context/MachineContext";
-import { SystemPage } from "./components/SystemPage";
+import { SystemBanner } from "./features/system/SystemBanner";
+import { MachineContext, buildMachineContextValue, type MachineAction } from "./features/system/MachineContext";
+import { SystemPage } from "./features/system/SystemPage";
 import { api, type OperationInput, type OperationUpdateInput } from "./lib/api";
 import { getRecentProject, toneForStatus, translateStatus } from "./lib/ui";
 import type {

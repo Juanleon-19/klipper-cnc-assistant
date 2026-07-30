@@ -1,7 +1,7 @@
 import { fireEvent, render, screen, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
-import type { Project } from "../types";
+import type { Project } from "../../types";
 import { ProjectList } from "./ProjectList";
 
 function makeProject(overrides: Partial<Project> = {}): Project {
