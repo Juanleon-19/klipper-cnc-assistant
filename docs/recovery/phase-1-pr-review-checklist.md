@@ -6,8 +6,8 @@ Esta lista controla la revisión del pull request `fase-1/auditoria-arquitectura
 
 - [x] La auditoría identifica la copia realmente servida por systemd.
 - [x] La matriz de procedencia distingue KEEP, RECOVER, REFACTOR, ARCHIVE y UNKNOWN.
-- [ ] Confirmar mediante revisión final que la reorganización backend no cambia comportamiento deliberadamente.
-- [ ] Confirmar mediante revisión final que la reorganización frontend conserva las funciones visibles.
+- [x] La comparación contra `05c6859` confirma que los servicios backend fueron renombrados sin cambios internos; solo se ajustaron imports y compatibilidad.
+- [x] La comparación contra `05c6859` confirma que los componentes frontend fueron movidos por feature y solo cambiaron rutas de importación.
 - [x] README, PLAN, AGENTS y arquitectura describen la estructura actual de la rama.
 
 ## Configuración y despliegue
@@ -35,7 +35,7 @@ Esta lista controla la revisión del pull request `fase-1/auditoria-arquitectura
 
 ## Cierre
 
-- [ ] Revisar la diferencia respecto a `main` por grupos funcionales.
-- [ ] Resolver observaciones de código o documentación en la misma rama.
+- [x] La diferencia propia de Fase 1 fue revisada contra su base real `05c6859` por grupos funcionales.
+- [x] Las observaciones de configuración, documentación y dependencias fueron resueltas en la misma rama.
 - [ ] Confirmar la migración de configuración antes de desplegar la rama fusionada.
 - [ ] Aprobar explícitamente el merge commit a `main`.
