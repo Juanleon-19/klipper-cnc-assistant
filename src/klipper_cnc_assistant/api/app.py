@@ -12,9 +12,7 @@ from klipper_cnc_assistant.application import (
     ApplicationError,
     CompensatedGCodeService,
     HeightMapService,
-    JobService,
     MachineSessionService,
-    MeshExecutionService,
     NotFoundError,
     PhysicalMapService,
     ProjectService,
@@ -22,6 +20,7 @@ from klipper_cnc_assistant.application import (
     SystemStatusService,
 )
 from klipper_cnc_assistant.domain import DomainError, ProjectValidationError
+from klipper_cnc_assistant.execution import JobService, MeshExecutionService
 from klipper_cnc_assistant.machine.config import load_machine_runtime_config
 from klipper_cnc_assistant.machine.runtime import MachineRuntime, MachineRuntimeError
 from klipper_cnc_assistant.storage import JsonProjectRepository

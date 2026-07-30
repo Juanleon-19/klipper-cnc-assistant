@@ -7,8 +7,8 @@ import time
 import unittest
 from pathlib import Path
 
-from klipper_cnc_assistant.application import CompensatedGCodeService, JobService, PhysicalMapService, ProjectService, ReferenceSessionService
-from klipper_cnc_assistant.application.job_service import MoonrakerJobAdapter
+from klipper_cnc_assistant.application import CompensatedGCodeService, PhysicalMapService, ProjectService, ReferenceSessionService
+from klipper_cnc_assistant.execution import JobService, MoonrakerJobAdapter
 from klipper_cnc_assistant.application.services import MachineSessionService
 from klipper_cnc_assistant.application.physical_map_service import PhysicalMeshConfig
 from klipper_cnc_assistant.storage import JsonProjectRepository

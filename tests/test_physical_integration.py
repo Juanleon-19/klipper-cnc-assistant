@@ -8,9 +8,10 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from klipper_cnc_assistant.application import ApplicationError, HeightMapService, MachineSessionService, MeshExecutionService, ReferenceSessionService
+from klipper_cnc_assistant.application import ApplicationError, HeightMapService, MachineSessionService, ReferenceSessionService
 from klipper_cnc_assistant.application.compensated_gcode_service import CompensatedGCodeService
 from klipper_cnc_assistant.application.physical_map_service import PhysicalExclusion, PhysicalMapService, PhysicalMeshConfig
+from klipper_cnc_assistant.execution import MeshExecutionService
 from klipper_cnc_assistant.input.serial_driver import HEADER, SerialDriver
 from klipper_cnc_assistant.machine.discovery import discover_machine
 from klipper_cnc_assistant.machine.state import AxisLimits, MachinePosition, MachineState

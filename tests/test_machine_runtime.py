@@ -8,8 +8,8 @@ import time
 import unittest
 from dataclasses import replace
 
-from klipper_cnc_assistant.application import MeshExecutionService
 from klipper_cnc_assistant.application.physical_map_service import PhysicalMapService, PhysicalMeshConfig
+from klipper_cnc_assistant.execution import MeshExecutionService
 from klipper_cnc_assistant.application.services import ProjectService
 from klipper_cnc_assistant.input.command_mapper import CommandMapper, ControllerCommand
 from klipper_cnc_assistant.input.serial_driver import ControllerPacket
