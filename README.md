@@ -1,46 +1,37 @@
 # Klipper CNC Assistant
 
-Estado de esta rama: Fase 1 de auditoria, arquitectura y organizacion.
+Estado de referencia: Fase 2 activa en `fase-2/referencias-conectividad`.
 Fecha de referencia: Thursday, July 30, 2026.
 
-Klipper CNC Assistant es una aplicacion web para preparar trabajos CNC basados en G-code sobre una maquina adaptada a Klipper. El producto combina un backend FastAPI, un frontend React, persistencia JSON local y una frontera fisica que interactua con Moonraker, Klipper y un controlador Arduino.
+Klipper CNC Assistant es una aplicacion web para preparar trabajos CNC basados en G-code sobre una maquina controlada por Klipper. El producto combina un backend FastAPI, un frontend React, persistencia JSON local y una frontera fisica que integra Moonraker, Klipper y un controlador Arduino.
 
-## Estado actual verificado
-
-En esta rama se audito el estado real del repositorio, se verifico la ruta servida por `systemd` y se reorganizo el codigo sin introducir cambios funcionales deliberados.
-
-Capacidades comprobadas en software:
+## Capacidades confirmadas
 
 - gestion de proyectos, montajes y operaciones;
 - analisis de G-code y visor tecnico;
-- persistencia JSON local en `data/projects/`;
-- backend FastAPI servido desde `src/klipper_cnc_assistant/`;
-- frontend React/Vite servido desde `frontend/dist` cuando existe build;
-- integracion de modulos fisicos para Moonraker, estado de maquina, serie y jog;
-- consola de ejecucion y servicios de ejecucion presentes en codigo;
-- documentacion de auditoria y arquitectura actualizada.
+- persistencia JSON local de proyectos, referencias, mapas y artefactos;
+- runtime fisico con Moonraker HTTP, Moonraker WebSocket y entrada serial Arduino;
+- reconexion segura del Arduino sobre una unica autoridad serial;
+- semantica separada de transporte WebSocket, frescura de posicion y observacion HTTP;
+- captura de referencias fisicas basada en observacion activa antes de persistir;
+- pestana `Referencia` extraida como feature del frontend.
 
-Funciones que existen en codigo pero no quedan cerradas en esta fase:
+## Capacidades todavia incompletas
 
-- Referencias;
-- Arduino y reconexion serie;
-- mapa de alturas medido y compensacion fisica;
-- ejecucion fisica de trabajos y recuperacion.
+- mapa de alturas fisico y compensacion completa;
+- ejecucion fisica de trabajos, recuperacion y cierre del flujo `JobRun`;
+- validacion fisica integral de la reconexion Arduino y de la captura de referencias sobre la CNC real.
 
-Esas areas se preservan y documentan, pero su reparacion funcional queda diferida a las Fases 2 a 4.
+Esas areas quedan fuera de Fase 2 y no se repararon deliberadamente en esta rama.
 
 ## Seguridad
 
-Reglas permanentes del repositorio:
-
-- no trabajar directamente en `main`;
-- no enviar G-code, homing, jog, probe, spindle ni ejecucion de trabajos sin autorizacion explicita del usuario;
-- no reiniciar ni reconfigurar `systemd`, Klipper, Moonraker, Arduino ni la maquina durante una fase de auditoria o reorganizacion;
-- no publicar secretos, `.env`, datos reales de produccion, mapas fisicos, referencias reales ni G-code privado;
-- mantener la configuracion operativa fuera del repositorio, en `/etc/klipper-cnc-assistant/klipper-cnc-assistant.env`;
-- usar `deploy/klipper-cnc-assistant.env.example` solo como plantilla segura en modo simulado.
-
-El host auditado en Thursday, July 30, 2026 tiene un servicio activo en modo fisico. Por esa razon la validacion automatizada de esta fase se limito a comandos seguros que no envian movimiento.
+- No trabajar directamente en `main`.
+- No enviar G-code, homing, jog, probe, spindle ni ejecucion de trabajos sin autorizacion explicita del usuario.
+- No reiniciar ni reconfigurar `systemd`, Klipper, Moonraker, Arduino ni la maquina durante desarrollo o pruebas seguras.
+- No publicar secretos, `.env`, datos reales de produccion, mapas fisicos, referencias reales ni G-code privado.
+- Mantener la configuracion operativa fuera del repositorio, en `/etc/klipper-cnc-assistant/`.
+- Usar solo configuraciones seguras o simuladas durante pruebas automatizadas.
 
 ## Estructura principal
 
@@ -64,6 +55,7 @@ frontend/src/
 │   ├── execution/
 │   ├── height-map/
 │   ├── projects/
+│   ├── references/
 │   ├── system/
 │   └── viewer/
 ├── lib/
@@ -77,9 +69,11 @@ docs/
 
 Arquitectura detallada: [docs/architecture.md](docs/architecture.md)
 
-Auditoria y procedencia funcional: [docs/recovery/current-project-audit.md](docs/recovery/current-project-audit.md)
+Auditoria Fase 1: [docs/recovery/current-project-audit.md](docs/recovery/current-project-audit.md)
 
-Despliegue y migracion de configuracion: [docs/deployment.md](docs/deployment.md)
+Linea base de Fase 2: [docs/phase-2/references-connectivity-baseline.md](docs/phase-2/references-connectivity-baseline.md)
+
+Resultado de Fase 2: [docs/phase-2/references-connectivity-result.md](docs/phase-2/references-connectivity-result.md)
 
 Plan por fases: [PLAN.md](PLAN.md)
 
@@ -90,6 +84,7 @@ Backend:
 ```bash
 python -m venv .venv
 source .venv/bin/activate
+python -m pip install --upgrade pip
 python -m pip install -e .
 python -m pip check
 ```
@@ -103,11 +98,11 @@ npm ci
 
 ## Desarrollo
 
-Backend local:
+Backend local seguro:
 
 ```bash
 source .venv/bin/activate
-PYTHONPATH=src python -m klipper_cnc_assistant serve --host 127.0.0.1 --port 8010 --data-dir /tmp/kca-dev-data
+MACHINE_MODE=simulated MACHINE_AUTO_CONNECT=false PYTHONPATH=src python -m klipper_cnc_assistant serve --host 127.0.0.1 --port 8010 --data-dir /tmp/kca-dev-data
 ```
 
 Analisis de G-code sin hardware:
@@ -126,26 +121,14 @@ npm run dev
 
 ## Pruebas
 
-Linea base backend pedida por el proyecto:
+Linea segura de backend usada en Fase 2:
 
 ```bash
-PYTHONPATH=src python -m unittest discover -s tests -v
+source .venv/bin/activate
+MACHINE_MODE=simulated MACHINE_AUTO_CONNECT=false PYTHONPATH=src python -m unittest discover -s tests -v
 ```
 
-En un host con runtime fisico activo, ejecutar solo en un entorno controlado que garantice `MACHINE_MODE=simulated` y que no inicialice hardware.
-
-Linea segura usada en esta fase:
-
-```bash
-MACHINE_MODE=simulated PYTHONPATH=src .venv/bin/python -m unittest -v \
-  tests.test_api \
-  tests.test_gcode_analysis \
-  tests.test_heightmap \
-  tests.test_job_service \
-  tests.test_moonraker_client \
-  tests.test_project_service \
-  tests.test_web_mvp
-```
+Si alguna suite intenta inicializar hardware, ejecutar la linea base documentada en `docs/phase-2/references-connectivity-baseline.md` mas las pruebas nuevas de Fase 2.
 
 Frontend:
 
@@ -165,12 +148,11 @@ python -m klipper_cnc_assistant serve --host 127.0.0.1 --port 8000 --data-dir da
 python -m klipper_cnc_assistant check-gcode archivo.nc
 ```
 
-El despliegue real auditado en Thursday, July 30, 2026 corre desde `/home/impresora/klipper-cnc-assistant`, usa la venv local y escucha en `127.0.0.1:8000`. Esta fase no reinicia ese servicio ni cambia su configuracion real.
+La aplicacion activa del host no se modifica desde esta rama. El desarrollo de Fase 2 se realiza exclusivamente en `/home/impresora/klipper-cnc-assistant-fase2`.
 
-## Estado de la fase
+## Estado de fases
 
-- Fase 1 activa en `fase-1/auditoria-arquitectura`.
-- Pull request de Fase 1 abierto en borrador contra `main`.
-- No se hizo merge a `main`.
-- La reorganizacion es estructural; las reparaciones funcionales siguen pendientes.
-- La configuracion operativa ya no es canonica dentro del repositorio, pero debe migrarse de forma supervisada antes de desplegar la unidad versionada nueva.
+- Fase 1: completada y fusionada en `main`.
+- Fase 2: activa en `fase-2/referencias-conectividad`.
+- Fase 3: pendiente.
+- Fase 4: pendiente.

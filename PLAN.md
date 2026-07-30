@@ -2,8 +2,6 @@
 
 Fecha de actualización: Thursday, July 30, 2026
 
-## Estado general
-
 El proyecto se organiza en cuatro fases independientes. Cada fase debe ejecutarse en su propia rama y solo puede integrarse en `main` después de revisión técnica, pruebas reproducibles y aprobación explícita del usuario.
 
 ## Fase 1 — Auditoría, arquitectura y organización
@@ -12,18 +10,18 @@ El proyecto se organiza en cuatro fases independientes. Cada fase debe ejecutars
 - Documentar la procedencia funcional de cada componente útil.
 - Verificar la arquitectura actual y definir la arquitectura objetivo.
 - Reorganizar el repositorio sin cambiar comportamiento funcional de forma deliberada.
-- Actualizar documentación principal y dejar una base estable para las fases siguientes.
+- Dejar la documentación base y la estructura estable del repositorio.
 
-Estado: activa en `fase-1/auditoria-arquitectura`
+Estado: completada y fusionada en `main`
 
 ## Fase 2 — Referencias, Arduino y conectividad
 
-- Cerrar la pestaña Referencias y su persistencia.
+- Cerrar la pestaña `Referencia` y preservar la persistencia existente.
 - Consolidar Arduino, `SerialDriver`, reconexión y límites de seguridad.
-- Consolidar Moonraker HTTP y WebSocket sin duplicidades.
-- Asegurar que la conectividad física y simulada tengan fronteras claras.
+- Separar Moonraker HTTP, transporte WebSocket, frescura de posición y observación activa.
+- Añadir pruebas automatizadas reproducibles para reconexión, telemetría y referencias.
 
-Estado: provisional hasta cerrar la Fase 1
+Estado: activa en `fase-2/referencias-conectividad`
 
 ## Fase 3 — Mapa de alturas y compensación
 
@@ -31,7 +29,7 @@ Estado: provisional hasta cerrar la Fase 1
 - Asegurar cobertura, validación de dominio y compensación reproducible.
 - Separar claramente simulación, medición física y generación compensada.
 
-Estado: provisional hasta cerrar la Fase 1
+Estado: pendiente
 
 ## Fase 4 — Ejecución, recuperación y cierre del producto
 
@@ -39,4 +37,4 @@ Estado: provisional hasta cerrar la Fase 1
 - Asegurar preflight, cambio de herramienta, reanudación y cancelación segura.
 - Validar el producto completo contra la arquitectura aprobada y dejar criterio de cierre.
 
-Estado: provisional hasta cerrar la Fase 1
+Estado: pendiente
