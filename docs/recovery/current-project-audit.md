@@ -357,3 +357,111 @@ Firmware:
 - la línea base lógica es estable;
 - la validación física documentada existe como procedimiento, pero no puede considerarse repetida ni revalidada durante esta fase;
 - el principal riesgo de publicación no es un secreto clásico, sino configuración local operativa versionada en `deploy/`.
+
+
+## Reorganizacion ejecutada en Fase 1
+
+Movimientos aplicados sin cambio funcional deliberado:
+
+- `src/klipper_cnc_assistant/application/job_service.py` -> `src/klipper_cnc_assistant/execution/job_service.py`
+- `src/klipper_cnc_assistant/application/mesh_execution_service.py` -> `src/klipper_cnc_assistant/execution/mesh_execution_service.py`
+- `frontend/src/components/DashboardPage.tsx` -> `frontend/src/features/projects/DashboardPage.tsx`
+- `frontend/src/components/OperationPanel.tsx` -> `frontend/src/features/projects/OperationPanel.tsx`
+- `frontend/src/components/ProjectForm.tsx` -> `frontend/src/features/projects/ProjectForm.tsx`
+- `frontend/src/components/ProjectList.tsx` -> `frontend/src/features/projects/ProjectList.tsx`
+- `frontend/src/components/ProjectWorkspace.tsx` -> `frontend/src/features/projects/ProjectWorkspace.tsx`
+- `frontend/src/components/SystemBanner.tsx` -> `frontend/src/features/system/SystemBanner.tsx`
+- `frontend/src/components/SystemPage.tsx` -> `frontend/src/features/system/SystemPage.tsx`
+- `frontend/src/context/MachineContext.tsx` -> `frontend/src/features/system/MachineContext.tsx`
+- `frontend/src/components/ToolpathPreview.tsx` -> `frontend/src/features/viewer/ToolpathPreview.tsx`
+- `frontend/src/components/execution/ExecutionConsole.tsx` -> `frontend/src/features/execution/ExecutionConsole.tsx`
+- `frontend/src/features/heightmap/` -> `frontend/src/features/height-map/`
+- pruebas frontend movidas junto a sus modulos
+
+Archivos mantenidos en su ubicacion actual por seguridad de fase:
+
+- `src/klipper_cnc_assistant/api/routes.py`
+- `src/klipper_cnc_assistant/api/machine_routes.py`
+- `src/klipper_cnc_assistant/machine/runtime.py`
+- `firmware/`
+- `deploy/`
+- `experiments/`
+
+## Estructura resultante tras la reorganizacion
+
+Backend:
+
+```text
+src/klipper_cnc_assistant/
+├── api/
+├── application/
+├── domain/
+├── execution/
+├── gcode/
+├── heightmap/
+├── input/
+├── jog/
+├── machine/
+├── moonraker/
+└── storage/
+```
+
+Frontend:
+
+```text
+frontend/src/
+├── components/
+│   └── StatusBadge.tsx
+├── features/
+│   ├── execution/
+│   ├── height-map/
+│   ├── projects/
+│   ├── system/
+│   └── viewer/
+├── lib/
+├── test/
+├── App.tsx
+├── main.tsx
+└── types.ts
+```
+
+## Validacion segura despues de reorganizar
+
+Fecha: Thursday, July 30, 2026
+
+Backend seguro ejecutado:
+
+```bash
+MACHINE_MODE=simulated PYTHONPATH=src .venv/bin/python -m unittest -v   tests.test_api   tests.test_gcode_analysis   tests.test_heightmap   tests.test_job_service   tests.test_moonraker_client   tests.test_project_service   tests.test_web_mvp
+```
+
+Resultado:
+
+- `94` pruebas aprobadas
+- `0` fallos
+- duracion aproximada: `62.472s`
+- advertencias repetidas: deprecaciones de `FastAPI`/`Starlette`
+
+Frontend ejecutado:
+
+```bash
+cd frontend
+npm run lint
+npm run test
+npm run build
+```
+
+Resultado:
+
+- `npm run lint`: correcto
+- `npm run test`: `12` archivos, `63` pruebas aprobadas, `38.54s`
+- `npm run build`: correcto
+- advertencia no bloqueante: chunk grande de Plotly por encima de `500 kB`
+
+## Estado final de la auditoria de Fase 1
+
+- la reorganizacion aplicada mantiene la linea base segura de pruebas;
+- no se eliminaron copias ni respaldos locales;
+- no se repitio validacion fisica ni se movio la maquina;
+- la suite backend completa pedida por la fase sigue bloqueada en este host por seguridad, porque existen pruebas de runtime fisico y el servicio real activo usa configuracion fisica;
+- `deploy/klipper-cnc-assistant.env` sigue siendo un riesgo heredado: no esta en `origin/main`, pero si existe ya en ramas remotas previas y debe dejar de ser referencia canonica de despliegue en fases posteriores.

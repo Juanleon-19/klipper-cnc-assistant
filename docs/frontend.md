@@ -13,7 +13,7 @@
 
 ## Fuente única de estado de máquina
 
-La UI usa `MachineContext` (`frontend/src/context/MachineContext.tsx`) como fuente visible de estado físico. El flujo es:
+La UI usa `MachineContext` (`frontend/src/features/system/MachineContext.tsx`) como fuente visible de estado físico. El flujo es:
 
 ```text
 MachineRuntime -> /api/machine/runtime|status -> App -> MachineContext -> Sidebar/Sistema/Proyecto
