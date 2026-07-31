@@ -361,25 +361,49 @@ def build_router() -> APIRouter:
     def capture_physical_work_origin(project_id: str, operation_id: str, request: Request) -> ReferenceSessionResponse:
         reference_service = request.app.state.reference_session_service
         runtime = request.app.state.machine_runtime
-        position = runtime.capture_current_position()
-        snapshot = runtime.snapshot()
-        return _reference_session_to_response(reference_service.capture_physical_work_origin(project_id, operation_id, position=position, machine_label=str(snapshot["moonraker"].get("url") or "physical"), homed_axes=snapshot["klipper"].get("homed_axes"), session_id=snapshot.get("started_at")))
+        observation = runtime.capture_reference_observation()
+        return _reference_session_to_response(
+            reference_service.capture_physical_work_origin(
+                project_id,
+                operation_id,
+                position=observation["position"],
+                machine_label=str(observation["machine_label"]),
+                homed_axes=observation.get("homed_axes"),
+                session_id=observation.get("session_id"),
+            )
+        )
 
     @router.post("/projects/{project_id}/operations/{operation_id}/reference-session/physical-z-reference", response_model=ReferenceSessionResponse)
     def capture_physical_z_reference(project_id: str, operation_id: str, request: Request) -> ReferenceSessionResponse:
         reference_service = request.app.state.reference_session_service
         runtime = request.app.state.machine_runtime
-        position = runtime.capture_current_position()
-        snapshot = runtime.snapshot()
-        return _reference_session_to_response(reference_service.capture_physical_z_reference(project_id, operation_id, position=position, machine_label=str(snapshot["moonraker"].get("url") or "physical"), homed_axes=snapshot["klipper"].get("homed_axes"), session_id=snapshot.get("started_at")))
+        observation = runtime.capture_reference_observation()
+        return _reference_session_to_response(
+            reference_service.capture_physical_z_reference(
+                project_id,
+                operation_id,
+                position=observation["position"],
+                machine_label=str(observation["machine_label"]),
+                homed_axes=observation.get("homed_axes"),
+                session_id=observation.get("session_id"),
+            )
+        )
 
     @router.post("/projects/{project_id}/operations/{operation_id}/reference-session/physical-z-reference-from-probe", response_model=ReferenceSessionResponse)
     def capture_physical_z_reference_from_probe(project_id: str, operation_id: str, request: Request) -> ReferenceSessionResponse:
         reference_service = request.app.state.reference_session_service
         runtime = request.app.state.machine_runtime
-        position = runtime.last_probe_position()
-        snapshot = runtime.snapshot()
-        return _reference_session_to_response(reference_service.capture_physical_z_reference(project_id, operation_id, position=position, machine_label=str(snapshot["moonraker"].get("url") or "physical"), homed_axes=snapshot["klipper"].get("homed_axes"), session_id=snapshot.get("started_at")))
+        observation = runtime.capture_probe_reference_observation()
+        return _reference_session_to_response(
+            reference_service.capture_physical_z_reference(
+                project_id,
+                operation_id,
+                position=observation["position"],
+                machine_label=str(observation["machine_label"]),
+                homed_axes=observation.get("homed_axes"),
+                session_id=observation.get("session_id"),
+            )
+        )
 
     @router.post("/projects/{project_id}/operations/{operation_id}/reference/go-to", response_model=dict[str, object])
     def go_to_reference_point(project_id: str, operation_id: str, request: Request) -> dict[str, object]:

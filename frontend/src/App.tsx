@@ -464,6 +464,7 @@ Después deberá volver a conectar el Arduino, hacer homing, posicionar X0/Y0 y 
       if (action === "connect") runtime = await api.connectMachine();
       else if (action === "disconnect") runtime = await api.disconnectMachine();
       else if (action === "diagnostic") runtime = await api.setMachineDiagnosticMode(true);
+      else if (action === "reconnect-arduino") runtime = await api.reconnectArduino();
       else if (action === "initialize") runtime = await api.initializeMachine(targetZ ?? 0);
       else if (action === "manual-on") runtime = await api.setManualControl(true);
       else if (action === "manual-off") runtime = await api.setManualControl(false);

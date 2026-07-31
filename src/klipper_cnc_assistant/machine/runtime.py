@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from klipper_cnc_assistant.input.command_mapper import CommandMapper, ControllerCommand
+from klipper_cnc_assistant.input.connection_manager import ArduinoConnectionManager, ArduinoConnectionState, UsbIdentity
 from klipper_cnc_assistant.input.serial_driver import ControllerPacket, SerialDriver, SerialProtocolError
 from klipper_cnc_assistant.jog.controller import JogController, JogError
 from klipper_cnc_assistant.jog.manual import ManualJogController
@@ -181,6 +182,7 @@ class MachineRuntime:
         self._telemetry_thread: threading.Thread | None = None
         self._telemetry_failures: list[BaseException] = []
         self._driver: SerialDriver | None = None
+        self._connection_manager: ArduinoConnectionManager | None = None
         self._serial_thread: threading.Thread | None = None
         self._mapper = CommandMapper()
         self._jog: JogController | None = None
@@ -201,6 +203,7 @@ class MachineRuntime:
         self._initialization_steps: list[InitializationStep] = []
         self._events: list[RuntimeEvent] = []
         self._counters = RuntimeCounters()
+        self._serial_generation = 0
         self._packet_sequence = 0
         self._probe_raw = False
         self._probe_filtered = False
@@ -208,7 +211,12 @@ class MachineRuntime:
         self._probe_raw_since: float | None = None
         self._last_probe_failure: dict[str, Any] | None = None
         self._telemetry_state = "DISCONNECTED"
+        self._telemetry_reconnects = 0
         self._last_websocket_message_at: float | None = None
+        self._last_http_observation_at: float | None = None
+        self._last_http_error: str | None = None
+        self._last_klippy_state: str | None = None
+        self._last_websocket_error: str | None = None
 
 
     _MACHINE_SETTINGS_FIELDS = {
@@ -319,26 +327,134 @@ class MachineRuntime:
             self._manual_enabled = False
             self._serial_stop.set()
             telemetry = self._telemetry
-            driver = self._driver
+            manager = self._connection_manager
         if telemetry is not None:
             telemetry.stop()
-        if driver is not None:
-            driver.close()
+        if manager is not None:
+            manager.stop()
         if self._telemetry_thread is not None:
             self._telemetry_thread.join(timeout=2.0)
-        if self._serial_thread is not None:
-            self._serial_thread.join(timeout=2.0)
         with self._lock:
             self._client = None
             self._machine = None
             self._telemetry = None
             self._driver = None
+            self._connection_manager = None
+            self._serial_thread = None
             self._jog = None
             self._manual = None
             self._state = MachineRuntimeState.DISCONNECTED
             self._event("info", "Runtime detenido.")
 
+    def current_physical_session_id(self) -> str:
+        with self._lock:
+            started = self._started_at.isoformat()
+            generation = self._serial_generation
+        return f"{started}#serial-{generation}"
+
+    def reconnect_arduino(self) -> dict[str, Any]:
+        self._require_physical_ready()
+        with self._lock:
+            if self.config.mode is MachineMode.SIMULATED:
+                raise MachineRuntimeError("Arduino no disponible en modo SIMULADO.")
+            if self._state in {MachineRuntimeState.STOPPING, MachineRuntimeState.DISCONNECTED}:
+                raise MachineRuntimeError("Runtime detenido; no se puede reconectar Arduino.")
+            if self._active_operation is not None:
+                raise MachineRuntimeError("No se puede reconectar Arduino durante una operación física activa.")
+            manager = self._connection_manager
+            if manager is None:
+                raise MachineRuntimeError("Arduino no inicializado.")
+            self._prepare_for_new_serial_session()
+            self._event("warning", "Reconexión manual de Arduino solicitada; el movimiento permanece bloqueado.")
+        manager.request_reconnect()
+        return self.snapshot()
+
+    def _prepare_for_new_serial_session(self) -> None:
+        with self._lock:
+            self._manual_enabled = False
+            self._diagnostic_input_only = True
+            self._ready_for_jog = False
+            self._probe_requested = False
+            self._previous_command = ControllerCommand()
+            self._last_command = ControllerCommand()
+            self._last_packet = None
+            self._last_packet_at = None
+            self._last_command_text = None
+            self._last_probe_result = None
+            self._last_probe_failure = None
+            self._packet_sequence = 0
+            self._probe_raw = False
+            self._probe_filtered = False
+            self._probe_filtered_since = None
+            self._probe_raw_since = None
+
+    def _build_connection_manager(self) -> ArduinoConnectionManager:
+        return ArduinoConnectionManager(
+            configured_port=self.config.serial_port,
+            baudrate=self.config.serial_baudrate,
+            startup_delay=self.config.serial_startup_delay_s,
+            driver_factory=self._serial_factory,
+            on_packet=self._handle_controller_packet_from_manager,
+            on_session_started=self._on_serial_session_started,
+            on_session_lost=self._on_serial_session_lost,
+            on_state_change=self._on_connection_state,
+        )
+
+    def _on_connection_state(self, snapshot: dict[str, object]) -> None:
+        state = str(snapshot.get("state") or ArduinoConnectionState.DISCONNECTED)
+        last_error = snapshot.get("last_error")
+        with self._lock:
+            manager = self._connection_manager
+            if manager is not None:
+                self._driver = manager.driver
+                self._serial_thread = manager.thread
+            if last_error:
+                self._last_error = str(last_error)
+            if state == ArduinoConnectionState.CONNECTED:
+                if self._client is not None and self._state in {MachineRuntimeState.CONNECTING, MachineRuntimeState.DEGRADED}:
+                    self._state = MachineRuntimeState.DIAGNOSTIC
+            elif state in {ArduinoConnectionState.DEGRADED, ArduinoConnectionState.RETRY_WAIT}:
+                if self._client is not None and self._state not in {MachineRuntimeState.STOPPING, MachineRuntimeState.DISCONNECTED, MachineRuntimeState.ERROR}:
+                    self._state = MachineRuntimeState.DEGRADED
+
+    def _on_serial_session_started(self, generation: int, identity: UsbIdentity | None) -> None:
+        self._prepare_for_new_serial_session()
+        with self._lock:
+            self._serial_generation = generation
+            manager = self._connection_manager
+            if manager is not None:
+                self._driver = manager.driver
+                self._serial_thread = manager.thread
+            if self._client is not None:
+                self._state = MachineRuntimeState.DIAGNOSTIC
+            self._last_error = None
+            if generation > 1:
+                message = "Arduino reconectado en modo diagnóstico; el movimiento sigue bloqueado hasta nueva habilitación explícita."
+            else:
+                message = "Arduino conectado en modo diagnóstico; el movimiento sigue bloqueado hasta nueva habilitación explícita."
+            if identity is not None and not identity.exact:
+                message += " Sin número de serie USB; la reconexión automática queda limitada al puerto configurado."
+            self._event("info", message)
+
+    def _on_serial_session_lost(self, message: str) -> None:
+        self._prepare_for_new_serial_session()
+        with self._lock:
+            self._counters.disconnects += 1
+            self._driver = None
+            if self._client is not None and self._state not in {MachineRuntimeState.STOPPING, MachineRuntimeState.DISCONNECTED, MachineRuntimeState.ERROR}:
+                self._state = MachineRuntimeState.DEGRADED
+            self._last_error = message
+            self._event("warning", f"Arduino degradado: {message}")
+
+    def _handle_controller_packet_from_manager(self, packet: ControllerPacket, generation: int) -> None:
+        with self._lock:
+            if generation != self._serial_generation:
+                return
+        command = self._mapper.map(packet)
+        self._handle_controller_packet(packet, command)
+
     def connect(self) -> dict[str, Any]:
+        telemetry_thread: threading.Thread | None = None
         with self._lock:
             if self.config.mode is MachineMode.SIMULATED:
                 self._state = MachineRuntimeState.READY_FOR_HOME
@@ -351,43 +467,86 @@ class MachineRuntime:
         try:
             assert self.config.moonraker_url is not None
             assert self.config.moonraker_ws is not None
-            assert self.config.serial_port is not None
             client = self._client_factory(self.config.moonraker_url, timeout=self.config.moonraker_request_timeout_s)
             server_info = client.get_server_info()
-            if server_info.get("klippy_state") != "ready":
+            klippy_state = str(server_info.get("klippy_state") or "unknown")
+            if klippy_state != "ready":
                 raise MachineRuntimeError("Klipper no está ready.")
             machine = self._discovery(client)
             self._attach_telemetry_tracking(machine)
             telemetry = self._telemetry_factory(self.config.moonraker_ws, machine)
-            if hasattr(telemetry, "set_state_callback"):
+            if hasattr(telemetry, "set_snapshot_callback"):
+                telemetry.set_snapshot_callback(self._on_telemetry_state)
+            elif hasattr(telemetry, "set_state_callback"):
                 telemetry.set_state_callback(self._on_telemetry_state)
-            driver = self._serial_factory(port=self.config.serial_port, baudrate=self.config.serial_baudrate, startup_delay=self.config.serial_startup_delay_s)
-            driver.open()
+            connection_manager = self._build_connection_manager()
             telemetry_thread = threading.Thread(target=_run_telemetry, args=(telemetry, self._telemetry_failures), daemon=True)
-            serial_thread = threading.Thread(target=self._serial_loop, daemon=True)
             with self._lock:
                 self._client = client
                 self._machine = machine
                 self._telemetry = telemetry
-                self._driver = driver
+                self._connection_manager = connection_manager
                 self._jog = JogController(client, machine)
                 self._manual = ManualJogController(self._jog, mode=JogMode.FINE)
                 self._state = MachineRuntimeState.DIAGNOSTIC
                 self._diagnostic_input_only = True
                 self._serial_stop.clear()
                 self._reset_live_probe_stability()
-                self._event("info", "Moonraker, Klipper y Arduino conectados en modo diagnóstico.")
-            telemetry_thread.start()
-            serial_thread.start()
-            with self._lock:
                 self._telemetry_thread = telemetry_thread
-                self._serial_thread = serial_thread
-                self._last_telemetry_at = time.monotonic()
+                self._last_http_observation_at = time.monotonic()
+                self._last_http_error = None
+                self._last_klippy_state = klippy_state
+                self._last_websocket_error = None
+            telemetry_thread.start()
+            connection_manager.start()
+            deadline = time.monotonic() + max(self.config.serial_startup_delay_s + 1.5, 1.5)
+            snapshot = connection_manager.snapshot()
+            while time.monotonic() < deadline:
+                snapshot = connection_manager.snapshot()
+                with self._lock:
+                    self._driver = connection_manager.driver
+                    self._serial_thread = connection_manager.thread
+                if snapshot["state"] in {ArduinoConnectionState.CONNECTED, ArduinoConnectionState.DEGRADED, ArduinoConnectionState.RETRY_WAIT}:
+                    break
+                time.sleep(0.05)
+            if snapshot["state"] == ArduinoConnectionState.CONNECTED:
+                with self._lock:
+                    self._last_telemetry_at = time.monotonic()
+                    self._event("info", "Moonraker, Klipper y Arduino conectados en modo diagnóstico.")
+                return self.snapshot()
+            with self._lock:
+                self._state = MachineRuntimeState.DEGRADED
+                self._last_error = str(snapshot.get("last_error") or "Arduino aún no disponible; Moonraker y Klipper permanecen activos mientras continúa la reconexión serial.")
+                self._event("warning", "Moonraker y Klipper conectados; Arduino aún no disponible. Se mantiene reconexión serial sin habilitar movimiento.")
             return self.snapshot()
         except Exception as error:
+            manager = None
+            telemetry = None
+            thread_to_join = telemetry_thread
             with self._lock:
+                manager = self._connection_manager
+                telemetry = self._telemetry
+                if self._telemetry_thread is not None:
+                    thread_to_join = self._telemetry_thread
+            if manager is not None:
+                manager.stop()
+            if telemetry is not None:
+                telemetry.stop()
+            if thread_to_join is not None:
+                thread_to_join.join(timeout=2.0)
+            with self._lock:
+                self._connection_manager = None
+                self._driver = None
+                self._serial_thread = None
+                self._client = None
+                self._machine = None
+                self._telemetry = None
+                self._jog = None
+                self._manual = None
+                self._telemetry_thread = None
                 self._state = MachineRuntimeState.ERROR
                 self._last_error = str(error)
+                self._last_http_error = str(error)
                 self._event("error", str(error))
             raise
 
@@ -981,22 +1140,18 @@ class MachineRuntime:
         return self.snapshot()
 
     def capture_current_position(self) -> dict[str, float]:
-        self._require_physical_ready()
-        machine = self._machine
-        if machine is None:
-            raise MachineRuntimeError("No hay posición física disponible.")
-        snapshot = machine.get_motion_snapshot()
-        return {"x_mm": float(snapshot["x"]), "y_mm": float(snapshot["y"]), "z_mm": float(snapshot["z"])}
+        observation = self.capture_reference_observation()
+        return dict(observation["position"])
+
+    def capture_reference_observation(self) -> dict[str, Any]:
+        return self._observe_reference_position(use_last_probe=False)
 
     def last_probe_position(self) -> dict[str, float]:
-        self._require_physical_ready()
-        if self._last_probe_result is None:
-            raise MachineRuntimeError("No hay resultado de sonda de un punto disponible.")
-        return {
-            "x_mm": self._last_probe_result.x_mm,
-            "y_mm": self._last_probe_result.y_mm,
-            "z_mm": self._last_probe_result.z_mm,
-        }
+        observation = self.capture_probe_reference_observation()
+        return dict(observation["position"])
+
+    def capture_probe_reference_observation(self) -> dict[str, Any]:
+        return self._observe_reference_position(use_last_probe=True)
 
     def snapshot(self) -> dict[str, Any]:
         with self._lock:
@@ -1007,6 +1162,10 @@ class MachineRuntime:
             profile = get_jog_profile(self._manual.mode) if self._manual is not None else get_jog_profile(JogMode.FINE)
             safety = self._safety_snapshot(serial_age=serial_age, telemetry_age=telemetry_age)
             health = self._health_from_safety(safety)
+            websocket_state = self._normalize_telemetry_transport_state(self._telemetry_state)
+            position_age = self._position_age_s(machine_snapshot)
+            last_websocket_message_age = None if self._last_websocket_message_at is None else max(0.0, now - self._last_websocket_message_at)
+            last_http_observation_age = None if self._last_http_observation_at is None else max(0.0, now - self._last_http_observation_at)
             return {
                 "mode": self.config.mode.value.upper(),
                 "mode_label": self.config.mode_label,
@@ -1018,13 +1177,22 @@ class MachineRuntime:
                     "url": self.config.moonraker_url,
                     "ws": self.config.moonraker_ws,
                     "http_connected": self._client is not None,
-                    "websocket_connected": self._telemetry_thread is not None and self._telemetry_thread.is_alive(),
+                    "http_state": self._http_status(now=now),
+                    "websocket_connected": websocket_state == "CONNECTED",
+                    "websocket_state": websocket_state,
                     "telemetry_state": self._telemetry_status(),
-                    "last_websocket_message_age_s": None if self._last_websocket_message_at is None else max(0.0, now - self._last_websocket_message_at),
+                    "last_websocket_message_age_s": last_websocket_message_age,
+                    "last_position_age_s": position_age,
+                    "last_http_observation_age_s": last_http_observation_age,
+                    "last_http_error": self._last_http_error,
+                    "last_websocket_error": self._last_websocket_error,
                     "last_error": self._last_error,
+                    "reconnects": self._telemetry_reconnects,
+                    "klippy_state": self._last_klippy_state,
                 },
                 "klipper": {
-                    "ready": self._client is not None and self._state not in {MachineRuntimeState.ERROR, MachineRuntimeState.DISCONNECTED},
+                    "ready": self._client is not None and self._last_klippy_state == "ready" and self._state not in {MachineRuntimeState.ERROR, MachineRuntimeState.DISCONNECTED},
+                    "state": self._last_klippy_state,
                     "position": machine_snapshot,
                     "homed_axes": None if self._machine is None else self._machine.homed_axes,
                     "limits": None if self._machine is None else {
@@ -1260,7 +1428,21 @@ class MachineRuntime:
     def _refresh_machine(self) -> None:
         if self._client is None:
             raise MachineRuntimeError("Moonraker no está conectado.")
-        refreshed = self._discovery(self._client)
+        try:
+            if hasattr(self._client, "get_server_info"):
+                server_info = self._client.get_server_info()
+                klippy_state = str(server_info.get("klippy_state") or "unknown")
+                if klippy_state != "ready":
+                    raise MachineRuntimeError("Klipper no está ready.")
+            else:
+                klippy_state = "ready"
+            refreshed = self._discovery(self._client)
+        except Exception as error:
+            with self._lock:
+                self._last_http_error = str(error)
+                self._last_klippy_state = locals().get("klippy_state", self._last_klippy_state)
+            raise
+        observed_at = time.monotonic()
         with self._lock:
             if self._machine is None:
                 self._attach_telemetry_tracking(refreshed)
@@ -1286,28 +1468,45 @@ class MachineRuntime:
                     absolute_coordinates=refreshed.absolute_coordinates,
                     homing_origin=None if refreshed.homing_origin is None else refreshed.homing_origin.as_tuple(),
                 )
-            self._last_telemetry_at = time.monotonic()
+            self._last_telemetry_at = observed_at
+            self._last_http_observation_at = observed_at
+            self._last_http_error = None
+            self._last_klippy_state = klippy_state
 
-    def _on_telemetry_state(self, state: str) -> None:
+    def _on_telemetry_state(self, state: str | dict[str, Any]) -> None:
+        payload = state if isinstance(state, dict) else {"state": str(state)}
+        transport_state = self._normalize_telemetry_transport_state(payload.get("state"))
         with self._lock:
-            self._telemetry_state = str(state)
-            if state == "LIVE":
-                self._last_websocket_message_at = time.monotonic()
+            self._telemetry_state = transport_state
+            reconnects = payload.get("reconnects")
+            if reconnects is not None:
+                self._telemetry_reconnects = int(reconnects)
+            last_message_at = payload.get("last_message_at")
+            if last_message_at is not None:
+                self._last_websocket_message_at = float(last_message_at)
+            last_error = payload.get("last_error")
+            if last_error:
+                self._last_websocket_error = str(last_error)
+            elif transport_state == "CONNECTED":
+                self._last_websocket_error = None
 
     def _telemetry_status(self) -> str:
         with self._lock:
-            state = self._telemetry_state
-            last_message = self._last_websocket_message_at
-        if state == "DISCONNECTED":
-            return state
-        machine = self._machine
-        position = None if machine is None else machine.get_motion_snapshot()
-        live_position_age = None if position is None else position.get("live_position_age_s")
-        if live_position_age is None or live_position_age > self.config.telemetry_fresh_timeout_s:
+            raw_state = str(self._telemetry_state or "DISCONNECTED").upper()
+            machine_snapshot = None if self._machine is None else self._machine.get_motion_snapshot()
+            last_http_observation_at = self._last_http_observation_at
+        if raw_state == "STALE":
             return "STALE"
-        if state == "LIVE" and (last_message is None or time.monotonic() - last_message > self.config.telemetry_fresh_timeout_s):
+        transport_state = self._normalize_telemetry_transport_state(raw_state)
+        if transport_state in {"DISCONNECTED", "ERROR", "STOPPED"}:
+            return transport_state
+        live_age = None if machine_snapshot is None else machine_snapshot.get("live_position_age_s")
+        if last_http_observation_at is None or time.monotonic() - last_http_observation_at > self.config.telemetry_fresh_timeout_s:
+            if live_age is None or float(live_age) > self.config.telemetry_fresh_timeout_s:
+                return "STALE"
+        if self._position_is_stale():
             return "STALE"
-        return state
+        return "LIVE"
 
     def _attach_telemetry_tracking(self, machine) -> None:
         original_update_motion = machine.update_motion
@@ -1776,6 +1975,107 @@ class MachineRuntime:
             with self._lock:
                 self._last_error = str(error)
 
+    def _normalize_telemetry_transport_state(self, state: object) -> str:
+        normalized = str(state or "DISCONNECTED").upper()
+        if normalized in {"LIVE", "STALE"}:
+            return "CONNECTED"
+        if normalized not in {"DISCONNECTED", "CONNECTING", "CONNECTED", "RECONNECTING", "ERROR", "STOPPED"}:
+            return "ERROR"
+        return normalized
+
+    def _telemetry_transport_state(self) -> str:
+        with self._lock:
+            return self._normalize_telemetry_transport_state(self._telemetry_state)
+
+    def _http_status(self, *, now: float | None = None) -> str:
+        if self._client is None:
+            return "DISCONNECTED"
+        if self._last_http_observation_at is None:
+            return "UNOBSERVED"
+        current = time.monotonic() if now is None else now
+        age = max(0.0, current - self._last_http_observation_at)
+        if age > self.config.telemetry_fresh_timeout_s:
+            return "STALE"
+        return "AVAILABLE"
+
+    def _position_age_s(self, machine_snapshot: dict[str, Any] | None) -> float | None:
+        if machine_snapshot is None:
+            return None
+        ages = [
+            machine_snapshot.get("live_position_age_s"),
+            machine_snapshot.get("commanded_position_age_s"),
+            machine_snapshot.get("gcode_position_age_s"),
+        ]
+        numeric = [float(age) for age in ages if isinstance(age, (int, float))]
+        return min(numeric) if numeric else None
+
+    def _position_is_stale(self) -> bool:
+        machine_snapshot = None if self._machine is None else self._machine.get_motion_snapshot()
+        age = self._position_age_s(machine_snapshot)
+        return age is None or age > self.config.telemetry_fresh_timeout_s
+
+    def _assert_finite_position(self, position: dict[str, float]) -> None:
+        for axis in ("x_mm", "y_mm", "z_mm"):
+            value = float(position[axis])
+            if not math.isfinite(value):
+                raise MachineRuntimeError(f"Posición observada inválida en {axis}: {value}.")
+
+    def _observe_reference_position(self, *, use_last_probe: bool) -> dict[str, Any]:
+        self._require_physical_ready()
+        with self._lock:
+            if self._state in {MachineRuntimeState.STOPPING, MachineRuntimeState.DISCONNECTED}:
+                raise MachineRuntimeError("Runtime detenido; no se puede capturar una referencia física.")
+            if self._active_operation is not None:
+                raise MachineRuntimeError("Hay una operación física activa incompatible con la captura de referencia.")
+            session_id = f"{self._started_at.isoformat()}#serial-{self._serial_generation}"
+            last_probe = self._last_probe_result
+        self._assert_safety_for_connection()
+        self._refresh_machine()
+        with self._lock:
+            if self._active_operation is not None:
+                raise MachineRuntimeError("Hay una operación física activa incompatible con la captura de referencia.")
+            current_session = f"{self._started_at.isoformat()}#serial-{self._serial_generation}"
+            machine = self._machine
+            homed_axes = None if self._machine is None else self._machine.homed_axes
+            last_probe = self._last_probe_result if use_last_probe else last_probe
+        if current_session != session_id:
+            raise MachineRuntimeError("La sesión física cambió durante la observación activa; repita la captura.")
+        if self._last_klippy_state != "ready":
+            raise MachineRuntimeError("Klipper no está ready para capturar una referencia física.")
+        if machine is None:
+            raise MachineRuntimeError("No hay posición física disponible.")
+        missing = sorted(axis for axis in ("x", "y", "z") if not machine.axis_is_homed(axis))
+        if missing:
+            raise MachineRuntimeError("Falta homing de ejes: " + ", ".join(axis.upper() for axis in missing) + ".")
+        machine_snapshot = machine.get_motion_snapshot()
+        position_age = self._position_age_s(machine_snapshot)
+        if position_age is None or position_age > self.config.telemetry_fresh_timeout_s:
+            raise MachineRuntimeError("La posición observada está obsoleta; actualice Moonraker y repita la captura.")
+        if use_last_probe:
+            if last_probe is None:
+                raise MachineRuntimeError("No hay resultado de sonda de un punto disponible.")
+            position = {
+                "x_mm": float(last_probe.x_mm),
+                "y_mm": float(last_probe.y_mm),
+                "z_mm": float(last_probe.z_mm),
+            }
+        else:
+            position = {
+                "x_mm": float(machine_snapshot["x"]),
+                "y_mm": float(machine_snapshot["y"]),
+                "z_mm": float(machine_snapshot["z"]),
+            }
+        self._assert_finite_position(position)
+        return {
+            "position": position,
+            "session_id": current_session,
+            "homed_axes": homed_axes,
+            "machine_label": str(self.config.moonraker_url or "physical"),
+            "websocket_state": self._telemetry_transport_state(),
+            "http_state": self._http_status(),
+            "position_age_s": position_age,
+        }
+
     def _wait_for_axis(self, axis: str, target: float, label: str, *, start_position: float | None = None) -> None:
         if self._machine is None:
             raise MachineRuntimeError("No hay telemetría de máquina.")
@@ -1847,6 +2147,20 @@ class MachineRuntime:
         return numeric if numeric > 0 else None
 
     def _arduino_snapshot(self, *, now: float, serial_age: float | None) -> dict[str, Any]:
+        connection_snapshot = self._connection_manager.snapshot() if self._connection_manager is not None else {
+            "state": ArduinoConnectionState.DISCONNECTED,
+            "generation": self._serial_generation,
+            "configured_port": self.config.serial_port,
+            "connected_port": None,
+            "usb_identity": None,
+            "known_identity": None,
+            "reconnects": 0,
+            "rejected_devices": 0,
+            "retry_wait_s": None,
+            "last_error": None,
+            "thread_alive": False,
+            "open": False,
+        }
         driver_diagnostics = (
             self._driver.diagnostics.snapshot(now=now)
             if self._driver is not None
@@ -1862,7 +2176,7 @@ class MachineRuntime:
                 "checksum_errors": 0,
                 "sync_drops": 0,
                 "partial_packets": 0,
-                "reconnects": 0,
+                "reconnects": int(connection_snapshot.get("reconnects") or 0),
                 "last_byte_age_s": None,
                 "last_valid_packet_age_s": None,
                 "last_invalid_packet_age_s": None,
@@ -1883,14 +2197,18 @@ class MachineRuntime:
             reason = f"Último paquete válido obsoleto ({serial_age:.2f} s)."
         return {
             **driver_diagnostics,
+            **connection_snapshot,
+            "connection_state": str(connection_snapshot.get("state") or ArduinoConnectionState.DISCONNECTED),
             "recent": serial_age is not None and serial_age <= self.config.serial_fresh_timeout_s,
             "valid_packets": self._counters.valid_packets,
             "runtime_invalid_packets": self._counters.invalid_packets,
             "runtime_checksum_errors": self._counters.checksum_errors,
             "runtime_disconnects": self._counters.disconnects,
             "packet_frequency_hz": frequency,
+            "generation": self._serial_generation,
+            "last_packet_age_s": serial_age,
             "last_packet": None if self._last_packet is None else self._last_packet.__dict__,
-            "last_error": self._last_error,
+            "last_error": connection_snapshot.get("last_error") or self._last_error,
             "blocked_reason": reason,
         }
 

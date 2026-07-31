@@ -47,6 +47,54 @@ class ApiTest(unittest.TestCase):
         payload["montajes"][0]["preparacion"] = preparation
         project_file.write_text(json.dumps(payload, ensure_ascii=True, indent=2), encoding="utf-8")
 
+    def test_reconnect_arduino_endpoint_returns_runtime_snapshot(self) -> None:
+        runtime = self.app.state.machine_runtime
+        runtime.reconnect_arduino = lambda: runtime.snapshot()
+
+        response = self.client.post("/api/machine/reconnect-arduino")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["state"], runtime.snapshot()["state"])
+
+    def test_physical_work_origin_capture_is_idempotent_for_same_observation(self) -> None:
+        project_id = self._create_project()
+        operation_id = self._create_operation(project_id)
+        observation = {
+            "position": {"x_mm": 60.0, "y_mm": 88.75, "z_mm": 10.05},
+            "machine_label": "http://moonraker.local",
+            "homed_axes": "xyz",
+            "session_id": "2026-07-30T00:00:00+00:00#serial-2",
+        }
+        self.app.state.machine_runtime.capture_reference_observation = lambda: observation
+
+        first = self.client.post(f"/api/projects/{project_id}/operations/{operation_id}/reference-session/physical-work-origin")
+        second = self.client.post(f"/api/projects/{project_id}/operations/{operation_id}/reference-session/physical-work-origin")
+
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(second.status_code, 200)
+        self.assertEqual(first.json()["origen_trabajo"], second.json()["origen_trabajo"])
+        self.assertEqual(first.json()["origen_trabajo"]["fecha"], second.json()["origen_trabajo"]["fecha"])
+
+    def test_physical_z_reference_from_probe_uses_active_probe_observation(self) -> None:
+        project_id = self._create_project()
+        operation_id = self._create_operation(project_id)
+        self.app.state.machine_runtime.capture_probe_reference_observation = lambda: {
+            "position": {"x_mm": 60.0, "y_mm": 88.75, "z_mm": 0.015},
+            "machine_label": "http://moonraker.local",
+            "homed_axes": "xyz",
+            "session_id": "2026-07-30T00:00:00+00:00#serial-3",
+        }
+
+        response = self.client.post(f"/api/projects/{project_id}/operations/{operation_id}/reference-session/physical-z-reference-from-probe")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()["referencia_z"]
+        self.assertEqual(payload["x_mm"], 60.0)
+        self.assertEqual(payload["y_mm"], 88.75)
+        self.assertEqual(payload["z_mm"], 0.015)
+        self.assertEqual(payload["sesion"], "2026-07-30T00:00:00+00:00#serial-3")
+        self.assertEqual(payload["fuente"], "MEASURED")
+
     def test_job_run_start_conflict_returns_structured_detail(self) -> None:
         def raise_conflict(*_args, **_kwargs):
             raise ApplicationError("JOB_ACTIVE_CONFLICT")

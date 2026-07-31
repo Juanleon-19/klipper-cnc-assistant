@@ -137,6 +137,8 @@ class ReferenceSessionService:
             posicion_captura=self._captured_position_from_dict(position),
             sesion=session_id,
         )
+        if self._same_reference(setup.preparacion.origen_trabajo, reference):
+            return self.get_session(project_id, operation_id)
         updated = replace(
             setup,
             preparacion=replace(
@@ -179,6 +181,8 @@ class ReferenceSessionService:
             posicion_captura=self._captured_position_from_dict(position),
             sesion=session_id,
         )
+        if self._same_reference(setup.preparacion.referencia_z, reference):
+            return self.get_session(project_id, operation_id)
         updated = replace(
             setup,
             preparacion=replace(
@@ -476,6 +480,36 @@ class ReferenceSessionService:
             return self.physical_map_service.get_active(project_id, operation.id)
         except Exception:
             return None
+
+    def _same_reference(self, current: CoordinateReference | None, candidate: CoordinateReference) -> bool:
+        if current is None:
+            return False
+        current_position = current.posicion_captura
+        candidate_position = candidate.posicion_captura
+        return (
+            current.fuente == candidate.fuente
+            and current.maquina == candidate.maquina
+            and current.homed_axes == candidate.homed_axes
+            and current.sesion == candidate.sesion
+            and abs(float(current.x_mm) - float(candidate.x_mm)) <= 1e-9
+            and abs(float(current.y_mm) - float(candidate.y_mm)) <= 1e-9
+            and self._optional_float_equal(current.z_mm, candidate.z_mm)
+            and self._captured_position_equal(current_position, candidate_position)
+        )
+
+    def _captured_position_equal(self, current: CapturedPosition | None, candidate: CapturedPosition | None) -> bool:
+        if current is None or candidate is None:
+            return current is candidate
+        return (
+            abs(float(current.x_mm) - float(candidate.x_mm)) <= 1e-9
+            and abs(float(current.y_mm) - float(candidate.y_mm)) <= 1e-9
+            and self._optional_float_equal(current.z_mm, candidate.z_mm)
+        )
+
+    def _optional_float_equal(self, left: float | None, right: float | None) -> bool:
+        if left is None or right is None:
+            return left is right
+        return abs(float(left) - float(right)) <= 1e-9
 
     def _is_complete_measured_map(self, physical_map: dict[str, Any]) -> bool:
         if physical_map.get("source") != "MEASURED":

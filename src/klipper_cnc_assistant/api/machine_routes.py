@@ -45,6 +45,10 @@ def build_machine_router() -> APIRouter:
     def disconnect(request: Request) -> MachineRuntimeResponse:
         return MachineRuntimeResponse(**runtime(request).disconnect())
 
+    @router.post("/reconnect-arduino", response_model=MachineRuntimeResponse)
+    def reconnect_arduino(request: Request) -> MachineRuntimeResponse:
+        return MachineRuntimeResponse(**runtime(request).reconnect_arduino())
+
     @router.post("/diagnostic-mode", response_model=MachineRuntimeResponse)
     def diagnostic_mode(payload: DiagnosticModeRequest, request: Request) -> MachineRuntimeResponse:
         return MachineRuntimeResponse(**runtime(request).set_diagnostic_mode(payload.enabled))
