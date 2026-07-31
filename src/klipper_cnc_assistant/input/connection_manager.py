@@ -108,17 +108,20 @@ class ArduinoConnectionManager:
         return self._driver
 
     def start(self) -> None:
+        state_snapshot: dict[str, object] | None = None
         with self._lock:
             if self._thread is not None and self._thread.is_alive():
                 return
             self._stop.clear()
             self._reconnect_requested.clear()
-            self._set_state(ArduinoConnectionState.DISCOVERING)
+            state_snapshot = self._set_state_locked(ArduinoConnectionState.DISCOVERING)
             thread = threading.Thread(target=self._run, name="arduino-connection", daemon=True)
             self._thread = thread
             thread.start()
+        self._emit_state_change(state_snapshot)
 
     def stop(self) -> None:
+        state_snapshot: dict[str, object] | None = None
         with self._lock:
             self._stop.set()
             self._reconnect_requested.set()
@@ -134,7 +137,8 @@ class ArduinoConnectionManager:
             self._connected_port = None
             self._connected_identity = None
             self._retry_wait_s = None
-            self._set_state(ArduinoConnectionState.STOPPED)
+            state_snapshot = self._set_state_locked(ArduinoConnectionState.STOPPED)
+        self._emit_state_change(state_snapshot)
 
     def request_reconnect(self) -> None:
         with self._lock:
@@ -147,30 +151,14 @@ class ArduinoConnectionManager:
 
     def snapshot(self) -> dict[str, object]:
         with self._lock:
-            thread_alive = self._thread is not None and self._thread.is_alive()
-            driver = self._driver
-            snapshot = ArduinoConnectionSnapshot(
-                state=self._state.value,
-                generation=self._generation,
-                configured_port=self._configured_port,
-                connected_port=self._connected_port,
-                usb_identity=None if self._connected_identity is None else self._connected_identity.snapshot(),
-                known_identity=None if self._known_identity is None else self._known_identity.snapshot(),
-                reconnects=self._reconnects,
-                rejected_devices=self._rejected_devices,
-                retry_wait_s=self._retry_wait_s,
-                last_error=self._last_error,
-                thread_alive=thread_alive,
-                open=bool(driver is not None and driver.diagnostics.open),
-            )
-        return snapshot.__dict__
+            return self._snapshot_locked()
 
     def _run(self) -> None:
         backoff = 0.5
         while not self._stop.is_set():
             try:
                 port, identity = self._resolve_target()
-                self._set_state(ArduinoConnectionState.CONNECTING)
+                self._emit_state_change(self._transition_state(ArduinoConnectionState.CONNECTING))
                 driver = self._driver_factory(
                     port=port,
                     baudrate=self._baudrate,
@@ -190,7 +178,8 @@ class ArduinoConnectionManager:
                     generation = self._generation
                     connected_identity = self._connected_identity
                     self._reconnect_requested.clear()
-                    self._set_state(ArduinoConnectionState.CONNECTED)
+                    state_snapshot = self._set_state_locked(ArduinoConnectionState.CONNECTED)
+                self._emit_state_change(state_snapshot)
                 if self._on_session_started is not None:
                     self._on_session_started(generation, connected_identity)
                 backoff = 0.5
@@ -207,38 +196,46 @@ class ArduinoConnectionManager:
                     driver = self._driver
                 if driver is not None:
                     driver.close()
+                state_snapshot = None
                 with self._lock:
                     self._driver = None
                     self._connected_port = None
                     self._connected_identity = None
                     self._last_error = message
                     if not self._stop.is_set():
-                        self._set_state(ArduinoConnectionState.DEGRADED)
+                        state_snapshot = self._set_state_locked(ArduinoConnectionState.DEGRADED)
+                self._emit_state_change(state_snapshot)
                 if self._on_session_lost is not None and not self._stop.is_set():
                     self._on_session_lost(message)
                 if self._stop.is_set():
                     break
                 self._retry(backoff)
                 backoff = min(backoff * 2.0, 5.0)
+        state_snapshot: dict[str, object] | None = None
         with self._lock:
             self._driver = None
             self._connected_port = None
             self._connected_identity = None
             self._retry_wait_s = None
-            self._set_state(ArduinoConnectionState.STOPPED)
+            state_snapshot = self._set_state_locked(ArduinoConnectionState.STOPPED)
+        self._emit_state_change(state_snapshot)
 
     def _retry(self, seconds: float) -> None:
+        state_snapshot: dict[str, object] | None = None
         with self._lock:
             self._retry_wait_s = seconds
-            self._set_state(ArduinoConnectionState.RETRY_WAIT)
+            state_snapshot = self._set_state_locked(ArduinoConnectionState.RETRY_WAIT)
+        self._emit_state_change(state_snapshot)
         deadline = time.monotonic() + seconds
         while not self._stop.is_set() and time.monotonic() < deadline:
             if self._reconnect_requested.wait(timeout=0.1):
                 break
+        state_snapshot = None
         with self._lock:
             self._retry_wait_s = None
             if not self._stop.is_set():
-                self._set_state(ArduinoConnectionState.DISCOVERING)
+                state_snapshot = self._set_state_locked(ArduinoConnectionState.DISCOVERING)
+        self._emit_state_change(state_snapshot)
 
     def _resolve_target(self) -> tuple[str, UsbIdentity | None]:
         with self._lock:
@@ -294,7 +291,36 @@ class ArduinoConnectionManager:
                 )
         return None
 
-    def _set_state(self, state: ArduinoConnectionState) -> None:
+    def _snapshot_locked(self) -> dict[str, object]:
+        thread_alive = self._thread is not None and self._thread.is_alive()
+        driver = self._driver
+        snapshot = ArduinoConnectionSnapshot(
+            state=self._state.value,
+            generation=self._generation,
+            configured_port=self._configured_port,
+            connected_port=self._connected_port,
+            usb_identity=None if self._connected_identity is None else self._connected_identity.snapshot(),
+            known_identity=None if self._known_identity is None else self._known_identity.snapshot(),
+            reconnects=self._reconnects,
+            rejected_devices=self._rejected_devices,
+            retry_wait_s=self._retry_wait_s,
+            last_error=self._last_error,
+            thread_alive=thread_alive,
+            open=bool(driver is not None and driver.diagnostics.open),
+        )
+        return snapshot.__dict__
+
+    def _set_state_locked(self, state: ArduinoConnectionState) -> dict[str, object] | None:
         self._state = state
-        if self._on_state_change is not None:
-            self._on_state_change(self.snapshot())
+        if self._on_state_change is None:
+            return None
+        return self._snapshot_locked()
+
+    def _transition_state(self, state: ArduinoConnectionState) -> dict[str, object] | None:
+        with self._lock:
+            return self._set_state_locked(state)
+
+    def _emit_state_change(self, snapshot: dict[str, object] | None) -> None:
+        if snapshot is None or self._on_state_change is None:
+            return
+        self._on_state_change(dict(snapshot))

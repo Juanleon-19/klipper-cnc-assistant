@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import re
 import tempfile
 from pathlib import Path
@@ -7,6 +8,7 @@ import threading
 import time
 import unittest
 from dataclasses import replace
+from unittest.mock import patch
 
 from klipper_cnc_assistant.application.physical_map_service import PhysicalMapService, PhysicalMeshConfig
 from klipper_cnc_assistant.execution import MeshExecutionService
@@ -352,6 +354,87 @@ class FakeClock:
             self.updater(seconds)
 
 
+class ReadyInfoClient(MotionClient):
+    def get_server_info(self) -> dict[str, str]:
+        return {"klippy_state": "ready"}
+
+
+class PassiveTelemetry:
+    def __init__(self, *_args, **_kwargs) -> None:
+        self._stop = threading.Event()
+        self._snapshot_callback = None
+
+    def set_snapshot_callback(self, callback) -> None:
+        self._snapshot_callback = callback
+
+    async def run(self) -> None:
+        if self._snapshot_callback is not None:
+            self._snapshot_callback({
+                "state": "CONNECTED",
+                "last_message_at": time.monotonic(),
+                "last_error": None,
+                "reconnects": 0,
+            })
+        while not self._stop.is_set():
+            await asyncio.sleep(0.01)
+
+    def stop(self) -> None:
+        self._stop.set()
+
+
+class ReconnectableDiagnostics:
+    def __init__(self, port: str, baudrate: int) -> None:
+        self.port = port
+        self.baudrate = baudrate
+        self.open = False
+        self.thread_active = False
+        self.last_exception = None
+
+    def snapshot(self, *, now: float) -> dict[str, object]:
+        return {
+            "port": self.port,
+            "baudrate": self.baudrate,
+            "open": self.open,
+            "thread_active": self.thread_active,
+            "bytes_received": 0,
+            "packets_complete": 0,
+            "valid_packets": 0,
+            "invalid_packets": 0,
+            "checksum_errors": 0,
+            "sync_drops": 0,
+            "partial_packets": 0,
+            "reconnects": 0,
+            "last_byte_age_s": None,
+            "last_valid_packet_age_s": None,
+            "last_invalid_packet_age_s": None,
+            "last_exception": self.last_exception,
+        }
+
+
+class ReconnectableDriver:
+    def __init__(self, port: str, baudrate: int, *_args, **_kwargs) -> None:
+        self.port = port
+        self.baudrate = baudrate
+        self.closed = False
+        self.diagnostics = ReconnectableDiagnostics(port, baudrate)
+
+    def open(self) -> None:
+        self.diagnostics.open = True
+
+    def close(self) -> None:
+        self.closed = True
+        self.diagnostics.open = False
+
+    def read_packet(self) -> ControllerPacket:
+        self.diagnostics.thread_active = True
+        if self.closed:
+            raise RuntimeError("driver closed")
+        time.sleep(0.05)
+        if self.closed:
+            raise RuntimeError("driver closed")
+        return ControllerPacket(direction="CENTER", joystick_button=False, external_button=False, probe=False, x=512, y=512)
+
+
 def physical_runtime_with_machine(machine: MachineState, cfg: MachineRuntimeConfig | None = None) -> tuple[MachineRuntime, MotionClient]:
     cfg = cfg or config(MachineMode.PHYSICAL)
     runtime = MachineRuntime(cfg, discovery=lambda _client: machine)
@@ -501,6 +584,103 @@ class MachineRuntimeTest(unittest.TestCase):
         runtime = MachineRuntime(config(MachineMode.PHYSICAL))
         with self.assertRaisesRegex(MachineRuntimeError, "MOONRAKER_URL"):
             runtime.connect()
+
+    def test_connect_cleans_up_after_early_http_failure(self) -> None:
+        class FailingClient:
+            def get_server_info(self) -> dict[str, str]:
+                raise RuntimeError("Moonraker HTTP timeout")
+
+        runtime = MachineRuntime(
+            config(MachineMode.PHYSICAL, moonraker_url="http://moonraker.local", moonraker_ws="ws://moonraker.local/websocket", serial_port="/dev/ttyUSB0"),
+            client_factory=lambda _url, timeout=None: FailingClient(),
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "Moonraker HTTP timeout"):
+            runtime.connect()
+
+        snapshot = runtime.snapshot()
+        self.assertEqual(snapshot["state"], "ERROR")
+        self.assertFalse(snapshot["moonraker"]["http_connected"])
+        self.assertEqual(snapshot["arduino"]["connection_state"], "DISCONNECTED")
+        self.assertEqual(snapshot["moonraker"]["last_http_error"], "Moonraker HTTP timeout")
+
+    def test_connect_keeps_moonraker_active_while_arduino_retries_and_recovers_later(self) -> None:
+        machine = MachineState(
+            position=MachinePosition(0, 0, 10),
+            x_limits=AxisLimits(0, 100),
+            y_limits=AxisLimits(0, 100),
+            z_limits=AxisLimits(0, 200),
+            homed_axes="xyz",
+            max_velocity=100,
+            max_accel=500,
+            live_velocity=0,
+        )
+        client = ReadyInfoClient(machine)
+        serial_available = threading.Event()
+        runtime = MachineRuntime(
+            config(MachineMode.PHYSICAL, moonraker_url="http://moonraker.local", moonraker_ws="ws://moonraker.local/websocket", serial_port="/dev/ttyUSB0"),
+            client_factory=lambda _url, timeout=None: client,
+            telemetry_factory=PassiveTelemetry,
+            serial_factory=ReconnectableDriver,
+            discovery=lambda _client: machine,
+        )
+
+        with patch("klipper_cnc_assistant.input.connection_manager.os.path.exists", side_effect=lambda _path: serial_available.is_set()), patch(
+            "klipper_cnc_assistant.input.connection_manager.list_ports.comports",
+            return_value=[],
+        ):
+            try:
+                initial = runtime.connect()
+                self.assertEqual(initial["state"], "DEGRADED")
+                self.assertTrue(initial["moonraker"]["http_connected"])
+                self.assertNotEqual(initial["arduino"]["connection_state"], "CONNECTED")
+
+                serial_available.set()
+                deadline = time.monotonic() + 2.0
+                recovered = runtime.snapshot()
+                while time.monotonic() < deadline:
+                    recovered = runtime.snapshot()
+                    if recovered["arduino"]["connection_state"] == "CONNECTED":
+                        break
+                    time.sleep(0.05)
+
+                self.assertEqual(recovered["arduino"]["connection_state"], "CONNECTED")
+                self.assertEqual(recovered["state"], "DIAGNOSTIC")
+                self.assertTrue(recovered["moonraker"]["http_connected"])
+                with runtime._lock:
+                    self.assertFalse(runtime._manual_enabled)
+                    self.assertFalse(runtime._ready_for_jog)
+            finally:
+                runtime.stop()
+
+    def test_capture_reference_observation_rejects_stale_position(self) -> None:
+        machine = MachineState(position=MachinePosition(0, 0, 10), x_limits=AxisLimits(0, 100), y_limits=AxisLimits(0, 100), z_limits=AxisLimits(0, 200), homed_axes="xyz", max_velocity=100, max_accel=500, live_velocity=0)
+        runtime, _client = physical_runtime_with_machine(machine)
+        runtime._state = runtime_module.MachineRuntimeState.DIAGNOSTIC
+        runtime._last_klippy_state = "ready"
+        runtime._refresh_machine = lambda: None
+        stale_at = time.monotonic() - 10.0
+        machine.live_position_updated_at = stale_at
+        machine.commanded_position_updated_at = stale_at
+        machine.gcode_position_updated_at = stale_at
+
+        with self.assertRaisesRegex(MachineRuntimeError, "posición observada está obsoleta"):
+            runtime.capture_reference_observation()
+
+    def test_capture_reference_observation_rejects_session_change_during_refresh(self) -> None:
+        machine = MachineState(position=MachinePosition(0, 0, 10), x_limits=AxisLimits(0, 100), y_limits=AxisLimits(0, 100), z_limits=AxisLimits(0, 200), homed_axes="xyz", max_velocity=100, max_accel=500, live_velocity=0)
+        runtime, _client = physical_runtime_with_machine(machine)
+        runtime._state = runtime_module.MachineRuntimeState.DIAGNOSTIC
+        runtime._last_klippy_state = "ready"
+
+        def change_session() -> None:
+            with runtime._lock:
+                runtime._serial_generation += 1
+
+        runtime._refresh_machine = change_session
+
+        with self.assertRaisesRegex(MachineRuntimeError, "La sesión física cambió durante la observación activa"):
+            runtime.capture_reference_observation()
 
 
     def test_transport_timeout_is_cleared_when_homing_is_confirmed_by_state(self) -> None:

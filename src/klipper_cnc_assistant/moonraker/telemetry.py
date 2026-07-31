@@ -2,10 +2,15 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 import time
 from typing import Any, Callable
 
 import websockets
+
+
+class _TelemetryStopRequested(Exception):
+    pass
 
 
 class MoonrakerTelemetry:
@@ -31,6 +36,10 @@ class MoonrakerTelemetry:
         self._last_error: str | None = None
         self._reconnects = 0
         self._connected_once = False
+        self._control_lock = threading.Lock()
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._stop_waiter: asyncio.Future[None] | None = None
+        self._websocket = None
 
     def set_state_callback(self, callback: Callable[[str], None] | None) -> None:
         self._state_callback = callback
@@ -152,39 +161,95 @@ class MoonrakerTelemetry:
         if isinstance(gcode_move, dict):
             self._process_gcode_move(gcode_move)
 
-    async def _recv_or_ping(self, websocket) -> str:
+    async def _await_or_stop(self, awaitable, *, timeout: float) -> object:
+        task = asyncio.ensure_future(awaitable)
+        with self._control_lock:
+            stop_waiter = self._stop_waiter
+        waiters: set[asyncio.Future[object] | asyncio.Task[object]] = {task}
+        if stop_waiter is not None:
+            waiters.add(stop_waiter)
+        done, pending = await asyncio.wait(waiters, timeout=timeout, return_when=asyncio.FIRST_COMPLETED)
+        if stop_waiter is not None and stop_waiter in done:
+            for pending_task in pending:
+                pending_task.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
+            raise _TelemetryStopRequested()
+        if task in done:
+            return await task
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        raise asyncio.TimeoutError()
+
+    async def _recv_or_ping(self, websocket) -> str | None:
         try:
-            return await asyncio.wait_for(websocket.recv(), timeout=self._idle_ping_interval_s)
+            return await self._await_or_stop(websocket.recv(), timeout=self._idle_ping_interval_s)
         except asyncio.TimeoutError:
-            pong = await websocket.ping()
-            await asyncio.wait_for(pong, timeout=self._ping_timeout_s)
-            return await asyncio.wait_for(websocket.recv(), timeout=self._idle_ping_interval_s)
+            pong = websocket.ping()
+            await self._await_or_stop(pong, timeout=self._ping_timeout_s)
+            return None
 
     async def run(self) -> None:
         self._running = True
-        while self._running:
-            try:
-                self._set_state('RECONNECTING' if self._connected_once else 'CONNECTING')
-                async with websockets.connect(self.websocket_url, ping_interval=None) as websocket:
-                    await self._subscribe(websocket)
-                    self._connected_once = True
-                    self._set_state('CONNECTED')
-                    while self._running:
-                        message = await self._recv_or_ping(websocket)
-                        self._process_message(json.loads(message))
-            except asyncio.CancelledError:
-                raise
-            except Exception as error:
-                if not self._running:
+        loop = asyncio.get_running_loop()
+        stop_waiter: asyncio.Future[None] = loop.create_future()
+        with self._control_lock:
+            self._loop = loop
+            self._stop_waiter = stop_waiter
+        try:
+            while self._running:
+                try:
+                    self._set_state('RECONNECTING' if self._connected_once else 'CONNECTING')
+                    async with websockets.connect(self.websocket_url, ping_interval=None) as websocket:
+                        with self._control_lock:
+                            self._websocket = websocket
+                        try:
+                            await self._subscribe(websocket)
+                            self._connected_once = True
+                            self._set_state('CONNECTED')
+                            while self._running:
+                                message = await self._recv_or_ping(websocket)
+                                if message is None:
+                                    continue
+                                self._process_message(json.loads(message))
+                        finally:
+                            with self._control_lock:
+                                if self._websocket is websocket:
+                                    self._websocket = None
+                except _TelemetryStopRequested:
                     break
-                if self._connected_once:
-                    self._reconnects += 1
-                    self._set_state('RECONNECTING', error=str(error))
-                else:
-                    self._set_state('ERROR', error=str(error))
-                await asyncio.sleep(self._reconnect_delay_s)
-        self._set_state('STOPPED')
+                except asyncio.CancelledError:
+                    raise
+                except Exception as error:
+                    if not self._running:
+                        break
+                    if self._connected_once:
+                        self._reconnects += 1
+                        self._set_state('RECONNECTING', error=str(error))
+                    else:
+                        self._set_state('ERROR', error=str(error))
+                    await asyncio.sleep(self._reconnect_delay_s)
+        finally:
+            with self._control_lock:
+                self._websocket = None
+                self._stop_waiter = None
+                self._loop = None
+            if self._state != 'STOPPED':
+                self._set_state('STOPPED')
 
     def stop(self) -> None:
         self._running = False
-        self._set_state('STOPPED')
+        with self._control_lock:
+            loop = self._loop
+            stop_waiter = self._stop_waiter
+            websocket = self._websocket
+
+        def request_stop() -> None:
+            if stop_waiter is not None and not stop_waiter.done():
+                stop_waiter.set_result(None)
+            if websocket is not None:
+                asyncio.create_task(websocket.close())
+
+        if loop is not None and loop.is_running():
+            loop.call_soon_threadsafe(request_stop)
+        if self._state != 'STOPPED':
+            self._set_state('STOPPED')

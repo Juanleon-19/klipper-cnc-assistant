@@ -454,6 +454,7 @@ class MachineRuntime:
         self._handle_controller_packet(packet, command)
 
     def connect(self) -> dict[str, Any]:
+        telemetry_thread: threading.Thread | None = None
         with self._lock:
             if self.config.mode is MachineMode.SIMULATED:
                 self._state = MachineRuntimeState.READY_FOR_HOME
@@ -508,23 +509,29 @@ class MachineRuntime:
                 if snapshot["state"] in {ArduinoConnectionState.CONNECTED, ArduinoConnectionState.DEGRADED, ArduinoConnectionState.RETRY_WAIT}:
                     break
                 time.sleep(0.05)
-            if snapshot["state"] != ArduinoConnectionState.CONNECTED:
-                raise MachineRuntimeError(str(snapshot.get("last_error") or "No se pudo iniciar la sesión serial del Arduino."))
+            if snapshot["state"] == ArduinoConnectionState.CONNECTED:
+                with self._lock:
+                    self._last_telemetry_at = time.monotonic()
+                    self._event("info", "Moonraker, Klipper y Arduino conectados en modo diagnóstico.")
+                return self.snapshot()
             with self._lock:
-                self._last_telemetry_at = time.monotonic()
-                self._event("info", "Moonraker, Klipper y Arduino conectados en modo diagnóstico.")
+                self._state = MachineRuntimeState.DEGRADED
+                self._last_error = str(snapshot.get("last_error") or "Arduino aún no disponible; Moonraker y Klipper permanecen activos mientras continúa la reconexión serial.")
+                self._event("warning", "Moonraker y Klipper conectados; Arduino aún no disponible. Se mantiene reconexión serial sin habilitar movimiento.")
             return self.snapshot()
         except Exception as error:
             manager = None
             telemetry = None
+            thread_to_join = telemetry_thread
             with self._lock:
                 manager = self._connection_manager
                 telemetry = self._telemetry
+                if self._telemetry_thread is not None:
+                    thread_to_join = self._telemetry_thread
             if manager is not None:
                 manager.stop()
             if telemetry is not None:
                 telemetry.stop()
-            thread_to_join = self._telemetry_thread or telemetry_thread
             if thread_to_join is not None:
                 thread_to_join.join(timeout=2.0)
             with self._lock:

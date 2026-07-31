@@ -194,6 +194,38 @@ class ConnectionManagerTest(unittest.TestCase):
                 manager._resolve_target()
         self.assertEqual(manager.snapshot()["rejected_devices"], 1)
 
+    def test_snapshot_does_not_block_behind_state_callback_waiting_on_external_lock(self) -> None:
+        factory = ScriptedFactory([["wait"]])
+        runtime_lock = threading.Lock()
+        callback_waiting = threading.Event()
+        callback_finished = threading.Event()
+        snapshot_done = threading.Event()
+
+        def on_state_change(_snapshot: dict[str, object]) -> None:
+            callback_waiting.set()
+            with runtime_lock:
+                callback_finished.set()
+
+        manager = ArduinoConnectionManager(
+            configured_port="/dev/ttyUSB0",
+            baudrate=115200,
+            startup_delay=0.0,
+            driver_factory=factory,
+            on_state_change=on_state_change,
+        )
+        with patch("klipper_cnc_assistant.input.connection_manager.os.path.exists", return_value=True):
+            with runtime_lock:
+                starter = threading.Thread(target=manager.start)
+                starter.start()
+                self._wait_for(callback_waiting.is_set)
+                snap_thread = threading.Thread(target=lambda: (manager.snapshot(), snapshot_done.set()))
+                snap_thread.start()
+                self._wait_for(snapshot_done.is_set, timeout=0.5)
+            self._wait_for(callback_finished.is_set)
+            starter.join(timeout=1.0)
+            snap_thread.join(timeout=1.0)
+            manager.stop()
+
 
 if __name__ == "__main__":
     unittest.main()
