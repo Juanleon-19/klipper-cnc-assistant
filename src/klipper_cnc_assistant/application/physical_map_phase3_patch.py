@@ -86,7 +86,7 @@ def _decorate_execution_payload(self, payload: dict[str, Any]) -> dict[str, Any]
     last_progress_age_s = None
     parsed_last_progress = _parse_datetime(last_progress_at)
     if parsed_last_progress is not None:
-      last_progress_age_s = max(0.0, (utc_now() - parsed_last_progress).total_seconds())
+        last_progress_age_s = max(0.0, (utc_now() - parsed_last_progress).total_seconds())
     execution["measured_count"] = measured_count
     execution["pending_count"] = sum(1 for point in progress_points if point.get("status") in {"PENDING", "RETRY_REQUIRED"})
     execution["excluded_count"] = excluded_count
@@ -99,7 +99,7 @@ def _decorate_execution_payload(self, payload: dict[str, Any]) -> dict[str, Any]
     execution["worker_alive"] = bool(execution.get("worker_active"))
     execution["pause_requested"] = bool(execution.get("pause_requested"))
     execution["cancel_requested"] = bool(execution.get("cancel_requested"))
-    execution["last_error"] = execution.get("error")
+    execution["last_error"] = execution.get("last_error") or execution.get("error")
     execution["last_progress_age_s"] = last_progress_age_s
     execution["operation_state"] = execution.get("point_state") or decorated.get("status")
     decorated["execution"] = execution
