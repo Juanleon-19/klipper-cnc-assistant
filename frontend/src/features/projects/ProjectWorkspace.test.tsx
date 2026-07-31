@@ -397,6 +397,15 @@ const physicalMachine: MachineContextValue = {
   refreshRuntime: vi.fn(),
 };
 
+function requireRuntime(machine: MachineContextValue) {
+  if (!machine.runtime) {
+    throw new Error("La fixture de prueba requiere runtime físico.");
+  }
+  return machine.runtime;
+}
+
+const physicalRuntime = requireRuntime(physicalMachine);
+
 function renderWorkspace(machine?: MachineContextValue, options?: { onRefreshProject?: () => Promise<void>; onProjectStateChange?: (project: Project) => void }) {
   const workspace = (
     <ProjectWorkspace
@@ -610,7 +619,7 @@ describe("ProjectWorkspace", () => {
     const activeMachine: MachineContextValue = {
       ...physicalMachine,
       runtime: {
-        ...physicalMachine.runtime,
+        ...physicalRuntime,
         active_operation: { operation_type: "reference_move", generation: 7 },
       },
     };
@@ -675,7 +684,14 @@ describe("ProjectWorkspace", () => {
 
   it("permite volver a medir la referencia cuando ya existe una captura previa", async () => {
     vi.mocked(physicalMachine.refreshRuntime).mockClear();
-    const capturedMachine: MachineContextValue = { ...physicalMachine, runtimeState: "REFERENCE_CAPTURED", runtime: { ...physicalMachine.runtime, state: "REFERENCE_CAPTURED" } as NonNullable<MachineContextValue["runtime"]> };
+    const capturedMachine: MachineContextValue = {
+      ...physicalMachine,
+      runtimeState: "REFERENCE_CAPTURED",
+      runtime: {
+        ...physicalRuntime,
+        state: "REFERENCE_CAPTURED",
+      },
+    };
     renderWorkspace(capturedMachine);
 
     fireEvent.click(screen.getByRole("button", { name: /^Referencia$/i }));
