@@ -505,19 +505,7 @@ def build_router() -> APIRouter:
     @router.get("/projects/{project_id}/operations/{operation_id}/physical-map", response_model=PhysicalMapResponse)
     def get_physical_map(project_id: str, operation_id: str, request: Request) -> PhysicalMapResponse:
         service = request.app.state.physical_map_service
-        project = service._load_project(project_id)
-        operation = project.get_operation(operation_id)
-        payload = service._latest_surface_map(project_id, operation)
-        if payload is None:
-            legacy = service._latest_legacy_tool_map(project_id, operation)
-            if legacy is not None:
-                payload = service._migrate_legacy_payload(legacy, operation)
-        if payload is None:
-            return PhysicalMapResponse(payload=service.get_active(project_id, operation_id))
-        decorator = getattr(service, "_decorate_execution", None)
-        if callable(decorator):
-            payload = decorator(payload)
-        return PhysicalMapResponse(payload=payload)
+        return PhysicalMapResponse(payload=service.get_latest_map(project_id, operation_id))
 
 
     @router.get("/projects/{project_id}/operations/{operation_id}/physical-map/history", response_model=list[dict[str, object]])
