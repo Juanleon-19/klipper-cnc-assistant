@@ -518,6 +518,17 @@ export type PhysicalMapPayload = Record<string, unknown> & {
   reference_point?: PhysicalMeshPoint;
   valid_for_execution?: boolean;
   warnings?: string[];
+  mesh_config?: {
+    grid_mode?: "manual" | "suggested";
+    rows?: number;
+    columns?: number;
+    edge_margin_left_mm?: number;
+    edge_margin_right_mm?: number;
+    edge_margin_bottom_mm?: number;
+    edge_margin_top_mm?: number;
+    max_spacing_mm?: number | null;
+    margin_mm?: number | null;
+  };
   probe_config?: { safe_z_mm?: number | null; probe_step_mm?: number | null; probe_feed_mm_min?: number | null; retract_mm?: number | null };
   tool_references?: Record<string, unknown>;
 };
