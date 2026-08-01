@@ -465,11 +465,27 @@ def build_router() -> APIRouter:
         runtime = request.app.state.machine_runtime
         reference_service = request.app.state.reference_session_service
         physical_map_service = request.app.state.physical_map_service
-        probe = runtime.last_probe_position()
-        snapshot = runtime.snapshot()
-        machine_label = str(snapshot["moonraker"].get("url") or "physical")
-        homed_axes = snapshot["klipper"].get("homed_axes")
-        session_id = snapshot.get("started_at")
+        config = PhysicalMeshConfig(
+            grid_mode=payload.grid_mode,
+            rows=payload.rows,
+            columns=payload.columns,
+            edge_margin_left_mm=payload.edge_margin_left_mm,
+            edge_margin_right_mm=payload.edge_margin_right_mm,
+            edge_margin_bottom_mm=payload.edge_margin_bottom_mm,
+            edge_margin_top_mm=payload.edge_margin_top_mm,
+            exclusions=tuple(PhysicalExclusion(**exclusion.model_dump()) for exclusion in payload.exclusions),
+            max_spacing_mm=payload.max_spacing_mm,
+            margin_mm=payload.margin_mm,
+            safe_z_mm=payload.safe_z_mm,
+            probe_step_mm=payload.probe_step_mm,
+            probe_feed_mm_min=payload.probe_feed_mm_min,
+            retract_mm=payload.retract_mm,
+        )
+        observation = runtime.capture_probe_reference_observation()
+        probe = observation["position"]
+        machine_label = str(observation.get("machine_label") or "physical")
+        homed_axes = observation.get("homed_axes")
+        session_id = observation.get("session_id")
         reference_service.capture_physical_work_origin(project_id, operation_id, position=probe, machine_label=machine_label, homed_axes=homed_axes, session_id=session_id)
         reference_service.capture_physical_z_reference(project_id, operation_id, position=probe, machine_label=machine_label, homed_axes=homed_axes, session_id=session_id)
         plan = physical_map_service.capture_reference_and_plan(
@@ -482,29 +498,26 @@ def build_router() -> APIRouter:
             homed_axes=homed_axes,
             machine_label=machine_label,
             session_id=session_id,
-            config=PhysicalMeshConfig(
-                grid_mode=payload.grid_mode,
-                rows=payload.rows,
-                columns=payload.columns,
-                edge_margin_left_mm=payload.edge_margin_left_mm,
-                edge_margin_right_mm=payload.edge_margin_right_mm,
-                edge_margin_bottom_mm=payload.edge_margin_bottom_mm,
-                edge_margin_top_mm=payload.edge_margin_top_mm,
-                exclusions=tuple(PhysicalExclusion(**exclusion.model_dump()) for exclusion in payload.exclusions),
-                max_spacing_mm=payload.max_spacing_mm,
-                margin_mm=payload.margin_mm,
-                safe_z_mm=payload.safe_z_mm,
-                probe_step_mm=payload.probe_step_mm,
-                probe_feed_mm_min=payload.probe_feed_mm_min,
-                retract_mm=payload.retract_mm,
-            ),
+            config=config,
         )
         return PhysicalMapResponse(payload=plan)
 
     @router.get("/projects/{project_id}/operations/{operation_id}/physical-map", response_model=PhysicalMapResponse)
     def get_physical_map(project_id: str, operation_id: str, request: Request) -> PhysicalMapResponse:
         service = request.app.state.physical_map_service
-        return PhysicalMapResponse(payload=service.get_active(project_id, operation_id))
+        project = service._load_project(project_id)
+        operation = project.get_operation(operation_id)
+        payload = service._latest_surface_map(project_id, operation)
+        if payload is None:
+            legacy = service._latest_legacy_tool_map(project_id, operation)
+            if legacy is not None:
+                payload = service._migrate_legacy_payload(legacy, operation)
+        if payload is None:
+            return PhysicalMapResponse(payload=service.get_active(project_id, operation_id))
+        decorator = getattr(service, "_decorate_execution", None)
+        if callable(decorator):
+            payload = decorator(payload)
+        return PhysicalMapResponse(payload=payload)
 
 
     @router.get("/projects/{project_id}/operations/{operation_id}/physical-map/history", response_model=list[dict[str, object]])
@@ -583,7 +596,8 @@ def build_router() -> APIRouter:
 
     @router.post("/projects/{project_id}/physical-maps/{map_id:path}/pause", response_model=PhysicalMapResponse)
     def pause_physical_map(project_id: str, map_id: str, request: Request) -> PhysicalMapResponse:
-        return PhysicalMapResponse(payload=request.app.state.physical_map_service.mark_status(project_id=project_id, map_id=map_id, status="MESH_PAUSED"))
+        updated = request.app.state.mesh_execution_service.pause(project_id=project_id, map_id=map_id)
+        return PhysicalMapResponse(payload=updated)
 
     @router.post("/projects/{project_id}/physical-maps/{map_id:path}/resume", response_model=PhysicalMapResponse)
     def resume_physical_map(project_id: str, map_id: str, request: Request) -> PhysicalMapResponse:
