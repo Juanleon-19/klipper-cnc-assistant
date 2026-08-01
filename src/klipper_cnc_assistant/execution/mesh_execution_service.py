@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from datetime import datetime, timezone
 from typing import Any
 
 from klipper_cnc_assistant.application.errors import ApplicationError
@@ -36,7 +37,7 @@ POINT_STATES = (
 
 
 def _iso_now() -> str:
-    return time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime())
+    return datetime.now(timezone.utc).isoformat()
 
 
 class MeshExecutionService:
@@ -69,7 +70,7 @@ class MeshExecutionService:
             self._prune_dead_threads_locked()
             live_thread = self._threads.get(key)
             if live_thread is not None and live_thread.is_alive():
-                return self.physical_map_service.get_by_id(project_id, map_id)
+                raise ApplicationError("La malla ya tiene un worker activo y no puede iniciarse dos veces.")
             if any(thread.is_alive() for other_key, thread in self._threads.items() if other_key != key):
                 raise ApplicationError("Ya hay una operación física de malla en curso.")
             cancel_request = self._cancel_requests.get(key)
