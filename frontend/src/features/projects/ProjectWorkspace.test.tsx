@@ -794,6 +794,72 @@ describe("ProjectWorkspace", () => {
     expect(screen.getByRole("button", { name: /^Cancelar$/i })).toHaveClass("button--ghost");
   });
 
+  it("rehidrata la receta persistida del mapa y muestra primer y último punto", async () => {
+    apiMock.getPhysicalMap.mockResolvedValueOnce({
+      payload: {
+        map_id: "measured/persisted-3x4",
+        status: "MESH_PAUSED",
+        source: "MEASURED",
+        point_count: 12,
+        excluded_count: 1,
+        executable_point_count: 11,
+        grid_mode: "manual",
+        rows: 3,
+        columns: 4,
+        edge_margins: { left_mm: 2, right_mm: 3, bottom_mm: 4, top_mm: 5 },
+        mesh_config: {
+          grid_mode: "manual",
+          rows: 3,
+          columns: 4,
+          edge_margin_left_mm: 2,
+          edge_margin_right_mm: 3,
+          edge_margin_bottom_mm: 4,
+          edge_margin_top_mm: 5,
+          max_spacing_mm: 8,
+          margin_mm: 0,
+        },
+        probe_config: { safe_z_mm: 14, probe_step_mm: 0.02, probe_feed_mm_min: 90, retract_mm: 1.2 },
+        exclusions: [
+          { id: "ex-1", name: "Pinza 1", shape: "rectangle", enabled: true, x_min_mm: 8, x_max_mm: 12, y_min_mm: 6, y_max_mm: 9 },
+          { id: "ex-2", name: "Pinza 2", shape: "circle", enabled: true, center_x_mm: 20, center_y_mm: 20, radius_mm: 3 },
+        ],
+        grid: { rows: 3, columns: 4, dx_mm: 25, dy_mm: 23 },
+        local_region: { min_x_mm: 2, min_y_mm: 4, max_x_mm: 77, max_y_mm: 55 },
+        points: [
+          { index: 0, role: "REFERENCE", row: 0, column: 0, x_local: 2, y_local: 4, x_machine: 62, y_machine: 92.75, status: "MEASURED" },
+          { index: 1, row: 0, column: 0, x_local: 2, y_local: 4, x_machine: 62, y_machine: 92.75, status: "MEASURED" },
+          { index: 2, row: 0, column: 1, x_local: 27, y_local: 4, x_machine: 87, y_machine: 92.75, status: "PENDING" },
+          { index: 11, row: 2, column: 0, x_local: 77, y_local: 55, x_machine: 137, y_machine: 143.75, status: "PENDING" },
+        ],
+      },
+    });
+
+    renderWorkspace(physicalMachine);
+    fireEvent.click(screen.getByRole("button", { name: /Mapa de alturas/i }));
+
+    expect(await screen.findByText(/Mapa medido físicamente/i)).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByLabelText(/^Filas$/i)).toHaveValue("3"));
+    expect(screen.getByLabelText(/^Columnas$/i)).toHaveValue("4");
+    expect(screen.getByLabelText(/Z segura de traslado/i)).toHaveValue("14");
+    expect(screen.getByLabelText(/Paso de sonda/i)).toHaveValue("0.02");
+    expect(screen.getByLabelText(/Velocidad de sonda/i)).toHaveValue("90");
+    expect(screen.getByLabelText(/Retracto \(mm\)/i)).toHaveValue("1.2");
+    expect(screen.getByText(/2 configurada\(s\)/i)).toBeInTheDocument();
+    expect(screen.getByText(/X 2\.000 mm · Y 4\.000 mm/i)).toBeInTheDocument();
+    expect(screen.getByText(/X 77\.000 mm · Y 55\.000 mm/i)).toBeInTheDocument();
+  });
+
+  it("bloquea la vista previa cuando la receta de malla es inválida", async () => {
+    renderWorkspace(physicalMachine);
+    fireEvent.click(screen.getByRole("button", { name: /Mapa de alturas/i }));
+    expect(await screen.findByText(/Mapa medido físicamente/i)).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText(/Z segura de traslado/i), { target: { value: "" } });
+
+    expect(screen.getByText(/La configuración de malla es inválida/i)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Generar vista previa de malla/i })).toBeDisabled();
+  });
+
 
 
   it("permite configurar malla manual 2x2 y previsualiza exactamente cuatro puntos interiores", async () => {

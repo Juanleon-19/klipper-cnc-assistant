@@ -46,6 +46,55 @@ def _tool_diameter(operation: OperacionPCB) -> float | None:
     return float(values[0].replace(",", "."))
 
 
+def _as_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    if math.isnan(parsed) or math.isinf(parsed):
+        return None
+    return parsed
+
+
+def _as_int(value: Any) -> int | None:
+    parsed = _as_float(value)
+    if parsed is None or not parsed.is_integer():
+        return None
+    return int(parsed)
+
+
+def _same_number(left: Any, right: Any, *, tolerance: float = 0.001) -> bool:
+    left_value = _as_float(left)
+    right_value = _as_float(right)
+    if left_value is None or right_value is None:
+        return False
+    return abs(left_value - right_value) <= tolerance
+
+
+def _same_optional_number(left: Any, right: Any, *, tolerance: float = 0.001) -> bool:
+    left_value = _as_float(left)
+    right_value = _as_float(right)
+    if left_value is None or right_value is None:
+        return left_value is None and right_value is None
+    return abs(left_value - right_value) <= tolerance
+
+
+def _tool_reference_from_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    references = payload.get("tool_references") or {}
+    tool_key = payload.get("acquisition_tool_id") or payload.get("tool_id")
+    if isinstance(references, dict) and isinstance(tool_key, str):
+        reference = references.get(tool_key)
+        if isinstance(reference, dict):
+            return reference
+    if isinstance(references, dict):
+        for reference in references.values():
+            if isinstance(reference, dict) and reference.get("valid", True):
+                return reference
+    return {}
+
+
 @dataclass(frozen=True)
 class PhysicalExclusion:
     id: str
@@ -374,16 +423,32 @@ class PhysicalMapService:
         if setup.active_map_id:
             try:
                 active = self.get_by_id(project_id, setup.active_map_id)
-                if active.get("setup_id") == operation.setup_id and active.get("face") == operation.cara and active.get("archived_at") is None:
+                if self._payload_matches_setup_face(active, operation):
                     return self._ensure_completed_map_finalized(project_id, active)
             except Exception:
                 pass
         payload = self._latest_surface_map(project_id, operation)
         if payload is not None:
-            return self._ensure_completed_map_finalized(project_id, payload)
+            return self._decorate_execution_payload(self._ensure_completed_map_finalized(project_id, payload))
         legacy = self._latest_legacy_tool_map(project_id, operation)
         if legacy is not None:
-            return self._migrate_legacy_payload(legacy, operation)
+            return self._decorate_execution_payload(self._migrate_legacy_payload(legacy, operation))
+        raise NotFoundError("No existe mapa físico medido para este montaje y cara.")
+
+    def get_latest_map(self, project_id: str, operation_id: str) -> dict[str, Any]:
+        project = self._load_project(project_id)
+        operation = project.get_operation(operation_id)
+        setup = project.get_setup(operation.setup_id)
+        if setup.active_map_id:
+            try:
+                payload = self._load(project_id, setup.active_map_id)
+            except Exception:
+                payload = None
+            if payload is not None and self._payload_matches_setup_face(payload, operation):
+                return self._decorate_execution_payload(payload, include_progress_age=True)
+        payload = self._latest_surface_map(project_id, operation)
+        if payload is not None:
+            return self._decorate_execution_payload(payload, include_progress_age=True)
         raise NotFoundError("No existe mapa físico medido para este montaje y cara.")
 
     def get_by_id(self, project_id: str, map_id: str) -> dict[str, Any]:
@@ -393,7 +458,7 @@ class PhysicalMapService:
             operation_id = str((payload.get("operation_ids") or [""])[0])
             if operation_id:
                 payload = self._migrate_legacy_payload(payload, project.get_operation(operation_id))
-        return self._ensure_completed_map_finalized(project_id, payload)
+        return self._decorate_execution_payload(self._ensure_completed_map_finalized(project_id, payload))
 
     def height_map_from_payload(self, payload: dict[str, Any]) -> HeightMap:
         return self._height_map_from_payload(payload)
@@ -450,6 +515,7 @@ class PhysicalMapService:
         error: str | None = None,
     ) -> dict[str, Any]:
         payload = self.get_by_id(project_id, map_id)
+        execution_before = dict(payload.get("execution") or {})
         points = payload["points"]
         if point_index < 0 or point_index >= len(points):
             raise ApplicationError("Índice de punto fuera de rango.")
@@ -481,46 +547,117 @@ class PhysicalMapService:
         })
         points[point_index] = point
         payload["points"] = points
-        payload["status"] = "MESH_COMPLETE" if all(item.get("status") in {"MEASURED", "EXCLUDED", "SKIPPED"} for item in points) else "MESH_PROBING"
-        if payload["status"] == "MESH_COMPLETE":
+        payload["updated_at"] = measured_at
+        payload["height_map"] = self._height_map_payload_from_points(payload)
+        if all(item.get("status") in {"MEASURED", "EXCLUDED", "SKIPPED"} for item in points):
+            payload["status"] = "MESH_COMPLETE"
             payload["completed_at"] = measured_at
             payload = self._set_execution_state(
                 payload,
                 worker_active=False,
-                point_state="POINT_COMPLETE",
+                point_state="MESH_COMPLETE",
                 point_index=point_index,
                 last_event=f"Punto {point_index + 1}/{len(points)} persistido; malla completa.",
+                metadata={
+                    "phase": "complete",
+                    "pause_requested": False,
+                    "pause_reason": None,
+                    "cancel_requested": False,
+                    "cancel_reason": None,
+                    "last_progress_at": measured_at,
+                },
             )
-        else:
+            payload = self._finalize_completed_map(project_id, payload)
+            self._save(project_id, map_id, payload)
+            return payload
+        if execution_before.get("cancel_requested"):
+            payload["status"] = "CANCELLED"
             payload = self._set_execution_state(
                 payload,
-                point_state="POINT_PERSIST",
+                worker_active=False,
+                point_state="CANCELLED",
                 point_index=point_index,
-                last_event=f"Punto {point_index + 1}/{len(points)} persistido; buscando siguiente punto.",
+                last_event=f"Punto {point_index + 1}/{len(points)} persistido antes de cerrar la cancelación.",
+                metadata={
+                    "phase": "cancelled",
+                    "pause_requested": False,
+                    "pause_reason": None,
+                    "cancel_requested": False,
+                    "cancel_reason": execution_before.get("cancel_reason") or "Solicitada por el operador.",
+                    "last_progress_at": measured_at,
+                },
             )
-        payload["updated_at"] = measured_at
-        payload["height_map"] = self._height_map_payload_from_points(payload)
-        if payload["status"] == "MESH_COMPLETE":
-            payload = self._finalize_completed_map(project_id, payload)
+            self._save(project_id, map_id, payload)
+            return payload
+        if execution_before.get("pause_requested"):
+            payload["status"] = "MESH_PAUSED"
+            payload = self._set_execution_state(
+                payload,
+                worker_active=False,
+                point_state="MESH_PAUSED",
+                point_index=point_index,
+                last_event=f"Punto {point_index + 1}/{len(points)} persistido; pausa confirmada antes del siguiente punto.",
+                metadata={
+                    "phase": "paused",
+                    "pause_requested": True,
+                    "pause_reason": execution_before.get("pause_reason") or "Solicitada por el operador.",
+                    "cancel_requested": False,
+                    "last_progress_at": measured_at,
+                },
+            )
+            self._save(project_id, map_id, payload)
+            return payload
+        payload["status"] = "MESH_PROBING"
+        payload = self._set_execution_state(
+            payload,
+            worker_active=True,
+            point_state="POINT_PERSIST",
+            point_index=point_index,
+            last_event=f"Punto {point_index + 1}/{len(points)} persistido; buscando siguiente punto.",
+            metadata={
+                "phase": "persist",
+                "last_progress_at": measured_at,
+            },
+        )
         self._save(project_id, map_id, payload)
         return payload
 
-    def mark_status(self, *, project_id: str, map_id: str, status: str) -> dict[str, Any]:
+    def mark_status(
+        self,
+        *,
+        project_id: str,
+        map_id: str,
+        status: str,
+        worker_active: bool | None = None,
+        point_state: str | None = None,
+        last_event: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         payload = self.get_by_id(project_id, map_id)
+        previous_execution = dict(payload.get("execution") or {})
+        metadata = dict(metadata or {})
+        if status in {"MESH_PAUSED", "CANCELLED"} and "last_error" not in metadata:
+            last_error = previous_execution.get("last_error") or previous_execution.get("error")
+            if last_error:
+                metadata["last_error"] = last_error
         payload["status"] = status
-        payload["updated_at"] = _iso_now()
         payload = self._set_execution_state(
             payload,
-            worker_active=status == "MESH_PROBING",
-            point_state="MESH_PAUSED" if status == "MESH_PAUSED" else status,
-            last_event=f"Estado de malla actualizado a {status}.",
+            worker_active=(status == "MESH_PROBING" if worker_active is None else worker_active),
+            point_state=point_state or ("MESH_PAUSED" if status == "MESH_PAUSED" else status),
+            last_event=last_event or f"Estado de malla actualizado a {status}.",
+            metadata=metadata,
         )
         execution = dict(payload.get("execution") or {})
-        if status == "MESH_PAUSED":
+        if status == "MESH_PAUSED" and "pause_requested" not in metadata:
             execution["pause_requested"] = True
-        elif status in {"MESH_READY", "MESH_PROBING", "CANCELLED"}:
+        elif status in {"MESH_READY", "MESH_PROBING", "CANCELLED"} and "pause_requested" not in metadata:
             execution["pause_requested"] = False
+        if status == "CANCELLED" and "cancel_requested" not in metadata:
+            execution["cancel_requested"] = False
         payload["execution"] = execution
+        payload = self._decorate_execution_payload(payload)
+        payload["updated_at"] = _iso_now()
         self._save(project_id, map_id, payload)
         return payload
 
@@ -565,6 +702,7 @@ class PhysicalMapService:
         command: str | None = None,
         target: dict[str, Any] | None = None,
         observed: dict[str, Any] | None = None,
+        metadata: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         payload = self.get_by_id(project_id, map_id)
         payload = self._set_execution_state(
@@ -578,6 +716,7 @@ class PhysicalMapService:
             command=command,
             target=target,
             observed=observed,
+            metadata=metadata,
         )
         payload["updated_at"] = _iso_now()
         self._save(project_id, map_id, payload)
@@ -650,6 +789,131 @@ class PhysicalMapService:
             "events": list(payload.get("events", [])),
         }
 
+    def validate_resume_context(self, *, project_id: str, map_id: str) -> dict[str, Any]:
+        payload = self.get_by_id(project_id, map_id)
+        if payload.get("schema_version") != "surface-map-v2":
+            raise ApplicationError("La malla no conserva un formato reanudable.")
+        if payload.get("archived_at") is not None:
+            raise ApplicationError("La malla archivada no puede reanudarse.")
+        if payload.get("status") == "MESH_COMPLETE":
+            raise ApplicationError("La malla ya está completa.")
+        if payload.get("status") == "CANCELLED":
+            raise ApplicationError("La malla fue cancelada y necesita una nueva planificación o repetición explícita.")
+        project = self._load_project(project_id)
+        operation_ids = [str(item) for item in (payload.get("operation_ids") or []) if str(item)]
+        operation_id = operation_ids[0] if operation_ids else str(payload.get("operation_id") or "")
+        if not operation_id:
+            raise ApplicationError("La malla no conserva la operación de origen y no puede reanudarse.")
+        operation = project.get_operation(operation_id)
+        if payload.get("setup_id") != operation.setup_id:
+            raise ApplicationError("El montaje activo ya no coincide con la malla planificada.")
+        if payload.get("face") != operation.cara:
+            raise ApplicationError("La cara activa ya no coincide con la malla planificada.")
+        mesh_config = payload.get("mesh_config") or {}
+        grid = payload.get("grid") or {}
+        payload_rows = _as_int(payload.get("rows"))
+        payload_columns = _as_int(payload.get("columns"))
+        mesh_rows = _as_int(mesh_config.get("rows"))
+        mesh_columns = _as_int(mesh_config.get("columns"))
+        grid_rows = _as_int(grid.get("rows"))
+        grid_columns = _as_int(grid.get("columns"))
+        if payload_rows is not None and any(candidate is not None and candidate != payload_rows for candidate in (mesh_rows, grid_rows)):
+            raise ApplicationError("La configuración de cuadrícula persistida cambió y la malla ya no es reanudable.")
+        if payload_columns is not None and any(candidate is not None and candidate != payload_columns for candidate in (mesh_columns, grid_columns)):
+            raise ApplicationError("La configuración de cuadrícula persistida cambió y la malla ya no es reanudable.")
+        payload_grid_mode = str(payload.get("grid_mode") or mesh_config.get("grid_mode") or "manual")
+        mesh_grid_mode = str(mesh_config.get("grid_mode") or payload_grid_mode)
+        if mesh_grid_mode != payload_grid_mode:
+            raise ApplicationError("La configuración de cuadrícula persistida cambió y la malla ya no es reanudable.")
+        setup = project.get_setup(operation.setup_id)
+        if setup.active_map_id != map_id:
+            raise ApplicationError("La malla ya no coincide con el mapa activo del montaje.")
+        if setup.placement_revision != payload.get("placement_revision"):
+            raise ApplicationError("La revisión de colocación cambió; la malla ya no es reanudable.")
+        origin = setup.preparacion.origen_trabajo
+        if origin is not None and (not _same_number(origin.x_mm, payload.get("machine_origin_x")) or not _same_number(origin.y_mm, payload.get("machine_origin_y"))):
+            raise ApplicationError("El origen X/Y vigente ya no coincide con la malla planificada.")
+        current_z_reference = setup.preparacion.referencia_z
+        if current_z_reference is not None and current_z_reference.z_mm is not None:
+            reference = _tool_reference_from_payload(payload)
+            expected_x = reference.get("reference_x", payload.get("machine_origin_x"))
+            expected_y = reference.get("reference_y", payload.get("machine_origin_y"))
+            expected_z = reference.get("reference_z", payload.get("reference_z"))
+            if not _same_number(current_z_reference.x_mm, expected_x) or not _same_number(current_z_reference.y_mm, expected_y) or not _same_number(current_z_reference.z_mm, expected_z):
+                raise ApplicationError("La referencia Z vigente ya no coincide con la malla planificada.")
+        return payload
+
+    def _payload_matches_setup_face(self, payload: dict[str, Any], operation: OperacionPCB) -> bool:
+        return (
+            payload.get("schema_version") == "surface-map-v2"
+            and payload.get("setup_id") == operation.setup_id
+            and payload.get("face") == operation.cara
+            and payload.get("archived_at") is None
+            and payload.get("status") != "ARCHIVED"
+        )
+
+    def _decorate_execution_payload(self, payload: dict[str, Any], *, include_progress_age: bool = False) -> dict[str, Any]:
+        decorated = dict(payload)
+        points = [dict(point) for point in decorated.get("points") or []]
+        execution = dict(decorated.get("execution") or {})
+        progress_points = [point for point in points if point.get("role") != "REFERENCE" and point.get("status") != "EXCLUDED"]
+        pending_points = [point for point in points if point.get("status") in {"PENDING", "RETRY_REQUIRED"}]
+        measured_count = sum(1 for point in progress_points if point.get("status") == "MEASURED")
+        failed_count = sum(1 for point in progress_points if point.get("status") == "FAILED")
+        excluded_count = sum(1 for point in points if point.get("status") == "EXCLUDED")
+        total_count = len(progress_points)
+        current_point_index = execution.get("point_index")
+        next_point_index = pending_points[0].get("index") if pending_points else None
+        progress_percent = 100.0 if total_count == 0 else round((measured_count / total_count) * 100.0, 3)
+        last_progress_age_s = None
+        if include_progress_age:
+            last_progress_at = execution.get("last_progress_at") or execution.get("last_transition_at")
+            parsed_last_progress = self._parse_datetime(last_progress_at)
+            last_progress_age_s = None if parsed_last_progress is None else max(0.0, (utc_now() - parsed_last_progress).total_seconds())
+        execution.setdefault("worker_generation", 0)
+        execution.setdefault("pause_requested", False)
+        execution.setdefault("pause_reason", None)
+        execution.setdefault("cancel_requested", False)
+        execution.setdefault("cancel_reason", None)
+        execution.setdefault("phase", "planned")
+        execution.setdefault("last_progress_at", decorated.get("updated_at") or _iso_now())
+        execution.setdefault("last_error", execution.get("error"))
+        execution["measured_count"] = measured_count
+        execution["pending_count"] = sum(1 for point in progress_points if point.get("status") in {"PENDING", "RETRY_REQUIRED"})
+        execution["excluded_count"] = excluded_count
+        execution["failed_count"] = failed_count
+        execution["progress_total"] = total_count
+        execution["total_count"] = total_count
+        execution["current_point_index"] = current_point_index
+        execution["next_point_index"] = next_point_index
+        execution["progress_percent"] = progress_percent
+        execution["worker_alive"] = bool(execution.get("worker_active"))
+        execution["pause_requested"] = bool(execution.get("pause_requested"))
+        execution["cancel_requested"] = bool(execution.get("cancel_requested"))
+        execution["last_error"] = execution.get("last_error") or execution.get("error")
+        if include_progress_age:
+            execution["last_progress_age_s"] = last_progress_age_s
+        else:
+            execution.pop("last_progress_age_s", None)
+        execution["operation_state"] = execution.get("point_state") or decorated.get("status")
+        decorated["execution"] = execution
+        decorated["points"] = points
+        decorated["measured_count"] = measured_count
+        decorated["total_count"] = total_count
+        decorated["current_point_index"] = current_point_index
+        decorated["next_point_index"] = next_point_index
+        decorated["progress_percent"] = progress_percent
+        decorated["worker_alive"] = execution["worker_alive"]
+        decorated["pause_requested"] = execution["pause_requested"]
+        decorated["cancel_requested"] = execution["cancel_requested"]
+        if include_progress_age:
+            decorated["last_progress_age_s"] = last_progress_age_s
+        else:
+            decorated.pop("last_progress_age_s", None)
+        decorated["last_error"] = execution.get("last_error")
+        decorated["operation_state"] = execution["operation_state"]
+        return decorated
+
     def _set_execution_state(
         self,
         payload: dict[str, Any],
@@ -663,10 +927,12 @@ class PhysicalMapService:
         command: str | None = None,
         target: dict[str, Any] | None = None,
         observed: dict[str, Any] | None = None,
+        metadata: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         now = _iso_now()
         points = list(payload.get("points", []))
         execution = dict(payload.get("execution") or {})
+        metadata = dict(metadata or {})
         previous_state = execution.get("point_state")
         if worker_active is not None:
             execution["worker_active"] = worker_active
@@ -689,11 +955,19 @@ class PhysicalMapService:
         if target is not None or observed is not None:
             execution["last_result"] = {"target": target, "observed": observed, "at": now}
         execution["last_transition_at"] = now
-        execution["measured_count"] = sum(1 for point in points if point.get("status") == "MEASURED")
-        execution["pending_count"] = sum(1 for point in points if point.get("status") in {"PENDING", "RETRY_REQUIRED"})
+        if point_state is not None or last_event is not None:
+            execution["last_progress_at"] = metadata.pop("last_progress_at", now)
+        if error is not None:
+            execution["last_error"] = error
+        elif point_state not in {None, "POINT_FAILED"} and "last_error" not in metadata:
+            execution["last_error"] = None
+        execution.update(metadata)
+        execution["operation_state"] = execution.get("point_state") or payload.get("status")
+        execution["measured_count"] = sum(1 for point in points if point.get("role") != "REFERENCE" and point.get("status") == "MEASURED")
+        execution["pending_count"] = sum(1 for point in points if point.get("role") != "REFERENCE" and point.get("status") in {"PENDING", "RETRY_REQUIRED"})
         execution["excluded_count"] = sum(1 for point in points if point.get("status") == "EXCLUDED")
-        execution["failed_count"] = sum(1 for point in points if point.get("status") == "FAILED")
-        execution["progress_total"] = sum(1 for point in points if point.get("status") != "EXCLUDED")
+        execution["failed_count"] = sum(1 for point in points if point.get("role") != "REFERENCE" and point.get("status") == "FAILED")
+        execution["progress_total"] = sum(1 for point in points if point.get("role") != "REFERENCE" and point.get("status") != "EXCLUDED")
         payload["execution"] = execution
         event = {
             "timestamp": now,
@@ -718,7 +992,7 @@ class PhysicalMapService:
         if last_event is not None or point_state is not None:
             events.append(event)
         payload["events"] = events[-500:]
-        return payload
+        return self._decorate_execution_payload(payload)
 
     def _operations_for_setup_face(self, project, operation: OperacionPCB) -> tuple[OperacionPCB, ...]:
         return tuple(
@@ -833,6 +1107,7 @@ class PhysicalMapService:
         config: PhysicalMeshConfig = kwargs["config"]
         origin_x = float(kwargs["machine_origin_x"])
         origin_y = float(kwargs["machine_origin_y"])
+        now = _iso_now()
         points = self._points_from_samples(
             samples=list(height_map.muestras),
             operation=operation,
@@ -852,7 +1127,7 @@ class PhysicalMapService:
             machine_label=kwargs["machine_label"],
             session_id=kwargs["session_id"],
         )
-        return {
+        payload = {
             "schema_version": "surface-map-v2",
             "map_model": "SURFACE_BY_SETUP_FACE_PLACEMENT",
             "map_id": kwargs["map_id"],
@@ -869,9 +1144,9 @@ class PhysicalMapService:
             "operation_ids": [item.id for item in operations],
             "source": "MEASURED",
             "status": kwargs["status"],
-            "created_at": _iso_now(),
+            "created_at": now,
             "completed_at": None,
-            "updated_at": _iso_now(),
+            "updated_at": now,
             "machine_origin_x": origin_x,
             "machine_origin_y": origin_y,
             "reference_z": float(kwargs["reference_z"]),
@@ -936,25 +1211,35 @@ class PhysicalMapService:
             "invalid_points": [],
             "execution": {
                 "worker_active": False,
+                "worker_generation": 0,
                 "point_state": "MESH_PLANNED",
                 "point_index": None,
-                "state_entered_at": _iso_now(),
-                "last_transition_at": _iso_now(),
+                "state_entered_at": now,
+                "last_transition_at": now,
+                "last_progress_at": now,
                 "last_event": "Malla planificada; ejecución física pendiente.",
                 "last_command": None,
                 "last_result": None,
                 "retry_count": 0,
                 "error": None,
-                "measured_count": sum(1 for point in points if point.get("status") == "MEASURED"),
-                "pending_count": sum(1 for point in points if point.get("status") in {"PENDING", "RETRY_REQUIRED", "FAILED"}),
+                "last_error": None,
+                "pause_requested": False,
+                "pause_reason": None,
+                "cancel_requested": False,
+                "cancel_reason": None,
+                "phase": "planned",
+                "operation_state": "MESH_PLANNED",
+                "measured_count": sum(1 for point in points if point.get("role") != "REFERENCE" and point.get("status") == "MEASURED"),
+                "pending_count": sum(1 for point in points if point.get("role") != "REFERENCE" and point.get("status") in {"PENDING", "RETRY_REQUIRED"}),
                 "excluded_count": sum(1 for point in points if point.get("status") == "EXCLUDED"),
-                "failed_count": 0,
-                "progress_total": sum(1 for point in points if point.get("status") != "EXCLUDED"),
+                "failed_count": sum(1 for point in points if point.get("role") != "REFERENCE" and point.get("status") == "FAILED"),
+                "progress_total": sum(1 for point in points if point.get("role") != "REFERENCE" and point.get("status") != "EXCLUDED"),
             },
             "events": [],
             "points": points,
             "height_map": self._serialize_height_map(height_map),
         }
+        return self._decorate_execution_payload(payload)
 
 
     def _apply_captured_reference_point(self, points: list[dict[str, Any]], *, reference_z: float) -> list[dict[str, Any]]:
@@ -1208,9 +1493,12 @@ class PhysicalMapService:
         if not value:
             return None
         try:
-            return datetime.fromisoformat(str(value))
+            parsed = datetime.fromisoformat(str(value))
         except ValueError:
             return None
+        if parsed.tzinfo is None:
+            return parsed.replace(tzinfo=timezone.utc)
+        return parsed
 
     def _first_valid_tool_reference(self, payload: dict[str, Any]) -> dict[str, Any] | None:
         for reference in (payload.get("tool_references") or {}).values():
@@ -1340,19 +1628,27 @@ class PhysicalMapService:
             return False
         if payload.get("setup_id") != operation.setup_id or payload.get("face") != operation.cara:
             return False
-        if abs(float(payload.get("machine_origin_x", origin_x)) - origin_x) > 0.001:
+        if not _same_number(payload.get("machine_origin_x", origin_x), origin_x) or not _same_number(payload.get("machine_origin_y", origin_y), origin_y):
             return False
-        if abs(float(payload.get("machine_origin_y", origin_y)) - origin_y) > 0.001:
-            return False
-        mesh_config = payload.get("mesh_config", {})
+        mesh_config = payload.get("mesh_config") or {}
+        probe_config = payload.get("probe_config") or {}
+        exclusions = payload.get("exclusions") or []
+        expected_exclusions = [exclusion.to_payload() for exclusion in config.exclusions]
         checks = (
             int(mesh_config.get("rows", config.rows)) == config.rows,
             int(mesh_config.get("columns", config.columns)) == config.columns,
             str(mesh_config.get("grid_mode", "manual")) == config.grid_mode,
-            abs(float(mesh_config.get("edge_margin_left_mm", config.edge_margin_left_mm)) - config.edge_margin_left_mm) <= 0.001,
-            abs(float(mesh_config.get("edge_margin_right_mm", config.edge_margin_right_mm)) - config.edge_margin_right_mm) <= 0.001,
-            abs(float(mesh_config.get("edge_margin_bottom_mm", config.edge_margin_bottom_mm)) - config.edge_margin_bottom_mm) <= 0.001,
-            abs(float(mesh_config.get("edge_margin_top_mm", config.edge_margin_top_mm)) - config.edge_margin_top_mm) <= 0.001,
+            _same_number(mesh_config.get("edge_margin_left_mm"), config.edge_margin_left_mm),
+            _same_number(mesh_config.get("edge_margin_right_mm"), config.edge_margin_right_mm),
+            _same_number(mesh_config.get("edge_margin_bottom_mm"), config.edge_margin_bottom_mm),
+            _same_number(mesh_config.get("edge_margin_top_mm"), config.edge_margin_top_mm),
+            _same_number(mesh_config.get("max_spacing_mm"), config.max_spacing_mm),
+            _same_number(mesh_config.get("margin_mm"), config.margin_mm),
+            _same_optional_number(probe_config.get("safe_z_mm"), config.safe_z_mm),
+            _same_optional_number(probe_config.get("probe_step_mm"), config.probe_step_mm),
+            _same_optional_number(probe_config.get("probe_feed_mm_min"), config.probe_feed_mm_min),
+            _same_optional_number(probe_config.get("retract_mm"), config.retract_mm),
+            exclusions == expected_exclusions,
         )
         return all(checks)
 

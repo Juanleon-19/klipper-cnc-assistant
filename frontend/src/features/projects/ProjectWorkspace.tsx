@@ -510,6 +510,61 @@ export function ProjectWorkspace({
   }, [referenceSession]);
 
   useEffect(() => {
+    if (!physicalMap) {
+      return;
+    }
+    const meshConfig = typeof physicalMap.mesh_config === "object" && physicalMap.mesh_config ? physicalMap.mesh_config : null;
+    const probeConfig = typeof physicalMap.probe_config === "object" && physicalMap.probe_config ? physicalMap.probe_config : null;
+    const nextRows = Number(meshConfig?.rows ?? physicalMap.rows);
+    const nextColumns = Number(meshConfig?.columns ?? physicalMap.columns);
+    const nextGridMode = meshConfig?.grid_mode ?? physicalMap.grid_mode;
+    if (nextGridMode === "manual" || nextGridMode === "suggested") {
+      setGridDefinitionMode(nextGridMode);
+    }
+    if (Number.isFinite(nextRows) && nextRows >= 2) {
+      setMeshRowsInput(String(nextRows));
+    }
+    if (Number.isFinite(nextColumns) && nextColumns >= 2) {
+      setMeshColumnsInput(String(nextColumns));
+    }
+    const left = Number(meshConfig?.edge_margin_left_mm ?? physicalMap.edge_margins?.left_mm);
+    const right = Number(meshConfig?.edge_margin_right_mm ?? physicalMap.edge_margins?.right_mm);
+    const bottom = Number(meshConfig?.edge_margin_bottom_mm ?? physicalMap.edge_margins?.bottom_mm);
+    const top = Number(meshConfig?.edge_margin_top_mm ?? physicalMap.edge_margins?.top_mm);
+    if ([left, right, bottom, top].every((value) => Number.isFinite(value) && value >= 0)) {
+      setUniformEdgeRetreatInput(String(left));
+      setEdgeRetreatLeftInput(String(left));
+      setEdgeRetreatRightInput(String(right));
+      setEdgeRetreatBottomInput(String(bottom));
+      setEdgeRetreatTopInput(String(top));
+      setUseUniformEdgeRetreat(left === right && left === bottom && left === top);
+    }
+    const nextSpacing = Number(meshConfig?.max_spacing_mm);
+    if (Number.isFinite(nextSpacing) && nextSpacing > 0) {
+      setMeshSpacingInput(String(nextSpacing));
+    }
+    const nextSafeZ = Number(probeConfig?.safe_z_mm);
+    const nextProbeStep = Number(probeConfig?.probe_step_mm);
+    const nextProbeFeed = Number(probeConfig?.probe_feed_mm_min);
+    const nextRetract = Number(probeConfig?.retract_mm);
+    if (Number.isFinite(nextSafeZ) && nextSafeZ > 0) {
+      setSafeZInput(String(nextSafeZ));
+    }
+    if (Number.isFinite(nextProbeStep) && nextProbeStep > 0) {
+      setProbeStepInput(String(nextProbeStep));
+    }
+    if (Number.isFinite(nextProbeFeed) && nextProbeFeed > 0) {
+      setProbeSpeedInput(String(nextProbeFeed));
+    }
+    if (Number.isFinite(nextRetract) && nextRetract > 0) {
+      setProbeRetractInput(String(nextRetract));
+    }
+    if (Array.isArray(physicalMap.exclusions)) {
+      setMeshExclusions(physicalMap.exclusions);
+    }
+  }, [physicalMap]);
+
+  useEffect(() => {
     if (!project || !selectedOperation) {
       return;
     }
@@ -1236,16 +1291,31 @@ export function ProjectWorkspace({
     const probeWidth = Math.max(0, project.material.ancho_mm - edgeLeft - edgeRight);
     const probeHeight = Math.max(0, project.material.alto_mm - edgeBottom - edgeTop);
     const plannedPoints = rows * columns;
+    const safeZ = parsePositive(safeZInput);
+    const probeStep = parsePositive(probeStepInput);
+    const probeFeed = parsePositive(probeSpeedInput);
+    const probeRetract = parsePositive(probeRetractInput);
+    const spacingTarget = parsePositive(meshSpacingInput);
     const executablePoints = physicalMap?.executable_point_count ?? physicalMap?.points?.filter((point) => point.status !== "EXCLUDED").length ?? plannedPoints;
     const excludedPoints = physicalMap?.excluded_count ?? physicalMap?.points?.filter((point) => point.status === "EXCLUDED").length ?? 0;
     const hasReferencePoint = (physicalMap?.points ?? []).some((point) => point.role === "REFERENCE");
+    const executablePhysicalPoints = (physicalMap?.points ?? []).filter((point) => point.role !== "REFERENCE" && point.status !== "EXCLUDED");
+    const firstPhysicalPoint = executablePhysicalPoints[0] ?? null;
+    const lastPhysicalPoint = executablePhysicalPoints[executablePhysicalPoints.length - 1] ?? null;
+    const meshConfigValid = probeWidth > 0
+      && probeHeight > 0
+      && safeZ !== undefined
+      && probeStep !== undefined
+      && probeFeed !== undefined
+      && probeRetract !== undefined
+      && (gridDefinitionMode === "manual" || spacingTarget !== undefined);
     const filteredPhysicalPoints = (physicalMap?.points ?? []).filter((point) => {
       if (pointFilter === "ALL") return true;
       if (pointFilter === "FAILED") return point.status === "FAILED" || point.status === "RETRY_REQUIRED";
       if (pointFilter === "PENDING") return ["PENDING", "MOVING", "PROBING"].includes(point.status);
       return point.status === pointFilter;
     });
-    const physicalPlanPayload = { grid_mode: gridDefinitionMode, rows, columns, edge_margin_left_mm: edgeLeft, edge_margin_right_mm: edgeRight, edge_margin_bottom_mm: edgeBottom, edge_margin_top_mm: edgeTop, exclusions: meshExclusions, max_spacing_mm: parsePositive(meshSpacingInput), margin_mm: 0, safe_z_mm: parsePositive(safeZInput), probe_step_mm: parsePositive(probeStepInput), probe_feed_mm_min: parsePositive(probeSpeedInput), retract_mm: parsePositive(probeRetractInput) };
+    const physicalPlanPayload = { grid_mode: gridDefinitionMode, rows, columns, edge_margin_left_mm: edgeLeft, edge_margin_right_mm: edgeRight, edge_margin_bottom_mm: edgeBottom, edge_margin_top_mm: edgeTop, exclusions: meshExclusions, max_spacing_mm: spacingTarget, margin_mm: 0, safe_z_mm: safeZ, probe_step_mm: probeStep, probe_feed_mm_min: probeFeed, retract_mm: probeRetract };
     const mapTabItems: Array<{ id: MapTab; icon: string; label: string; title: string }> = [
       { id: "mapa2d", icon: "▦", label: "Mapa 2D", title: "Ver región, puntos y recorrido de sondeo" },
       { id: "superficie3d", icon: "◭", label: "Superficie 3D", title: "Ver superficie medida sin perder cámara" },
@@ -1414,19 +1484,23 @@ export function ProjectWorkspace({
               <div className="metric-box"><span>Filas / columnas</span><strong>{rows} × {columns}</strong></div>
               <div className="metric-box"><span>Puntos totales</span><strong>{physicalMap?.point_count ?? plannedPoints}</strong></div>
               <div className="metric-box"><span>Excluidos</span><strong>{excludedPoints}</strong></div>
+              <div className="metric-box"><span>Exclusiones</span><strong>{meshExclusions.length ? `${meshExclusions.length} configurada(s)` : "Sin exclusiones"}</strong></div>
               <div className="metric-box"><span>Ejecutables</span><strong>{executablePoints}</strong></div>
               <div className="metric-box"><span>Medidos</span><strong>{physicalMap?.points?.filter((point) => point.status === "MEASURED").length ?? 0}</strong></div>
               <div className="metric-box"><span>Pendientes</span><strong>{physicalMap?.points?.filter((point) => ["PENDING", "MOVING", "PROBING"].includes(point.status)).length ?? 0}</strong></div>
               <div className="metric-box"><span>Separación X</span><strong>{formatMillimeters(physicalMap?.grid?.dx_mm ?? (columns > 1 ? probeWidth / (columns - 1) : null), 3)}</strong></div>
               <div className="metric-box"><span>Separación Y</span><strong>{formatMillimeters(physicalMap?.grid?.dy_mm ?? (rows > 1 ? probeHeight / (rows - 1) : null), 3)}</strong></div>
-              <div className="metric-box"><span>Z segura</span><strong>{formatMillimeters(parsePositive(safeZInput), 3)}</strong></div>
-              <div className="metric-box"><span>Paso / velocidad</span><strong>{formatMillimeters(parsePositive(probeStepInput), 3)} · {formatMillimeters(parsePositive(probeSpeedInput), 0)}/min</strong></div>
-              <div className="metric-box"><span>Retracto</span><strong>{formatMillimeters(parsePositive(probeRetractInput), 3)}</strong></div>
+              <div className="metric-box"><span>Z segura</span><strong>{formatMillimeters(safeZ, 3)}</strong></div>
+              <div className="metric-box"><span>Paso / velocidad</span><strong>{formatMillimeters(probeStep, 3)} · {formatMillimeters(probeFeed, 0)}/min</strong></div>
+              <div className="metric-box"><span>Retracto</span><strong>{formatMillimeters(probeRetract, 3)}</strong></div>
+              <div className="metric-box"><span>Primer punto</span><strong>{firstPhysicalPoint ? `X ${formatMillimeters(firstPhysicalPoint.x_local, 3)} · Y ${formatMillimeters(firstPhysicalPoint.y_local, 3)}` : "Pendiente de preview"}</strong></div>
+              <div className="metric-box"><span>Último punto</span><strong>{lastPhysicalPoint ? `X ${formatMillimeters(lastPhysicalPoint.x_local, 3)} · Y ${formatMillimeters(lastPhysicalPoint.y_local, 3)}` : "Pendiente de preview"}</strong></div>
             </div>
             {probeWidth <= 0 || probeHeight <= 0 ? <div className="alert alert--warning">El retiro de los bordes deja una región de sondeo inválida. Reduzca los valores o revise las dimensiones del material.</div> : null}
+            {!meshConfigValid ? <div className="alert alert--warning">La configuración de malla es inválida. Revise filas, columnas, límites, separación objetivo y parámetros de sonda antes de continuar.</div> : null}
             {meshValidationMessage ? <div className="alert alert--info">{meshValidationMessage}</div> : null}
             <div className="action-grid">
-              <button className="button" type="button" disabled={heightMapBusy || !selectedOperation || probeWidth <= 0 || probeHeight <= 0} onClick={() => void withPhysicalMapAction(async () => {
+              <button className="button" type="button" disabled={heightMapBusy || !selectedOperation || !meshConfigValid} onClick={() => void withPhysicalMapAction(async () => {
                 if (!selectedOperation) return null;
                 const result = physicalReady
                   ? await api.planPhysicalMapFromReference(project.id, selectedOperation.id, physicalPlanPayload)
