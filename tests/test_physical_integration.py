@@ -11,6 +11,7 @@ from unittest.mock import patch
 from klipper_cnc_assistant.application import ApplicationError, HeightMapService, MachineSessionService, ReferenceSessionService
 from klipper_cnc_assistant.application.compensated_gcode_service import CompensatedGCodeService
 from klipper_cnc_assistant.application.physical_map_service import PhysicalExclusion, PhysicalMapService, PhysicalMeshConfig
+from klipper_cnc_assistant.domain import CoordinateReference
 from klipper_cnc_assistant.execution import MeshExecutionService
 from klipper_cnc_assistant.input.serial_driver import HEADER, SerialDriver
 from klipper_cnc_assistant.machine.discovery import discover_machine
@@ -146,6 +147,66 @@ class StatefulMeshRuntime:
             return {"z_measured": 9.9, "duration_s": 0.001}
         finally:
             self.movement_lock = False
+
+
+class BlockingMeshRuntime(StatefulMeshRuntime):
+    def __init__(self, *, block_point_index: int = 0, fail_on_cancel: bool = False) -> None:
+        super().__init__()
+        self.block_point_index = block_point_index
+        self.fail_on_cancel = fail_on_cancel
+        self.cancel_calls = 0
+        self.cancelled = threading.Event()
+
+    def cancel_operation(self) -> None:
+        self.cancel_calls += 1
+        self.cancelled.set()
+        self.release.set()
+
+    def probe_mesh_point(self, point: dict, probe_config: dict | None = None, progress_callback=None) -> dict:
+        point_index = int(point["index"])
+        if point_index != self.block_point_index:
+            return super().probe_mesh_point(point, probe_config=probe_config, progress_callback=progress_callback)
+        if self.movement_lock:
+            raise RuntimeError("movement lock leaked")
+        self.movement_lock = True
+        try:
+            self.entered.set()
+            if progress_callback:
+                progress_callback("POINT_MOVE_XY", {"x_mm": point["x_machine"], "y_mm": point["y_machine"]})
+            while not self.release.wait(0.01):
+                if self.cancelled.is_set():
+                    break
+            if self.cancelled.is_set() and self.fail_on_cancel:
+                raise RuntimeError("cancelled by operator")
+            self.transitions.append("POINT_CONTACT_DETECTED")
+            if progress_callback:
+                progress_callback("POINT_CONTACT_DETECTED", {"z_mm": 9.9})
+            self.position.update({"x": float(point["x_machine"]), "y": float(point["y_machine"]), "z": 10.9})
+            self.calls.append(point_index)
+            return {"z_measured": 9.9, "duration_s": 0.001}
+        finally:
+            self.movement_lock = False
+
+
+class WatchdogMeshRuntime(StatefulMeshRuntime):
+    def __init__(self) -> None:
+        super().__init__()
+        self.cancel_calls = 0
+        self.cancelled = threading.Event()
+        self.hang_started = threading.Event()
+
+    def cancel_operation(self) -> None:
+        self.cancel_calls += 1
+        self.cancelled.set()
+
+    def probe_mesh_point(self, point: dict, probe_config: dict | None = None, progress_callback=None) -> dict:
+        point_index = int(point["index"])
+        if point_index == 1:
+            return super().probe_mesh_point(point, probe_config=probe_config, progress_callback=progress_callback)
+        self.hang_started.set()
+        while not self.cancelled.wait(0.01):
+            pass
+        raise RuntimeError("watchdog cancelled probe")
 
 
 class PhysicalIntegrationTest(unittest.TestCase):
@@ -657,6 +718,382 @@ class PhysicalIntegrationTest(unittest.TestCase):
             self.assertFalse(failed["execution"]["worker_active"])
             self.assertFalse(bad.movement_lock)
 
+    def test_mesh_worker_watchdog_cancels_hung_point_and_preserves_measured_progress(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            repository, _project_service, project, operation = self._physical_project(temp)
+            service = PhysicalMapService(repository)
+            plan = service.capture_reference_and_plan(
+                project_id=project.id,
+                operation_id=operation.id,
+                machine_origin_x=0.0,
+                machine_origin_y=0.0,
+                reference_z=10.0,
+                machine_position={"x_mm": 0.0, "y_mm": 0.0, "z_mm": 10.0},
+                homed_axes="xyz",
+                machine_label="test",
+                session_id="session",
+                config=PhysicalMeshConfig(grid_mode="manual", rows=2, columns=2, edge_margin_left_mm=0.0, edge_margin_right_mm=0.0, edge_margin_bottom_mm=0.0, edge_margin_top_mm=0.0),
+            )
+            worker = MeshExecutionService(service, point_watchdog_timeout_s=0.05, point_watchdog_poll_s=0.01, point_watchdog_grace_s=0.01)
+            runtime = WatchdogMeshRuntime()
+            worker.start_all(project_id=project.id, map_id=plan["map_id"], runtime=runtime)
+            self.assertTrue(runtime.hang_started.wait(1.0))
+            self.assertTrue(worker.wait_until_idle(timeout_s=3.0))
+            paused = service.get_by_id(project.id, plan["map_id"])
+            self.assertEqual(paused["status"], "MESH_PAUSED")
+            self.assertFalse(paused["execution"]["worker_active"])
+            self.assertGreaterEqual(runtime.cancel_calls, 1)
+            self.assertEqual(paused["points"][1]["status"], "MEASURED")
+            self.assertEqual(runtime.calls, [1])
+            self.assertIn("Timeout sin progreso", str(paused["execution"].get("last_error")))
+
+    def test_pause_before_start_is_idempotent_and_keeps_first_pending_point(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            repository, _project_service, project, operation = self._physical_project(temp)
+            service = PhysicalMapService(repository)
+            plan = service.capture_reference_and_plan(
+                project_id=project.id,
+                operation_id=operation.id,
+                machine_origin_x=0.0,
+                machine_origin_y=0.0,
+                reference_z=1.0,
+                machine_position={"x_mm": 0.0, "y_mm": 0.0, "z_mm": 1.0},
+                homed_axes="xyz",
+                machine_label="test",
+                session_id="session",
+                config=PhysicalMeshConfig(grid_mode="manual", rows=2, columns=2),
+            )
+            worker = MeshExecutionService(service)
+            first = worker.pause(project_id=project.id, map_id=plan["map_id"])
+            second = worker.pause(project_id=project.id, map_id=plan["map_id"])
+            self.assertEqual(first["status"], "MESH_PAUSED")
+            self.assertEqual(second["status"], "MESH_PAUSED")
+            self.assertEqual(second["execution"]["next_point_index"], 1)
+            self.assertTrue(second["execution"]["pause_requested"])
+
+    def test_pause_requested_during_point_stops_before_next_point(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            repository, _project_service, project, operation = self._physical_project(temp)
+            service = PhysicalMapService(repository)
+            plan = service.capture_reference_and_plan(
+                project_id=project.id,
+                operation_id=operation.id,
+                machine_origin_x=0.0,
+                machine_origin_y=0.0,
+                reference_z=10.0,
+                machine_position={"x_mm": 0.0, "y_mm": 0.0, "z_mm": 10.0},
+                homed_axes="xyz",
+                machine_label="test",
+                session_id="session",
+                config=PhysicalMeshConfig(grid_mode="manual", rows=2, columns=2),
+            )
+            worker = MeshExecutionService(service)
+            runtime = BlockingMeshRuntime(block_point_index=1)
+            worker.start_all(project_id=project.id, map_id=plan["map_id"], runtime=runtime)
+            self.assertTrue(runtime.entered.wait(1.0))
+            pausing = worker.pause(project_id=project.id, map_id=plan["map_id"])
+            self.assertEqual(pausing["execution"]["point_state"], "MESH_PAUSING")
+            runtime.release.set()
+            self.assertTrue(worker.wait_until_idle(timeout_s=3.0))
+            paused = service.get_by_id(project.id, plan["map_id"])
+            self.assertEqual(paused["status"], "MESH_PAUSED")
+            self.assertEqual(paused["execution"]["next_point_index"], 2)
+            self.assertEqual(runtime.calls, [1])
+            self.assertFalse(paused["execution"]["worker_active"])
+
+    def test_pause_requested_between_points_stops_before_next_probe(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            repository, _project_service, project, operation = self._physical_project(temp)
+            service = PhysicalMapService(repository)
+            plan = service.capture_reference_and_plan(
+                project_id=project.id,
+                operation_id=operation.id,
+                machine_origin_x=0.0,
+                machine_origin_y=0.0,
+                reference_z=1.0,
+                machine_position={"x_mm": 0.0, "y_mm": 0.0, "z_mm": 1.0},
+                homed_axes="xyz",
+                machine_label="test",
+                session_id="session",
+                config=PhysicalMeshConfig(grid_mode="manual", rows=2, columns=2),
+            )
+            worker = MeshExecutionService(service)
+            runtime = FakeMeshRuntime()
+            original_record = service.record_point
+            persisted_first = threading.Event()
+            release = threading.Event()
+
+            def blocking_record(*, project_id: str, map_id: str, point_index: int, **kwargs):
+                updated = original_record(project_id=project_id, map_id=map_id, point_index=point_index, **kwargs)
+                if point_index == 1 and not persisted_first.is_set():
+                    persisted_first.set()
+                    self.assertTrue(release.wait(1.0))
+                return updated
+
+            with patch.object(service, "record_point", side_effect=blocking_record):
+                worker.start_all(project_id=project.id, map_id=plan["map_id"], runtime=runtime)
+                self.assertTrue(persisted_first.wait(1.0))
+                pausing = worker.pause(project_id=project.id, map_id=plan["map_id"])
+                self.assertTrue(pausing["execution"]["pause_requested"])
+                release.set()
+                self.assertTrue(worker.wait_until_idle(timeout_s=3.0))
+
+            paused = service.get_by_id(project.id, plan["map_id"])
+            self.assertEqual(paused["status"], "MESH_PAUSED")
+            self.assertEqual(runtime.calls, [1])
+            self.assertEqual(paused["execution"]["next_point_index"], 2)
+
+    def test_cancel_before_start_and_after_repeat_is_idempotent(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            repository, _project_service, project, operation = self._physical_project(temp)
+            service = PhysicalMapService(repository)
+            plan = service.capture_reference_and_plan(
+                project_id=project.id,
+                operation_id=operation.id,
+                machine_origin_x=0.0,
+                machine_origin_y=0.0,
+                reference_z=1.0,
+                machine_position={"x_mm": 0.0, "y_mm": 0.0, "z_mm": 1.0},
+                homed_axes="xyz",
+                machine_label="test",
+                session_id="session",
+                config=PhysicalMeshConfig(grid_mode="manual", rows=2, columns=2),
+            )
+            worker = MeshExecutionService(service)
+            runtime = FakeMeshRuntime()
+            first = worker.cancel(project_id=project.id, map_id=plan["map_id"], runtime=runtime)
+            second = worker.cancel(project_id=project.id, map_id=plan["map_id"], runtime=runtime)
+            self.assertEqual(first["status"], "CANCELLED")
+            self.assertEqual(second["status"], "CANCELLED")
+            self.assertEqual(second["execution"]["next_point_index"], 1)
+            self.assertEqual(sum(1 for point in second["points"] if point.get("role") != "REFERENCE" and point["status"] == "MEASURED"), 0)
+
+    def test_cancel_requested_during_point_finishes_worker_without_next_probe(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            repository, _project_service, project, operation = self._physical_project(temp)
+            service = PhysicalMapService(repository)
+            plan = service.capture_reference_and_plan(
+                project_id=project.id,
+                operation_id=operation.id,
+                machine_origin_x=0.0,
+                machine_origin_y=0.0,
+                reference_z=10.0,
+                machine_position={"x_mm": 0.0, "y_mm": 0.0, "z_mm": 10.0},
+                homed_axes="xyz",
+                machine_label="test",
+                session_id="session",
+                config=PhysicalMeshConfig(grid_mode="manual", rows=2, columns=2),
+            )
+            worker = MeshExecutionService(service)
+            runtime = BlockingMeshRuntime(block_point_index=1, fail_on_cancel=True)
+            worker.start_all(project_id=project.id, map_id=plan["map_id"], runtime=runtime)
+            self.assertTrue(runtime.entered.wait(1.0))
+            cancelling = worker.cancel(project_id=project.id, map_id=plan["map_id"], runtime=runtime)
+            self.assertEqual(cancelling["execution"]["point_state"], "MESH_CANCELING")
+            self.assertTrue(worker.wait_until_idle(timeout_s=3.0))
+            cancelled = service.get_by_id(project.id, plan["map_id"])
+            self.assertEqual(cancelled["status"], "CANCELLED")
+            self.assertEqual(runtime.calls, [])
+            self.assertGreaterEqual(runtime.cancel_calls, 1)
+            self.assertEqual(cancelled["execution"]["next_point_index"], 1)
+            again = worker.cancel(project_id=project.id, map_id=plan["map_id"], runtime=runtime)
+            self.assertEqual(again["status"], "CANCELLED")
+
+    def test_cancel_requested_between_points_stops_before_next_probe(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            repository, _project_service, project, operation = self._physical_project(temp)
+            service = PhysicalMapService(repository)
+            plan = service.capture_reference_and_plan(
+                project_id=project.id,
+                operation_id=operation.id,
+                machine_origin_x=0.0,
+                machine_origin_y=0.0,
+                reference_z=1.0,
+                machine_position={"x_mm": 0.0, "y_mm": 0.0, "z_mm": 1.0},
+                homed_axes="xyz",
+                machine_label="test",
+                session_id="session",
+                config=PhysicalMeshConfig(grid_mode="manual", rows=2, columns=2),
+            )
+            worker = MeshExecutionService(service)
+            runtime = FakeMeshRuntime()
+            original_record = service.record_point
+            persisted_first = threading.Event()
+            release = threading.Event()
+
+            def blocking_record(*, project_id: str, map_id: str, point_index: int, **kwargs):
+                updated = original_record(project_id=project_id, map_id=map_id, point_index=point_index, **kwargs)
+                if point_index == 1 and not persisted_first.is_set():
+                    persisted_first.set()
+                    self.assertTrue(release.wait(1.0))
+                return updated
+
+            with patch.object(service, "record_point", side_effect=blocking_record):
+                worker.start_all(project_id=project.id, map_id=plan["map_id"], runtime=runtime)
+                self.assertTrue(persisted_first.wait(1.0))
+                cancelling = worker.cancel(project_id=project.id, map_id=plan["map_id"], runtime=runtime)
+                self.assertTrue(cancelling["execution"]["cancel_requested"])
+                release.set()
+                self.assertTrue(worker.wait_until_idle(timeout_s=3.0))
+
+            cancelled = service.get_by_id(project.id, plan["map_id"])
+            self.assertEqual(cancelled["status"], "CANCELLED")
+            self.assertEqual(runtime.calls, [1])
+            self.assertEqual(cancelled["execution"]["next_point_index"], 2)
+
+    def test_post_persist_error_does_not_repeat_confirmed_point(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            repository, _project_service, project, operation = self._physical_project(temp)
+            service = PhysicalMapService(repository)
+            plan = service.capture_reference_and_plan(
+                project_id=project.id,
+                operation_id=operation.id,
+                machine_origin_x=0.0,
+                machine_origin_y=0.0,
+                reference_z=1.0,
+                machine_position={"x_mm": 0.0, "y_mm": 0.0, "z_mm": 1.0},
+                homed_axes="xyz",
+                machine_label="test",
+                session_id="session",
+                config=PhysicalMeshConfig(grid_mode="manual", rows=2, columns=2),
+            )
+            worker = MeshExecutionService(service)
+            runtime = FakeMeshRuntime()
+            original_update = service.update_execution_state
+            failed_once = {"value": False}
+
+            def flaky_update(*, project_id: str, map_id: str, **kwargs):
+                if not failed_once["value"] and kwargs.get("point_state") == "POINT_COMPLETE" and kwargs.get("point_index") == 1:
+                    failed_once["value"] = True
+                    raise RuntimeError("post-persist failure")
+                return original_update(project_id=project_id, map_id=map_id, **kwargs)
+
+            with patch.object(service, "update_execution_state", side_effect=flaky_update):
+                worker.start_all(project_id=project.id, map_id=plan["map_id"], runtime=runtime)
+                self.assertTrue(worker.wait_until_idle(timeout_s=3.0))
+
+            completed = service.get_by_id(project.id, plan["map_id"])
+            self.assertEqual(completed["status"], "MESH_COMPLETE")
+            self.assertEqual(runtime.calls.count(1), 1)
+            self.assertEqual(sum(1 for point in completed["points"] if point.get("role") != "REFERENCE" and point["status"] == "MEASURED"), 4)
+
+    def test_reconcile_missing_worker_pauses_map_and_allows_resume(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            repository, _project_service, project, operation = self._physical_project(temp)
+            service = PhysicalMapService(repository)
+            plan = service.capture_reference_and_plan(
+                project_id=project.id,
+                operation_id=operation.id,
+                machine_origin_x=0.0,
+                machine_origin_y=0.0,
+                reference_z=1.0,
+                machine_position={"x_mm": 0.0, "y_mm": 0.0, "z_mm": 1.0},
+                homed_axes="xyz",
+                machine_label="test",
+                session_id="session",
+                config=PhysicalMeshConfig(grid_mode="manual", rows=2, columns=2),
+            )
+            worker = MeshExecutionService(service)
+            service.mark_status(
+                project_id=project.id,
+                map_id=plan["map_id"],
+                status="MESH_PROBING",
+                worker_active=True,
+                point_state="POINT_MOVE_XY",
+                last_event="Worker perdido durante la ejecución.",
+                metadata={
+                    "phase": "move_xy",
+                    "last_error": "Worker desaparecido durante el sondeo.",
+                    "last_progress_at": plan["execution"]["last_progress_at"],
+                },
+            )
+            reconciled = worker.reconcile_map_state(project_id=project.id, map_id=plan["map_id"])
+            self.assertEqual(reconciled["status"], "MESH_PAUSED")
+            self.assertFalse(reconciled["execution"]["worker_active"])
+            self.assertIn("worker", str(reconciled["execution"]["last_error"]).lower())
+            resumed = worker.resume(project_id=project.id, map_id=plan["map_id"], runtime=FakeMeshRuntime())
+            self.assertEqual(resumed["status"], "MESH_PROBING")
+            self.assertTrue(worker.wait_until_idle(timeout_s=3.0))
+            completed = service.get_by_id(project.id, plan["map_id"])
+            self.assertEqual(completed["status"], "MESH_COMPLETE")
+
+    def test_resume_rejects_changed_context_and_active_worker(self) -> None:
+        def make_plan(temp: str):
+            repository, project_service, project, operation = self._physical_project(temp)
+            service = PhysicalMapService(repository)
+            plan = service.capture_reference_and_plan(
+                project_id=project.id,
+                operation_id=operation.id,
+                machine_origin_x=5.0,
+                machine_origin_y=6.0,
+                reference_z=1.5,
+                machine_position={"x_mm": 5.0, "y_mm": 6.0, "z_mm": 1.5},
+                homed_axes="xyz",
+                machine_label="test",
+                session_id="session",
+                config=PhysicalMeshConfig(grid_mode="manual", rows=2, columns=2),
+            )
+            return repository, project_service, project, operation, service, plan
+
+        with tempfile.TemporaryDirectory() as temp:
+            repository, project_service, project, operation, service, plan = make_plan(temp)
+            other_project = project_service.create_project(nombre="PCB-2", ancho_mm=60, alto_mm=60, espesor_mm=1.6)
+            with self.assertRaises(Exception):
+                service.validate_resume_context(project_id=other_project.id, map_id=plan["map_id"])
+
+        for label in ("setup", "face", "grid", "placement", "origin", "reference", "active-map"):
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as temp:
+                repository, _project_service, project, operation, service, plan = make_plan(temp)
+                if label in {"setup", "face", "grid"}:
+                    payload = service.get_by_id(project.id, plan["map_id"])
+                    if label == "setup":
+                        payload["setup_id"] = "setup-mutated"
+                    elif label == "face":
+                        payload["face"] = "inferior"
+                    else:
+                        payload["mesh_config"] = dict(payload.get("mesh_config") or {}, rows=3)
+                    repository.save_height_map_payload(project.id, plan["map_id"], payload)
+                else:
+                    loaded = repository.load_project(project.id)
+                    setup = loaded.get_setup(operation.setup_id)
+                    if label == "placement":
+                        updated_setup = replace(setup, placement_revision="placement-mutated")
+                    elif label == "origin":
+                        updated_setup = replace(setup, preparacion=replace(setup.preparacion, origen_trabajo=CoordinateReference(x_mm=99.0, y_mm=99.0)))
+                    elif label == "reference":
+                        updated_setup = replace(setup, preparacion=replace(setup.preparacion, referencia_z=CoordinateReference(x_mm=99.0, y_mm=99.0, z_mm=2.0)))
+                    else:
+                        replanned = service.capture_reference_and_plan(
+                            project_id=project.id,
+                            operation_id=operation.id,
+                            machine_origin_x=5.0,
+                            machine_origin_y=6.0,
+                            reference_z=1.5,
+                            machine_position={"x_mm": 5.0, "y_mm": 6.0, "z_mm": 1.5},
+                            homed_axes="xyz",
+                            machine_label="test",
+                            session_id="session",
+                            config=PhysicalMeshConfig(grid_mode="manual", rows=3, columns=3),
+                        )
+                        self.assertNotEqual(replanned["map_id"], plan["map_id"])
+                        with self.assertRaises(ApplicationError):
+                            service.validate_resume_context(project_id=project.id, map_id=plan["map_id"])
+                        continue
+                    repository.save_project(loaded.replace_setup(updated_setup))
+                with self.assertRaises(ApplicationError):
+                    service.validate_resume_context(project_id=project.id, map_id=plan["map_id"])
+
+        with tempfile.TemporaryDirectory() as temp:
+            repository, _project_service, project, operation, service, plan = make_plan(temp)
+            worker = MeshExecutionService(service)
+            runtime = BlockingMeshRuntime(block_point_index=1)
+            worker.start_all(project_id=project.id, map_id=plan["map_id"], runtime=runtime)
+            self.assertTrue(runtime.entered.wait(1.0))
+            with self.assertRaises(ApplicationError):
+                worker.resume(project_id=project.id, map_id=plan["map_id"], runtime=runtime)
+            runtime.release.set()
+            self.assertTrue(worker.wait_until_idle(timeout_s=3.0))
+
     def test_reference_session_accepts_map_ready_active_map_without_reasking_validation(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             repository, _project_service, project, operation = self._physical_project(temp)
@@ -821,6 +1258,30 @@ class PhysicalIntegrationTest(unittest.TestCase):
             )
             self.assertEqual(plan["grid"]["rows"], 4)
             self.assertEqual(plan["grid"]["columns"], 4)
+
+    def test_preview_parameters_regenerate_spacing_total_and_serpentine_order(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            repository, _project_service, project, operation = self._physical_project(temp)
+            service = PhysicalMapService(repository)
+            first = service.preview_mesh(
+                project_id=project.id,
+                operation_id=operation.id,
+                config=PhysicalMeshConfig(grid_mode="manual", rows=3, columns=3, edge_margin_left_mm=2.0, edge_margin_right_mm=2.0, edge_margin_bottom_mm=2.0, edge_margin_top_mm=2.0),
+            )
+            second = service.preview_mesh(
+                project_id=project.id,
+                operation_id=operation.id,
+                config=PhysicalMeshConfig(grid_mode="manual", rows=2, columns=4, edge_margin_left_mm=4.0, edge_margin_right_mm=4.0, edge_margin_bottom_mm=2.0, edge_margin_top_mm=2.0),
+            )
+            first_points = [(point["x_local"], point["y_local"]) for point in first["points"]]
+            self.assertEqual(first["point_count"], 9)
+            self.assertAlmostEqual(first["grid"]["dx_mm"], 28.0)
+            self.assertAlmostEqual(first["grid"]["dy_mm"], 28.0)
+            self.assertEqual(first_points, [(2.0, 2.0), (30.0, 2.0), (58.0, 2.0), (58.0, 30.0), (30.0, 30.0), (2.0, 30.0), (2.0, 58.0), (30.0, 58.0), (58.0, 58.0)])
+            self.assertEqual(second["point_count"], 8)
+            self.assertAlmostEqual(second["grid"]["dx_mm"], (60.0 - 4.0 - 4.0) / 3.0)
+            self.assertAlmostEqual(second["grid"]["dy_mm"], 56.0)
+            self.assertNotEqual(first_points, [(point["x_local"], point["y_local"]) for point in second["points"]])
 
     def test_changing_mesh_archives_partial_previous_map(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

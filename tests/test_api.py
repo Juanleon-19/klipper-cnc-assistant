@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -40,6 +41,15 @@ class ApiTest(unittest.TestCase):
                 "herramienta": "V-bit 30",
             },
         ).json()["id"]
+
+    def _upload_and_analyze_operation(self, project_id: str, operation_id: str, *, content: str = "G21\nG90\nG0 X10 Y10\nG1 X20 Y10 Z-0.050 F120\n") -> None:
+        upload = self.client.post(
+            f"/api/projects/{project_id}/operations/{operation_id}/gcode",
+            json={"nombre_archivo": "job.nc", "contenido": content},
+        )
+        self.assertEqual(upload.status_code, 200)
+        analyze = self.client.post(f"/api/projects/{project_id}/operations/{operation_id}/analyze")
+        self.assertEqual(analyze.status_code, 200)
 
     def _write_setup_preparation(self, project_id: str, preparation: dict) -> None:
         project_file = self.data_dir / "projects" / project_id / "project.json"
@@ -175,6 +185,222 @@ class ApiTest(unittest.TestCase):
         self.assertEqual(payload["cambios_herramienta"], ["T1"])
         self.assertEqual(payload["analysis_version"], payload["current_analysis_version"])
         self.assertFalse(payload["analisis_desactualizado"])
+
+    def test_plan_from_reference_uses_single_observation_and_persists_exact_parameters(self) -> None:
+        project_id = self._create_project()
+        operation_id = self._create_operation(project_id)
+        self._upload_and_analyze_operation(project_id, operation_id)
+        calls = {"capture": 0}
+
+        def capture_probe_reference_observation() -> dict[str, object]:
+            calls["capture"] += 1
+            return {
+                "position": {"x_mm": 60.0, "y_mm": 88.75, "z_mm": 0.015},
+                "machine_label": "http://moonraker.local",
+                "homed_axes": "xyz",
+                "session_id": "2026-08-01T00:00:00+00:00#serial-3",
+            }
+
+        runtime = self.app.state.machine_runtime
+        runtime.capture_probe_reference_observation = capture_probe_reference_observation
+        payload = {
+            "grid_mode": "manual",
+            "rows": 3,
+            "columns": 4,
+            "edge_margin_left_mm": 1.5,
+            "edge_margin_right_mm": 2.5,
+            "edge_margin_bottom_mm": 3.5,
+            "edge_margin_top_mm": 4.5,
+            "exclusions": [
+                {
+                    "id": "keepout-1",
+                    "name": "Pinza",
+                    "shape": "rectangle",
+                    "enabled": True,
+                    "x_min_mm": 8.0,
+                    "x_max_mm": 12.0,
+                    "y_min_mm": 6.0,
+                    "y_max_mm": 9.0,
+                }
+            ],
+            "max_spacing_mm": 7.5,
+            "margin_mm": 0,
+            "safe_z_mm": 11.0,
+            "probe_step_mm": 0.04,
+            "probe_feed_mm_min": 45.0,
+            "retract_mm": 0.9,
+        }
+
+        response = self.client.post(f"/api/projects/{project_id}/operations/{operation_id}/physical-map/plan-from-reference", json=payload)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(calls["capture"], 1)
+        measured = response.json()["payload"]
+        self.assertEqual(measured["status"], "MESH_PLANNED")
+        self.assertFalse(measured["execution"]["worker_active"])
+        self.assertEqual(measured["rows"], 3)
+        self.assertEqual(measured["columns"], 4)
+        self.assertEqual(measured["point_count"], 12)
+        self.assertEqual(measured["mesh_config"]["edge_margin_left_mm"], 1.5)
+        self.assertEqual(measured["mesh_config"]["edge_margin_right_mm"], 2.5)
+        self.assertEqual(measured["mesh_config"]["edge_margin_bottom_mm"], 3.5)
+        self.assertEqual(measured["mesh_config"]["edge_margin_top_mm"], 4.5)
+        self.assertEqual(measured["mesh_config"]["max_spacing_mm"], 7.5)
+        self.assertEqual(measured["probe_config"]["safe_z_mm"], 11.0)
+        self.assertEqual(measured["probe_config"]["probe_step_mm"], 0.04)
+        self.assertEqual(measured["probe_config"]["probe_feed_mm_min"], 45.0)
+        self.assertEqual(measured["probe_config"]["retract_mm"], 0.9)
+        self.assertEqual(measured["exclusions"][0]["id"], "keepout-1")
+
+        service = self.app.state.physical_map_service
+        preview = service.preview_mesh(
+            project_id=project_id,
+            operation_id=operation_id,
+            machine_origin_x=60.0,
+            machine_origin_y=88.75,
+            config=service.__class__.__dict__["preview_mesh"].__globals__["PhysicalMeshConfig"](
+                grid_mode="manual",
+                rows=3,
+                columns=4,
+                edge_margin_left_mm=1.5,
+                edge_margin_right_mm=2.5,
+                edge_margin_bottom_mm=3.5,
+                edge_margin_top_mm=4.5,
+                exclusions=(service.__class__.__dict__["preview_mesh"].__globals__["PhysicalExclusion"](
+                    id="keepout-1",
+                    name="Pinza",
+                    shape="rectangle",
+                    enabled=True,
+                    x_min_mm=8.0,
+                    x_max_mm=12.0,
+                    y_min_mm=6.0,
+                    y_max_mm=9.0,
+                ),),
+                max_spacing_mm=7.5,
+                margin_mm=0,
+                safe_z_mm=11.0,
+                probe_step_mm=0.04,
+                probe_feed_mm_min=45.0,
+                retract_mm=0.9,
+            ),
+        )
+        self.assertEqual(measured["point_count"], preview["point_count"])
+        self.assertEqual(measured["grid"]["dx_mm"], preview["grid"]["dx_mm"])
+        self.assertEqual(measured["grid"]["dy_mm"], preview["grid"]["dy_mm"])
+        self.assertEqual(measured["local_region"], preview["local_region"])
+        self.assertEqual(measured["points"][1]["x_local"], preview["points"][0]["x_local"])
+        self.assertEqual(measured["points"][-1]["y_local"], preview["points"][-1]["y_local"])
+
+    def test_get_physical_map_returns_latest_paused_state_without_writing_files(self) -> None:
+        project_id = self._create_project()
+        operation_id = self._create_operation(project_id)
+        self._upload_and_analyze_operation(project_id, operation_id)
+        service = self.app.state.physical_map_service
+        planned = service.capture_reference_and_plan(
+            project_id=project_id,
+            operation_id=operation_id,
+            machine_origin_x=50.0,
+            machine_origin_y=40.0,
+            reference_z=1.25,
+            machine_position={"x_mm": 50.0, "y_mm": 40.0, "z_mm": 1.25},
+            homed_axes="xyz",
+            machine_label="test",
+            session_id="session-1",
+        )
+        paused = service.mark_status(
+            project_id=project_id,
+            map_id=planned["map_id"],
+            status="MESH_PAUSED",
+            worker_active=False,
+            point_state="MESH_PAUSED",
+            last_event="Pausa persistida para recuperación.",
+            metadata={
+                "pause_requested": True,
+                "pause_reason": "Solicitada por el operador.",
+                "phase": "paused",
+                "last_error": "Watchdog sin progreso.",
+                "last_progress_at": "2026-08-01T00:00:00+00:00",
+            },
+        )
+        map_file = self.data_dir / "projects" / project_id / "maps" / Path(planned["map_id"]) / "height_map.json"
+        before_text = map_file.read_text(encoding="utf-8")
+        before_mtime = map_file.stat().st_mtime_ns
+        before_updated_at = paused["updated_at"]
+
+        response = self.client.get(f"/api/projects/{project_id}/operations/{operation_id}/physical-map")
+
+        self.assertEqual(response.status_code, 200)
+        latest = response.json()["payload"]
+        self.assertEqual(latest["map_id"], planned["map_id"])
+        self.assertEqual(latest["status"], "MESH_PAUSED")
+        self.assertEqual(latest["last_error"], "Watchdog sin progreso.")
+        self.assertTrue(isinstance(latest["last_progress_age_s"], float))
+        self.assertEqual(latest["updated_at"], before_updated_at)
+        self.assertEqual(map_file.read_text(encoding="utf-8"), before_text)
+        self.assertEqual(map_file.stat().st_mtime_ns, before_mtime)
+
+    def test_pause_physical_map_is_idempotent_and_preserves_next_point(self) -> None:
+        project_id = self._create_project()
+        operation_id = self._create_operation(project_id)
+        self._upload_and_analyze_operation(project_id, operation_id)
+        service = self.app.state.physical_map_service
+        plan = service.capture_reference_and_plan(
+            project_id=project_id,
+            operation_id=operation_id,
+            machine_origin_x=0.0,
+            machine_origin_y=0.0,
+            reference_z=10.0,
+            machine_position={"x_mm": 0.0, "y_mm": 0.0, "z_mm": 10.0},
+            homed_axes="xyz",
+            machine_label="test",
+            session_id="session",
+        )
+
+        class BlockingRuntime:
+            def __init__(self) -> None:
+                self.entered = threading.Event()
+                self.release = threading.Event()
+                self.calls: list[int] = []
+
+            def snapshot(self) -> dict[str, object]:
+                return {
+                    "state": "MESH_PROBING",
+                    "position": {"x": 0.0, "y": 0.0, "z": 10.0, "velocity": 0.0},
+                    "homed_axes": "xyz",
+                    "last_command_text": "probe_mesh_point",
+                    "telemetry_age_s": 0.01,
+                    "serial_age_s": 0.01,
+                }
+
+            def probe_mesh_point(self, point: dict[str, object], probe_config=None, progress_callback=None) -> dict[str, float]:
+                self.calls.append(int(point["index"]))
+                self.entered.set()
+                if progress_callback is not None:
+                    progress_callback("POINT_MOVE_XY", {"x_mm": point.get("x_machine"), "y_mm": point.get("y_machine")})
+                self.release.wait(1.0)
+                return {"z_measured": 9.95, "duration_s": 0.01}
+
+        runtime = BlockingRuntime()
+        self.app.state.mesh_execution_service.start_all(project_id=project_id, map_id=plan["map_id"], runtime=runtime)
+        self.assertTrue(runtime.entered.wait(1.0))
+
+        first = self.client.post(f"/api/projects/{project_id}/physical-maps/{plan['map_id']}/pause")
+        second = self.client.post(f"/api/projects/{project_id}/physical-maps/{plan['map_id']}/pause")
+
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(second.status_code, 200)
+        first_payload = first.json()["payload"]
+        second_payload = second.json()["payload"]
+        self.assertEqual(first_payload["execution"]["point_state"], "MESH_PAUSING")
+        self.assertTrue(first_payload["execution"]["pause_requested"])
+        self.assertEqual(second_payload["execution"]["point_state"], "MESH_PAUSING")
+        runtime.release.set()
+        self.assertTrue(self.app.state.mesh_execution_service.wait_until_idle(timeout_s=3.0))
+        final = service.get_by_id(project_id, plan["map_id"])
+        self.assertEqual(final["status"], "MESH_PAUSED")
+        self.assertTrue(final["execution"]["pause_requested"])
+        self.assertEqual(final["next_point_index"], 2)
+        self.assertEqual(runtime.calls, [1])
 
 
     def test_execution_preflight_reports_concrete_blockers_without_hardware(self) -> None:
