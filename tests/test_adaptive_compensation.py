@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import tempfile
 import unittest
 from pathlib import Path
@@ -9,6 +10,7 @@ import klipper_cnc_assistant.application.adaptive_compensation as adaptive_compe
 from klipper_cnc_assistant.application.adaptive_compensation import ReferenceFrame, generate_adaptive_gcode
 from klipper_cnc_assistant.application.errors import ApplicationError
 from klipper_cnc_assistant.application.services import ProjectService
+from klipper_cnc_assistant.gcode.tokenizer import tokenize_gcode
 from klipper_cnc_assistant.heightmap import HeightGrid, HeightSample, ProbeRegion, SampleQuality, compute_height_map
 from klipper_cnc_assistant.storage import JsonProjectRepository
 
@@ -47,6 +49,110 @@ def build_height_map(fn) -> object:
         muestras=samples,
         estado="medido relativo",
     )
+
+
+def emitted_motion_records(output: str) -> list[dict[str, object]]:
+    positioning = "absolute"
+    active_motion = None
+    machine_x = 0.0
+    machine_y = 0.0
+    machine_z = 0.0
+    records: list[dict[str, object]] = []
+    for line in tokenize_gcode(output):
+        if not line.tokens:
+            continue
+        axes: dict[str, float] = {}
+        ij: dict[str, float] = {}
+        for token in line.tokens:
+            if token.letter == "G":
+                command = adaptive_compensation_module._normalize_g_command(token.raw_value)
+                if command in {"G0", "G1", "G2", "G3"}:
+                    active_motion = command
+                elif command == "G90":
+                    positioning = "absolute"
+                elif command == "G91":
+                    positioning = "relative"
+            elif token.letter in {"X", "Y", "Z"} and token.raw_value is not None:
+                axes[token.letter] = float(token.raw_value)
+            elif token.letter in {"I", "J"} and token.raw_value is not None:
+                ij[token.letter] = float(token.raw_value)
+        if active_motion not in {"G0", "G1", "G2", "G3"} or (not axes and not ij):
+            continue
+        start = (machine_x, machine_y, machine_z)
+        if positioning == "absolute":
+            machine_x = axes.get("X", machine_x)
+            machine_y = axes.get("Y", machine_y)
+            machine_z = axes.get("Z", machine_z)
+        else:
+            machine_x += axes.get("X", 0.0)
+            machine_y += axes.get("Y", 0.0)
+            machine_z += axes.get("Z", 0.0)
+        end = (machine_x, machine_y, machine_z)
+        center = None
+        if active_motion in {"G2", "G3"}:
+            center = (start[0] + ij.get("I", 0.0), start[1] + ij.get("J", 0.0))
+        records.append(
+            {
+                "command": active_motion,
+                "line_number": line.line_number,
+                "raw": line.raw,
+                "start": start,
+                "end": end,
+                "center": center,
+                "i": ij.get("I"),
+                "j": ij.get("J"),
+            }
+        )
+    return records
+
+
+def arc_program(
+    *,
+    command: str,
+    center_x_mm: float,
+    center_y_mm: float,
+    radius_mm: float,
+    start_angle_deg: float,
+    sweep_deg: float,
+    start_z_mm: float = -0.1,
+    end_z_mm: float | None = None,
+) -> tuple[str, dict[str, float]]:
+    start_angle = math.radians(start_angle_deg)
+    sweep_angle = math.radians(sweep_deg)
+    end_angle = start_angle + sweep_angle
+    start_x = center_x_mm + radius_mm * math.cos(start_angle)
+    start_y = center_y_mm + radius_mm * math.sin(start_angle)
+    end_x = start_x if math.isclose(abs(sweep_deg), 360.0, abs_tol=1e-9) else center_x_mm + radius_mm * math.cos(end_angle)
+    end_y = start_y if math.isclose(abs(sweep_deg), 360.0, abs_tol=1e-9) else center_y_mm + radius_mm * math.sin(end_angle)
+    target_z = start_z_mm if end_z_mm is None else end_z_mm
+    text = (
+        "G21\n"
+        "G90\n"
+        f"G1 X{start_x:.5f} Y{start_y:.5f} Z{start_z_mm:.5f} F120\n"
+        f"{command} X{end_x:.5f} Y{end_y:.5f} I{center_x_mm - start_x:.5f} J{center_y_mm - start_y:.5f} Z{target_z:.5f} F120\n"
+    )
+    return text, {
+        "start_x_mm": start_x,
+        "start_y_mm": start_y,
+        "end_x_mm": end_x,
+        "end_y_mm": end_y,
+        "center_x_mm": center_x_mm,
+        "center_y_mm": center_y_mm,
+        "radius_mm": radius_mm,
+        "sweep_deg": sweep_deg,
+        "target_z_mm": target_z,
+    }
+
+
+def signed_arc_sweep_deg(start: tuple[float, float, float], end: tuple[float, float, float], center: tuple[float, float], command: str) -> float:
+    start_angle = math.atan2(start[1] - center[1], start[0] - center[0])
+    end_angle = math.atan2(end[1] - center[1], end[0] - center[0])
+    sweep = math.degrees(end_angle - start_angle)
+    if command == "G2" and sweep >= 0.0:
+        sweep -= 360.0
+    if command == "G3" and sweep <= 0.0:
+        sweep += 360.0
+    return sweep
 
 
 class AdaptiveCompensationTests(unittest.TestCase):
@@ -118,6 +224,59 @@ class AdaptiveCompensationTests(unittest.TestCase):
         self.assertEqual(len(motions), 2)
         self.assertEqual(result["preview"]["segments_subdivided"], 0)
 
+    def test_g0_vertical_retract_from_cut_to_safe_is_allowed(self) -> None:
+        height_map = build_height_map(lambda x_mm, _y: 0.005 * x_mm)
+        result = generate_adaptive_gcode(
+            original_text="G21\nG90\nG1 X10 Y0 Z-0.1 F120\nG0 Z1\n",
+            height_map=height_map,
+            reference_frame=self.reference,
+            max_z_error_mm=0.01,
+            operation_id="op",
+            operation_name="g0-retract",
+            min_segment_length_mm=0.05,
+        )
+        rapid = [record for record in emitted_motion_records(result["output"]) if record["command"] == "G0"][-1]
+        self.assertAlmostEqual(float(rapid["end"][2]), 11.0, places=6)
+
+    def test_g0_xy_below_surface_is_blocked_with_line_and_reason(self) -> None:
+        height_map = build_height_map(lambda _x, _y: 0.0)
+        with self.assertRaisesRegex(ApplicationError, r"L4: G0 bloqueado: XY rápido bajo Z=0"):
+            generate_adaptive_gcode(
+                original_text="G21\nG90\nG1 X0 Y0 Z-0.1 F120\nG0 X20 Y0\n",
+                height_map=height_map,
+                reference_frame=self.reference,
+                max_z_error_mm=0.01,
+                operation_id="op",
+                operation_name="g0-xy-below",
+                min_segment_length_mm=0.05,
+            )
+
+    def test_g0_plunge_toward_cut_is_blocked_with_line_and_reason(self) -> None:
+        height_map = build_height_map(lambda _x, _y: 0.0)
+        with self.assertRaisesRegex(ApplicationError, r"L3: G0 bloqueado: plunge rápido hacia zona de corte"):
+            generate_adaptive_gcode(
+                original_text="G21\nG90\nG0 Z-0.1\n",
+                height_map=height_map,
+                reference_frame=self.reference,
+                max_z_error_mm=0.01,
+                operation_id="op",
+                operation_name="g0-plunge",
+                min_segment_length_mm=0.05,
+            )
+
+    def test_g0_diagonal_crossing_surface_is_blocked_with_line_and_reason(self) -> None:
+        height_map = build_height_map(lambda _x, _y: 0.0)
+        with self.assertRaisesRegex(ApplicationError, r"L3: G0 bloqueado: diagonal rápida que atraviesa la superficie"):
+            generate_adaptive_gcode(
+                original_text="G21\nG90\nG0 X20 Y0 Z-0.1\n",
+                height_map=height_map,
+                reference_frame=self.reference,
+                max_z_error_mm=0.01,
+                operation_id="op",
+                operation_name="g0-diagonal",
+                min_segment_length_mm=0.05,
+            )
+
     def test_relative_mode_is_preserved(self) -> None:
         height_map = build_height_map(lambda _x, _y: 0.0)
         result = generate_adaptive_gcode(
@@ -144,6 +303,100 @@ class AdaptiveCompensationTests(unittest.TestCase):
             min_segment_length_mm=0.05,
         )
         self.assertEqual(sum(1 for line in result["output"].splitlines() if line.startswith("G2 ")), 1)
+
+    def test_arc_geometry_preserves_center_radius_direction_and_ij(self) -> None:
+        height_map = build_height_map(lambda _x, _y: 0.0)
+        cases = (
+            ("G3", 60.0, 0.0, None),
+            ("G2", -90.0, 45.0, None),
+            ("G3", 180.0, 90.0, -0.2),
+            ("G3", 240.0, 180.0, None),
+            ("G2", -360.0, 270.0, None),
+        )
+        for command, sweep_deg, start_angle_deg, end_z_mm in cases:
+            with self.subTest(command=command, sweep_deg=sweep_deg, start_angle_deg=start_angle_deg, end_z_mm=end_z_mm):
+                original_text, expected = arc_program(
+                    command=command,
+                    center_x_mm=10.0,
+                    center_y_mm=10.0,
+                    radius_mm=5.0,
+                    start_angle_deg=start_angle_deg,
+                    sweep_deg=sweep_deg,
+                    start_z_mm=-0.1,
+                    end_z_mm=end_z_mm,
+                )
+                result = generate_adaptive_gcode(
+                    original_text=original_text,
+                    height_map=height_map,
+                    reference_frame=self.reference,
+                    max_z_error_mm=0.01,
+                    operation_id="op",
+                    operation_name="arc-geometry",
+                    min_segment_length_mm=0.05,
+                )
+                arc_moves = [record for record in emitted_motion_records(result["output"]) if record["command"] in {"G2", "G3"}]
+                self.assertEqual(len(arc_moves), 1)
+                arc_move = arc_moves[0]
+                expected_center = (
+                    self.reference.machine_origin_x_mm + expected["center_x_mm"],
+                    self.reference.machine_origin_y_mm + expected["center_y_mm"],
+                )
+                self.assertIsNotNone(arc_move["center"])
+                self.assertAlmostEqual(float(arc_move["center"][0]), expected_center[0], places=4)
+                self.assertAlmostEqual(float(arc_move["center"][1]), expected_center[1], places=4)
+                radius_start = math.dist(arc_move["start"][:2], arc_move["center"])
+                radius_end = math.dist(arc_move["end"][:2], arc_move["center"])
+                self.assertAlmostEqual(radius_start, expected["radius_mm"], places=4)
+                self.assertAlmostEqual(radius_end, expected["radius_mm"], places=4)
+                self.assertAlmostEqual(float(arc_move["i"]), expected["center_x_mm"] - expected["start_x_mm"], places=4)
+                self.assertAlmostEqual(float(arc_move["j"]), expected["center_y_mm"] - expected["start_y_mm"], places=4)
+                if abs(sweep_deg) < 359.999:
+                    self.assertAlmostEqual(
+                        signed_arc_sweep_deg(arc_move["start"], arc_move["end"], arc_move["center"], command),
+                        sweep_deg,
+                        places=3,
+                    )
+                else:
+                    self.assertAlmostEqual(float(arc_move["start"][0]), float(arc_move["end"][0]), places=4)
+                    self.assertAlmostEqual(float(arc_move["start"][1]), float(arc_move["end"][1]), places=4)
+
+    def test_subdivided_arc_preserves_original_center_radius_direction_and_continuity(self) -> None:
+        height_map = build_height_map(lambda x_mm, y_mm: 0.0015 * ((x_mm - 10.0) ** 2 + (y_mm - 10.0) ** 2))
+        original_text, expected = arc_program(
+            command="G3",
+            center_x_mm=10.0,
+            center_y_mm=10.0,
+            radius_mm=5.0,
+            start_angle_deg=0.0,
+            sweep_deg=240.0,
+            start_z_mm=-0.1,
+            end_z_mm=-0.2,
+        )
+        result = generate_adaptive_gcode(
+            original_text=original_text,
+            height_map=height_map,
+            reference_frame=self.reference,
+            max_z_error_mm=0.003,
+            operation_id="op",
+            operation_name="subdivided-arc",
+            min_segment_length_mm=0.05,
+        )
+        arc_moves = [record for record in emitted_motion_records(result["output"]) if record["command"] == "G3"]
+        self.assertGreater(len(arc_moves), 1)
+        expected_center = (
+            self.reference.machine_origin_x_mm + expected["center_x_mm"],
+            self.reference.machine_origin_y_mm + expected["center_y_mm"],
+        )
+        for index, move in enumerate(arc_moves):
+            self.assertAlmostEqual(float(move["center"][0]), expected_center[0], places=4)
+            self.assertAlmostEqual(float(move["center"][1]), expected_center[1], places=4)
+            self.assertAlmostEqual(math.dist(move["start"][:2], move["center"]), expected["radius_mm"], places=4)
+            self.assertAlmostEqual(math.dist(move["end"][:2], move["center"]), expected["radius_mm"], places=4)
+            if index > 0:
+                previous = arc_moves[index - 1]
+                self.assertAlmostEqual(float(previous["end"][0]), float(move["start"][0]), places=5)
+                self.assertAlmostEqual(float(previous["end"][1]), float(move["start"][1]), places=5)
+                self.assertAlmostEqual(float(previous["end"][2]), float(move["start"][2]), places=5)
 
     def test_arc_subdivides_adaptively_when_curved(self) -> None:
         height_map = build_height_map(lambda x_mm, y_mm: 0.0015 * ((x_mm - 10.0) ** 2 + (y_mm - 10.0) ** 2))
@@ -188,6 +441,24 @@ class AdaptiveCompensationTests(unittest.TestCase):
         self.assertIn("Z10.01", plunge)
         self.assertAlmostEqual(result["preview"]["trace"][-1]["delta_z_mm"], 0.11, places=6)
 
+    def test_relative_plunge_uses_last_emitted_machine_position(self) -> None:
+        height_map = build_height_map(lambda x_mm, y_mm: 0.01 * x_mm + 0.001 * y_mm)
+        result = generate_adaptive_gcode(
+            original_text="G21\nG91\nG0 X10 Y10\nG1 Z-0.1 F120\n",
+            height_map=height_map,
+            reference_frame=self.reference,
+            max_z_error_mm=0.01,
+            operation_id="op",
+            operation_name="relative-plunge",
+            min_segment_length_mm=0.05,
+        )
+        motions = [record for record in emitted_motion_records(result["output"]) if record["command"] == "G1"]
+        self.assertEqual(len(motions), 1)
+        plunge = motions[0]
+        self.assertAlmostEqual(float(plunge["start"][2]), 0.0, places=6)
+        self.assertAlmostEqual(float(plunge["end"][2]), 0.01, places=6)
+        self.assertIn("Z0.01", str(plunge["raw"]))
+
     def test_xy_cut_after_pure_z_plunge_keeps_compensated_start(self) -> None:
         height_map = build_height_map(lambda x_mm, _y: 0.005 * x_mm)
         result = generate_adaptive_gcode(
@@ -219,6 +490,22 @@ class AdaptiveCompensationTests(unittest.TestCase):
         self.assertIn("Z10.05", motions[-1])
         self.assertAlmostEqual(result["preview"]["trace"][-1]["delta_z_mm"], 0.05, places=6)
 
+    def test_relative_retract_uses_last_emitted_machine_position(self) -> None:
+        height_map = build_height_map(lambda x_mm, _y: 0.005 * x_mm)
+        result = generate_adaptive_gcode(
+            original_text="G21\nG91\nG0 X10 Y0\nG1 Z-0.1 F120\nG1 Z0.1 F120\n",
+            height_map=height_map,
+            reference_frame=self.reference,
+            max_z_error_mm=0.01,
+            operation_id="op",
+            operation_name="relative-retract",
+            min_segment_length_mm=0.05,
+        )
+        motions = [record for record in emitted_motion_records(result["output"]) if record["command"] == "G1"]
+        self.assertEqual(len(motions), 2)
+        self.assertAlmostEqual(float(motions[0]["end"][2]), float(motions[1]["start"][2]), places=6)
+        self.assertIn("Z0.1", str(motions[-1]["raw"]))
+
     def test_ramp_crossing_surface_threshold_is_split_at_crossing(self) -> None:
         height_map = build_height_map(lambda x_mm, _y: 0.01 * x_mm)
         result = generate_adaptive_gcode(
@@ -230,11 +517,15 @@ class AdaptiveCompensationTests(unittest.TestCase):
             operation_name="ramp",
             min_segment_length_mm=0.05,
         )
-        motions = [line for line in result["output"].splitlines() if line.startswith("G1 ")]
+        motions = [record for record in emitted_motion_records(result["output"]) if record["command"] == "G1"]
         self.assertGreaterEqual(len(motions), 2)
-        self.assertTrue(any("X118.18182" in line and "Z10" in line for line in motions))
-        crossing_lines = [line for line in motions if "X118.18182" in line]
-        self.assertGreaterEqual(len(crossing_lines), 2)
+        seen_xy_progress: dict[tuple[float, float], float] = {}
+        for point in result["preview"]["trace"]:
+            key = (round(float(point["pcb_x_mm"]), 5), round(float(point["pcb_y_mm"]), 5))
+            if key in seen_xy_progress:
+                self.assertAlmostEqual(seen_xy_progress[key], float(point["final_z_mm"]), places=5)
+            else:
+                seen_xy_progress[key] = float(point["final_z_mm"])
 
     def test_safe_retraction_finishes_without_surface_compensation(self) -> None:
         height_map = build_height_map(lambda x_mm, _y: 0.005 * x_mm)
@@ -248,6 +539,23 @@ class AdaptiveCompensationTests(unittest.TestCase):
             min_segment_length_mm=0.05,
         )
         self.assertAlmostEqual(result["preview"]["trace"][-1]["delta_z_mm"], 0.0, places=6)
+
+    def test_global_motion_continuity_uses_previous_real_endpoint(self) -> None:
+        height_map = build_height_map(lambda x_mm, y_mm: 0.01 * x_mm + 0.001 * y_mm)
+        result = generate_adaptive_gcode(
+            original_text="G21\nG91\nG0 X10 Y10\nG1 Z-0.1 F120\nG1 X10 Z0.05 F120\nG1 Z0.05 F120\n",
+            height_map=height_map,
+            reference_frame=self.reference,
+            max_z_error_mm=0.01,
+            operation_id="op",
+            operation_name="continuity",
+            min_segment_length_mm=0.05,
+        )
+        motions = emitted_motion_records(result["output"])
+        for previous, current in zip(motions, motions[1:]):
+            self.assertAlmostEqual(float(previous["end"][0]), float(current["start"][0]), places=6)
+            self.assertAlmostEqual(float(previous["end"][1]), float(current["start"][1]), places=6)
+            self.assertAlmostEqual(float(previous["end"][2]), float(current["start"][2]), places=6)
 
     def test_dwell_line_is_preserved_literally(self) -> None:
         height_map = build_height_map(lambda _x, _y: 0.0)
@@ -382,6 +690,45 @@ class AdaptiveCompensationTests(unittest.TestCase):
         self.assertGreater(result["preview"]["segments_subdivided"], 0)
         self.assertLessEqual(result["preview"]["max_approximation_error_mm"], 0.01)
 
+    def test_cell_interval_sampling_detects_adversarial_peak_between_global_quarters(self) -> None:
+        height_map = build_height_map(lambda x_mm, y_mm: 0.0008 * x_mm * y_mm)
+        result = generate_adaptive_gcode(
+            original_text="G21\nG90\nG1 X0 Y2.5 Z-0.1 F120\nG1 X20 Y17.5 Z-0.1 F120\n",
+            height_map=height_map,
+            reference_frame=self.reference,
+            max_z_error_mm=0.004,
+            operation_id="op",
+            operation_name="adversarial-line",
+            min_segment_length_mm=0.05,
+        )
+        self.assertGreater(result["preview"]["segments_subdivided"], 0)
+        self.assertLessEqual(result["preview"]["max_approximation_error_mm"], 0.004)
+
+    def test_arc_cell_interval_sampling_handles_adversarial_surface(self) -> None:
+        height_map = build_height_map(lambda x_mm, y_mm: 0.0012 * x_mm * y_mm)
+        original_text, _expected = arc_program(
+            command="G2",
+            center_x_mm=10.0,
+            center_y_mm=10.0,
+            radius_mm=5.0,
+            start_angle_deg=180.0,
+            sweep_deg=-270.0,
+            start_z_mm=-0.1,
+            end_z_mm=-0.2,
+        )
+        result = generate_adaptive_gcode(
+            original_text=original_text,
+            height_map=height_map,
+            reference_frame=self.reference,
+            max_z_error_mm=0.004,
+            operation_id="op",
+            operation_name="adversarial-arc",
+            min_segment_length_mm=0.05,
+        )
+        arc_moves = [record for record in emitted_motion_records(result["output"]) if record["command"] == "G2"]
+        self.assertGreater(len(arc_moves), 1)
+        self.assertLessEqual(result["preview"]["max_approximation_error_mm"], 0.004)
+
     def test_impossible_tolerance_due_to_min_segment_length_blocks_generation(self) -> None:
         height_map = build_height_map(lambda x_mm, _y: 0.002 * (x_mm - 10.0) ** 2)
         with self.assertRaisesRegex(ApplicationError, "longitud mínima"):
@@ -408,6 +755,28 @@ class AdaptiveCompensationTests(unittest.TestCase):
                     operation_name="recursion-limit",
                     min_segment_length_mm=0.05,
                 )
+
+    def test_arc_impossible_tolerance_due_to_min_segment_length_blocks_generation(self) -> None:
+        height_map = build_height_map(lambda x_mm, y_mm: 0.0015 * ((x_mm - 10.0) ** 2 + (y_mm - 10.0) ** 2))
+        original_text, _expected = arc_program(
+            command="G3",
+            center_x_mm=10.0,
+            center_y_mm=10.0,
+            radius_mm=5.0,
+            start_angle_deg=0.0,
+            sweep_deg=240.0,
+            start_z_mm=-0.1,
+        )
+        with self.assertRaisesRegex(ApplicationError, "longitud mínima"):
+            generate_adaptive_gcode(
+                original_text=original_text,
+                height_map=height_map,
+                reference_frame=self.reference,
+                max_z_error_mm=0.0001,
+                operation_id="op",
+                operation_name="arc-min-length",
+                min_segment_length_mm=50.0,
+            )
 
     def test_global_simplification_preserves_verified_error_bound(self) -> None:
         height_map = build_height_map(lambda x_mm, _y: 0.0012 * (x_mm - 10.0) ** 2)
