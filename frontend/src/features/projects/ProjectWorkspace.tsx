@@ -156,7 +156,7 @@ function isPhysicalMapReady(payload: PhysicalMapPayload | null | undefined): pay
 
 function resolveProbeProfileSource(payload: PhysicalMapPayload | null | undefined): ProbeProfileSource {
   const config = payload?.probe_config;
-  if (config?.source === "map_override") {
+  if (config?.source === "map_override" || config?.probe_step_mm != null || config?.probe_feed_mm_min != null || config?.retract_mm != null) {
     return "map_override";
   }
   return "machine_reference_profile";
@@ -280,13 +280,10 @@ export function ProjectWorkspace({
         reference_probe_retract_mm: nextReferenceProbeRetract,
         reference_probe_retract_feed_mm_min: String(settings.reference_probe_retract_feed_mm_min ?? 60),
       });
-      setProbeStepInput((current) => current === "0.05" || probeProfileMode === "machine_reference_profile" ? nextReferenceProbeStep : current);
-      setProbeSpeedInput((current) => current === "60" || probeProfileMode === "machine_reference_profile" ? nextReferenceProbeFeed : current);
-      setProbeRetractInput((current) => current === "1.0" || probeProfileMode === "machine_reference_profile" ? nextReferenceProbeRetract : current);
     }).catch(() => {
       setMachineSettingsMessage("No se pudo leer la configuración avanzada de máquina.");
     });
-  }, [machine.isPhysical, probeProfileMode]);
+  }, [machine.isPhysical]);
 
   useEffect(() => {
     setSelectedOperationId((current) => {
@@ -1330,14 +1327,16 @@ export function ProjectWorkspace({
     const configuredProbeStep = parsePositive(probeStepInput);
     const configuredProbeFeed = parsePositive(probeSpeedInput);
     const configuredProbeRetract = parsePositive(probeRetractInput);
-    const currentProbeConfig = physicalMap?.probe_config ?? null;
-    const effectiveProfileSource = resolveProbeProfileSource(physicalMap) ?? probeProfileMode;
+    const effectiveProfileSource = probeProfileMode;
     const inheritedProbeStep = parsePositive(machineSettingsInput.reference_probe_step_mm);
     const inheritedProbeFeed = parsePositive(machineSettingsInput.reference_probe_feed_mm_min);
     const inheritedProbeRetract = parsePositive(machineSettingsInput.reference_probe_retract_mm);
-    const effectiveProbeStep = Number(currentProbeConfig?.effective_probe_step_mm ?? (effectiveProfileSource === "map_override" ? configuredProbeStep : inheritedProbeStep));
-    const effectiveProbeFeed = Number(currentProbeConfig?.effective_probe_feed_mm_min ?? (effectiveProfileSource === "map_override" ? configuredProbeFeed : inheritedProbeFeed));
-    const effectiveProbeRetract = Number(currentProbeConfig?.effective_retract_mm ?? (effectiveProfileSource === "map_override" ? configuredProbeRetract : inheritedProbeRetract));
+    const displayProbeStepInput = effectiveProfileSource === "machine_reference_profile" ? machineSettingsInput.reference_probe_step_mm : probeStepInput;
+    const displayProbeFeedInput = effectiveProfileSource === "machine_reference_profile" ? machineSettingsInput.reference_probe_feed_mm_min : probeSpeedInput;
+    const displayProbeRetractInput = effectiveProfileSource === "machine_reference_profile" ? machineSettingsInput.reference_probe_retract_mm : probeRetractInput;
+    const effectiveProbeStep = Number(effectiveProfileSource === "map_override" ? configuredProbeStep : inheritedProbeStep);
+    const effectiveProbeFeed = Number(effectiveProfileSource === "map_override" ? configuredProbeFeed : inheritedProbeFeed);
+    const effectiveProbeRetract = Number(effectiveProfileSource === "map_override" ? configuredProbeRetract : inheritedProbeRetract);
     const meshProbeStateMessage = describeMeshProbeState(physicalMap);
     const persistenceCount = typeof physicalMap?.execution?.persistence_count === "number" ? physicalMap.execution.persistence_count : null;
     const stepCounter = typeof physicalMap?.execution?.step_counter === "number" ? physicalMap.execution.step_counter : null;
@@ -1516,9 +1515,9 @@ export function ProjectWorkspace({
               </div>
               <div className="form-grid form-grid--dense">
                 <label>Z segura de traslado (mm)<input value={safeZInput} inputMode="decimal" onChange={(event) => { setSafeZInput(event.target.value); invalidateMeshPreview(); }} /></label>
-                <label>Paso de sonda (mm)<input value={probeStepInput} inputMode="decimal" disabled={probeProfileMode === "machine_reference_profile"} onChange={(event) => { setProbeStepInput(event.target.value); invalidateMeshPreview(); }} /></label>
-                <label>Velocidad de sonda (mm/min)<input value={probeSpeedInput} inputMode="decimal" disabled={probeProfileMode === "machine_reference_profile"} onChange={(event) => { setProbeSpeedInput(event.target.value); invalidateMeshPreview(); }} /></label>
-                <label>Retracto (mm)<input value={probeRetractInput} inputMode="decimal" disabled={probeProfileMode === "machine_reference_profile"} onChange={(event) => { setProbeRetractInput(event.target.value); invalidateMeshPreview(); }} /></label>
+                <label>Paso de sonda (mm)<input value={displayProbeStepInput} inputMode="decimal" disabled={effectiveProfileSource === "machine_reference_profile"} onChange={(event) => { setProbeStepInput(event.target.value); invalidateMeshPreview(); }} /></label>
+                <label>Velocidad de sonda (mm/min)<input value={displayProbeFeedInput} inputMode="decimal" disabled={effectiveProfileSource === "machine_reference_profile"} onChange={(event) => { setProbeSpeedInput(event.target.value); invalidateMeshPreview(); }} /></label>
+                <label>Retracto (mm)<input value={displayProbeRetractInput} inputMode="decimal" disabled={effectiveProfileSource === "machine_reference_profile"} onChange={(event) => { setProbeRetractInput(event.target.value); invalidateMeshPreview(); }} /></label>
               </div>
               <div className="info-grid info-grid--double compact-grid">
                 <div className="metric-box"><span>Fuente efectiva</span><strong>{effectiveProfileSource === "map_override" ? "Override del mapa" : "Perfil de referencia"}</strong></div>
@@ -1569,7 +1568,7 @@ export function ProjectWorkspace({
               <div className="metric-box"><span>Separación X</span><strong>{formatMillimeters(physicalMap?.grid?.dx_mm ?? (columns > 1 ? probeWidth / (columns - 1) : null), 3)}</strong></div>
               <div className="metric-box"><span>Separación Y</span><strong>{formatMillimeters(physicalMap?.grid?.dy_mm ?? (rows > 1 ? probeHeight / (rows - 1) : null), 3)}</strong></div>
               <div className="metric-box"><span>Z segura</span><strong>{formatMillimeters(safeZ, 3)}</strong></div>
-              <div className="metric-box"><span>Perfil efectivo</span><strong>{effectiveProfileSource === "map_override" ? "Override" : "Referencia"}</strong></div>
+              <div className="metric-box"><span>Perfil efectivo</span><strong>{effectiveProfileSource === "map_override" ? "Override del mapa" : "Perfil de referencia"}</strong></div>
               <div className="metric-box"><span>Paso / velocidad</span><strong>{formatMillimeters(Number.isFinite(effectiveProbeStep) ? effectiveProbeStep : null, 3)} · {formatMillimeters(Number.isFinite(effectiveProbeFeed) ? effectiveProbeFeed : null, 0)}/min</strong></div>
               <div className="metric-box"><span>Retracto</span><strong>{formatMillimeters(Number.isFinite(effectiveProbeRetract) ? effectiveProbeRetract : null, 3)}</strong></div>
               <div className="metric-box"><span>Primer punto</span><strong>{firstPhysicalPoint ? `X ${formatMillimeters(firstPhysicalPoint.x_local, 3)} · Y ${formatMillimeters(firstPhysicalPoint.y_local, 3)}` : "Pendiente de preview"}</strong></div>
