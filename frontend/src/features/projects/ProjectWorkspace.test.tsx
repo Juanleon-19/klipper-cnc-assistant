@@ -1375,6 +1375,65 @@ describe("ProjectWorkspace", () => {
     expect(screen.queryByText(/La malla persistida ya no coincide/i)).toBeNull();
   });
 
+  it("describe las diferencias reales de filas cuando el mapa persistido no coincide", async () => {
+    apiMock.planPhysicalMapFromReference.mockResolvedValueOnce({
+      payload: {
+        map_id: "measured/rows-mismatch",
+        status: "MESH_PLANNED",
+        source: "MEASURED",
+        operation_ids: ["op_1"],
+        placement_revision: "placement-1",
+        point_count: 6,
+        mesh_configuration_fingerprint: "fingerprint/rows-mismatch/config",
+        mesh_geometry_fingerprint: "fingerprint/rows-mismatch/geometry",
+        grid_mode: "manual",
+        rows: 3,
+        columns: 2,
+        dx: 76,
+        dy: 28,
+        grid: { rows: 3, columns: 2, dx_mm: 76, dy_mm: 28 },
+        local_region: { min_x_mm: 2, min_y_mm: 2, max_x_mm: 78, max_y_mm: 58 },
+        machine_region: { min_x_mm: 62, min_y_mm: 90.75, max_x_mm: 138, max_y_mm: 146.75 },
+        mesh_config: {
+          grid_mode: "manual",
+          rows: 3,
+          columns: 2,
+          edge_margin_left_mm: 2,
+          edge_margin_right_mm: 2,
+          edge_margin_bottom_mm: 2,
+          edge_margin_top_mm: 2,
+        },
+        probe_config: {
+          source: "machine_reference_profile",
+          safe_z_mm: 10,
+          effective_probe_step_mm: 0.05,
+          effective_probe_feed_mm_min: 60,
+          effective_retract_mm: 1.0,
+        },
+        points: [
+          { index: 0, row: 0, column: 0, x_local: 2, y_local: 2, x_machine: 62, y_machine: 90.75, status: "PENDING" },
+          { index: 1, row: 0, column: 1, x_local: 78, y_local: 2, x_machine: 138, y_machine: 90.75, status: "PENDING" },
+          { index: 2, row: 1, column: 1, x_local: 78, y_local: 30, x_machine: 138, y_machine: 118.75, status: "PENDING" },
+          { index: 3, row: 1, column: 0, x_local: 2, y_local: 30, x_machine: 62, y_machine: 118.75, status: "PENDING" },
+          { index: 4, row: 2, column: 0, x_local: 2, y_local: 58, x_machine: 62, y_machine: 146.75, status: "PENDING" },
+          { index: 5, row: 2, column: 1, x_local: 78, y_local: 58, x_machine: 138, y_machine: 146.75, status: "PENDING" },
+        ],
+      },
+    });
+
+    renderWorkspace(physicalMachine);
+    fireEvent.click(screen.getByRole("button", { name: /Mapa de alturas/i }));
+    expect(await screen.findByText(/Mapa medido físicamente/i)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /Generar vista previa de malla/i }));
+    expect(await screen.findByText(/Vista previa generada/i)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /^3\. Armar sondeo$/i }));
+
+    expect(await screen.findByText((content) => content.includes("difiere de la vista previa") && content.includes("filas"))).toBeInTheDocument();
+    expect(apiMock.executeAllPhysicalMapPoints).not.toHaveBeenCalled();
+  });
+
   it("invalidar la configuración posterior a una preview vuelve a bloquear armar", async () => {
     renderWorkspace(physicalMachine);
     fireEvent.click(screen.getByRole("button", { name: /Mapa de alturas/i }));
