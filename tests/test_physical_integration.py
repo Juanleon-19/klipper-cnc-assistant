@@ -209,6 +209,72 @@ class WatchdogMeshRuntime(StatefulMeshRuntime):
         raise RuntimeError("watchdog cancelled probe")
 
 
+class CadenceMeshRuntime(StatefulMeshRuntime):
+    def __init__(self, *, lower_steps: int = 100) -> None:
+        super().__init__()
+        self.lower_steps = lower_steps
+        self.step_started_at: list[float] = []
+        self.step_completed_at: list[float] = []
+
+    def probe_mesh_point(self, point: dict, probe_config: dict | None = None, progress_callback=None) -> dict:
+        if self.movement_lock:
+            raise RuntimeError("movement lock leaked")
+        self.movement_lock = True
+        try:
+            self.entered.set()
+            states = (
+                ("POINT_MOVE_SAFE_Z", {"safe_z_mm": 12.0}),
+                ("POINT_CONFIRM_SAFE_Z", {"observed_z_mm": 12.0}),
+                ("POINT_VERIFY_PROBE_OPEN", {"probe_raw": False, "probe_filtered": False, "last_packet_age_s": 0.01}),
+                ("POINT_MOVE_XY", {"x_mm": point["x_machine"], "y_mm": point["y_machine"]}),
+                ("POINT_CONFIRM_XY", {"x_mm": point["x_machine"], "y_mm": point["y_machine"]}),
+                ("POINT_DESCENT_STARTED", {"probe_step_mm": 0.1, "probe_feed_mm_min": 120.0, "retract_mm": 1.0}),
+            )
+            for state, detail in states:
+                self.transitions.append(state)
+                if progress_callback:
+                    progress_callback(state, detail)
+            for step_index in range(self.lower_steps):
+                command_started_at = time.monotonic()
+                self.step_started_at.append(command_started_at)
+                if progress_callback:
+                    progress_callback("POINT_LOWER_STEP", {"step_mm": 0.1, "feed_mm_min": 120.0, "command_started_at": command_started_at})
+                command_completed_at = time.monotonic()
+                self.step_completed_at.append(command_completed_at)
+                if progress_callback:
+                    progress_callback(
+                        "POINT_CONFIRM_STEP",
+                        {
+                            "step_mm": 0.1,
+                            "z_mm": 10.0 - ((step_index + 1) * 0.1),
+                            "command_started_at": command_started_at,
+                            "command_completed_at": command_completed_at,
+                            "command_duration_s": command_completed_at - command_started_at,
+                        },
+                    )
+            if progress_callback:
+                progress_callback("POINT_CONTACT_DETECTED", {"z_mm": 0.0})
+                progress_callback("POINT_RETRACT", {"retract_mm": 1.0, "feed_mm_min": 120.0})
+                retract_started_at = time.monotonic()
+                retract_completed_at = time.monotonic()
+                progress_callback(
+                    "POINT_CONFIRM_RETRACT",
+                    {
+                        "retract_mm": 1.0,
+                        "z_mm": 1.0,
+                        "command_started_at": retract_started_at,
+                        "command_completed_at": retract_completed_at,
+                        "command_duration_s": retract_completed_at - retract_started_at,
+                    },
+                )
+                progress_callback("POINT_VERIFY_PROBE_OPEN_AFTER_RETRACT", {"probe_raw": False, "probe_filtered": False, "last_packet_age_s": 0.01})
+            self.calls.append(int(point["index"]))
+            self.position.update({"x": float(point["x_machine"]), "y": float(point["y_machine"]), "z": 1.0})
+            return {"z_measured": 0.0, "duration_s": 0.001}
+        finally:
+            self.movement_lock = False
+
+
 class PhysicalIntegrationTest(unittest.TestCase):
     def test_serial_driver_resynchronizes_and_reports_diagnostics(self) -> None:
         with patch("klipper_cnc_assistant.input.serial_driver.serial.Serial", FakeSerial):
@@ -747,6 +813,80 @@ class PhysicalIntegrationTest(unittest.TestCase):
             self.assertEqual(runtime.calls, [1])
             self.assertIn("Timeout sin progreso", str(paused["execution"].get("last_error")))
 
+    def test_mesh_worker_limits_persistence_writes_during_100_lower_steps(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            repository, _project_service, project, operation = self._physical_project(temp)
+            service = PhysicalMapService(repository)
+            plan = service.capture_reference_and_plan(
+                project_id=project.id,
+                operation_id=operation.id,
+                machine_origin_x=0.0,
+                machine_origin_y=0.0,
+                reference_z=10.0,
+                machine_position={"x_mm": 0.0, "y_mm": 0.0, "z_mm": 10.0},
+                homed_axes="xyz",
+                machine_label="test",
+                session_id="session",
+                config=PhysicalMeshConfig(grid_mode="manual", rows=2, columns=2, edge_margin_left_mm=0.0, edge_margin_right_mm=0.0, edge_margin_bottom_mm=0.0, edge_margin_top_mm=0.0),
+            )
+            worker = MeshExecutionService(service)
+            runtime = CadenceMeshRuntime(lower_steps=100)
+            point = service.next_pending_point(project.id, plan["map_id"])
+            save_count = 0
+            original_save = repository.save_height_map_payload
+
+            def counting_save(project_id: str, operation_id: str, payload: dict):
+                nonlocal save_count
+                save_count += 1
+                return original_save(project_id, operation_id, payload)
+
+            with patch.object(repository, "save_height_map_payload", side_effect=counting_save):
+                worker._probe_one_point(project.id, plan["map_id"], runtime, point, probe_config=plan.get("probe_config"))
+
+            updated = service.get_by_id(project.id, plan["map_id"])
+            self.assertEqual(runtime.calls, [1])
+            self.assertEqual(updated["points"][1]["status"], "MEASURED")
+            self.assertEqual(updated["execution"]["step_counter"], 100)
+            self.assertLessEqual(save_count, 12)
+
+    def test_mesh_worker_heartbeat_ignores_slow_persistence_during_lower_steps(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            repository, _project_service, project, operation = self._physical_project(temp)
+            service = PhysicalMapService(repository)
+            plan = service.capture_reference_and_plan(
+                project_id=project.id,
+                operation_id=operation.id,
+                machine_origin_x=0.0,
+                machine_origin_y=0.0,
+                reference_z=10.0,
+                machine_position={"x_mm": 0.0, "y_mm": 0.0, "z_mm": 10.0},
+                homed_axes="xyz",
+                machine_label="test",
+                session_id="session",
+                config=PhysicalMeshConfig(grid_mode="manual", rows=2, columns=2, edge_margin_left_mm=0.0, edge_margin_right_mm=0.0, edge_margin_bottom_mm=0.0, edge_margin_top_mm=0.0),
+            )
+            worker = MeshExecutionService(service, point_watchdog_timeout_s=0.05, point_watchdog_poll_s=0.005, point_watchdog_grace_s=0.005)
+            runtime = CadenceMeshRuntime(lower_steps=5)
+            point = service.next_pending_point(project.id, plan["map_id"])
+            original_update = service.update_execution_state
+
+            def slow_update(**kwargs):
+                time.sleep(0.2)
+                return original_update(**kwargs)
+
+            with patch.object(service, "update_execution_state", side_effect=slow_update):
+                worker._probe_one_point(project.id, plan["map_id"], runtime, point, probe_config=plan.get("probe_config"))
+
+            updated = service.get_by_id(project.id, plan["map_id"])
+            self.assertEqual(updated["points"][1]["status"], "MEASURED")
+            self.assertEqual(updated["execution"]["step_counter"], 5)
+            self.assertEqual(runtime.calls, [1])
+            self.assertGreaterEqual(len(runtime.step_started_at), 5)
+            self.assertTrue(
+                all((later - earlier) < 0.05 for earlier, later in zip(runtime.step_started_at, runtime.step_started_at[1:])),
+                runtime.step_started_at,
+            )
+
     def test_pause_before_start_is_idempotent_and_keeps_first_pending_point(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             repository, _project_service, project, operation = self._physical_project(temp)
@@ -1171,6 +1311,34 @@ class PhysicalIntegrationTest(unittest.TestCase):
         project_service.analyze_operation(project.id, operation.id)
         return repository, project_service, project, operation
 
+    def _persist_saved_reference(self, repository: JsonProjectRepository, project_id: str, setup_id: str) -> None:
+        project = repository.load_project(project_id)
+        setup = project.get_setup(setup_id)
+        updated_setup = replace(
+            setup,
+            preparacion=replace(
+                setup.preparacion,
+                origen_trabajo=CoordinateReference(
+                    x_mm=5.0,
+                    y_mm=6.0,
+                    fuente="MEASURED",
+                    maquina="klipper",
+                    homed_axes="xyz",
+                    sesion="physical-session",
+                ),
+                referencia_z=CoordinateReference(
+                    x_mm=5.0,
+                    y_mm=6.0,
+                    z_mm=1.5,
+                    fuente="MEASURED",
+                    maquina="klipper",
+                    homed_axes="xyz",
+                    sesion="physical-session",
+                ),
+            ),
+        )
+        repository.save_project(project.replace_setup(updated_setup))
+
     def test_manual_mesh_2x2_generates_exact_inner_vertices(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             repository, _project_service, project, operation = self._physical_project(temp)
@@ -1220,6 +1388,65 @@ class PhysicalIntegrationTest(unittest.TestCase):
             self.assertIsNone(preview["points"][0]["x_machine"])
             self.assertEqual(preview["reference_point"]["role"], "REFERENCE")
             self.assertFalse(preview["valid_for_execution"])
+
+    def test_preview_from_saved_reference_is_pure_and_matches_equivalent_planned_map(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            repository, _project_service, project, operation = self._physical_project(temp)
+            self._persist_saved_reference(repository, project.id, operation.setup_id)
+            service = PhysicalMapService(repository)
+            config = PhysicalMeshConfig(
+                grid_mode="manual",
+                rows=2,
+                columns=2,
+                edge_margin_left_mm=2.0,
+                edge_margin_right_mm=2.0,
+                edge_margin_bottom_mm=2.0,
+                edge_margin_top_mm=2.0,
+                safe_z_mm=10.0,
+            )
+            save_counts = {"project": 0, "map": 0}
+            original_save_project = repository.save_project
+            original_save_map = repository.save_height_map_payload
+
+            def counting_save_project(project_payload):
+                save_counts["project"] += 1
+                return original_save_project(project_payload)
+
+            def counting_save_map(project_id: str, map_id: str, payload: dict):
+                save_counts["map"] += 1
+                return original_save_map(project_id, map_id, payload)
+
+            with patch.object(repository, "save_project", side_effect=counting_save_project), patch.object(repository, "save_height_map_payload", side_effect=counting_save_map):
+                preview = service.preview_mesh_from_saved_reference(
+                    project_id=project.id,
+                    operation_id=operation.id,
+                    config=config,
+                )
+
+            self.assertEqual(preview["status"], "MESH_PREVIEW")
+            self.assertEqual(preview["source"], "PREVIEW")
+            self.assertEqual(save_counts["project"], 0)
+            self.assertEqual(save_counts["map"], 0)
+            self.assertEqual(service.history(project_id=project.id, operation_id=operation.id), [])
+            self.assertIsNone(repository.load_project(project.id).get_setup(operation.setup_id).active_map_id)
+
+            planned = service.plan_from_saved_reference(
+                project_id=project.id,
+                operation_id=operation.id,
+                config=config,
+            )
+
+            self.assertEqual(planned["status"], "MESH_PLANNED")
+            self.assertEqual(preview["point_count"], planned["point_count"])
+            self.assertEqual(preview["grid"], planned["grid"])
+            self.assertEqual(preview["local_region"], planned["local_region"])
+            self.assertEqual(preview["machine_region"], planned["machine_region"])
+            self.assertEqual(
+                [(point["x_local"], point["y_local"], point["x_machine"], point["y_machine"]) for point in preview["points"]],
+                [(point["x_local"], point["y_local"], point["x_machine"], point["y_machine"]) for point in planned["points"] if point.get("role") != "REFERENCE"],
+            )
+            self.assertEqual(repository.load_project(project.id).get_setup(operation.setup_id).active_map_id, planned["map_id"])
+            self.assertEqual(len(service.history(project_id=project.id, operation_id=operation.id)), 1)
 
     def test_repeat_measurement_archives_previous_and_creates_empty_version_with_reference_first(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -1282,6 +1509,55 @@ class PhysicalIntegrationTest(unittest.TestCase):
             self.assertAlmostEqual(second["grid"]["dx_mm"], (60.0 - 4.0 - 4.0) / 3.0)
             self.assertAlmostEqual(second["grid"]["dy_mm"], 56.0)
             self.assertNotEqual(first_points, [(point["x_local"], point["y_local"]) for point in second["points"]])
+
+    def test_cancelled_map_does_not_block_new_plan_from_saved_reference(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            repository, _project_service, project, operation = self._physical_project(temp)
+            self._persist_saved_reference(repository, project.id, operation.setup_id)
+            service = PhysicalMapService(repository)
+            config = PhysicalMeshConfig(
+                grid_mode="manual",
+                rows=2,
+                columns=2,
+                edge_margin_left_mm=2.0,
+                edge_margin_right_mm=2.0,
+                edge_margin_bottom_mm=2.0,
+                edge_margin_top_mm=2.0,
+            )
+            first = service.plan_from_saved_reference(
+                project_id=project.id,
+                operation_id=operation.id,
+                config=config,
+            )
+            cancelled = service.mark_status(
+                project_id=project.id,
+                map_id=first["map_id"],
+                status="CANCELLED",
+                worker_active=False,
+                point_state="CANCELLED",
+                last_event="Cancelado por el operador.",
+                metadata={"cancel_requested": True},
+            )
+
+            second = service.plan_from_saved_reference(
+                project_id=project.id,
+                operation_id=operation.id,
+                config=config,
+            )
+
+            self.assertEqual(cancelled["status"], "CANCELLED")
+            self.assertNotEqual(first["map_id"], second["map_id"])
+            self.assertEqual(second["status"], "MESH_PLANNED")
+            self.assertTrue(all(point["status"] in {"PENDING", "EXCLUDED"} for point in second["points"] if point.get("role") != "REFERENCE"))
+            self.assertEqual(second["execution"].get("step_counter", 0), 0)
+            self.assertFalse(second["execution"]["worker_active"])
+            archived_first = service.get_by_id(project.id, first["map_id"])
+            self.assertIsNotNone(archived_first["archived_at"])
+            self.assertEqual(repository.load_project(project.id).get_setup(operation.setup_id).active_map_id, second["map_id"])
+            history = service.history(project_id=project.id, operation_id=operation.id)
+            self.assertGreaterEqual(len(history), 2)
+            self.assertTrue(any(item["map_id"] == first["map_id"] and item["archived_at"] for item in history))
+            self.assertTrue(any(item["map_id"] == second["map_id"] and item["active"] for item in history))
 
     def test_changing_mesh_archives_partial_previous_map(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

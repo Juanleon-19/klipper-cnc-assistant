@@ -1545,6 +1545,79 @@ class MachineRuntimeTest(unittest.TestCase):
         self.assertAlmostEqual(float(runtime._jog.calls[0]["distance"]), -0.05)
         self.assertAlmostEqual(float(runtime._jog.calls[1]["distance"]), 0.8)
 
+    def test_probe_profile_payload_marks_inherited_and_override_values(self) -> None:
+        machine = MachineState(
+            position=MachinePosition(10, 8, 5),
+            x_limits=AxisLimits(0, 100),
+            y_limits=AxisLimits(0, 100),
+            z_limits=AxisLimits(0, 200),
+            homed_axes="xyz",
+            max_velocity=100,
+            max_accel=500,
+            live_velocity=0,
+        )
+        runtime, _client = physical_runtime_with_machine(
+            machine,
+            cfg=config(MachineMode.PHYSICAL, probe_step_mm=0.05, probe_lower_speed_mm_s=1.25, probe_retract_mm=0.4, probe_retract_speed_mm_s=2.5),
+        )
+
+        inherited = runtime.effective_probe_profile_payload({"source": "machine_reference_profile", "safe_z_mm": 10.0})
+        override = runtime.effective_probe_profile_payload(
+            {"source": "map_override", "safe_z_mm": 10.0, "probe_step_mm": 0.2, "probe_feed_mm_min": 90.0, "retract_mm": 0.7}
+        )
+
+        self.assertEqual(inherited["source"], "machine_reference_profile")
+        self.assertAlmostEqual(float(inherited["effective_probe_step_mm"]), 0.05)
+        self.assertAlmostEqual(float(inherited["effective_probe_feed_mm_min"]), 75.0)
+        self.assertAlmostEqual(float(inherited["effective_retract_mm"]), 0.4)
+        self.assertEqual(override["source"], "map_override")
+        self.assertAlmostEqual(float(override["effective_probe_step_mm"]), 0.2)
+        self.assertAlmostEqual(float(override["effective_probe_feed_mm_min"]), 90.0)
+        self.assertAlmostEqual(float(override["effective_retract_mm"]), 0.7)
+        with self.assertRaises(MachineRuntimeError):
+            runtime.effective_probe_profile_payload({"source": "map_override", "probe_step_mm": 0.2})
+
+    def test_reference_and_mesh_profiles_report_identical_probe_sequence(self) -> None:
+        def sequence_for(profile_factory) -> list[str]:
+            machine = MachineState(
+                position=MachinePosition(10, 8, 5.0),
+                x_limits=AxisLimits(0, 100),
+                y_limits=AxisLimits(0, 100),
+                z_limits=AxisLimits(0, 200),
+                homed_axes="xyz",
+                max_velocity=100,
+                max_accel=500,
+                live_velocity=0,
+            )
+            runtime, _client = physical_runtime_with_machine(
+                machine,
+                cfg=config(MachineMode.PHYSICAL, probe_step_mm=0.1, probe_lower_speed_mm_s=1.25, probe_retract_mm=0.4, probe_retract_speed_mm_s=2.5),
+            )
+            runtime._jog = ProbeJogSpy(runtime, machine)
+            runtime._last_command = ControllerCommand()
+            runtime._wait_for_axis = lambda *args, **kwargs: None
+            states: list[str] = []
+            runtime._perform_probe_descent(label="probe", profile=profile_factory(runtime), progress_callback=lambda state, _detail: states.append(state))
+            return states
+
+        expected = [
+            "POINT_VERIFY_PROBE_OPEN",
+            "POINT_DESCENT_STARTED",
+            "POINT_LOWER_STEP",
+            "POINT_CONFIRM_STEP",
+            "POINT_CONTACT_DETECTED",
+            "POINT_RETRACT",
+            "POINT_CONFIRM_RETRACT",
+            "POINT_VERIFY_PROBE_OPEN_AFTER_RETRACT",
+        ]
+        reference_states = sequence_for(lambda runtime: runtime._reference_probe_profile())
+        mesh_states = sequence_for(
+            lambda runtime: runtime._resolve_probe_profile({"source": "map_override", "probe_step_mm": 0.1, "probe_feed_mm_min": 75.0, "retract_mm": 0.4})
+        )
+
+        self.assertEqual(reference_states, expected)
+        self.assertEqual(mesh_states, expected)
+
     def test_tool_change_skips_clearance_descent_when_current_gcode_z_is_already_higher(self) -> None:
         machine = MachineState(
             position=MachinePosition(40, 30, 119.127),

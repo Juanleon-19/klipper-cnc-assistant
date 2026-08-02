@@ -66,6 +66,7 @@ export type PhysicalMapPlanPayload = {
   max_spacing_mm?: number;
   margin_mm?: number;
   safe_z_mm?: number;
+  probe_profile_source?: "machine_reference_profile" | "map_override";
   probe_step_mm?: number;
   probe_feed_mm_min?: number;
   retract_mm?: number;
@@ -301,10 +302,11 @@ export const api = {
       method: "POST",
       body: JSON.stringify(payload),
     }),
-  previewPhysicalMap: (projectId: string, operationId: string, payload: PhysicalMapPlanPayload) =>
+  previewPhysicalMap: (projectId: string, operationId: string, payload: PhysicalMapPlanPayload, options?: { signal?: AbortSignal }) =>
     request<PhysicalMapResponse>(`/api/projects/${projectId}/operations/${operationId}/physical-map/preview`, {
       method: "POST",
       body: JSON.stringify(payload),
+      signal: options?.signal,
     }),
   planPhysicalMapFromReference: (projectId: string, operationId: string, payload: PhysicalMapPlanPayload) =>
     request<PhysicalMapResponse>(`/api/projects/${projectId}/operations/${operationId}/physical-map/plan-from-reference`, {

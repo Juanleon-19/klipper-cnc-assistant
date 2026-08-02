@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { DashboardPage } from "./features/projects/DashboardPage";
 import { ProjectForm } from "./features/projects/ProjectForm";
@@ -78,6 +78,7 @@ export default function App() {
   const [loading, setLoading] = useState(true);
   const [refreshingSystem, setRefreshingSystem] = useState(false);
   const [error, setError] = useState("");
+  const runtimePollInFlight = useRef(false);
   const [busyKey, setBusyKey] = useState<string | null>(null);
   const [creatingProject, setCreatingProject] = useState(false);
   const [savingProject, setSavingProject] = useState(false);
@@ -144,8 +145,25 @@ export default function App() {
 
   useEffect(() => {
     if (machineRuntime?.mode !== "PHYSICAL") return;
-    const timer = window.setInterval(() => { void refreshMachineRuntime().catch(() => undefined); }, 500);
-    return () => window.clearInterval(timer);
+    const poll = async () => {
+      if (runtimePollInFlight.current) {
+        return;
+      }
+      runtimePollInFlight.current = true;
+      try {
+        await refreshMachineRuntime();
+      } catch {
+        // Preserve the last visible runtime snapshot.
+      } finally {
+        runtimePollInFlight.current = false;
+      }
+    };
+    const timer = window.setInterval(() => { void poll(); }, 1000);
+    void poll();
+    return () => {
+      runtimePollInFlight.current = false;
+      window.clearInterval(timer);
+    };
   }, [machineRuntime?.mode, refreshMachineRuntime]);
 
   const syncProject = async (projectId: string) => {
