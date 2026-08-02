@@ -186,10 +186,34 @@ class ApiTest(unittest.TestCase):
         self.assertEqual(payload["analysis_version"], payload["current_analysis_version"])
         self.assertFalse(payload["analisis_desactualizado"])
 
-    def test_plan_from_reference_uses_single_observation_and_persists_exact_parameters(self) -> None:
+    def test_plan_from_reference_uses_saved_reference_without_new_capture_and_persists_exact_parameters(self) -> None:
         project_id = self._create_project()
         operation_id = self._create_operation(project_id)
         self._upload_and_analyze_operation(project_id, operation_id)
+        self._write_setup_preparation(project_id, {
+            "origen_trabajo": {
+                "x_mm": 60.0,
+                "y_mm": 88.75,
+                "z_mm": None,
+                "fuente": "MEASURED",
+                "fecha": "2026-07-31T00:00:00+00:00",
+                "maquina": "klipper",
+                "homed_axes": "xyz",
+                "sesion": "physical-session",
+                "posicion_captura": {"x_mm": 60.0, "y_mm": 88.75, "z_mm": None},
+            },
+            "referencia_z": {
+                "x_mm": 60.0,
+                "y_mm": 88.75,
+                "z_mm": 0.015,
+                "fuente": "MEASURED",
+                "fecha": "2026-07-31T00:00:00+00:00",
+                "maquina": "klipper",
+                "homed_axes": "xyz",
+                "sesion": "physical-session",
+                "posicion_captura": {"x_mm": 60.0, "y_mm": 88.75, "z_mm": 0.015},
+            },
+        })
         calls = {"capture": 0}
 
         def capture_probe_reference_observation() -> dict[str, object]:
@@ -234,7 +258,7 @@ class ApiTest(unittest.TestCase):
         response = self.client.post(f"/api/projects/{project_id}/operations/{operation_id}/physical-map/plan-from-reference", json=payload)
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(calls["capture"], 1)
+        self.assertEqual(calls["capture"], 0)
         measured = response.json()["payload"]
         self.assertEqual(measured["status"], "MESH_PLANNED")
         self.assertFalse(measured["execution"]["worker_active"])
@@ -253,11 +277,9 @@ class ApiTest(unittest.TestCase):
         self.assertEqual(measured["exclusions"][0]["id"], "keepout-1")
 
         service = self.app.state.physical_map_service
-        preview = service.preview_mesh(
+        preview = service.preview_mesh_from_saved_reference(
             project_id=project_id,
             operation_id=operation_id,
-            machine_origin_x=60.0,
-            machine_origin_y=88.75,
             config=service.__class__.__dict__["preview_mesh"].__globals__["PhysicalMeshConfig"](
                 grid_mode="manual",
                 rows=3,
@@ -290,6 +312,72 @@ class ApiTest(unittest.TestCase):
         self.assertEqual(measured["local_region"], preview["local_region"])
         self.assertEqual(measured["points"][1]["x_local"], preview["points"][0]["x_local"])
         self.assertEqual(measured["points"][-1]["y_local"], preview["points"][-1]["y_local"])
+
+    def test_preview_endpoint_is_pure_and_does_not_persist_physical_map(self) -> None:
+        project_id = self._create_project()
+        operation_id = self._create_operation(project_id)
+        self._upload_and_analyze_operation(project_id, operation_id)
+        self._write_setup_preparation(project_id, {
+            "origen_trabajo": {
+                "x_mm": 60.0,
+                "y_mm": 88.75,
+                "z_mm": None,
+                "fuente": "MEASURED",
+                "fecha": "2026-07-31T00:00:00+00:00",
+                "maquina": "klipper",
+                "homed_axes": "xyz",
+                "sesion": "physical-session",
+                "posicion_captura": {"x_mm": 60.0, "y_mm": 88.75, "z_mm": None},
+            },
+            "referencia_z": {
+                "x_mm": 60.0,
+                "y_mm": 88.75,
+                "z_mm": 0.015,
+                "fuente": "MEASURED",
+                "fecha": "2026-07-31T00:00:00+00:00",
+                "maquina": "klipper",
+                "homed_axes": "xyz",
+                "sesion": "physical-session",
+                "posicion_captura": {"x_mm": 60.0, "y_mm": 88.75, "z_mm": 0.015},
+            },
+        })
+        payload = {
+            "grid_mode": "manual",
+            "rows": 2,
+            "columns": 2,
+            "edge_margin_left_mm": 2.0,
+            "edge_margin_right_mm": 2.0,
+            "edge_margin_bottom_mm": 2.0,
+            "edge_margin_top_mm": 2.0,
+            "safe_z_mm": 10.0,
+        }
+        repository = self.app.state.physical_map_service.repository
+        counts = {"project": 0, "map": 0}
+        original_save_project = repository.save_project
+        original_save_map = repository.save_height_map_payload
+
+        def counting_save_project(project):
+            counts["project"] += 1
+            return original_save_project(project)
+
+        def counting_save_map(project_id_arg, map_id_arg, map_payload):
+            counts["map"] += 1
+            return original_save_map(project_id_arg, map_id_arg, map_payload)
+
+        with patch.object(repository, "save_project", side_effect=counting_save_project), patch.object(repository, "save_height_map_payload", side_effect=counting_save_map):
+            response = self.client.post(f"/api/projects/{project_id}/operations/{operation_id}/physical-map/preview", json=payload)
+
+        self.assertEqual(response.status_code, 200)
+        preview = response.json()["payload"]
+        self.assertEqual(preview["status"], "MESH_PREVIEW")
+        self.assertEqual(preview["point_count"], 4)
+        self.assertEqual(counts["project"], 0)
+        self.assertEqual(counts["map"], 0)
+        service = self.app.state.physical_map_service
+        history = service.history(project_id=project_id, operation_id=operation_id)
+        self.assertEqual(history, [])
+        project_payload = self.client.get(f"/api/projects/{project_id}").json()
+        self.assertIsNone(project_payload["montajes"][0]["active_map_id"])
 
     def test_get_physical_map_returns_latest_paused_state_without_writing_files(self) -> None:
         project_id = self._create_project()

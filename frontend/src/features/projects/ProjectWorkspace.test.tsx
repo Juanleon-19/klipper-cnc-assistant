@@ -6,6 +6,16 @@ import { ApiError } from "../../lib/api";
 import type { HeightMap, JobPlan, JobRun, LiveExecutionSnapshot, Project, ReferenceSession } from "../../types";
 import { ProjectWorkspace } from "./ProjectWorkspace";
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((nextResolve, nextReject) => {
+    resolve = nextResolve;
+    reject = nextReject;
+  });
+  return { promise, resolve, reject };
+}
+
 const apiMock = vi.hoisted(() => ({
   getHeightMap: vi.fn(),
   getReferenceSession: vi.fn(),
@@ -445,6 +455,7 @@ describe("ProjectWorkspace", () => {
         map_id: "measured/manual-2x2",
         status: "MESH_PLANNED",
         source: "MEASURED",
+        placement_revision: "placement-1",
         point_count: 4,
         grid_mode: "manual",
         rows: 2,
@@ -454,6 +465,22 @@ describe("ProjectWorkspace", () => {
         grid: { rows: 2, columns: 2, dx_mm: 76, dy_mm: 56 },
         local_region: { min_x_mm: 2, min_y_mm: 2, max_x_mm: 78, max_y_mm: 58 },
         machine_region: { min_x_mm: 62, min_y_mm: 90.75, max_x_mm: 138, max_y_mm: 146.75 },
+        mesh_config: {
+          grid_mode: "manual",
+          rows: 2,
+          columns: 2,
+          edge_margin_left_mm: 2,
+          edge_margin_right_mm: 2,
+          edge_margin_bottom_mm: 2,
+          edge_margin_top_mm: 2,
+        },
+        probe_config: {
+          source: "machine_reference_profile",
+          safe_z_mm: 10,
+          effective_probe_step_mm: 0.05,
+          effective_probe_feed_mm_min: 60,
+          effective_retract_mm: 1.0,
+        },
         points: [
           { index: 0, row: 0, column: 0, x_local: 2, y_local: 2, x_machine: 62, y_machine: 90.75, status: "PENDING" },
           { index: 1, row: 0, column: 1, x_local: 78, y_local: 2, x_machine: 138, y_machine: 90.75, status: "PENDING" },
@@ -475,12 +502,14 @@ describe("ProjectWorkspace", () => {
         dy: 56,
         grid: { rows: 2, columns: 2, dx_mm: 76, dy_mm: 56 },
         local_region: { min_x_mm: 2, min_y_mm: 2, max_x_mm: 78, max_y_mm: 58 },
+        machine_region: { min_x_mm: 62, min_y_mm: 90.75, max_x_mm: 138, max_y_mm: 146.75 },
         points: [
-          { index: 0, row: 0, column: 0, x_local: 2, y_local: 2, x_machine: null, y_machine: null, status: "PENDING" },
-          { index: 1, row: 0, column: 1, x_local: 78, y_local: 2, x_machine: null, y_machine: null, status: "PENDING" },
-          { index: 2, row: 1, column: 1, x_local: 78, y_local: 58, x_machine: null, y_machine: null, status: "PENDING" },
-          { index: 3, row: 1, column: 0, x_local: 2, y_local: 58, x_machine: null, y_machine: null, status: "PENDING" },
+          { index: 0, row: 0, column: 0, x_local: 2, y_local: 2, x_machine: 62, y_machine: 90.75, status: "PENDING" },
+          { index: 1, row: 0, column: 1, x_local: 78, y_local: 2, x_machine: 138, y_machine: 90.75, status: "PENDING" },
+          { index: 2, row: 1, column: 1, x_local: 78, y_local: 58, x_machine: 138, y_machine: 146.75, status: "PENDING" },
+          { index: 3, row: 1, column: 0, x_local: 2, y_local: 58, x_machine: 62, y_machine: 146.75, status: "PENDING" },
         ],
+        preview_backend_duration_ms: 15,
         warnings: ["Vista previa en coordenadas PCB. Complete la referencia para calcular las coordenadas CNC."],
       },
     });
@@ -818,7 +847,7 @@ describe("ProjectWorkspace", () => {
           max_spacing_mm: 8,
           margin_mm: 0,
         },
-        probe_config: { safe_z_mm: 14, probe_step_mm: 0.02, probe_feed_mm_min: 90, retract_mm: 1.2 },
+        probe_config: { source: "map_override", safe_z_mm: 14, probe_step_mm: 0.02, probe_feed_mm_min: 90, retract_mm: 1.2 },
         exclusions: [
           { id: "ex-1", name: "Pinza 1", shape: "rectangle", enabled: true, x_min_mm: 8, x_max_mm: 12, y_min_mm: 6, y_max_mm: 9 },
           { id: "ex-2", name: "Pinza 2", shape: "circle", enabled: true, center_x_mm: 20, center_y_mm: 20, radius_mm: 3 },
@@ -874,10 +903,11 @@ describe("ProjectWorkspace", () => {
 
     fireEvent.click(screen.getByRole("button", { name: /Generar vista previa de malla/i }));
 
-    await waitFor(() => expect(apiMock.planPhysicalMapFromReference).toHaveBeenCalledWith(
+    await waitFor(() => expect(apiMock.previewPhysicalMap).toHaveBeenCalledWith(
       "proj_1",
       "op_1",
-      expect.objectContaining({ grid_mode: "manual", rows: 2, columns: 2, edge_margin_left_mm: 2, edge_margin_right_mm: 2 })
+      expect.objectContaining({ grid_mode: "manual", rows: 2, columns: 2, edge_margin_left_mm: 2, edge_margin_right_mm: 2 }),
+      expect.objectContaining({ signal: expect.any(AbortSignal) })
     ));
     expect(await screen.findByText(/Vista previa generada/i)).toBeInTheDocument();
 
@@ -903,7 +933,8 @@ describe("ProjectWorkspace", () => {
     await waitFor(() => expect(apiMock.previewPhysicalMap).toHaveBeenCalledWith(
       "proj_1",
       "op_1",
-      expect.objectContaining({ grid_mode: "manual", rows: 2, columns: 2 })
+      expect.objectContaining({ grid_mode: "manual", rows: 2, columns: 2 }),
+      expect.objectContaining({ signal: expect.any(AbortSignal) })
     ));
     expect(await screen.findByText(/Heatmap mock · 4 puntos · preview/i)).toBeInTheDocument();
     expect(screen.getByText(/Vista previa en coordenadas PCB/i)).toBeInTheDocument();
@@ -951,7 +982,6 @@ describe("ProjectWorkspace", () => {
     fireEvent.click(screen.getByRole("button", { name: /Mapa de alturas/i }));
     expect(await screen.findByText(/Mapa medido físicamente/i)).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: /^3\. Armar sondeo$/i }));
     fireEvent.click(screen.getByRole("button", { name: /^4\. Iniciar sondeo automático$/i }));
 
     await waitFor(() => expect(apiMock.executeAllPhysicalMapPoints).toHaveBeenCalledWith("proj_1", "measured/manual-2x2"));
@@ -1046,10 +1076,11 @@ describe("ProjectWorkspace", () => {
     fireEvent.click(screen.getByRole("button", { name: /Aceptar sugerencia/i }));
     expect(screen.getByText(/Propuesta automática aceptada/i)).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: /Generar vista previa de malla/i }));
-    await waitFor(() => expect(apiMock.planPhysicalMapFromReference).toHaveBeenLastCalledWith(
+    await waitFor(() => expect(apiMock.previewPhysicalMap).toHaveBeenLastCalledWith(
       "proj_1",
       "op_1",
-      expect.objectContaining({ grid_mode: "suggested", rows: 3, columns: 4 })
+      expect.objectContaining({ grid_mode: "suggested", rows: 3, columns: 4 }),
+      expect.objectContaining({ signal: expect.any(AbortSignal) })
     ));
 
     fireEvent.click(screen.getByText(/Más acciones/i));
@@ -1057,6 +1088,179 @@ describe("ProjectWorkspace", () => {
     await waitFor(() => expect(apiMock.resetSetupMap).toHaveBeenCalledWith("proj_1", "setup-main"));
     expect(confirmSpy).toHaveBeenCalledWith(expect.stringContaining("conservará origen X/Y"));
     confirmSpy.mockRestore();
+  });
+
+  it("alinea el editor override con los valores enviados", async () => {
+    renderWorkspace(physicalMachine);
+    fireEvent.click(screen.getByRole("button", { name: /Mapa de alturas/i }));
+    expect(await screen.findByText(/Mapa medido físicamente/i)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /Override del mapa/i }));
+    fireEvent.change(screen.getByLabelText(/Paso de sonda/i), { target: { value: "0.03" } });
+    fireEvent.change(screen.getByLabelText(/Velocidad de sonda/i), { target: { value: "75" } });
+    fireEvent.change(screen.getByLabelText(/Retracto \(mm\)/i), { target: { value: "0.8" } });
+    fireEvent.click(screen.getByRole("button", { name: /Generar vista previa de malla/i }));
+
+    await waitFor(() => expect(apiMock.previewPhysicalMap).toHaveBeenCalledWith(
+      "proj_1",
+      "op_1",
+      expect.objectContaining({
+        probe_profile_source: "map_override",
+        probe_step_mm: 0.03,
+        probe_feed_mm_min: 75,
+        retract_mm: 0.8,
+      }),
+      expect.objectContaining({ signal: expect.any(AbortSignal) })
+    ));
+  });
+
+  it("muestra perfil heredado y omite overrides en la preview", async () => {
+    renderWorkspace(physicalMachine);
+    fireEvent.click(screen.getByRole("button", { name: /Mapa de alturas/i }));
+    expect(await screen.findByText(/Mapa medido físicamente/i)).toBeInTheDocument();
+
+    expect(screen.getByLabelText(/Paso de sonda/i)).toBeDisabled();
+    expect(screen.getByLabelText(/Velocidad de sonda/i)).toBeDisabled();
+    expect(screen.getByLabelText(/Retracto \(mm\)/i)).toBeDisabled();
+    expect(screen.getByLabelText(/Paso de sonda/i)).toHaveValue("0.05");
+    expect(screen.getByLabelText(/Velocidad de sonda/i)).toHaveValue("60");
+    expect(screen.getByLabelText(/Retracto \(mm\)/i)).toHaveValue("1");
+
+    fireEvent.click(screen.getByRole("button", { name: /Generar vista previa de malla/i }));
+
+    await waitFor(() => expect(apiMock.previewPhysicalMap).toHaveBeenCalledWith(
+      "proj_1",
+      "op_1",
+      expect.objectContaining({
+        probe_profile_source: "machine_reference_profile",
+        probe_step_mm: undefined,
+        probe_feed_mm_min: undefined,
+        retract_mm: undefined,
+      }),
+      expect.objectContaining({ signal: expect.any(AbortSignal) })
+    ));
+  });
+
+  it("permite cancelar la preview y descarta la respuesta tardía", async () => {
+    const pendingPreview = deferred<{ payload: Record<string, unknown> }>();
+    apiMock.previewPhysicalMap.mockReturnValueOnce(pendingPreview.promise);
+    renderWorkspace(physicalMachine);
+    fireEvent.click(screen.getByRole("button", { name: /Mapa de alturas/i }));
+    expect(await screen.findByText(/Mapa medido físicamente/i)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /Generar vista previa de malla/i }));
+    expect(await screen.findByRole("button", { name: /Cancelar generación/i })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /Cancelar generación/i }));
+
+    pendingPreview.resolve({
+      payload: {
+        preview_id: "preview/late",
+        status: "MESH_PREVIEW",
+        source: "PREVIEW",
+        point_count: 4,
+        rows: 2,
+        columns: 2,
+        grid: { rows: 2, columns: 2, dx_mm: 76, dy_mm: 56 },
+        local_region: { min_x_mm: 2, min_y_mm: 2, max_x_mm: 78, max_y_mm: 58 },
+        points: [
+          { index: 0, row: 0, column: 0, x_local: 2, y_local: 2, x_machine: 62, y_machine: 90.75, status: "PENDING" },
+          { index: 1, row: 0, column: 1, x_local: 78, y_local: 2, x_machine: 138, y_machine: 90.75, status: "PENDING" },
+          { index: 2, row: 1, column: 1, x_local: 78, y_local: 58, x_machine: 138, y_machine: 146.75, status: "PENDING" },
+          { index: 3, row: 1, column: 0, x_local: 2, y_local: 58, x_machine: 62, y_machine: 146.75, status: "PENDING" },
+        ],
+      },
+    });
+
+    await waitFor(() => expect(screen.getByRole("button", { name: /Generar vista previa de malla/i })).toBeEnabled());
+    expect(screen.queryByText(/Heatmap mock · 4 puntos · preview/i)).toBeNull();
+    expect(screen.getByText(/Generación de vista previa cancelada/i)).toBeInTheDocument();
+  });
+
+  it("limpia la preview y permite regenerarla sin resurrección de respuestas obsoletas", async () => {
+    const firstPreview = deferred<{ payload: Record<string, unknown> }>();
+    apiMock.previewPhysicalMap.mockReturnValueOnce(firstPreview.promise);
+    apiMock.previewPhysicalMap.mockResolvedValueOnce({
+      payload: {
+        preview_id: "preview/second",
+        status: "MESH_PREVIEW",
+        source: "PREVIEW",
+        point_count: 6,
+        rows: 2,
+        columns: 3,
+        grid: { rows: 2, columns: 3, dx_mm: 38, dy_mm: 56 },
+        local_region: { min_x_mm: 2, min_y_mm: 2, max_x_mm: 78, max_y_mm: 58 },
+        points: [
+          { index: 0, row: 0, column: 0, x_local: 2, y_local: 2, x_machine: 62, y_machine: 90.75, status: "PENDING" },
+          { index: 1, row: 0, column: 1, x_local: 40, y_local: 2, x_machine: 100, y_machine: 90.75, status: "PENDING" },
+          { index: 2, row: 0, column: 2, x_local: 78, y_local: 2, x_machine: 138, y_machine: 90.75, status: "PENDING" },
+          { index: 3, row: 1, column: 2, x_local: 78, y_local: 58, x_machine: 138, y_machine: 146.75, status: "PENDING" },
+          { index: 4, row: 1, column: 1, x_local: 40, y_local: 58, x_machine: 100, y_machine: 146.75, status: "PENDING" },
+          { index: 5, row: 1, column: 0, x_local: 2, y_local: 58, x_machine: 62, y_machine: 146.75, status: "PENDING" },
+        ],
+      },
+    });
+
+    renderWorkspace(physicalMachine);
+    fireEvent.click(screen.getByRole("button", { name: /Mapa de alturas/i }));
+    expect(await screen.findByText(/Mapa medido físicamente/i)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /Generar vista previa de malla/i }));
+    fireEvent.click(await screen.findByRole("button", { name: /Cancelar generación/i }));
+    fireEvent.change(screen.getByLabelText(/^Columnas$/i), { target: { value: "3" } });
+    fireEvent.click(screen.getByRole("button", { name: /Generar vista previa de malla/i }));
+
+    firstPreview.resolve({
+      payload: {
+        preview_id: "preview/late-first",
+        status: "MESH_PREVIEW",
+        source: "PREVIEW",
+        point_count: 4,
+        rows: 2,
+        columns: 2,
+        grid: { rows: 2, columns: 2, dx_mm: 76, dy_mm: 56 },
+        local_region: { min_x_mm: 2, min_y_mm: 2, max_x_mm: 78, max_y_mm: 58 },
+        points: [
+          { index: 0, row: 0, column: 0, x_local: 2, y_local: 2, x_machine: 62, y_machine: 90.75, status: "PENDING" },
+          { index: 1, row: 0, column: 1, x_local: 78, y_local: 2, x_machine: 138, y_machine: 90.75, status: "PENDING" },
+          { index: 2, row: 1, column: 1, x_local: 78, y_local: 58, x_machine: 138, y_machine: 146.75, status: "PENDING" },
+          { index: 3, row: 1, column: 0, x_local: 2, y_local: 58, x_machine: 62, y_machine: 146.75, status: "PENDING" },
+        ],
+      },
+    });
+
+    expect(await screen.findByText(/Heatmap mock · 6 puntos · preview/i)).toBeInTheDocument();
+    expect(screen.queryByText(/Heatmap mock · 4 puntos · preview/i)).toBeNull();
+  });
+
+  it("arma el sondeo con la preview actual sin iniciar movimiento", async () => {
+    renderWorkspace(physicalMachine);
+    fireEvent.click(screen.getByRole("button", { name: /Mapa de alturas/i }));
+    expect(await screen.findByText(/Mapa medido físicamente/i)).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText(/^Filas$/i), { target: { value: "2" } });
+    fireEvent.change(screen.getByLabelText(/^Columnas$/i), { target: { value: "2" } });
+    fireEvent.click(screen.getByRole("button", { name: /Generar vista previa de malla/i }));
+    expect(await screen.findByText(/Vista previa generada/i)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /^3\. Armar sondeo$/i }));
+
+    await waitFor(() => expect(apiMock.planPhysicalMapFromReference).toHaveBeenCalledWith(
+      "proj_1",
+      "op_1",
+      expect.objectContaining({ grid_mode: "manual", rows: 2, columns: 2 })
+    ));
+    expect(apiMock.executeAllPhysicalMapPoints).not.toHaveBeenCalled();
+  });
+
+  it("invalidar la configuración posterior a una preview vuelve a bloquear armar", async () => {
+    renderWorkspace(physicalMachine);
+    fireEvent.click(screen.getByRole("button", { name: /Mapa de alturas/i }));
+    expect(await screen.findByText(/Mapa medido físicamente/i)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /Generar vista previa de malla/i }));
+    expect(await screen.findByText(/Vista previa generada/i)).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText(/^Filas$/i), { target: { value: "3" } });
+
+    expect(screen.getByRole("button", { name: /^3\. Armar sondeo$/i })).toBeDisabled();
   });
 
 
