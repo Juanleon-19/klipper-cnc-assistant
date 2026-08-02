@@ -518,11 +518,15 @@ export type PhysicalMapPayload = Record<string, unknown> & {
   map_id?: string | null;
   preview_id?: string;
   preview_version?: string;
+  operation_id?: string;
+  operation_ids?: string[];
   status?: string;
   source?: string;
   point_count?: number;
   excluded_count?: number;
   executable_point_count?: number;
+  mesh_configuration_fingerprint?: string;
+  mesh_geometry_fingerprint?: string;
   estimated_distance_mm?: number | null;
   estimated_time_s?: number | null;
   edge_margins?: { left_mm: number; right_mm: number; bottom_mm: number; top_mm: number };
