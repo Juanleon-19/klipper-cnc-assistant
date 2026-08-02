@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from queue import Empty, SimpleQueue
 import threading
 import time
 from datetime import datetime, timezone
@@ -21,12 +22,14 @@ POINT_STATES = (
     "POINT_CONFIRM_XY",
     "POINT_SETTLE",
     "POINT_VERIFY_PROBE_OPEN",
+    "POINT_DESCENT_STARTED",
     "POINT_LOWER_STEP",
     "POINT_CONFIRM_STEP",
     "POINT_CONTACT_DETECTED",
     "POINT_CAPTURE_Z",
     "POINT_RETRACT",
     "POINT_CONFIRM_RETRACT",
+    "POINT_VERIFY_PROBE_OPEN_AFTER_RETRACT",
     "POINT_PERSIST",
     "POINT_COMPLETE",
     "POINT_RETRY",
@@ -377,9 +380,36 @@ class MeshExecutionService:
         payload = self.physical_map_service.get_by_id(project_id, map_id)
         total_points = int((payload.get("execution") or {}).get("total_count") or payload.get("total_count") or 0)
         worker_generation = int((payload.get("execution") or {}).get("worker_generation", 0))
+        persist_states = {
+            "POINT_MOVE_SAFE_Z",
+            "POINT_CONFIRM_SAFE_Z",
+            "POINT_MOVE_XY",
+            "POINT_CONFIRM_XY",
+            "POINT_DESCENT_STARTED",
+            "POINT_CONTACT_DETECTED",
+            "POINT_RETRACT",
+            "POINT_CONFIRM_RETRACT",
+        }
+        log_states = persist_states | {"POINT_VERIFY_PROBE_OPEN", "POINT_VERIFY_PROBE_OPEN_AFTER_RETRACT"}
         while attempts < int(point.get("attempts", 0)) + 1:
             attempts += 1
-            self.physical_map_service.update_execution_state(
+            started = time.monotonic()
+            progress_updates: SimpleQueue[dict[str, Any]] = SimpleQueue()
+            progress_state = {
+                "monotonic": started,
+                "iso": _iso_now(),
+                "phase": "precheck",
+                "state": "POINT_PRECHECK",
+                "step_counter": 0,
+                "command_started_at": None,
+                "command_completed_at": None,
+                "command_duration_s": None,
+                "elapsed_since_previous_step_s": None,
+                "last_step_completed_at": None,
+                "persistence_count": 0,
+                "persistence_duration_s": 0.0,
+            }
+            self._persist_execution_state(
                 project_id=project_id,
                 map_id=map_id,
                 worker_active=True,
@@ -391,93 +421,55 @@ class MeshExecutionService:
                 metadata={
                     "phase": "precheck",
                     "worker_generation": worker_generation,
-                    "last_progress_at": _iso_now(),
+                    "last_progress_at": progress_state["iso"],
+                    **self._progress_metrics(progress_state, persistence_count=1),
                 },
+                progress_state=progress_state,
             )
-            started = time.monotonic()
-            progress_ticks = {"monotonic": time.monotonic(), "iso": _iso_now()}
             try:
-                self.physical_map_service.update_execution_state(
-                    project_id=project_id,
-                    map_id=map_id,
-                    worker_active=True,
-                    point_state="POINT_MOVE_SAFE_Z",
-                    point_index=point_index,
-                    retry_count=attempts - 1,
-                    command="probe_mesh_point",
-                    target=target,
-                    last_event=f"Punto {point_index + 1}: operación física exclusiva iniciada.",
-                    metadata={
-                        "phase": "move_safe_z",
-                        "worker_generation": worker_generation,
-                        "last_progress_at": progress_ticks["iso"],
-                    },
-                )
-
                 def progress(state: str, detail: dict[str, Any]) -> None:
-                    progress_ticks["monotonic"] = time.monotonic()
-                    progress_ticks["iso"] = _iso_now()
-                    observed_now = self._observed_from_runtime(runtime)
-                    phase = self._phase_for_point_state(state)
-                    self.physical_map_service.update_execution_state(
-                        project_id=project_id,
-                        map_id=map_id,
-                        worker_active=True,
-                        point_state=state,
-                        point_index=point_index,
-                        retry_count=attempts - 1,
-                        command=str(detail.get("command") or state),
-                        target={**target, **detail},
-                        observed=observed_now,
-                        last_event=f"Punto {point_index + 1}: {state}.",
-                        metadata={
-                            "phase": phase,
-                            "worker_generation": worker_generation,
-                            "last_progress_at": progress_ticks["iso"],
-                        },
+                    self._update_progress_heartbeat(progress_state, state, detail)
+                    if state not in log_states:
+                        return
+                    progress_updates.put(
+                        {
+                            "state": state,
+                            "detail": dict(detail),
+                            "phase": self._phase_for_point_state(state),
+                            "last_progress_at": progress_state["iso"],
+                            "metrics": self._progress_metrics(progress_state),
+                            "persist": state in persist_states,
+                        }
                     )
-                    transition = {
-                        "POINT_MOVE_SAFE_Z": "MOVE_SAFE_Z",
-                        "POINT_CONFIRM_SAFE_Z": "MOVE_SAFE_Z_DONE",
-                        "POINT_VERIFY_PROBE_OPEN": "VERIFY_PROBE_OPEN",
-                        "POINT_MOVE_XY": "MOVE_XY",
-                        "POINT_CONFIRM_XY": "MOVE_XY_DONE",
-                        "POINT_LOWER_STEP": "LOWER_STEP",
-                        "POINT_CONTACT_DETECTED": "CONTACT",
-                        "POINT_RETRACT": "RETRACT",
-                    }.get(state)
-                    if transition:
-                        self._log_transition(
-                            transition,
-                            project_id,
-                            map_id,
-                            point_index=point_index,
-                            target={**target, **detail},
-                            observed=observed_now,
-                            started=started,
-                            execution={
-                                "phase": phase,
-                                "worker_generation": worker_generation,
-                                "last_progress_at": progress_ticks["iso"],
-                                "point_state": state,
-                                "total_count": total_points,
-                            },
-                        )
 
                 result = self._probe_with_watchdog(
                     runtime,
                     point,
                     probe_config=probe_config,
                     progress_callback=progress,
+                    progress_updates=progress_updates,
                     project_id=project_id,
                     map_id=map_id,
                     point_index=point_index,
                     total_points=total_points,
                     worker_generation=worker_generation,
-                    progress_ticks=progress_ticks,
+                    progress_state=progress_state,
+                )
+                self._drain_progress_updates(
+                    progress_updates,
+                    project_id=project_id,
+                    map_id=map_id,
+                    point_index=point_index,
+                    retry_count=attempts - 1,
+                    target=target,
+                    runtime=runtime,
+                    started=started,
+                    total_points=total_points,
+                    worker_generation=worker_generation,
+                    progress_state=progress_state,
                 )
                 observed = self._observed_from_runtime(runtime)
-                self.physical_map_service.update_execution_state(
+                self._persist_execution_state(
                     project_id=project_id,
                     map_id=map_id,
                     worker_active=True,
@@ -491,8 +483,11 @@ class MeshExecutionService:
                         "phase": "capture_z",
                         "worker_generation": worker_generation,
                         "last_progress_at": _iso_now(),
+                        **self._progress_metrics(progress_state),
                     },
+                    progress_state=progress_state,
                 )
+                record_started = time.monotonic()
                 updated = self.physical_map_service.record_point(
                     project_id=project_id,
                     map_id=map_id,
@@ -503,6 +498,8 @@ class MeshExecutionService:
                     duration_s=float(result.get("duration_s", time.monotonic() - started)),
                     error=None,
                 )
+                progress_state["persistence_count"] = int(progress_state["persistence_count"]) + 1
+                progress_state["persistence_duration_s"] = float(progress_state["persistence_duration_s"]) + (time.monotonic() - record_started)
                 next_phase = "complete" if updated.get("status") == "MESH_COMPLETE" else "paused" if updated.get("status") == "MESH_PAUSED" else "cancelled" if updated.get("status") == "CANCELLED" else "persist"
                 next_state = "POINT_COMPLETE" if updated.get("status") == "MESH_PROBING" else str(updated.get("status"))
                 last_event = (
@@ -510,7 +507,7 @@ class MeshExecutionService:
                     if updated.get("status") == "MESH_PROBING"
                     else f"Punto {point_index + 1}: completado con estado {updated.get('status')}."
                 )
-                self.physical_map_service.update_execution_state(
+                self._persist_execution_state(
                     project_id=project_id,
                     map_id=map_id,
                     worker_active=updated.get("status") == "MESH_PROBING",
@@ -524,7 +521,9 @@ class MeshExecutionService:
                         "phase": next_phase,
                         "worker_generation": worker_generation,
                         "last_progress_at": updated.get("updated_at") or _iso_now(),
+                        **self._progress_metrics(progress_state),
                     },
+                    progress_state=progress_state,
                 )
                 self._log_transition(
                     "POINT_COMPLETE",
@@ -544,6 +543,19 @@ class MeshExecutionService:
                 )
                 return
             except Exception as error:
+                self._drain_progress_updates(
+                    progress_updates,
+                    project_id=project_id,
+                    map_id=map_id,
+                    point_index=point_index,
+                    retry_count=attempts - 1,
+                    target=target,
+                    runtime=runtime,
+                    started=started,
+                    total_points=total_points,
+                    worker_generation=worker_generation,
+                    progress_state=progress_state,
+                )
                 observed = self._observed_from_runtime(runtime)
                 with self._lock:
                     cancelled = bool(self._cancel_requests.get((project_id, map_id)) and self._cancel_requests[(project_id, map_id)].is_set())
@@ -586,12 +598,13 @@ class MeshExecutionService:
                             "pause_requested": False,
                             "phase": "cancelled",
                             "last_error": str(error),
-                            "last_progress_at": progress_ticks["iso"],
+                            "last_progress_at": progress_state["iso"],
+                            **self._progress_metrics(progress_state),
                         },
                     )
                     return
                 if attempts <= self.max_point_retries:
-                    self.physical_map_service.update_execution_state(
+                    self._persist_execution_state(
                         project_id=project_id,
                         map_id=map_id,
                         worker_active=True,
@@ -605,12 +618,14 @@ class MeshExecutionService:
                         metadata={
                             "phase": "retry",
                             "worker_generation": worker_generation,
-                            "last_progress_at": progress_ticks["iso"],
+                            "last_progress_at": progress_state["iso"],
+                            **self._progress_metrics(progress_state),
                         },
+                        progress_state=progress_state,
                     )
                     continue
                 self.physical_map_service.mark_point_failed(project_id=project_id, map_id=map_id, point_index=point_index, error=str(error))
-                self.physical_map_service.update_execution_state(
+                self._persist_execution_state(
                     project_id=project_id,
                     map_id=map_id,
                     worker_active=False,
@@ -626,8 +641,10 @@ class MeshExecutionService:
                         "worker_generation": worker_generation,
                         "pause_requested": True,
                         "pause_reason": "Punto fallido; requiere decisión explícita del operador.",
-                        "last_progress_at": progress_ticks["iso"],
+                        "last_progress_at": progress_state["iso"],
+                        **self._progress_metrics(progress_state),
                     },
+                    progress_state=progress_state,
                 )
                 self._log_transition(
                     "POINT_FAILED",
@@ -641,7 +658,7 @@ class MeshExecutionService:
                     execution={
                         "phase": "failed",
                         "worker_generation": worker_generation,
-                        "last_progress_at": progress_ticks["iso"],
+                        "last_progress_at": progress_state["iso"],
                         "point_state": "POINT_FAILED",
                         "total_count": total_points,
                     },
@@ -655,12 +672,13 @@ class MeshExecutionService:
         *,
         probe_config: dict[str, Any] | None,
         progress_callback,
+        progress_updates: SimpleQueue[dict[str, Any]],
         project_id: str,
         map_id: str,
         point_index: int,
         total_points: int,
         worker_generation: int,
-        progress_ticks: dict[str, Any],
+        progress_state: dict[str, Any],
     ) -> dict[str, Any]:
         result_holder: dict[str, Any] = {}
         error_holder: dict[str, BaseException] = {}
@@ -684,7 +702,21 @@ class MeshExecutionService:
         timeout_s = self.point_watchdog_timeout_s
         if timeout_s is None:
             timeout_s = float(getattr(getattr(runtime, "config", None), "no_progress_timeout_s", 60.0) or 60.0)
+        drain_target = {"x_mm": point.get("x_machine"), "y_mm": point.get("y_machine"), "point_index": point_index}
         while not finished.wait(self.point_watchdog_poll_s):
+            self._drain_progress_updates(
+                progress_updates,
+                project_id=project_id,
+                map_id=map_id,
+                point_index=point_index,
+                retry_count=0,
+                target=drain_target,
+                runtime=runtime,
+                started=time.monotonic(),
+                total_points=total_points,
+                worker_generation=worker_generation,
+                progress_state=progress_state,
+            )
             with self._lock:
                 cancel_requested = self._cancel_requests.get((project_id, map_id))
                 cancelled = bool(cancel_requested and cancel_requested.is_set())
@@ -693,7 +725,7 @@ class MeshExecutionService:
                     runtime.cancel_operation()
                 except Exception:
                     pass
-            elapsed_without_progress = time.monotonic() - float(progress_ticks["monotonic"])
+            elapsed_without_progress = time.monotonic() - float(progress_state["monotonic"])
             if elapsed_without_progress <= timeout_s:
                 continue
             try:
@@ -711,14 +743,202 @@ class MeshExecutionService:
                 metadata={
                     "phase": "watchdog_timeout",
                     "worker_generation": worker_generation,
-                    "last_progress_at": progress_ticks["iso"],
+                    "last_progress_at": progress_state["iso"],
+                    **self._progress_metrics(progress_state),
                 },
             )
             finished.wait(self.point_watchdog_grace_s)
             raise TimeoutError(f"Timeout sin progreso durante {elapsed_without_progress:.3f} s en el punto {point_index + 1}/{total_points}.")
+        self._drain_progress_updates(
+            progress_updates,
+            project_id=project_id,
+            map_id=map_id,
+            point_index=point_index,
+            retry_count=0,
+            target=drain_target,
+            runtime=runtime,
+            started=time.monotonic(),
+            total_points=total_points,
+            worker_generation=worker_generation,
+            progress_state=progress_state,
+        )
         if "error" in error_holder:
             raise error_holder["error"]
         return dict(result_holder["result"])
+
+    @staticmethod
+    def _progress_metrics(progress_state: dict[str, Any], *, persistence_count: int | None = None) -> dict[str, Any]:
+        return {
+            "phase": progress_state.get("phase"),
+            "step_counter": int(progress_state.get("step_counter") or 0),
+            "command_started_at": progress_state.get("command_started_at"),
+            "command_completed_at": progress_state.get("command_completed_at"),
+            "command_duration_s": progress_state.get("command_duration_s"),
+            "elapsed_since_previous_step_s": progress_state.get("elapsed_since_previous_step_s"),
+            "persistence_count": int(progress_state.get("persistence_count") or 0) if persistence_count is None else int(persistence_count),
+            "persistence_duration_s": progress_state.get("persistence_duration_s"),
+        }
+
+    @classmethod
+    def _update_progress_heartbeat(cls, progress_state: dict[str, Any], state: str, detail: dict[str, Any]) -> None:
+        now = time.monotonic()
+        progress_state["monotonic"] = now
+        progress_state["iso"] = _iso_now()
+        progress_state["state"] = state
+        progress_state["phase"] = cls._phase_for_point_state(state)
+        if state == "POINT_LOWER_STEP":
+            progress_state["step_counter"] = int(progress_state.get("step_counter") or 0) + 1
+        command_started_at = detail.get("command_started_at")
+        command_completed_at = detail.get("command_completed_at")
+        if command_started_at is not None:
+            progress_state["command_started_at"] = float(command_started_at)
+        if command_completed_at is not None:
+            progress_state["command_completed_at"] = float(command_completed_at)
+        if detail.get("command_duration_s") is not None:
+            progress_state["command_duration_s"] = float(detail["command_duration_s"])
+        if state == "POINT_CONFIRM_STEP":
+            previous_completed = progress_state.get("last_step_completed_at")
+            started = progress_state.get("command_started_at")
+            if previous_completed is None or started is None:
+                progress_state["elapsed_since_previous_step_s"] = None
+            else:
+                progress_state["elapsed_since_previous_step_s"] = max(0.0, float(started) - float(previous_completed))
+            progress_state["last_step_completed_at"] = progress_state.get("command_completed_at")
+
+    def _persist_execution_state(
+        self,
+        *,
+        project_id: str,
+        map_id: str,
+        worker_active: bool | None = None,
+        point_state: str | None = None,
+        point_index: int | None = None,
+        retry_count: int | None = None,
+        error: str | None = None,
+        last_event: str | None = None,
+        command: str | None = None,
+        target: dict[str, Any] | None = None,
+        observed: dict[str, Any] | None = None,
+        metadata: dict[str, Any] | None = None,
+        metrics: dict[str, Any] | None = None,
+        progress_state: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        progress_state = progress_state or {}
+        next_count = int(progress_state.get("persistence_count") or 0) + 1
+        merged_metadata = dict(metadata or {})
+        snapshot_metrics = dict(metrics or self._progress_metrics(progress_state))
+        snapshot_metrics["persistence_count"] = next_count
+        merged_metadata.update(snapshot_metrics)
+        started = time.monotonic()
+        updated = self.physical_map_service.update_execution_state(
+            project_id=project_id,
+            map_id=map_id,
+            worker_active=worker_active,
+            point_state=point_state,
+            point_index=point_index,
+            retry_count=retry_count,
+            error=error,
+            last_event=last_event,
+            command=command,
+            target=target,
+            observed=observed,
+            metadata=merged_metadata,
+        )
+        duration = time.monotonic() - started
+        progress_state["persistence_count"] = next_count
+        progress_state["persistence_duration_s"] = float(progress_state.get("persistence_duration_s") or 0.0) + duration
+        return updated
+
+    def _drain_progress_updates(
+        self,
+        progress_updates: SimpleQueue[dict[str, Any]],
+        *,
+        project_id: str,
+        map_id: str,
+        point_index: int,
+        retry_count: int,
+        target: dict[str, Any],
+        runtime: Any,
+        started: float,
+        total_points: int,
+        worker_generation: int,
+        progress_state: dict[str, Any],
+    ) -> None:
+        transition_map = {
+            "POINT_MOVE_SAFE_Z": "MOVE_SAFE_Z",
+            "POINT_CONFIRM_SAFE_Z": "MOVE_SAFE_Z_DONE",
+            "POINT_VERIFY_PROBE_OPEN": "VERIFY_PROBE_OPEN",
+            "POINT_DESCENT_STARTED": "DESCENT_STARTED",
+            "POINT_MOVE_XY": "MOVE_XY",
+            "POINT_CONFIRM_XY": "MOVE_XY_DONE",
+            "POINT_CONTACT_DETECTED": "CONTACT",
+            "POINT_RETRACT": "RETRACT",
+            "POINT_CONFIRM_RETRACT": "RETRACT_DONE",
+            "POINT_VERIFY_PROBE_OPEN_AFTER_RETRACT": "VERIFY_PROBE_OPEN_AFTER_RETRACT",
+        }
+        while True:
+            try:
+                update = progress_updates.get_nowait()
+            except Empty:
+                return
+            state = str(update["state"])
+            detail = dict(update.get("detail") or {})
+            phase = str(update.get("phase") or self._phase_for_point_state(state))
+            last_progress_at = str(update.get("last_progress_at") or progress_state.get("iso") or _iso_now())
+            metrics = dict(update.get("metrics") or self._progress_metrics(progress_state))
+            observed_now = self._observed_from_runtime(runtime)
+            if bool(update.get("persist")):
+                self._persist_execution_state(
+                    project_id=project_id,
+                    map_id=map_id,
+                    worker_active=True,
+                    point_state=state,
+                    point_index=point_index,
+                    retry_count=retry_count,
+                    command=str(detail.get("command") or state),
+                    target={**target, **detail},
+                    observed=observed_now,
+                    last_event=self._point_event_message(point_index, state),
+                    metadata={
+                        "phase": phase,
+                        "worker_generation": worker_generation,
+                        "last_progress_at": last_progress_at,
+                    },
+                    metrics=metrics,
+                    progress_state=progress_state,
+                )
+            transition = transition_map.get(state)
+            if transition:
+                self._log_transition(
+                    transition,
+                    project_id,
+                    map_id,
+                    point_index=point_index,
+                    target={**target, **detail},
+                    observed=observed_now,
+                    started=started,
+                    execution={
+                        "phase": phase,
+                        "worker_generation": worker_generation,
+                        "last_progress_at": last_progress_at,
+                        "point_state": state,
+                        "total_count": total_points,
+                    },
+                )
+
+    @staticmethod
+    def _point_event_message(point_index: int, state: str) -> str:
+        labels = {
+            "POINT_MOVE_SAFE_Z": "iniciando Z segura",
+            "POINT_CONFIRM_SAFE_Z": "Z segura confirmada",
+            "POINT_MOVE_XY": "iniciando movimiento XY",
+            "POINT_CONFIRM_XY": "movimiento XY confirmado",
+            "POINT_DESCENT_STARTED": "Descendiendo: búsqueda de contacto",
+            "POINT_CONTACT_DETECTED": "contacto detectado",
+            "POINT_RETRACT": "iniciando retracto",
+            "POINT_CONFIRM_RETRACT": "retracto confirmado",
+        }
+        return f"Punto {point_index + 1}: {labels.get(state, state)}."
 
     def _require_current_machine_state(self, runtime: Any) -> dict[str, Any]:
         """Require a fresh HTTP observation before a physical point.
@@ -787,12 +1007,14 @@ class MeshExecutionService:
             "POINT_CONFIRM_XY": "confirm_xy",
             "POINT_SETTLE": "settle",
             "POINT_VERIFY_PROBE_OPEN": "waiting_probe",
+            "POINT_DESCENT_STARTED": "descent",
             "POINT_LOWER_STEP": "waiting_probe",
             "POINT_CONFIRM_STEP": "waiting_probe",
             "POINT_CONTACT_DETECTED": "contact",
             "POINT_CAPTURE_Z": "capture_z",
             "POINT_RETRACT": "retract",
             "POINT_CONFIRM_RETRACT": "retract",
+            "POINT_VERIFY_PROBE_OPEN_AFTER_RETRACT": "verify_open_after_retract",
             "POINT_PERSIST": "persist",
             "POINT_COMPLETE": "persist",
             "POINT_RETRY": "retry",
