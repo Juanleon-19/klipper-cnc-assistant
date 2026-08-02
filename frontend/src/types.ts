@@ -348,6 +348,7 @@ export type CompensationAuditSummary = {
   estimated_time_s?: number | null;
   estimation_method?: string | null;
   estimation_confidence?: string | null;
+  estimation_detail?: string | null;
   eligible?: boolean;
   error?: string | null;
   time_difference_s?: number | null;
@@ -621,6 +622,7 @@ export type CompensatedGCodeResult = {
     estimated_time_s?: number | null;
     method?: string | null;
     confidence?: string | null;
+    detail?: string | null;
   };
 };
 
@@ -666,6 +668,7 @@ export type JobOperationPlan = {
     estimated_time_s?: number | null;
     method?: string | null;
     confidence?: string | null;
+    detail?: string | null;
   } | null;
   estimated_time_s?: number | null;
   compensation_status: string;
@@ -725,6 +728,7 @@ export type JobRunOperation = {
     estimated_time_s?: number | null;
     method?: string | null;
     confidence?: string | null;
+    detail?: string | null;
   } | null;
   estimated_time_s?: number | null;
 };
@@ -907,6 +911,7 @@ export type LiveExecutionSnapshot = {
     reason?: string | null;
     method?: string | null;
     confidence?: string | null;
+    detail?: string | null;
     progress?: number;
     elapsed_s?: number;
     predicted_elapsed_s?: number;

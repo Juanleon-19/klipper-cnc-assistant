@@ -205,6 +205,7 @@ export function ExecutionConsole({ snapshot, error, busy, onPrepare, onStart, on
         <div className="metric-box"><span>Método ETA</span><strong>{estimateMethodLabel(eta?.method)}</strong></div>
         <div className="metric-box"><span>Confianza</span><strong>{eta?.available ? (eta.confidence ?? "-") : "-"}</strong></div>
       </div>
+      {eta?.available && eta.detail ? <p className="muted">{eta.detail}</p> : null}
 
       <div className="execution-console-v2__progress-grid">
         <section className="execution-progress-card">

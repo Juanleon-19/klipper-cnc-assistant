@@ -89,6 +89,9 @@ class TimeEstimationServiceTests(unittest.TestCase):
         self.assertEqual(estimate["method"], "moonraker_analysis")
         self.assertEqual(estimate["estimated_time_s"], 42.5)
         self.assertEqual(estimate["confidence"], "high")
+        self.assertEqual(estimate["offset_table"][-1]["predicted_cumulative_seconds"], 42.5)
+        self.assertEqual(estimate["distribution_method"], "internal_scaled")
+        self.assertIn("distribución temporal", estimate["distribution_detail"])
 
     def test_internal_estimator_is_used_when_analysis_not_ready(self) -> None:
         self.runtime.config.moonraker_url = "http://moonraker.local"
@@ -103,3 +106,24 @@ class TimeEstimationServiceTests(unittest.TestCase):
         table = estimate["offset_table"]
         self.assertGreaterEqual(len(table), 2)
         self.assertLess(table[0]["predicted_cumulative_seconds"], table[-1]["predicted_cumulative_seconds"])
+
+    def test_dwell_events_contribute_to_offset_table_in_order(self) -> None:
+        service = TimeEstimationService(self.repository, self.runtime)
+        estimate = service.estimate_text("G4 P500\nG21\nG90\nG1 X10 F600\nG4 P1000\nG1 X20 F600\nG4 P250\n")
+        table = estimate["offset_table"]
+        self.assertGreaterEqual(len(table), 5)
+        self.assertGreaterEqual(estimate["dwell_time_s"], 1.75)
+        self.assertEqual(table[-1]["predicted_cumulative_seconds"], estimate["estimated_time_s"])
+        self.assertLess(table[0]["predicted_cumulative_seconds"], table[2]["predicted_cumulative_seconds"])
+        self.assertLess(table[2]["predicted_cumulative_seconds"], table[-1]["predicted_cumulative_seconds"])
+
+    def test_parser_does_not_turn_g92_into_inherited_motion(self) -> None:
+        service = TimeEstimationService(self.repository, self.runtime)
+        estimate = service.estimate_text("G21\nG90\nG1 X10 F600\nG92 X0 Y0\n")
+        self.assertTrue(any("G92" in item for item in estimate["unsupported_commands"]))
+
+    def test_parser_keeps_dwell_literal_without_motion_conversion(self) -> None:
+        service = TimeEstimationService(self.repository, self.runtime)
+        estimate = service.estimate_text("G21\nG90\nG1 X10 F600\nG4 P1000\n")
+        self.assertEqual(estimate["unsupported_commands"], [])
+        self.assertGreaterEqual(estimate["dwell_time_s"], 1.0)

@@ -379,6 +379,42 @@ class ApiTest(unittest.TestCase):
         project_payload = self.client.get(f"/api/projects/{project_id}").json()
         self.assertIsNone(project_payload["montajes"][0]["active_map_id"])
 
+    def test_compensation_audit_uses_real_estimation_threshold_instead_of_line_count(self) -> None:
+        self.app.state.compensated_gcode_service.build_comparison_report = lambda *_args, **_kwargs: {
+            "selected_mode": "legacy",
+            "recommended_mode": "adaptive_fast",
+            "max_z_error_mm": 0.01,
+            "original": {"mode": "original", "movements_total": 10, "unsupported_commands": [], "eligible": True},
+            "legacy": {"mode": "legacy", "movements_total": 12, "unsupported_commands": [], "eligible": True},
+            "adaptive_fast": {"mode": "adaptive_fast", "movements_total": 4, "unsupported_commands": [], "eligible": True},
+            "warnings": [],
+            "_artifacts": {"original": "G1 X1", "legacy": "G1 X2", "adaptive_fast": "G1 X3"},
+        }
+
+        def estimate_text(text: str) -> dict[str, object]:
+            if text == "G1 X1":
+                return {"estimated_time_s": 10.0, "method": "internal", "confidence": "medium", "unsupported_commands": []}
+            if text == "G1 X2":
+                return {"estimated_time_s": 10.0, "method": "internal", "confidence": "medium", "unsupported_commands": []}
+            return {
+                "estimated_time_s": 10.06,
+                "method": "moonraker_analysis",
+                "confidence": "high",
+                "distribution_detail": "Moonraker aporta el tiempo total; la distribución temporal por file_position proviene del estimador interno escalado.",
+                "unsupported_commands": [],
+            }
+
+        self.app.state.time_estimation_service.estimate_text = estimate_text
+
+        response = self.client.post("/api/projects/proj/operations/op/compensation-audit")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["recommended_mode"], "legacy")
+        self.assertFalse(payload["adaptive_fast"]["eligible"])
+        self.assertEqual(payload["adaptive_fast"]["estimation_method"], "moonraker_analysis")
+        self.assertIn("interno escalado", payload["adaptive_fast"]["estimation_detail"])
+
     def test_get_physical_map_returns_latest_paused_state_without_writing_files(self) -> None:
         project_id = self._create_project()
         operation_id = self._create_operation(project_id)

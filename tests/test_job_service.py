@@ -601,6 +601,79 @@ class JobServiceTest(unittest.TestCase):
             "filename_mismatch",
         )
 
+    def test_eta_snapshot_keeps_moonraker_method_with_scaled_internal_distribution(self) -> None:
+        run = {"eta_ratio_ema": 1.0}
+        operation = {
+            "time_estimate": {
+                "estimated_time_s": 42.5,
+                "method": "moonraker_analysis",
+                "confidence": "high",
+                "distribution_detail": "Moonraker aporta el tiempo total; la distribución temporal por file_position proviene del estimador interno escalado.",
+                "offset_table": [
+                    {"file_byte_offset": 10.0, "predicted_cumulative_seconds": 20.0},
+                    {"file_byte_offset": 20.0, "predicted_cumulative_seconds": 42.5},
+                ],
+            }
+        }
+        status = {
+            "file_position": 10.0,
+            "progress": 0.5,
+            "print_duration": 19.0,
+            "print_state": "printing",
+        }
+
+        eta = self.job_service._build_eta_snapshot(
+            run=run,
+            operation=operation,
+            status=status,
+            expected_filename="job.gcode",
+            observed_filename="job.gcode",
+        )
+
+        self.assertTrue(eta["available"])
+        self.assertEqual(eta["method"], "moonraker_analysis")
+        self.assertIn("interno escalado", eta["detail"])
+
+    def test_paused_eta_does_not_consume_print_duration(self) -> None:
+        run = {"eta_ratio_ema": 1.0}
+        operation = {
+            "time_estimate": {
+                "estimated_time_s": 30.0,
+                "method": "internal",
+                "confidence": "medium",
+                "offset_table": [
+                    {"file_byte_offset": 10.0, "predicted_cumulative_seconds": 10.0},
+                    {"file_byte_offset": 20.0, "predicted_cumulative_seconds": 20.0},
+                    {"file_byte_offset": 30.0, "predicted_cumulative_seconds": 30.0},
+                ],
+            }
+        }
+        status = {
+            "file_position": 10.0,
+            "progress": 0.333,
+            "print_duration": 9.0,
+            "print_state": "paused",
+        }
+
+        first = self.job_service._build_eta_snapshot(
+            run=run,
+            operation=operation,
+            status=status,
+            expected_filename="job.gcode",
+            observed_filename="job.gcode",
+        )
+        second = self.job_service._build_eta_snapshot(
+            run=run,
+            operation=operation,
+            status=status,
+            expected_filename="job.gcode",
+            observed_filename="job.gcode",
+        )
+
+        self.assertTrue(first["available"])
+        self.assertEqual(first["elapsed_s"], second["elapsed_s"])
+        self.assertEqual(first["remaining_s"], second["remaining_s"])
+
     def test_watcher_error_is_persisted(self) -> None:
         self.job_service.generate_project_compensation(project_id=self.project_id, setup_id=self.setup_id, face="superior")
         def boom() -> dict:

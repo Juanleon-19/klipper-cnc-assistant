@@ -2328,6 +2328,18 @@ export function ProjectWorkspace({
                       <td>{formatDurationSeconds(compensationAudit.adaptive_fast.estimated_time_s)}</td>
                     </tr>
                     <tr>
+                      <td>Método / confianza</td>
+                      <td>{[compensationAudit.original.estimation_method, compensationAudit.original.estimation_confidence].filter(Boolean).join(" / ") || "-"}</td>
+                      <td>{[compensationAudit.legacy.estimation_method, compensationAudit.legacy.estimation_confidence].filter(Boolean).join(" / ") || "-"}</td>
+                      <td>{[compensationAudit.adaptive_fast.estimation_method, compensationAudit.adaptive_fast.estimation_confidence].filter(Boolean).join(" / ") || "-"}</td>
+                    </tr>
+                    <tr>
+                      <td>Detalle de estimación</td>
+                      <td>{compensationAudit.original.estimation_detail ?? "-"}</td>
+                      <td>{compensationAudit.legacy.estimation_detail ?? "-"}</td>
+                      <td>{compensationAudit.adaptive_fast.estimation_detail ?? "-"}</td>
+                    </tr>
+                    <tr>
                       <td>Movimientos</td>
                       <td>{compensationAudit.original.movements_total ?? "-"}</td>
                       <td>{compensationAudit.legacy.movements_total ?? "-"}</td>
@@ -2364,7 +2376,7 @@ export function ProjectWorkspace({
             {compensationAudit?.adaptive_fast && compensationAudit.adaptive_fast.eligible === false ? (
               <div className="alert alert--warning">
                 <strong>Adaptive_fast no es elegible</strong>
-                <p>{compensationAudit.adaptive_fast.error ?? "La auditoría detectó que supera tolerancia, introduce comandos no soportados o no mejora el tiempo frente a legacy."}</p>
+                <p>{compensationAudit.adaptive_fast.error ?? "La auditoría detectó que supera tolerancia, introduce comandos no soportados o excede el umbral de tiempo frente a legacy."}</p>
               </div>
             ) : null}
           </div>

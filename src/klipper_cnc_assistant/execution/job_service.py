@@ -1830,7 +1830,8 @@ class JobService:
                 "confidence": None,
             }
         ratio = float(run.get("eta_ratio_ema") or 1.0)
-        if predicted_elapsed > 0.1 and actual_elapsed >= 0.0:
+        print_state = str(status.get("print_state") or "").lower()
+        if predicted_elapsed > 0.1 and actual_elapsed >= 0.0 and print_state not in {"paused", "pausing"}:
             measured_ratio = actual_elapsed / predicted_elapsed
             ratio = max(0.25, min(4.0, ratio * 0.7 + measured_ratio * 0.3))
             run["eta_ratio_ema"] = ratio
@@ -1844,6 +1845,7 @@ class JobService:
             "available": True,
             "method": method,
             "confidence": estimate.get("confidence", "medium"),
+            "detail": estimate.get("distribution_detail") or estimate.get("distribution_method"),
             "progress": self._clamp_progress(status.get("progress")),
             "elapsed_s": actual_elapsed,
             "predicted_elapsed_s": predicted_elapsed,

@@ -729,6 +729,7 @@ def build_router() -> APIRouter:
             compensated[key]["estimated_time_s"] = estimate.get("estimated_time_s")
             compensated[key]["estimation_method"] = estimate.get("method")
             compensated[key]["estimation_confidence"] = estimate.get("confidence")
+            compensated[key]["estimation_detail"] = estimate.get("distribution_detail") or estimate.get("distribution_method")
             compensated[key]["unsupported_commands"] = list(dict.fromkeys(list(compensated[key].get("unsupported_commands") or []) + list(estimate.get("unsupported_commands") or [])))
         adaptive = compensated.get("adaptive_fast") or {}
         legacy = compensated.get("legacy") or {}
@@ -737,11 +738,15 @@ def build_router() -> APIRouter:
         if adaptive_time is not None and legacy_time is not None:
             adaptive["time_difference_s"] = float(adaptive_time) - float(legacy_time)
             adaptive["time_difference_pct"] = None if float(legacy_time) == 0 else ((float(adaptive_time) - float(legacy_time)) / float(legacy_time)) * 100.0
+            time_ok = float(adaptive_time) <= float(legacy_time) * 1.005
             adaptive["eligible"] = bool(
                 adaptive.get("eligible")
-                and (adaptive.get("time_difference_s") or 0.0) < 0.0
+                and time_ok
             )
             compensated["recommended_mode"] = "adaptive_fast" if adaptive.get("eligible") else "legacy"
+        else:
+            adaptive["eligible"] = False
+            compensated["recommended_mode"] = "legacy"
         return compensated
 
     @router.post("/projects/{project_id}/operations/{operation_id}/compensated-gcode/generate", response_model=dict[str, object])

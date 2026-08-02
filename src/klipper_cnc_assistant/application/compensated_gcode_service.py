@@ -271,15 +271,9 @@ class CompensatedGCodeService:
                 "error_z_max_approximation_mm": None,
             }
             adaptive_error = str(error)
-        adaptive_is_faster = (
-            adaptive_error is None
-            and legacy_summary.get("estimated_time_s") is not None
-            and adaptive_summary.get("estimated_time_s") is not None
-            and float(adaptive_summary["estimated_time_s"]) < float(legacy_summary["estimated_time_s"])
-        )
         adaptive_within_tolerance = adaptive_error is None and float(adaptive_summary.get("error_z_max_approximation_mm") or 0.0) <= float(operation.max_z_error_mm)
         adaptive_supported = adaptive_error is None and not adaptive_summary.get("unsupported_commands")
-        adaptive_eligible = bool(adaptive_is_faster and adaptive_within_tolerance and adaptive_supported)
+        adaptive_eligible = bool(adaptive_within_tolerance and adaptive_supported)
         if adaptive_error is None:
             adaptive_summary["eligible"] = adaptive_eligible
         selected_mode = str(operation.compensation_mode)
@@ -348,7 +342,6 @@ class CompensatedGCodeService:
                 distance_cut_mm += float(segment.distancia_mm)
         trace = list(preview.get("trace") or [])
         corrections = [float(item.get("delta_z_mm") or 0.0) for item in trace if item.get("delta_z_mm") is not None]
-        estimated_time_s = distance_xyz_mm / max(1.0, max(operation.analisis.avances_mm_min or [600.0]) / 60.0) if movement_counts["G0"] + movement_counts["G1"] + movement_counts["G2"] + movement_counts["G3"] > 0 else 0.0
         original_movements = len(operation.analisis.segmentos_vista_previa)
         movements = sum(movement_counts.values())
         return {
@@ -371,7 +364,10 @@ class CompensatedGCodeService:
             "points_outside_map": len(preview.get("outside_points") or []),
             "extrapolations": int(preview.get("extrapolations", 0)),
             "unsupported_commands": list(preview.get("unsupported_commands") or []),
-            "estimated_time_s": estimated_time_s,
+            "estimated_time_s": None,
+            "estimation_method": None,
+            "estimation_confidence": None,
+            "estimation_detail": None,
         }
 
     def _build_compensated_lines(self, operation: OperacionPCB, height_map: HeightMap, max_segment_mm: float, reference_frame: ReferenceFrame) -> tuple[list[str], dict[str, Any]]:

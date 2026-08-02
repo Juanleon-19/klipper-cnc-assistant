@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -22,6 +23,18 @@ class MotionSegment:
 
 
 @dataclass(frozen=True)
+class DwellEvent:
+    duration_s: float
+    end_offset: int
+
+
+@dataclass(frozen=True)
+class UnknownTimeEvent:
+    command: str
+    end_offset: int
+
+
+@dataclass(frozen=True)
 class MachineLimits:
     max_velocity_mm_s: float
     max_accel_mm_s2: float
@@ -30,6 +43,11 @@ class MachineLimits:
     z_min_mm: float | None
     z_max_mm: float | None
     max_z_velocity_mm_s: float | None = None
+
+
+UNSUPPORTED_ESTIMATOR_G_CODES = {"G10", "G28", "G53", "G90.1", "G91.1", "G92"}
+MOTION_G_CODES = {"G0", "G1", "G2", "G3"}
+MACRO_WORD_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 class TimeEstimationService:
@@ -66,6 +84,24 @@ class TimeEstimationService:
         if remote_filename:
             external = self._estimate_with_moonraker(remote_filename)
             if external is not None:
+                internal = self._estimate_internal(text)
+                external["offset_table"] = self._scale_offset_table(
+                    list(internal.get("offset_table") or []),
+                    float(external["estimated_time_s"]),
+                )
+                external["distribution_method"] = "internal_scaled"
+                external["distribution_detail"] = (
+                    "Moonraker aporta el tiempo total; la distribución temporal por file_position "
+                    "proviene del estimador interno escalado."
+                )
+                external["unsupported_commands"] = list(internal.get("unsupported_commands") or [])
+                external["unknown_time_commands"] = list(internal.get("unknown_time_commands") or [])
+                external["distance_xyz_mm"] = internal.get("distance_xyz_mm")
+                external["distance_cut_mm"] = internal.get("distance_cut_mm")
+                external["distance_rapid_mm"] = internal.get("distance_rapid_mm")
+                external["dwell_time_s"] = internal.get("dwell_time_s")
+                external["macro_time_offset_s"] = internal.get("macro_time_offset_s")
+                external["machine_limits"] = internal.get("machine_limits")
                 return external | {"source_path": source_path}
         internal = self._estimate_internal(text)
         internal["source_path"] = source_path
@@ -100,6 +136,8 @@ class TimeEstimationService:
             "unsupported_commands": [],
             "unknown_time_commands": [],
             "offset_table": [],
+            "distribution_method": "moonraker_analysis",
+            "distribution_detail": "Moonraker aporta el tiempo total y la distribución temporal.",
             "estimator_ready": True,
             "analysis_status": status,
             "raw": estimate,
@@ -109,8 +147,7 @@ class TimeEstimationService:
         state = ModalState()
         offsets = _line_offsets(text)
         lines = tokenize_gcode(text)
-        segments: list[MotionSegment] = []
-        cumulative = 0.0
+        events: list[MotionSegment | DwellEvent | UnknownTimeEvent] = []
         offset_table: list[dict[str, float]] = []
         unsupported_commands: list[str] = []
         unknown_time_commands: list[str] = []
@@ -125,17 +162,17 @@ class TimeEstimationService:
             end_offset = offsets[min(index, len(offsets) - 1)]
             parsed = _parse_line(line=line, state=state)
             if parsed["dwell_time_s"] > 0:
-                cumulative += parsed["dwell_time_s"]
                 dwell_time_s += parsed["dwell_time_s"]
-                offset_table.append({"file_byte_offset": float(end_offset), "predicted_cumulative_seconds": cumulative})
+                events.append(DwellEvent(duration_s=float(parsed["dwell_time_s"]), end_offset=end_offset))
             if parsed["unknown_time_command"]:
                 unknown_time_commands.append(parsed["unknown_time_command"])
+                events.append(UnknownTimeEvent(command=str(parsed["unknown_time_command"]), end_offset=end_offset))
             if parsed["unsupported_command"]:
                 unsupported_commands.append(parsed["unsupported_command"])
             segment = parsed["segment"]
             if segment is None:
                 continue
-            segments.append(MotionSegment(end_offset=end_offset, **segment))
+            events.append(MotionSegment(end_offset=end_offset, **segment))
             distance_xyz_mm += segment["distance_mm"]
             if segment["motion"] == "G0":
                 distance_rapid_mm += segment["distance_mm"]
@@ -144,22 +181,32 @@ class TimeEstimationService:
 
         limits = self._machine_limits()
         cumulative = 0.0
-        offset_table = []
         previous_vector: tuple[float, float, float] | None = None
         previous_nominal = 0.0
-        for idx, segment in enumerate(segments):
-            next_vector = segments[idx + 1].vector if idx + 1 < len(segments) else None
-            nominal = min(segment.feed_mm_s, self._velocity_limit_for_segment(segment, limits))
-            entry = _junction_velocity(previous_vector, segment.vector, previous_nominal, nominal, limits.square_corner_velocity_mm_s)
-            exit_velocity = _junction_velocity(segment.vector, next_vector, nominal, nominal if idx + 1 < len(segments) else 0.0, limits.square_corner_velocity_mm_s)
-            seconds = _trapezoid_time(segment.distance_mm, nominal, entry, exit_velocity, limits.max_accel_mm_s2, limits.minimum_cruise_ratio)
-            cumulative += seconds
-            offset_table.append({"file_byte_offset": float(segment.end_offset), "predicted_cumulative_seconds": cumulative})
-            previous_vector = segment.vector
-            previous_nominal = nominal
+        for idx, event in enumerate(events):
+            if isinstance(event, MotionSegment):
+                next_vector, next_nominal = self._next_motion_context(events, idx, limits)
+                nominal = min(event.feed_mm_s, self._velocity_limit_for_segment(event, limits))
+                entry = _junction_velocity(previous_vector, event.vector, previous_nominal, nominal, limits.square_corner_velocity_mm_s)
+                exit_velocity = _junction_velocity(event.vector, next_vector, nominal, next_nominal, limits.square_corner_velocity_mm_s)
+                seconds = _trapezoid_time(event.distance_mm, nominal, entry, exit_velocity, limits.max_accel_mm_s2, limits.minimum_cruise_ratio)
+                cumulative += seconds
+                previous_vector = event.vector
+                previous_nominal = nominal
+                offset_table.append({"file_byte_offset": float(event.end_offset), "predicted_cumulative_seconds": cumulative})
+                continue
+            if isinstance(event, DwellEvent):
+                cumulative += event.duration_s
+                previous_vector = None
+                previous_nominal = 0.0
+                offset_table.append({"file_byte_offset": float(event.end_offset), "predicted_cumulative_seconds": cumulative})
+                continue
+            cumulative += self.macro_time_offset_s
+            previous_vector = None
+            previous_nominal = 0.0
+            offset_table.append({"file_byte_offset": float(event.end_offset), "predicted_cumulative_seconds": cumulative})
 
         unknown_penalty = self.macro_time_offset_s * len(unknown_time_commands)
-        cumulative += unknown_penalty + dwell_time_s
         confidence = "low" if unknown_time_commands or unsupported_commands else "medium"
         return {
             "method": "internal",
@@ -173,6 +220,8 @@ class TimeEstimationService:
             "offset_table": offset_table,
             "dwell_time_s": dwell_time_s,
             "macro_time_offset_s": unknown_penalty,
+            "distribution_method": "internal",
+            "distribution_detail": "Distribución temporal calculada por el estimador interno.",
             "machine_limits": limits.__dict__,
         }
 
@@ -236,6 +285,40 @@ class TimeEstimationService:
             axis_limits.append(limits.max_z_velocity_mm_s * vector_length / abs(dz))
         return max(1e-6, min(axis_limits))
 
+    def _next_motion_context(
+        self,
+        events: list[MotionSegment | DwellEvent | UnknownTimeEvent],
+        index: int,
+        limits: MachineLimits,
+    ) -> tuple[tuple[float, float, float] | None, float]:
+        for event in events[index + 1:]:
+            if isinstance(event, MotionSegment):
+                nominal = min(event.feed_mm_s, self._velocity_limit_for_segment(event, limits))
+                return event.vector, nominal
+            if isinstance(event, DwellEvent):
+                break
+            if isinstance(event, UnknownTimeEvent):
+                break
+        return None, 0.0
+
+    def _scale_offset_table(self, offset_table: list[dict[str, float]], target_total_s: float) -> list[dict[str, float]]:
+        if not offset_table:
+            return []
+        current_total = float(offset_table[-1].get("predicted_cumulative_seconds") or 0.0)
+        if current_total <= 0:
+            return [
+                {"file_byte_offset": float(row.get("file_byte_offset") or 0.0), "predicted_cumulative_seconds": target_total_s}
+                for row in offset_table
+            ]
+        scale = target_total_s / current_total
+        return [
+            {
+                "file_byte_offset": float(row.get("file_byte_offset") or 0.0),
+                "predicted_cumulative_seconds": float(row.get("predicted_cumulative_seconds") or 0.0) * scale,
+            }
+            for row in offset_table
+        ]
+
 
 def _line_offsets(text: str) -> list[int]:
     offsets: list[int] = []
@@ -249,18 +332,27 @@ def _line_offsets(text: str) -> list[int]:
 
 
 def _parse_line(*, line, state: ModalState) -> dict[str, Any]:
+    code = line.code.strip()
+    if not code:
+        return {"segment": None, "dwell_time_s": 0.0, "unknown_time_command": None, "unsupported_command": None}
+    if _looks_like_macro_line(code):
+        return {"segment": None, "dwell_time_s": 0.0, "unknown_time_command": code.split()[0], "unsupported_command": None}
+
     motion_command = state.active_motion
+    explicit_motion: str | None = None
     axes_mm: dict[str, float] = {}
     arc_params: dict[str, float] = {}
     dwell_time_s = 0.0
     unknown_time_command: str | None = None
     unsupported_command: str | None = None
+    has_dwell = False
 
     for token in line.tokens:
         if token.letter == "G":
             command = _normalize_g_command(token.raw_value)
-            if command in {"G0", "G1", "G2", "G3"}:
+            if command in MOTION_G_CODES:
                 motion_command = command
+                explicit_motion = command
                 state.active_motion = command
             elif command == "G20":
                 state.units = "inch"
@@ -277,28 +369,46 @@ def _parse_line(*, line, state: ModalState) -> dict[str, Any]:
             elif command == "G94":
                 state.feed_mode = "units_per_minute"
             elif command == "G4":
-                pass
+                has_dwell = True
+            elif command in UNSUPPORTED_ESTIMATOR_G_CODES:
+                unsupported_command = f"L{line.line_number}:{command}: no soportado por el estimador interno"
             else:
-                unknown_time_command = command
+                unsupported_command = f"L{line.line_number}:{command}: comando G no soportado por el estimador interno"
         elif token.letter in {"X", "Y", "Z"}:
             axes_mm[token.letter] = _to_mm(float(token.raw_value), state.units)
         elif token.letter in {"I", "J", "K", "R"}:
             arc_params[token.letter] = _to_mm(float(token.raw_value), state.units)
         elif token.letter == "F":
             state.feed_mm_min = _to_mm(float(token.raw_value), state.units)
-        elif token.letter == "P" and any(t.letter == "G" and _normalize_g_command(t.raw_value) == "G4" for t in line.tokens):
+        elif token.letter == "P" and has_dwell:
             dwell_time_s = float(token.raw_value) / 1000.0
-        elif token.letter == "S" and any(t.letter == "G" and _normalize_g_command(t.raw_value) == "G4" for t in line.tokens):
+        elif token.letter == "S" and has_dwell:
             dwell_time_s = float(token.raw_value)
         elif token.letter in {"M", "T"}:
-            unknown_time_command = token.command
-        else:
-            unknown_time_command = token.command
+            continue
 
-    if motion_command in {"G0", "G1"} and not axes_mm:
+    has_motion_coordinates = bool(axes_mm or arc_params)
+    if unsupported_command is not None:
         return {"segment": None, "dwell_time_s": dwell_time_s, "unknown_time_command": unknown_time_command, "unsupported_command": unsupported_command}
-    if motion_command in {"G2", "G3"} and not axes_mm and not arc_params:
+    if has_dwell:
+        if has_motion_coordinates or explicit_motion is not None:
+            return {
+                "segment": None,
+                "dwell_time_s": 0.0,
+                "unknown_time_command": unknown_time_command,
+                "unsupported_command": f"L{line.line_number}:G4 incompatible con movimiento en la misma línea",
+            }
+        return {"segment": None, "dwell_time_s": dwell_time_s, "unknown_time_command": unknown_time_command, "unsupported_command": None}
+
+    if not has_motion_coordinates:
         return {"segment": None, "dwell_time_s": dwell_time_s, "unknown_time_command": unknown_time_command, "unsupported_command": unsupported_command}
+    if motion_command is None:
+        return {
+            "segment": None,
+            "dwell_time_s": dwell_time_s,
+            "unknown_time_command": unknown_time_command,
+            "unsupported_command": f"L{line.line_number}: coordenadas sin movimiento modal activo",
+        }
 
     start_x = state.x_mm
     start_y = state.y_mm
@@ -374,6 +484,11 @@ def _parse_line(*, line, state: ModalState) -> dict[str, Any]:
         "unknown_time_command": unknown_time_command,
         "unsupported_command": unsupported_command,
     }
+
+
+def _looks_like_macro_line(code: str) -> bool:
+    first = code.split()[0]
+    return bool("_" in first and MACRO_WORD_RE.match(first))
 
 
 def _normalize_g_command(raw_value: str | None) -> str:
