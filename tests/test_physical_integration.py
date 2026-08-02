@@ -10,7 +10,14 @@ from unittest.mock import patch
 
 from klipper_cnc_assistant.application import ApplicationError, HeightMapService, MachineSessionService, ReferenceSessionService
 from klipper_cnc_assistant.application.compensated_gcode_service import CompensatedGCodeService
-from klipper_cnc_assistant.application.physical_map_service import PhysicalExclusion, PhysicalMapService, PhysicalMeshConfig
+from klipper_cnc_assistant.application.physical_map_service import (
+    PhysicalExclusion,
+    PhysicalMapService,
+    PhysicalMeshConfig,
+    canonical_mesh_geometry,
+    mesh_configuration_fingerprint,
+    mesh_geometry_fingerprint,
+)
 from klipper_cnc_assistant.domain import CoordinateReference
 from klipper_cnc_assistant.execution import MeshExecutionService
 from klipper_cnc_assistant.input.serial_driver import HEADER, SerialDriver
@@ -1447,6 +1454,185 @@ class PhysicalIntegrationTest(unittest.TestCase):
             )
             self.assertEqual(repository.load_project(project.id).get_setup(operation.setup_id).active_map_id, planned["map_id"])
             self.assertEqual(len(service.history(project_id=project.id, operation_id=operation.id)), 1)
+
+    def test_mesh_fingerprint_accepts_origin_grid_promoted_to_reference(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            repository, _project_service, project, operation = self._physical_project(temp)
+            self._persist_saved_reference(repository, project.id, operation.setup_id)
+            service = PhysicalMapService(repository)
+            config = PhysicalMeshConfig(
+                grid_mode="manual",
+                rows=2,
+                columns=2,
+                edge_margin_left_mm=0.0,
+                edge_margin_right_mm=0.0,
+                edge_margin_bottom_mm=0.0,
+                edge_margin_top_mm=0.0,
+                safe_z_mm=10.0,
+            )
+
+            preview = service.preview_mesh_from_saved_reference(project_id=project.id, operation_id=operation.id, config=config)
+            planned = service.plan_from_saved_reference(project_id=project.id, operation_id=operation.id, config=config)
+
+            self.assertEqual(preview["points"][0]["role"], "GRID")
+            self.assertEqual((preview["points"][0]["x_local"], preview["points"][0]["y_local"]), (0.0, 0.0))
+            self.assertEqual(planned["points"][0]["role"], "REFERENCE")
+            self.assertEqual((planned["points"][0]["x_local"], planned["points"][0]["y_local"]), (0.0, 0.0))
+            self.assertEqual(mesh_configuration_fingerprint(preview), mesh_configuration_fingerprint(planned))
+            self.assertEqual(mesh_geometry_fingerprint(preview), mesh_geometry_fingerprint(planned))
+            self.assertEqual(canonical_mesh_geometry(preview)["point_count"], 4)
+            self.assertEqual(canonical_mesh_geometry(planned)["point_count"], 4)
+
+    def test_mesh_fingerprint_accepts_same_geometry_without_origin_coincidence(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            repository, _project_service, project, operation = self._physical_project(temp)
+            self._persist_saved_reference(repository, project.id, operation.setup_id)
+            service = PhysicalMapService(repository)
+            config = PhysicalMeshConfig(
+                grid_mode="manual",
+                rows=2,
+                columns=2,
+                edge_margin_left_mm=2.0,
+                edge_margin_right_mm=2.0,
+                edge_margin_bottom_mm=2.0,
+                edge_margin_top_mm=2.0,
+                safe_z_mm=10.0,
+            )
+
+            preview = service.preview_mesh_from_saved_reference(project_id=project.id, operation_id=operation.id, config=config)
+            planned = service.plan_from_saved_reference(project_id=project.id, operation_id=operation.id, config=config)
+
+            self.assertTrue(all(point.get("role") == "GRID" for point in preview["points"]))
+            self.assertEqual(planned["points"][0]["role"], "REFERENCE")
+            self.assertLess(int(planned["points"][0]["row"]), 0)
+            self.assertLess(int(planned["points"][0]["column"]), 0)
+            self.assertEqual(mesh_configuration_fingerprint(preview), mesh_configuration_fingerprint(planned))
+            self.assertEqual(mesh_geometry_fingerprint(preview), mesh_geometry_fingerprint(planned))
+
+    def test_mesh_fingerprint_rejects_real_rows_margin_exclusion_and_profile_differences(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            repository, _project_service, project, operation = self._physical_project(temp)
+            self._persist_saved_reference(repository, project.id, operation.setup_id)
+            service = PhysicalMapService(repository)
+            base = service.preview_mesh_from_saved_reference(
+                project_id=project.id,
+                operation_id=operation.id,
+                config=PhysicalMeshConfig(
+                    grid_mode="manual",
+                    rows=2,
+                    columns=2,
+                    edge_margin_left_mm=2.0,
+                    edge_margin_right_mm=2.0,
+                    edge_margin_bottom_mm=2.0,
+                    edge_margin_top_mm=2.0,
+                    safe_z_mm=10.0,
+                ),
+            )
+            variants = {
+                "rows": service.preview_mesh_from_saved_reference(
+                    project_id=project.id,
+                    operation_id=operation.id,
+                    config=PhysicalMeshConfig(
+                        grid_mode="manual",
+                        rows=3,
+                        columns=2,
+                        edge_margin_left_mm=2.0,
+                        edge_margin_right_mm=2.0,
+                        edge_margin_bottom_mm=2.0,
+                        edge_margin_top_mm=2.0,
+                        safe_z_mm=10.0,
+                    ),
+                ),
+                "margins": service.preview_mesh_from_saved_reference(
+                    project_id=project.id,
+                    operation_id=operation.id,
+                    config=PhysicalMeshConfig(
+                        grid_mode="manual",
+                        rows=2,
+                        columns=2,
+                        edge_margin_left_mm=4.0,
+                        edge_margin_right_mm=2.0,
+                        edge_margin_bottom_mm=2.0,
+                        edge_margin_top_mm=2.0,
+                        safe_z_mm=10.0,
+                    ),
+                ),
+                "exclusions": service.preview_mesh_from_saved_reference(
+                    project_id=project.id,
+                    operation_id=operation.id,
+                    config=PhysicalMeshConfig(
+                        grid_mode="manual",
+                        rows=2,
+                        columns=2,
+                        edge_margin_left_mm=2.0,
+                        edge_margin_right_mm=2.0,
+                        edge_margin_bottom_mm=2.0,
+                        edge_margin_top_mm=2.0,
+                        exclusions=(PhysicalExclusion(id="keepout", name="Pinza", shape="rectangle", enabled=True, x_min_mm=8.0, x_max_mm=12.0, y_min_mm=6.0, y_max_mm=9.0),),
+                        safe_z_mm=10.0,
+                    ),
+                ),
+                "profile": service.preview_mesh_from_saved_reference(
+                    project_id=project.id,
+                    operation_id=operation.id,
+                    config=PhysicalMeshConfig(
+                        grid_mode="manual",
+                        rows=2,
+                        columns=2,
+                        edge_margin_left_mm=2.0,
+                        edge_margin_right_mm=2.0,
+                        edge_margin_bottom_mm=2.0,
+                        edge_margin_top_mm=2.0,
+                        safe_z_mm=12.0,
+                        probe_profile_source="map_override",
+                        probe_step_mm=0.03,
+                        probe_feed_mm_min=75.0,
+                        retract_mm=0.8,
+                    ),
+                ),
+            }
+
+            for label, variant in variants.items():
+                with self.subTest(label=label):
+                    self.assertNotEqual(mesh_configuration_fingerprint(base), mesh_configuration_fingerprint(variant))
+                    self.assertNotEqual(mesh_geometry_fingerprint(base), mesh_geometry_fingerprint(variant))
+
+    def test_mesh_fingerprint_ignores_representational_only_noise(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            repository, _project_service, project, operation = self._physical_project(temp)
+            self._persist_saved_reference(repository, project.id, operation.setup_id)
+            service = PhysicalMapService(repository)
+            planned = service.plan_from_saved_reference(
+                project_id=project.id,
+                operation_id=operation.id,
+                config=PhysicalMeshConfig(
+                    grid_mode="manual",
+                    rows=2,
+                    columns=2,
+                    edge_margin_left_mm=0.0,
+                    edge_margin_right_mm=0.0,
+                    edge_margin_bottom_mm=0.0,
+                    edge_margin_top_mm=0.0,
+                    safe_z_mm=10.0,
+                ),
+            )
+            noisy = dict(planned)
+            noisy["map_id"] = "measured/noisy-map"
+            noisy["created_at"] = "2026-08-01T00:00:00+00:00"
+            noisy["updated_at"] = "2026-08-01T01:00:00+00:00"
+            noisy["preview_id"] = "preview/noisy"
+            noisy_points = []
+            for reverse_index, point in enumerate(reversed(planned["points"])):
+                updated = dict(point)
+                updated["index"] = reverse_index + 40
+                if updated.get("x_local") == 0.0 and updated.get("y_local") == 0.0:
+                    updated["role"] = "GRID"
+                    updated["status"] = "MEASURED"
+                noisy_points.append(updated)
+            noisy["points"] = noisy_points
+
+            self.assertEqual(mesh_configuration_fingerprint(planned), mesh_configuration_fingerprint(noisy))
+            self.assertEqual(mesh_geometry_fingerprint(planned), mesh_geometry_fingerprint(noisy))
 
     def test_repeat_measurement_archives_previous_and_creates_empty_version_with_reference_first(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import math
 import re
 import threading
@@ -93,6 +94,172 @@ def _tool_reference_from_payload(payload: dict[str, Any]) -> dict[str, Any]:
             if isinstance(reference, dict) and reference.get("valid", True):
                 return reference
     return {}
+
+
+MESH_FINGERPRINT_TOLERANCE_MM = 0.001
+MESH_FINGERPRINT_DIGITS = 3
+_MESH_SORT_SENTINEL = 10**9
+
+
+def _mesh_normalize_number(value: Any) -> float | None:
+    parsed = _as_float(value)
+    if parsed is None:
+        return None
+    scaled = round(parsed / MESH_FINGERPRINT_TOLERANCE_MM) * MESH_FINGERPRINT_TOLERANCE_MM
+    if abs(scaled) < (MESH_FINGERPRINT_TOLERANCE_MM / 2.0):
+        scaled = 0.0
+    return float(f"{scaled:.{MESH_FINGERPRINT_DIGITS}f}")
+
+
+def _mesh_operation_ids(payload: dict[str, Any]) -> list[str]:
+    raw = payload.get("operation_ids")
+    if isinstance(raw, list):
+        values = [str(item).strip() for item in raw if str(item).strip()]
+    else:
+        single = str(payload.get("operation_id") or "").strip()
+        values = [single] if single else []
+    return sorted(dict.fromkeys(values))
+
+
+def _mesh_region_payload(payload: dict[str, Any]) -> dict[str, float | None]:
+    region = payload.get("local_region")
+    if not isinstance(region, dict):
+        region = payload.get("probe_region")
+    region = region if isinstance(region, dict) else {}
+    return {
+        "min_x_mm": _mesh_normalize_number(region.get("min_x_mm")),
+        "min_y_mm": _mesh_normalize_number(region.get("min_y_mm")),
+        "max_x_mm": _mesh_normalize_number(region.get("max_x_mm")),
+        "max_y_mm": _mesh_normalize_number(region.get("max_y_mm")),
+    }
+
+
+def _mesh_grid_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    grid = payload.get("grid") if isinstance(payload.get("grid"), dict) else {}
+    return {
+        "rows": _as_int(grid.get("rows") or payload.get("rows")),
+        "columns": _as_int(grid.get("columns") or payload.get("columns")),
+        "dx_mm": _mesh_normalize_number(grid.get("dx_mm") or payload.get("dx")),
+        "dy_mm": _mesh_normalize_number(grid.get("dy_mm") or payload.get("dy")),
+    }
+
+
+def _mesh_margins_payload(payload: dict[str, Any]) -> dict[str, float | None]:
+    mesh_config = payload.get("mesh_config") if isinstance(payload.get("mesh_config"), dict) else {}
+    edge_margins = payload.get("edge_margins") if isinstance(payload.get("edge_margins"), dict) else {}
+    return {
+        "left_mm": _mesh_normalize_number(mesh_config.get("edge_margin_left_mm", edge_margins.get("left_mm"))),
+        "right_mm": _mesh_normalize_number(mesh_config.get("edge_margin_right_mm", edge_margins.get("right_mm"))),
+        "bottom_mm": _mesh_normalize_number(mesh_config.get("edge_margin_bottom_mm", edge_margins.get("bottom_mm"))),
+        "top_mm": _mesh_normalize_number(mesh_config.get("edge_margin_top_mm", edge_margins.get("top_mm"))),
+    }
+
+
+def _mesh_profile_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    probe = payload.get("probe_config") if isinstance(payload.get("probe_config"), dict) else {}
+    return {
+        "source": str(probe.get("source") or probe.get("probe_profile_source") or "machine_reference_profile"),
+        "safe_z_mm": _mesh_normalize_number(probe.get("safe_z_mm")),
+        "probe_step_mm": _mesh_normalize_number(probe.get("effective_probe_step_mm", probe.get("probe_step_mm"))),
+        "probe_feed_mm_min": _mesh_normalize_number(probe.get("effective_probe_feed_mm_min", probe.get("probe_feed_mm_min"))),
+        "retract_mm": _mesh_normalize_number(probe.get("effective_retract_mm", probe.get("retract_mm"))),
+        "retract_feed_mm_min": _mesh_normalize_number(probe.get("effective_retract_feed_mm_min")),
+        "probe_open_stable_ms": _mesh_normalize_number(probe.get("effective_probe_open_stable_ms")),
+        "settle_tolerance_mm": _mesh_normalize_number(probe.get("effective_settle_tolerance_mm")),
+    }
+
+
+def _mesh_exclusions_payload(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    exclusions = payload.get("exclusions") if isinstance(payload.get("exclusions"), list) else []
+    normalized: list[dict[str, Any]] = []
+    for item in exclusions:
+        if not isinstance(item, dict):
+            continue
+        normalized.append({
+            "id": str(item.get("id") or "").strip(),
+            "name": str(item.get("name") or item.get("nombre") or "").strip(),
+            "shape": str(item.get("shape") or "").strip(),
+            "enabled": bool(item.get("enabled", True)),
+            "x_min_mm": _mesh_normalize_number(item.get("x_min_mm")),
+            "x_max_mm": _mesh_normalize_number(item.get("x_max_mm")),
+            "y_min_mm": _mesh_normalize_number(item.get("y_min_mm")),
+            "y_max_mm": _mesh_normalize_number(item.get("y_max_mm")),
+            "center_x_mm": _mesh_normalize_number(item.get("center_x_mm")),
+            "center_y_mm": _mesh_normalize_number(item.get("center_y_mm")),
+            "radius_mm": _mesh_normalize_number(item.get("radius_mm")),
+        })
+    normalized.sort(key=lambda item: (item["id"], item["name"], item["shape"]))
+    return normalized
+
+
+def _mesh_point_execution_state(point: dict[str, Any]) -> str:
+    return "EXCLUDED" if str(point.get("status") or "").upper() == "EXCLUDED" else "EXECUTABLE"
+
+
+def _mesh_point_is_synthetic_reference(point: dict[str, Any]) -> bool:
+    if str(point.get("role") or "").upper() != "REFERENCE":
+        return False
+    row = _as_int(point.get("row"))
+    column = _as_int(point.get("column"))
+    return row is None or column is None or row < 0 or column < 0
+
+
+def _mesh_canonical_points(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    points = payload.get("points") if isinstance(payload.get("points"), list) else []
+    normalized: list[dict[str, Any]] = []
+    for item in points:
+        if not isinstance(item, dict) or _mesh_point_is_synthetic_reference(item):
+            continue
+        normalized.append({
+            "row": _as_int(item.get("row")),
+            "column": _as_int(item.get("column")),
+            "x_local": _mesh_normalize_number(item.get("x_local")),
+            "y_local": _mesh_normalize_number(item.get("y_local")),
+            "x_machine": _mesh_normalize_number(item.get("x_machine")),
+            "y_machine": _mesh_normalize_number(item.get("y_machine")),
+            "execution_state": _mesh_point_execution_state(item),
+        })
+    normalized.sort(key=lambda item: (
+        _MESH_SORT_SENTINEL if item["row"] is None else item["row"],
+        _MESH_SORT_SENTINEL if item["column"] is None else item["column"],
+        float(_MESH_SORT_SENTINEL) if item["x_local"] is None else float(item["x_local"]),
+        float(_MESH_SORT_SENTINEL) if item["y_local"] is None else float(item["y_local"]),
+        float(_MESH_SORT_SENTINEL) if item["x_machine"] is None else float(item["x_machine"]),
+        float(_MESH_SORT_SENTINEL) if item["y_machine"] is None else float(item["y_machine"]),
+    ))
+    return normalized
+
+
+def canonical_mesh_configuration(payload: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "setup_id": str(payload.get("setup_id") or ""),
+        "operation_ids": _mesh_operation_ids(payload),
+        "placement_revision": payload.get("placement_revision"),
+        "grid_mode": str(payload.get("grid_mode") or ((payload.get("mesh_config") or {}).get("grid_mode")) or "manual"),
+        "rows": _as_int(payload.get("rows") or ((payload.get("mesh_config") or {}).get("rows"))),
+        "columns": _as_int(payload.get("columns") or ((payload.get("mesh_config") or {}).get("columns"))),
+        "region": _mesh_region_payload(payload),
+        "grid": _mesh_grid_payload(payload),
+        "margins": _mesh_margins_payload(payload),
+        "exclusions": _mesh_exclusions_payload(payload),
+        "profile": _mesh_profile_payload(payload),
+    }
+
+
+def canonical_mesh_geometry(payload: dict[str, Any]) -> dict[str, Any]:
+    configuration = canonical_mesh_configuration(payload)
+    points = _mesh_canonical_points(payload)
+    configuration["point_count"] = len(points)
+    configuration["nodes"] = points
+    return configuration
+
+
+def mesh_configuration_fingerprint(payload: dict[str, Any]) -> str:
+    return json.dumps(canonical_mesh_configuration(payload), ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+
+
+def mesh_geometry_fingerprint(payload: dict[str, Any]) -> str:
+    return json.dumps(canonical_mesh_geometry(payload), ensure_ascii=True, sort_keys=True, separators=(",", ":"))
 
 
 @dataclass(frozen=True)
@@ -272,6 +439,7 @@ class PhysicalMapService:
     ) -> dict[str, Any]:
         project = self._load_project(project_id)
         operation = project.get_operation(operation_id)
+        operations = self._operations_for_setup_face(project, operation) or (operation,)
         selected_config = config or PhysicalMeshConfig()
         if selected_config.grid_mode == "suggested":
             suggestion = self.suggest_mesh_config(project_id=project_id, operation_id=operation_id, config=selected_config)
@@ -308,6 +476,7 @@ class PhysicalMapService:
             "project_id": project_id,
             "setup_id": operation.setup_id,
             "operation_id": operation.id,
+            "operation_ids": [item.id for item in operations],
             "face": operation.cara,
             "placement_revision": project.get_setup(operation.setup_id).placement_revision,
             "source": "PREVIEW",
@@ -328,7 +497,7 @@ class PhysicalMapService:
             "edge_margins": {"left_mm": selected_config.edge_margin_left_mm, "right_mm": selected_config.edge_margin_right_mm, "bottom_mm": selected_config.edge_margin_bottom_mm, "top_mm": selected_config.edge_margin_top_mm},
             "exclusions": [exclusion.to_payload() for exclusion in selected_config.exclusions],
             "mesh_config": {"grid_mode": selected_config.grid_mode, "rows": selected_config.rows, "columns": selected_config.columns, "edge_margin_left_mm": selected_config.edge_margin_left_mm, "edge_margin_right_mm": selected_config.edge_margin_right_mm, "edge_margin_bottom_mm": selected_config.edge_margin_bottom_mm, "edge_margin_top_mm": selected_config.edge_margin_top_mm, "max_spacing_mm": selected_config.max_spacing_mm, "margin_mm": selected_config.margin_mm},
-            "probe_config": {"safe_z_mm": selected_config.safe_z_mm, "probe_step_mm": selected_config.probe_step_mm, "probe_feed_mm_min": selected_config.probe_feed_mm_min, "retract_mm": selected_config.retract_mm},
+            "probe_config": {"source": selected_config.resolved_probe_profile_source(), "safe_z_mm": selected_config.safe_z_mm, "probe_step_mm": selected_config.probe_step_mm, "probe_feed_mm_min": selected_config.probe_feed_mm_min, "retract_mm": selected_config.retract_mm},
             "local_points": points,
             "machine_points": None if machine_origin_x is None or machine_origin_y is None else points,
             "points": points,
@@ -345,7 +514,7 @@ class PhysicalMapService:
             "created_at": now,
             "updated_at": now,
         }
-        return payload
+        return self._attach_mesh_fingerprints(payload)
 
     def preview_mesh_from_saved_reference(
         self,
@@ -971,6 +1140,12 @@ class PhysicalMapService:
             decorated.pop("last_progress_age_s", None)
         decorated["last_error"] = execution.get("last_error")
         decorated["operation_state"] = execution["operation_state"]
+        return self._attach_mesh_fingerprints(decorated)
+
+    def _attach_mesh_fingerprints(self, payload: dict[str, Any]) -> dict[str, Any]:
+        decorated = dict(payload)
+        decorated["mesh_configuration_fingerprint"] = mesh_configuration_fingerprint(decorated)
+        decorated["mesh_geometry_fingerprint"] = mesh_geometry_fingerprint(decorated)
         return decorated
 
     def _set_execution_state(

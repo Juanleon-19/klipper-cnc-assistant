@@ -236,70 +236,176 @@ function buildMeshPlanFingerprint(payload: {
   });
 }
 
-function buildPersistedMapFingerprint(
-  payload: PhysicalMapPayload,
-  context: { projectId: string; operationId: string; setupId: string; placementRevision: string | null }
-) {
-  const meshConfig = payload.mesh_config ?? {};
-  const probeConfig = payload.probe_config ?? {};
-  return JSON.stringify({
-    project_id: context.projectId,
-    operation_id: context.operationId,
-    setup_id: context.setupId,
-    placement_revision: payload.placement_revision ?? context.placementRevision,
-    grid_mode: payload.grid_mode ?? meshConfig.grid_mode ?? "manual",
-    rows: payload.rows ?? meshConfig.rows ?? 0,
-    columns: payload.columns ?? meshConfig.columns ?? 0,
-    edge_margin_left_mm: normalizeComparableNumber(Number(meshConfig.edge_margin_left_mm ?? payload.edge_margins?.left_mm ?? null)),
-    edge_margin_right_mm: normalizeComparableNumber(Number(meshConfig.edge_margin_right_mm ?? payload.edge_margins?.right_mm ?? null)),
-    edge_margin_bottom_mm: normalizeComparableNumber(Number(meshConfig.edge_margin_bottom_mm ?? payload.edge_margins?.bottom_mm ?? null)),
-    edge_margin_top_mm: normalizeComparableNumber(Number(meshConfig.edge_margin_top_mm ?? payload.edge_margins?.top_mm ?? null)),
-    exclusions: normalizeMeshExclusions(payload.exclusions ?? []),
-    safe_z_mm: normalizeComparableNumber(probeConfig.safe_z_mm ?? null),
-    probe_profile_source: resolveProbeProfileSource(payload),
-    effective_probe_step_mm: normalizeComparableNumber(Number(probeConfig.effective_probe_step_mm ?? probeConfig.probe_step_mm ?? null)),
-    effective_probe_feed_mm_min: normalizeComparableNumber(Number(probeConfig.effective_probe_feed_mm_min ?? probeConfig.probe_feed_mm_min ?? null)),
-    effective_retract_mm: normalizeComparableNumber(Number(probeConfig.effective_retract_mm ?? probeConfig.retract_mm ?? null)),
-  });
+type MeshFingerprintKey = "mesh_configuration_fingerprint" | "mesh_geometry_fingerprint";
+
+function normalizeComparableInteger(value: unknown) {
+  if (typeof value === "number" && Number.isInteger(value)) {
+    return value;
+  }
+  if (typeof value === "string" && value.trim() !== "") {
+    const parsed = Number(value);
+    if (Number.isInteger(parsed)) {
+      return parsed;
+    }
+  }
+  return null;
 }
 
-function buildPreviewPointSignature(payload: PhysicalMapPayload | null) {
-  return JSON.stringify(
-    (payload?.points ?? [])
-      .filter((point) => point.role !== "REFERENCE")
-      .map((point) => ({
-        row: point.row,
-        column: point.column,
-        status: point.status,
-        x_local: normalizeComparableNumber(point.x_local),
-        y_local: normalizeComparableNumber(point.y_local),
-        x_machine: normalizeComparableNumber(point.x_machine ?? null),
-        y_machine: normalizeComparableNumber(point.y_machine ?? null),
-      }))
-  );
+function compareComparableValues(left: unknown, right: unknown) {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function meshFingerprint(payload: PhysicalMapPayload | null, key: MeshFingerprintKey) {
+  const fingerprint = payload?.[key];
+  return typeof fingerprint === "string" && fingerprint.length > 0 ? fingerprint : null;
+}
+
+function buildCanonicalMeshSnapshot(payload: PhysicalMapPayload | null) {
+  if (!payload) {
+    return null;
+  }
+  const meshConfig = payload.mesh_config ?? {};
+  const probeConfig = payload.probe_config ?? {};
+  const region = payload.local_region ?? payload.probe_region ?? null;
+  const operationIds = [...new Set((payload.operation_ids ?? [])
+    .filter((item): item is string => typeof item === "string" && item.length > 0))]
+    .sort();
+  if (operationIds.length === 0 && typeof payload.operation_id === "string" && payload.operation_id.length > 0) {
+    operationIds.push(payload.operation_id);
+  }
+  const nodes = (payload.points ?? [])
+    .filter((point) => {
+      const row = normalizeComparableInteger(point.row);
+      const column = normalizeComparableInteger(point.column);
+      return !(point.role === "REFERENCE" && (row === null || column === null || row < 0 || column < 0));
+    })
+    .map((point) => ({
+      row: normalizeComparableInteger(point.row),
+      column: normalizeComparableInteger(point.column),
+      x_local: normalizeComparableNumber(point.x_local),
+      y_local: normalizeComparableNumber(point.y_local),
+      x_machine: normalizeComparableNumber(point.x_machine ?? null),
+      y_machine: normalizeComparableNumber(point.y_machine ?? null),
+      execution_state: point.status === "EXCLUDED" ? "EXCLUDED" : "EXECUTABLE",
+    }))
+    .sort((left, right) => {
+      const leftRow = left.row ?? Number.MAX_SAFE_INTEGER;
+      const rightRow = right.row ?? Number.MAX_SAFE_INTEGER;
+      if (leftRow !== rightRow) return leftRow - rightRow;
+      const leftColumn = left.column ?? Number.MAX_SAFE_INTEGER;
+      const rightColumn = right.column ?? Number.MAX_SAFE_INTEGER;
+      if (leftColumn !== rightColumn) return leftColumn - rightColumn;
+      const leftX = left.x_local ?? Number.MAX_SAFE_INTEGER;
+      const rightX = right.x_local ?? Number.MAX_SAFE_INTEGER;
+      if (leftX !== rightX) return leftX - rightX;
+      const leftY = left.y_local ?? Number.MAX_SAFE_INTEGER;
+      const rightY = right.y_local ?? Number.MAX_SAFE_INTEGER;
+      if (leftY !== rightY) return leftY - rightY;
+      const leftMachineX = left.x_machine ?? Number.MAX_SAFE_INTEGER;
+      const rightMachineX = right.x_machine ?? Number.MAX_SAFE_INTEGER;
+      if (leftMachineX !== rightMachineX) return leftMachineX - rightMachineX;
+      const leftMachineY = left.y_machine ?? Number.MAX_SAFE_INTEGER;
+      const rightMachineY = right.y_machine ?? Number.MAX_SAFE_INTEGER;
+      return leftMachineY - rightMachineY;
+    });
+
+  return {
+    setupId: typeof payload.setup_id === "string" ? payload.setup_id : null,
+    operationIds,
+    placementRevision: payload.placement_revision ?? null,
+    rows: normalizeComparableInteger(payload.rows ?? meshConfig.rows ?? null),
+    columns: normalizeComparableInteger(payload.columns ?? meshConfig.columns ?? null),
+    region: region ? {
+      min_x_mm: normalizeComparableNumber(region.min_x_mm),
+      min_y_mm: normalizeComparableNumber(region.min_y_mm),
+      max_x_mm: normalizeComparableNumber(region.max_x_mm),
+      max_y_mm: normalizeComparableNumber(region.max_y_mm),
+    } : null,
+    grid: {
+      rows: normalizeComparableInteger(payload.grid?.rows ?? payload.rows ?? null),
+      columns: normalizeComparableInteger(payload.grid?.columns ?? payload.columns ?? null),
+      dx_mm: normalizeComparableNumber(payload.grid?.dx_mm ?? payload.dx ?? null),
+      dy_mm: normalizeComparableNumber(payload.grid?.dy_mm ?? payload.dy ?? null),
+    },
+    margins: {
+      left_mm: normalizeComparableNumber(Number(meshConfig.edge_margin_left_mm ?? payload.edge_margins?.left_mm ?? null)),
+      right_mm: normalizeComparableNumber(Number(meshConfig.edge_margin_right_mm ?? payload.edge_margins?.right_mm ?? null)),
+      bottom_mm: normalizeComparableNumber(Number(meshConfig.edge_margin_bottom_mm ?? payload.edge_margins?.bottom_mm ?? null)),
+      top_mm: normalizeComparableNumber(Number(meshConfig.edge_margin_top_mm ?? payload.edge_margins?.top_mm ?? null)),
+    },
+    exclusions: normalizeMeshExclusions(payload.exclusions ?? []),
+    profile: {
+      source: resolveProbeProfileSource(payload),
+      safe_z_mm: normalizeComparableNumber(probeConfig.safe_z_mm ?? null),
+      probe_step_mm: normalizeComparableNumber(Number(probeConfig.effective_probe_step_mm ?? probeConfig.probe_step_mm ?? null)),
+      probe_feed_mm_min: normalizeComparableNumber(Number(probeConfig.effective_probe_feed_mm_min ?? probeConfig.probe_feed_mm_min ?? null)),
+      retract_mm: normalizeComparableNumber(Number(probeConfig.effective_retract_mm ?? probeConfig.retract_mm ?? null)),
+      retract_feed_mm_min: normalizeComparableNumber(Number(probeConfig.effective_retract_feed_mm_min ?? null)),
+      probe_open_stable_ms: normalizeComparableNumber(Number(probeConfig.effective_probe_open_stable_ms ?? null)),
+      settle_tolerance_mm: normalizeComparableNumber(Number(probeConfig.effective_settle_tolerance_mm ?? null)),
+    },
+    pointCount: nodes.length,
+    nodes,
+  };
+}
+
+function describeMeshDifferences(meshPreview: PhysicalMapPayload | null, persisted: PhysicalMapPayload | null) {
+  const preview = buildCanonicalMeshSnapshot(meshPreview);
+  const saved = buildCanonicalMeshSnapshot(persisted);
+  if (!preview || !saved) {
+    return ["malla"];
+  }
+  const differences: string[] = [];
+  const pushDifference = (label: string) => {
+    if (!differences.includes(label)) {
+      differences.push(label);
+    }
+  };
+  if (!compareComparableValues(preview.setupId, saved.setupId)) pushDifference("montaje");
+  if (!compareComparableValues(preview.operationIds, saved.operationIds)) pushDifference("operación");
+  if (!compareComparableValues(preview.placementRevision, saved.placementRevision)) pushDifference("revisión de colocación");
+  if (!compareComparableValues(preview.rows, saved.rows)) pushDifference("filas");
+  if (!compareComparableValues(preview.columns, saved.columns)) pushDifference("columnas");
+  if (!compareComparableValues(preview.region, saved.region)) pushDifference("región");
+  if (!compareComparableValues(preview.grid, saved.grid)) pushDifference("grid");
+  if (!compareComparableValues(preview.margins, saved.margins)) pushDifference("márgenes");
+  if (!compareComparableValues(preview.exclusions, saved.exclusions)) pushDifference("exclusiones");
+  if (!compareComparableValues(preview.profile, saved.profile)) pushDifference("perfil");
+  if (!compareComparableValues(preview.pointCount, saved.pointCount)) pushDifference("número de nodos");
+  if (!compareComparableValues(preview.nodes, saved.nodes)) pushDifference("nodos canónicos");
+  return differences;
 }
 
 function previewMatchesPersisted(meshPreview: PhysicalMapPayload | null, persisted: PhysicalMapPayload | null) {
   if (!meshPreview || !persisted) {
-    return false;
+    return { matches: false, differingFields: ["malla"] };
   }
-  return JSON.stringify({
-    rows: meshPreview.rows,
-    columns: meshPreview.columns,
-    point_count: meshPreview.point_count,
-    local_region: meshPreview.local_region,
-    grid: meshPreview.grid,
-    machine_region: meshPreview.machine_region ?? null,
-    points: buildPreviewPointSignature(meshPreview),
-  }) === JSON.stringify({
-    rows: persisted.rows,
-    columns: persisted.columns,
-    point_count: persisted.point_count,
-    local_region: persisted.local_region,
-    grid: persisted.grid,
-    machine_region: persisted.machine_region ?? null,
-    points: buildPreviewPointSignature(persisted),
-  });
+  const previewConfigurationFingerprint = meshFingerprint(meshPreview, "mesh_configuration_fingerprint");
+  const persistedConfigurationFingerprint = meshFingerprint(persisted, "mesh_configuration_fingerprint");
+  const previewGeometryFingerprint = meshFingerprint(meshPreview, "mesh_geometry_fingerprint");
+  const persistedGeometryFingerprint = meshFingerprint(persisted, "mesh_geometry_fingerprint");
+  if (
+    previewConfigurationFingerprint
+    && persistedConfigurationFingerprint
+    && previewGeometryFingerprint
+    && persistedGeometryFingerprint
+  ) {
+    if (
+      previewConfigurationFingerprint === persistedConfigurationFingerprint
+      && previewGeometryFingerprint === persistedGeometryFingerprint
+    ) {
+      return { matches: true, differingFields: [] };
+    }
+  }
+  const differingFields = describeMeshDifferences(meshPreview, persisted);
+  return { matches: differingFields.length === 0, differingFields };
+}
+
+function buildPreviewMismatchMessage(differingFields: string[]) {
+  if (differingFields.length === 0) {
+    return "La malla persistida ya no coincide con la vista previa mostrada. Regénere la vista previa antes de continuar.";
+  }
+  return `La malla persistida difiere de la vista previa en: ${differingFields.join(", ")}. Regénere la vista previa antes de continuar.`;
 }
 
 function isAbortError(error: unknown) {
@@ -1637,17 +1743,9 @@ export function ProjectWorkspace({
       }
       await withPhysicalMapAction(async () => {
         const persisted = (await api.planPhysicalMapFromReference(project.id, selectedOperation.id, physicalPlanPayload)).payload;
-        if (!previewMatchesPersisted(meshPreview, persisted)) {
-          throw new Error("La malla persistida ya no coincide con la vista previa mostrada. Regénere la vista previa antes de continuar.");
-        }
-        const persistedFingerprint = buildPersistedMapFingerprint(persisted, {
-          projectId: project.id,
-          operationId: selectedOperation.id,
-          setupId: selectedOperation.setup_id,
-          placementRevision: selectedSetup?.placement_revision ?? null,
-        });
-        if (persistedFingerprint !== meshPreviewFingerprint) {
-          throw new Error("La configuración persistida ya no coincide con la vista previa mostrada. Regénere la vista previa antes de continuar.");
+        const comparison = previewMatchesPersisted(meshPreview, persisted);
+        if (!comparison.matches) {
+          throw new Error(buildPreviewMismatchMessage(comparison.differingFields));
         }
         setActiveMapTab("mapa2d");
         setMeshValidationMessage("Sondeo armado. El mapa persistido coincide con la vista previa actual y queda listo para iniciar.");

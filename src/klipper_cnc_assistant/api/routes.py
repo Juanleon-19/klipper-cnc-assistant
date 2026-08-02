@@ -7,7 +7,12 @@ from fastapi.responses import FileResponse
 from starlette.datastructures import UploadFile
 
 from klipper_cnc_assistant.application import ApplicationError
-from klipper_cnc_assistant.application.physical_map_service import PhysicalExclusion, PhysicalMeshConfig
+from klipper_cnc_assistant.application.physical_map_service import (
+    PhysicalExclusion,
+    PhysicalMeshConfig,
+    mesh_configuration_fingerprint,
+    mesh_geometry_fingerprint,
+)
 from klipper_cnc_assistant.heightmap import ExclusionZone, ProbeRegion
 
 from .heightmap_schemas import (
@@ -131,6 +136,8 @@ def _physical_map_response(request: Request, payload: dict[str, object]) -> Phys
     enriched = dict(payload)
     probe_config = enriched.get("probe_config")
     enriched["probe_config"] = runtime.effective_probe_profile_payload(probe_config if isinstance(probe_config, dict) else None)
+    enriched["mesh_configuration_fingerprint"] = mesh_configuration_fingerprint(enriched)
+    enriched["mesh_geometry_fingerprint"] = mesh_geometry_fingerprint(enriched)
     return PhysicalMapResponse(payload=enriched)
 
 
