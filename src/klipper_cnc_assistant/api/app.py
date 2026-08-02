@@ -47,8 +47,8 @@ def create_app(
     height_map_service = HeightMapService(repository)
     physical_map_service = PhysicalMapService(repository)
     mesh_execution_service = MeshExecutionService(physical_map_service)
-    compensated_gcode_service = CompensatedGCodeService(repository, physical_map_service)
     time_estimation_service = TimeEstimationService(repository, machine_runtime)
+    compensated_gcode_service = CompensatedGCodeService(repository, physical_map_service, time_estimation_service)
     reference_session_service = ReferenceSessionService(
         repository,
         height_map_service,

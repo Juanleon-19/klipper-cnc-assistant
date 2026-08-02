@@ -237,7 +237,8 @@ class JobService:
                     )
                     generated["time_estimate"] = estimate
                     self._merge_generated_metadata(project_id, str(generated["metadata_path"]), {"time_estimate": estimate})
-                generated_results[item["operation_id"]] = generated
+                if bool(generated.get("executable", True)):
+                    generated_results[item["operation_id"]] = generated
             except Exception as error:
                 generated_results[item["operation_id"]] = {"error": str(error)}
         refreshed = self._build_plan(context, generated_results=generated_results)
@@ -802,6 +803,19 @@ class JobService:
         operation["remote_file"] = remote_file
         operation["generated_file"] = generated["relative_path"]
         operation["generated_metadata"] = generated.get("metadata_path")
+        if self.time_estimation_service is not None:
+            estimate = self.time_estimation_service.estimate_project_file(
+                project_id=context.project_id,
+                relative_path=str(generated["relative_path"]),
+                remote_filename=remote_file,
+            )
+            operation["time_estimate"] = estimate
+            operation["estimated_time_s"] = estimate.get("estimated_time_s")
+            self._merge_generated_metadata(
+                context.project_id,
+                str(generated["metadata_path"]),
+                {"time_estimate": estimate},
+            )
         operation["execution_status"] = "WAITING_FOR_KLIPPER"
         operation["observed_printing"] = False
         operation["progress"] = 0.0
@@ -1349,6 +1363,8 @@ class JobService:
                     metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
                 except (OSError, json.JSONDecodeError):
                     continue
+                if metadata.get("executable") is False:
+                    continue
                 if not self._generated_artifact_is_current(project_id, operation, active_map, file_path, metadata):
                     continue
                 results[operation.id] = {
@@ -1384,6 +1400,8 @@ class JobService:
             return False
         if metadata.get("generated_hash") != hashlib.sha256(file_path.read_bytes()).hexdigest():
             return False
+        if metadata.get("executable") is False:
+            return False
         if metadata.get("tool_id") != _tool_key(operation):
             return False
         metadata_mode = str(metadata.get("compensation_mode") or "legacy")
@@ -1394,6 +1412,19 @@ class JobService:
             actual_z = (metadata.get("reference_frame") or {}).get("surface_reference_z_mm")
             if actual_z is None or abs(float(actual_z) - float(reference["reference_z"])) > 1e-9:
                 return False
+        setup = self.repository.load_project(project_id).get_setup(operation.setup_id)
+        current_fingerprint = self.compensated_gcode_service._build_artifact_fingerprint(
+            operation_id=operation.id,
+            original_hash=hashlib.sha256(original.encode("utf-8")).hexdigest(),
+            map_hash=active_map_hash,
+            reference_frame=self.compensated_gcode_service._reference_frame(active_map, operation),
+            compensation_mode=metadata_mode,
+            max_z_error_mm=float(operation.max_z_error_mm),
+            algorithm_version=str(metadata.get("algorithm_version") or ""),
+            placement_revision=setup.placement_revision,
+        )
+        if metadata.get("audit_fingerprint") != current_fingerprint:
+            return False
         return True
 
     def _load_active_map(self, project_id: str, operation_id: str) -> dict[str, Any] | None:
@@ -1830,7 +1861,7 @@ class JobService:
                 "confidence": None,
             }
         ratio = float(run.get("eta_ratio_ema") or 1.0)
-        print_state = str(status.get("print_state") or "").lower()
+        print_state = str(status.get("state") or status.get("print_state") or "").lower()
         if predicted_elapsed > 0.1 and actual_elapsed >= 0.0 and print_state not in {"paused", "pausing"}:
             measured_ratio = actual_elapsed / predicted_elapsed
             ratio = max(0.25, min(4.0, ratio * 0.7 + measured_ratio * 0.3))

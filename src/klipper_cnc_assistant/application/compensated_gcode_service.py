@@ -88,9 +88,10 @@ class CompensatedGCodeService:
     LEGACY_ALGORITHM_VERSION = "compensated-gcode-v1"
     ADAPTIVE_ALGORITHM_VERSION = "adaptive-fast-v1"
 
-    def __init__(self, repository: JsonProjectRepository, physical_map_service) -> None:
+    def __init__(self, repository: JsonProjectRepository, physical_map_service, time_estimation_service=None) -> None:
         self.repository = repository
         self.physical_map_service = physical_map_service
+        self.time_estimation_service = time_estimation_service
 
     def generate(
         self,
@@ -103,6 +104,7 @@ class CompensatedGCodeService:
     ) -> dict[str, Any]:
         project = self._load_project(project_id)
         operation = project.get_operation(operation_id)
+        setup = project.get_setup(operation.setup_id)
         if operation.analisis is None:
             raise ApplicationError("La operación requiere análisis G-code antes de generar compensación.")
         if not operation.archivo_gcode:
@@ -133,7 +135,18 @@ class CompensatedGCodeService:
         original = self.repository.read_project_file(project_id, operation.archivo_gcode)
         original_hash = hashlib.sha256(original.encode("utf-8")).hexdigest()
         map_hash = hashlib.sha256(json.dumps(physical_map, sort_keys=True).encode("utf-8")).hexdigest()
+        executable = True
+        artifact_kind = "production"
+        artifact_warning: str | None = None
         if selected_mode == CompensationMode.ADAPTIVE_FAST:
+            audit = self.build_comparison_report(project_id, operation_id)
+            adaptive_summary = audit["adaptive_fast"]
+            executable = bool(adaptive_summary.get("eligible"))
+            artifact_kind = "production" if executable else "experimental"
+            artifact_warning = None if executable else str(
+                adaptive_summary.get("error")
+                or "Adaptive_fast no es elegible para ejecución; se generó únicamente un artefacto experimental no ejecutable."
+            )
             adaptive = generate_adaptive_gcode(
                 original_text=original,
                 height_map=height_map,
@@ -150,6 +163,16 @@ class CompensatedGCodeService:
             lines, preview = self._build_compensated_lines(operation, height_map, segment_limit, reference_frame)
             output = "\n".join(lines) + "\n"
             algorithm_version = self.LEGACY_ALGORITHM_VERSION
+        audit_fingerprint = self._build_artifact_fingerprint(
+            operation_id=operation.id,
+            original_hash=original_hash,
+            map_hash=map_hash,
+            reference_frame=reference_frame,
+            compensation_mode=selected_mode.value,
+            max_z_error_mm=float(operation.max_z_error_mm),
+            algorithm_version=algorithm_version,
+            placement_revision=setup.placement_revision,
+        )
 
         relative_dir = Path("generated") / "compensated"
         stamp = _stamp()
@@ -170,11 +193,16 @@ class CompensatedGCodeService:
             "map_hash": map_hash,
             "reference_required": physical_map.get("tool_references", {}).get(_tool_key(operation)),
             "created_at": _now().isoformat(),
+            "placement_revision": setup.placement_revision,
             "original_path": operation.archivo_gcode,
             "original_hash": original_hash,
             "generated_hash": hashlib.sha256(output.encode("utf-8")).hexdigest(),
             "algorithm_version": algorithm_version,
             "compensation_mode": selected_mode.value,
+            "audit_fingerprint": audit_fingerprint,
+            "artifact_kind": artifact_kind,
+            "executable": executable,
+            "artifact_warning": artifact_warning,
             "max_z_error_mm": operation.max_z_error_mm,
             "max_segment_mm": segment_limit,
             "reference_frame": reference_frame.__dict__,
@@ -202,6 +230,9 @@ class CompensatedGCodeService:
         ).__dict__ | {
             "selected_mode": selected_mode.value,
             "effective_mode": selected_mode.value,
+            "executable": executable,
+            "artifact_kind": artifact_kind,
+            "warning": artifact_warning,
         }
 
     def resolve_generated_file(self, project_id: str, relative_path: str) -> Path:
@@ -225,7 +256,10 @@ class CompensatedGCodeService:
         self._validate_map_for_operation(physical_map, operation, require_tool_reference=False)
         height_map = self._height_map_from_payload(physical_map["height_map"])
         reference_frame = self._reference_frame(physical_map, operation)
+        setup = project.get_setup(operation.setup_id)
         original = self.repository.read_project_file(project_id, operation.archivo_gcode)
+        original_hash = hashlib.sha256(original.encode("utf-8")).hexdigest()
+        map_hash = hashlib.sha256(json.dumps(physical_map, sort_keys=True).encode("utf-8")).hexdigest()
         sample_spacing = self._sample_spacing_mm(height_map)
         segment_limit = max(0.25, sample_spacing / 2.0)
         original_summary = self._summarize_artifact(
@@ -243,6 +277,17 @@ class CompensatedGCodeService:
             operation=operation,
             preview=legacy_preview,
         )
+        legacy_summary["audit_fingerprint"] = self._build_artifact_fingerprint(
+            operation_id=operation.id,
+            original_hash=original_hash,
+            map_hash=map_hash,
+            reference_frame=reference_frame,
+            compensation_mode=CompensationMode.LEGACY.value,
+            max_z_error_mm=float(operation.max_z_error_mm),
+            algorithm_version=self.LEGACY_ALGORITHM_VERSION,
+            placement_revision=setup.placement_revision,
+        )
+        legacy_summary["executable"] = True
         adaptive_summary: dict[str, Any]
         adaptive_error: str | None = None
         try:
@@ -261,6 +306,16 @@ class CompensatedGCodeService:
                 operation=operation,
                 preview=adaptive["preview"],
             )
+            adaptive_summary["audit_fingerprint"] = self._build_artifact_fingerprint(
+                operation_id=operation.id,
+                original_hash=original_hash,
+                map_hash=map_hash,
+                reference_frame=reference_frame,
+                compensation_mode=CompensationMode.ADAPTIVE_FAST.value,
+                max_z_error_mm=float(operation.max_z_error_mm),
+                algorithm_version=self.ADAPTIVE_ALGORITHM_VERSION,
+                placement_revision=setup.placement_revision,
+            )
             adaptive_error = None
         except Exception as error:
             adaptive_summary = {
@@ -269,13 +324,48 @@ class CompensatedGCodeService:
                 "error": str(error),
                 "unsupported_commands": [],
                 "error_z_max_approximation_mm": None,
+                "executable": False,
+                "experimental_available": False,
+                "audit_fingerprint": self._build_artifact_fingerprint(
+                    operation_id=operation.id,
+                    original_hash=original_hash,
+                    map_hash=map_hash,
+                    reference_frame=reference_frame,
+                    compensation_mode=CompensationMode.ADAPTIVE_FAST.value,
+                    max_z_error_mm=float(operation.max_z_error_mm),
+                    algorithm_version=self.ADAPTIVE_ALGORITHM_VERSION,
+                    placement_revision=setup.placement_revision,
+                ),
             }
             adaptive_error = str(error)
+        self._attach_time_estimates(
+            original_text=original,
+            legacy_text=legacy_text,
+            adaptive_text=None if adaptive_error is not None else adaptive["output"],
+            summaries={
+                "original": original_summary,
+                "legacy": legacy_summary,
+                "adaptive_fast": adaptive_summary,
+            },
+        )
         adaptive_within_tolerance = adaptive_error is None and float(adaptive_summary.get("error_z_max_approximation_mm") or 0.0) <= float(operation.max_z_error_mm)
         adaptive_supported = adaptive_error is None and not adaptive_summary.get("unsupported_commands")
-        adaptive_eligible = bool(adaptive_within_tolerance and adaptive_supported)
+        adaptive_time = adaptive_summary.get("estimated_time_s")
+        legacy_time = legacy_summary.get("estimated_time_s")
+        adaptive_time_ok = adaptive_time is not None and legacy_time is not None and float(adaptive_time) <= float(legacy_time) * 1.005
+        adaptive_eligible = bool(adaptive_within_tolerance and adaptive_supported and adaptive_time_ok)
+        if adaptive_time is not None and legacy_time is not None:
+            adaptive_summary["time_difference_s"] = float(adaptive_time) - float(legacy_time)
+            adaptive_summary["time_difference_pct"] = None if float(legacy_time) == 0 else ((float(adaptive_time) - float(legacy_time)) / float(legacy_time)) * 100.0
         if adaptive_error is None:
             adaptive_summary["eligible"] = adaptive_eligible
+            adaptive_summary["executable"] = adaptive_eligible
+            adaptive_summary["experimental_available"] = True
+            if not adaptive_eligible and not adaptive_summary.get("error"):
+                adaptive_summary["error"] = (
+                    "Adaptive_fast solo queda disponible como artefacto experimental: "
+                    "la auditoría no pudo demostrar elegibilidad ejecutable frente a legacy."
+                )
         selected_mode = str(operation.compensation_mode)
         recommended_mode = "adaptive_fast" if adaptive_eligible else "legacy"
         return {
@@ -292,6 +382,57 @@ class CompensatedGCodeService:
                 "adaptive_fast": None if adaptive_error is not None else adaptive["output"],
             },
         }
+
+    def _attach_time_estimates(
+        self,
+        *,
+        original_text: str,
+        legacy_text: str,
+        adaptive_text: str | None,
+        summaries: dict[str, dict[str, Any]],
+    ) -> None:
+        if self.time_estimation_service is None:
+            return
+        artifacts = {
+            "original": original_text,
+            "legacy": legacy_text,
+            "adaptive_fast": adaptive_text,
+        }
+        for key, text in artifacts.items():
+            if not text:
+                continue
+            estimate = self.time_estimation_service.estimate_text(str(text))
+            summaries[key]["estimated_time_s"] = estimate.get("estimated_time_s")
+            summaries[key]["estimation_method"] = estimate.get("method")
+            summaries[key]["estimation_confidence"] = estimate.get("confidence")
+            summaries[key]["estimation_detail"] = estimate.get("distribution_detail") or estimate.get("distribution_method")
+            summaries[key]["unsupported_commands"] = list(
+                dict.fromkeys(list(summaries[key].get("unsupported_commands") or []) + list(estimate.get("unsupported_commands") or []))
+            )
+
+    def _build_artifact_fingerprint(
+        self,
+        *,
+        operation_id: str,
+        original_hash: str,
+        map_hash: str,
+        reference_frame: ReferenceFrame,
+        compensation_mode: str,
+        max_z_error_mm: float,
+        algorithm_version: str,
+        placement_revision: str | None,
+    ) -> str:
+        payload = {
+            "algorithm_version": algorithm_version,
+            "compensation_mode": compensation_mode,
+            "map_hash": map_hash,
+            "max_z_error_mm": max_z_error_mm,
+            "operation_id": operation_id,
+            "original_hash": original_hash,
+            "placement_revision": placement_revision,
+            "reference_frame": reference_frame.__dict__,
+        }
+        return hashlib.sha256(json.dumps(payload, ensure_ascii=True, sort_keys=True).encode("utf-8")).hexdigest()
 
     def _validate_map_for_operation(self, physical_map: dict[str, Any], operation: OperacionPCB, *, require_tool_reference: bool = True) -> None:
         if physical_map.get("schema_version") != "surface-map-v2":

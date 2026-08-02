@@ -743,9 +743,11 @@ def build_router() -> APIRouter:
                 adaptive.get("eligible")
                 and time_ok
             )
+            adaptive["executable"] = bool(adaptive.get("eligible"))
             compensated["recommended_mode"] = "adaptive_fast" if adaptive.get("eligible") else "legacy"
         else:
             adaptive["eligible"] = False
+            adaptive["executable"] = False
             compensated["recommended_mode"] = "legacy"
         return compensated
 
