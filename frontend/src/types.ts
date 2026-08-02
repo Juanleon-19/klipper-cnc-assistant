@@ -350,6 +350,9 @@ export type CompensationAuditSummary = {
   estimation_confidence?: string | null;
   estimation_detail?: string | null;
   eligible?: boolean;
+  executable?: boolean;
+  experimental_available?: boolean;
+  audit_fingerprint?: string | null;
   error?: string | null;
   time_difference_s?: number | null;
   time_difference_pct?: number | null;
@@ -618,6 +621,9 @@ export type CompensatedGCodeResult = {
   preview: Record<string, unknown>;
   selected_mode?: "legacy" | "adaptive_fast";
   effective_mode?: "legacy" | "adaptive_fast";
+  executable?: boolean;
+  artifact_kind?: "production" | "experimental";
+  warning?: string | null;
   time_estimate?: {
     estimated_time_s?: number | null;
     method?: string | null;

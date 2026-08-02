@@ -2148,6 +2148,9 @@ export function ProjectWorkspace({
     try {
       const generated = await api.generateCompensatedGCode(project.id, selectedOperation.id, mode);
       window.open(api.generatedFileUrl(project.id, generated.relative_path), "_blank", "noopener,noreferrer");
+      if (generated.warning) {
+        setWorkspaceError(generated.warning);
+      }
       await refreshCompensationAudit();
     } catch (error) {
       setWorkspaceError(error instanceof Error ? error.message : "No fue posible generar el archivo compensado solicitado.");
@@ -2256,6 +2259,8 @@ export function ProjectWorkspace({
     }
     const currentCompensationMode = selectedOperation?.compensation_mode ?? "legacy";
     const currentMaxZError = selectedOperation?.max_z_error_mm ?? 0.05;
+    const adaptiveExecutable = compensationAudit?.adaptive_fast?.executable !== false;
+    const adaptiveDownloadLabel = adaptiveExecutable ? "Descargar adaptive_fast" : "Descargar adaptive experimental";
     return (
       <article className="panel">
         <div className="section-heading section-heading--stacked">
@@ -2290,7 +2295,7 @@ export function ProjectWorkspace({
             </div>
             <div className="action-grid action-grid--inline">
               <button className={`button${currentCompensationMode === "legacy" ? "" : " button--ghost"}`} type="button" disabled={referenceBusy} onClick={() => void updateCompensationSettings({ compensation_mode: "legacy" })}>Legacy</button>
-              <button className={`button${currentCompensationMode === "adaptive_fast" ? "" : " button--ghost"}`} type="button" disabled={referenceBusy} onClick={() => void updateCompensationSettings({ compensation_mode: "adaptive_fast" })}>Adaptativa rápida</button>
+              <button className={`button${currentCompensationMode === "adaptive_fast" ? "" : " button--ghost"}`} type="button" disabled={referenceBusy || !adaptiveExecutable} onClick={() => void updateCompensationSettings({ compensation_mode: "adaptive_fast" })}>Adaptativa rápida</button>
               <label className="field-inline">
                 <span>Tolerancia Z (mm)</span>
                 <input
@@ -2307,7 +2312,7 @@ export function ProjectWorkspace({
               </label>
               <button className="button button--ghost" type="button" disabled={compensationAuditBusy || referenceBusy} onClick={() => void refreshCompensationAudit()}>Recalcular auditoría</button>
               <button className="button button--ghost" type="button" disabled={referenceBusy} onClick={() => void downloadCompensatedArtifact("legacy")}>Descargar legacy</button>
-              <button className="button button--ghost" type="button" disabled={referenceBusy} onClick={() => void downloadCompensatedArtifact("adaptive_fast")}>Descargar adaptive_fast</button>
+              <button className="button button--ghost" type="button" disabled={referenceBusy} onClick={() => void downloadCompensatedArtifact("adaptive_fast")}>{adaptiveDownloadLabel}</button>
             </div>
             {compensationAudit ? (
               <div className="table-scroll">
@@ -2377,6 +2382,7 @@ export function ProjectWorkspace({
               <div className="alert alert--warning">
                 <strong>Adaptive_fast no es elegible</strong>
                 <p>{compensationAudit.adaptive_fast.error ?? "La auditoría detectó que supera tolerancia, introduce comandos no soportados o excede el umbral de tiempo frente a legacy."}</p>
+                <p>{adaptiveExecutable ? "Puede revisar la auditoría y volver a generar." : "Solo se permite descargar un artefacto experimental no ejecutable; legacy sigue disponible para plan y ejecución."}</p>
               </div>
             ) : null}
           </div>

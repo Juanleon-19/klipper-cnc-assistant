@@ -61,6 +61,7 @@ const apiMock = vi.hoisted(() => ({
   getJobHistory: vi.fn(),
   executionPreflight: vi.fn(),
   executionAction: vi.fn(),
+  getCompensationAudit: vi.fn(),
   generatedFileUrl: vi.fn(),
   getMachineSettings: vi.fn(),
   updateMachineSettings: vi.fn(),
@@ -302,6 +303,28 @@ const heightMap: HeightMap = {
   },
   creado_en: new Date().toISOString(),
   actualizado_en: new Date().toISOString(),
+};
+
+const compensationAudit = {
+  selected_mode: "legacy" as const,
+  recommended_mode: "legacy" as const,
+  max_z_error_mm: 0.05,
+  original: { mode: "original", estimated_time_s: 10, estimation_method: "internal", estimation_confidence: "medium", estimation_detail: "Interno", movements_total: 2, unsupported_commands: [] },
+  legacy: { mode: "legacy", estimated_time_s: 10, estimation_method: "internal", estimation_confidence: "medium", estimation_detail: "Interno", movements_total: 2, unsupported_commands: [], executable: true },
+  adaptive_fast: {
+    mode: "adaptive_fast",
+    estimated_time_s: 10.2,
+    estimation_method: "internal",
+    estimation_confidence: "medium",
+    estimation_detail: "Interno",
+    movements_total: 4,
+    unsupported_commands: [],
+    eligible: false,
+    executable: false,
+    experimental_available: true,
+    error: "Adaptive_fast solo puede descargarse como experimental.",
+  },
+  warnings: [],
 };
 
 const project: Project = {
@@ -554,6 +577,7 @@ describe("ProjectWorkspace", () => {
     apiMock.capturePhysicalZReferenceFromProbe.mockResolvedValue(referenceSession);
     apiMock.executionPreflight.mockResolvedValue({ state: "PREFLIGHT", ready: false, checks: [], generated_file: null, detail: "Preflight incompleto." });
     apiMock.executionAction.mockResolvedValue({ state: "PREFLIGHT", ready: false, checks: [], generated_file: null, detail: "Acción registrada." });
+    apiMock.getCompensationAudit.mockResolvedValue(compensationAudit);
     apiMock.getCompensationPreview.mockResolvedValue({
       session: referenceSession,
       preview: {
@@ -1628,6 +1652,17 @@ describe("ProjectWorkspace", () => {
     fireEvent.click(screen.getByRole("button", { name: /Revalidar plan/i }));
     await waitFor(() => expect(apiMock.prepareJobRun).toHaveBeenCalledWith(project.id, project.montajes[0].id, "superior"));
     expect(screen.getAllByRole("button", { name: "Iniciar trabajo" })).toHaveLength(1);
+  });
+
+  it("deshabilita adaptive_fast ejecutable y diferencia la descarga experimental", async () => {
+    renderWorkspace();
+
+    fireEvent.click(screen.getByRole("button", { name: /^Ejecución$/i }));
+
+    expect(await screen.findByText(/Plan multioperación listo para ejecución/i)).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: /Adaptativa rápida/i })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /Descargar adaptive experimental/i })).toBeInTheDocument();
+    expect(screen.getByText(/solo se permite descargar un artefacto experimental no ejecutable/i)).toBeInTheDocument();
   });
 
 });
