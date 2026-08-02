@@ -302,10 +302,11 @@ export const api = {
       method: "POST",
       body: JSON.stringify(payload),
     }),
-  previewPhysicalMap: (projectId: string, operationId: string, payload: PhysicalMapPlanPayload) =>
+  previewPhysicalMap: (projectId: string, operationId: string, payload: PhysicalMapPlanPayload, options?: { signal?: AbortSignal }) =>
     request<PhysicalMapResponse>(`/api/projects/${projectId}/operations/${operationId}/physical-map/preview`, {
       method: "POST",
       body: JSON.stringify(payload),
+      signal: options?.signal,
     }),
   planPhysicalMapFromReference: (projectId: string, operationId: string, payload: PhysicalMapPlanPayload) =>
     request<PhysicalMapResponse>(`/api/projects/${projectId}/operations/${operationId}/physical-map/plan-from-reference`, {
