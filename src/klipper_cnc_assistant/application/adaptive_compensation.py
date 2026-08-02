@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -14,6 +15,12 @@ from klipper_cnc_assistant.heightmap.coverage import check_domain
 MAX_RECURSION_DEPTH = 12
 MAX_EMITTED_MOVES = 50_000
 FULL_CIRCLE_EPSILON = 1e-6
+SURFACE_THRESHOLD_Z_MM = 0.0
+UNSUPPORTED_G_CODES = {"G10", "G28", "G53", "G90.1", "G91.1", "G92"}
+SETUP_G_CODES = {"G17", "G18", "G19", "G20", "G21", "G90", "G91", "G94"}
+MOTION_G_CODES = {"G0", "G1", "G2", "G3"}
+DWELL_G_CODES = {"G4"}
+MACRO_WORD_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 @dataclass(frozen=True)
@@ -33,17 +40,31 @@ class AdaptivePoint:
     machine_y_mm: float
     machine_z_mm: float
     delta_z_mm: float
+    uses_surface_map: bool
 
 
 @dataclass(frozen=True)
 class ArcDefinition:
-    clockwise: bool
+    command: str
     center_x_mm: float
     center_y_mm: float
     radius_mm: float
     start_angle: float
     sweep_angle: float
-    full_circle: bool
+
+
+@dataclass(frozen=True)
+class ParsedAdaptiveLine:
+    category: str
+    plane: str
+    command: str | None
+    explicit_motion: str | None
+    prefix_tokens: tuple[str, ...]
+    passthrough_tokens: tuple[str, ...]
+    axes_mm: dict[str, float]
+    arc_params_mm: dict[str, float]
+    feed_token: str | None
+    unsupported_reason: str | None = None
 
 
 def generate_adaptive_gcode(
@@ -107,7 +128,7 @@ def generate_adaptive_gcode(
             f"Línea {first['line_number']}, X={first['x_mm']:.3f}, Y={first['y_mm']:.3f}, motivo={first['reason']}."
         )
     if unsupported_commands:
-        detail = ", ".join(unsupported_commands[:6])
+        detail = ", ".join(_unique(unsupported_commands)[:6])
         raise ApplicationError(f"adaptive_fast bloqueado por comandos o construcciones no soportadas: {detail}.")
 
     return {
@@ -144,138 +165,219 @@ def _transform_line(
     min_segment_length_mm: float,
 ) -> dict[str, Any]:
     if not line.tokens:
-        return _result([line.raw], plane=plane)
+        return _result([line.raw] if line.raw else [], plane=plane)
 
-    motion_command = state.active_motion
-    explicit_motion: str | None = None
-    axes_mm: dict[str, float] = {}
-    arc_params_mm: dict[str, float] = {}
-    feed_token: str | None = None
-    passthrough_tokens: list[str] = []
-    unsupported_commands: list[str] = []
+    parsed = _parse_adaptive_line(line=line, state=state, plane=plane)
+    if parsed.category in {"modal_change", "auxiliary", "movement_passthrough"}:
+        return _result([line.raw], plane=parsed.plane)
+    if parsed.category == "unsupported":
+        return _result([line.raw], plane=parsed.plane, unsupported_commands=[str(parsed.unsupported_reason or f"L{line.line_number}: comando no soportado")])
 
-    next_plane = plane
-    for token in line.tokens:
-        if token.letter == "G":
-            command = _normalize_g_command(token.raw_value)
-            if command in {"G0", "G1", "G2", "G3"}:
-                motion_command = command
-                explicit_motion = command
-                state.active_motion = command
-            elif command == "G20":
-                state.units = "inch"
-                state.seen_units.add("inch")
-            elif command == "G21":
-                state.units = "mm"
-                state.seen_units.add("mm")
-            elif command == "G90":
-                state.positioning = "absolute"
-                state.seen_positioning.add("absolute")
-            elif command == "G91":
-                state.positioning = "relative"
-                state.seen_positioning.add("relative")
-            elif command in {"G17", "G18", "G19"}:
-                next_plane = command
-            elif command == "G94":
-                state.feed_mode = "units_per_minute"
-            elif command == "G4":
-                passthrough_tokens.append(command)
-            else:
-                passthrough_tokens.append(command)
-        elif token.letter in {"X", "Y", "Z"}:
-            axes_mm[token.letter] = _to_mm(_numeric(token.raw_value), state.units)
-        elif token.letter in {"I", "J", "K", "R"}:
-            arc_params_mm[token.letter] = _to_mm(_numeric(token.raw_value), state.units)
-        elif token.letter == "F":
-            feed_mm_min = _to_mm(_numeric(token.raw_value), state.units)
-            state.feed_mm_min = feed_mm_min
-            feed_token = token.raw_value
-        else:
-            passthrough_tokens.append(token.command)
-
-    if motion_command is None:
-        return _result([line.raw], plane=next_plane)
-    if motion_command in {"G0", "G1"} and not axes_mm and explicit_motion is not None:
-        return _result([line.raw], plane=next_plane)
-    if motion_command in {"G2", "G3"} and not axes_mm and not arc_params_mm and explicit_motion is not None:
-        return _result([line.raw], plane=next_plane)
-
+    command = str(parsed.command)
     start_x = state.x_mm
     start_y = state.y_mm
     start_z = state.z_mm
-    target_x = _resolve_target_value(state.x_mm, axes_mm.get("X"), state.positioning)
-    target_y = _resolve_target_value(state.y_mm, axes_mm.get("Y"), state.positioning)
-    target_z = _resolve_target_value(state.z_mm, axes_mm.get("Z"), state.positioning)
+    target_x = _resolve_target_value(state.x_mm, parsed.axes_mm.get("X"), state.positioning)
+    target_y = _resolve_target_value(state.y_mm, parsed.axes_mm.get("Y"), state.positioning)
+    target_z = _resolve_target_value(state.z_mm, parsed.axes_mm.get("Z"), state.positioning)
 
-    if motion_command not in {"G0", "G1", "G2", "G3"}:
-        state.x_mm = target_x
-        state.y_mm = target_y
-        state.z_mm = target_z
-        return _result([line.raw], plane=next_plane)
-
-    if motion_command in {"G2", "G3"}:
-        transformed = _transform_arc_line(
+    if command in {"G0", "G1"}:
+        result = _transform_linear_motion(
             line=line,
-            command=motion_command,
-            explicit_motion=explicit_motion,
+            command=command,
+            prefix_tokens=list(parsed.prefix_tokens),
+            passthrough_tokens=list(parsed.passthrough_tokens),
+            feed_token=parsed.feed_token,
+            state=state,
+            height_map=height_map,
+            reference_frame=reference_frame,
+            max_z_error_mm=max_z_error_mm,
+            min_segment_length_mm=min_segment_length_mm,
             start_x=start_x,
             start_y=start_y,
             start_z=start_z,
             target_x=target_x,
             target_y=target_y,
             target_z=target_z,
-            arc_params_mm=arc_params_mm,
-            passthrough_tokens=passthrough_tokens,
-            feed_token=feed_token,
-            plane=next_plane,
+        )
+    else:
+        result = _transform_arc_motion(
+            line=line,
+            command=command,
+            prefix_tokens=list(parsed.prefix_tokens),
+            passthrough_tokens=list(parsed.passthrough_tokens),
+            feed_token=parsed.feed_token,
             state=state,
             height_map=height_map,
             reference_frame=reference_frame,
             max_z_error_mm=max_z_error_mm,
             min_segment_length_mm=min_segment_length_mm,
+            start_x=start_x,
+            start_y=start_y,
+            start_z=start_z,
+            target_x=target_x,
+            target_y=target_y,
+            target_z=target_z,
+            arc_params_mm=parsed.arc_params_mm,
+            plane=parsed.plane,
         )
-        state.x_mm = target_x
-        state.y_mm = target_y
-        state.z_mm = target_z
-        transformed["plane"] = next_plane
-        return transformed
 
-    transformed = _transform_linear_line(
-        line=line,
-        command=motion_command,
-        explicit_motion=explicit_motion,
-        start_x=start_x,
-        start_y=start_y,
-        start_z=start_z,
-        target_x=target_x,
-        target_y=target_y,
-        target_z=target_z,
-        passthrough_tokens=passthrough_tokens,
-        feed_token=feed_token,
-        state=state,
-        height_map=height_map,
-        reference_frame=reference_frame,
-        max_z_error_mm=max_z_error_mm,
-        min_segment_length_mm=min_segment_length_mm,
-    )
     state.x_mm = target_x
     state.y_mm = target_y
     state.z_mm = target_z
-    transformed["plane"] = next_plane
-    return transformed
+    return result | {"plane": parsed.plane}
 
 
-def _transform_linear_line(
+def _parse_adaptive_line(*, line: GCodeLine, state: ModalState, plane: str) -> ParsedAdaptiveLine:
+    code = line.code.strip()
+    if not code:
+        return ParsedAdaptiveLine("auxiliary", plane, None, None, (), (), {}, {}, None)
+    if _looks_like_macro_line(code):
+        return ParsedAdaptiveLine("auxiliary", plane, None, None, (), (), {}, {}, None)
+
+    motion_command = state.active_motion
+    explicit_motion: str | None = None
+    axes_mm: dict[str, float] = {}
+    arc_params_mm: dict[str, float] = {}
+    prefix_tokens: list[str] = []
+    passthrough_tokens: list[str] = []
+    feed_token: str | None = None
+    next_plane = plane
+    has_dwell = False
+    incompatible_motion_code: str | None = None
+
+    for token in line.tokens:
+        if token.letter == "G":
+            command = _normalize_g_command(token.raw_value)
+            if command in MOTION_G_CODES:
+                explicit_motion = command
+                motion_command = command
+                state.active_motion = command
+            elif command in {"G20", "G21"}:
+                state.units = "mm" if command == "G21" else "inch"
+                state.seen_units.add(state.units)
+                prefix_tokens.append(command)
+            elif command in {"G90", "G91"}:
+                state.positioning = "absolute" if command == "G90" else "relative"
+                state.seen_positioning.add(state.positioning)
+                prefix_tokens.append(command)
+            elif command in {"G17", "G18", "G19"}:
+                next_plane = command
+                prefix_tokens.append(command)
+            elif command == "G94":
+                state.feed_mode = "units_per_minute"
+                prefix_tokens.append(command)
+            elif command in DWELL_G_CODES:
+                has_dwell = True
+                incompatible_motion_code = command
+            elif command in UNSUPPORTED_G_CODES:
+                return ParsedAdaptiveLine(
+                    category="unsupported",
+                    plane=next_plane,
+                    command=None,
+                    explicit_motion=explicit_motion,
+                    prefix_tokens=tuple(prefix_tokens),
+                    passthrough_tokens=tuple(passthrough_tokens),
+                    axes_mm=axes_mm,
+                    arc_params_mm=arc_params_mm,
+                    feed_token=feed_token,
+                    unsupported_reason=f"L{line.line_number}:{command}: no soportado por adaptive_fast",
+                )
+            else:
+                return ParsedAdaptiveLine(
+                    category="unsupported",
+                    plane=next_plane,
+                    command=None,
+                    explicit_motion=explicit_motion,
+                    prefix_tokens=tuple(prefix_tokens),
+                    passthrough_tokens=tuple(passthrough_tokens),
+                    axes_mm=axes_mm,
+                    arc_params_mm=arc_params_mm,
+                    feed_token=feed_token,
+                    unsupported_reason=f"L{line.line_number}:{command}: comando G desconocido o no soportado",
+                )
+        elif token.letter in {"X", "Y", "Z"}:
+            axes_mm[token.letter] = _to_mm(_numeric(token.raw_value), state.units)
+        elif token.letter in {"I", "J", "K", "R"}:
+            arc_params_mm[token.letter] = _to_mm(_numeric(token.raw_value), state.units)
+        elif token.letter == "F":
+            state.feed_mm_min = _to_mm(_numeric(token.raw_value), state.units)
+            feed_token = token.raw_value
+        elif token.letter in {"M", "T"}:
+            passthrough_tokens.append(token.command)
+        elif token.letter == "S":
+            passthrough_tokens.append(token.command)
+        else:
+            passthrough_tokens.append(token.command)
+
+    has_motion_coordinates = bool(axes_mm or arc_params_mm)
+    if has_dwell:
+        if has_motion_coordinates or explicit_motion is not None:
+            return ParsedAdaptiveLine(
+                category="unsupported",
+                plane=next_plane,
+                command=None,
+                explicit_motion=explicit_motion,
+                prefix_tokens=tuple(prefix_tokens),
+                passthrough_tokens=tuple(passthrough_tokens),
+                axes_mm=axes_mm,
+                arc_params_mm=arc_params_mm,
+                feed_token=feed_token,
+                unsupported_reason=f"L{line.line_number}:{incompatible_motion_code}: incompatible con movimiento en la misma línea",
+            )
+        return ParsedAdaptiveLine("auxiliary", next_plane, None, None, tuple(prefix_tokens), tuple(passthrough_tokens), axes_mm, arc_params_mm, feed_token)
+
+    if not has_motion_coordinates:
+        if explicit_motion is not None:
+            return ParsedAdaptiveLine("movement_passthrough", next_plane, explicit_motion, explicit_motion, tuple(prefix_tokens), tuple(passthrough_tokens), axes_mm, arc_params_mm, feed_token)
+        return ParsedAdaptiveLine("modal_change" if prefix_tokens or feed_token is not None else "auxiliary", next_plane, None, None, tuple(prefix_tokens), tuple(passthrough_tokens), axes_mm, arc_params_mm, feed_token)
+
+    if motion_command is None:
+        return ParsedAdaptiveLine(
+            category="unsupported",
+            plane=next_plane,
+            command=None,
+            explicit_motion=explicit_motion,
+            prefix_tokens=tuple(prefix_tokens),
+            passthrough_tokens=tuple(passthrough_tokens),
+            axes_mm=axes_mm,
+            arc_params_mm=arc_params_mm,
+            feed_token=feed_token,
+            unsupported_reason=f"L{line.line_number}: coordenadas sin movimiento modal activo",
+        )
+
+    if motion_command in {"G2", "G3"} and next_plane != "G17":
+        return ParsedAdaptiveLine(
+            category="unsupported",
+            plane=next_plane,
+            command=None,
+            explicit_motion=explicit_motion,
+            prefix_tokens=tuple(prefix_tokens),
+            passthrough_tokens=tuple(passthrough_tokens),
+            axes_mm=axes_mm,
+            arc_params_mm=arc_params_mm,
+            feed_token=feed_token,
+            unsupported_reason=f"L{line.line_number}:{next_plane}: adaptive_fast solo soporta arcos en G17",
+        )
+
+    return ParsedAdaptiveLine(
+        category="movement_with_side_effect" if passthrough_tokens else "movement",
+        plane=next_plane,
+        command=motion_command,
+        explicit_motion=explicit_motion,
+        prefix_tokens=tuple(prefix_tokens),
+        passthrough_tokens=tuple(passthrough_tokens),
+        axes_mm=axes_mm,
+        arc_params_mm=arc_params_mm,
+        feed_token=feed_token,
+    )
+
+
+def _transform_linear_motion(
     *,
     line: GCodeLine,
     command: str,
-    explicit_motion: str | None,
-    start_x: float,
-    start_y: float,
-    start_z: float,
-    target_x: float,
-    target_y: float,
-    target_z: float,
+    prefix_tokens: list[str],
     passthrough_tokens: list[str],
     feed_token: str | None,
     state: ModalState,
@@ -283,68 +385,53 @@ def _transform_linear_line(
     reference_frame: ReferenceFrame,
     max_z_error_mm: float,
     min_segment_length_mm: float,
+    start_x: float,
+    start_y: float,
+    start_z: float,
+    target_x: float,
+    target_y: float,
+    target_z: float,
 ) -> dict[str, Any]:
-    xy_distance = math.dist((start_x, start_y), (target_x, target_y))
-    uses_surface = command == "G1" and xy_distance > 0 and float(target_z) < 0.0
-    single_line_only = bool(passthrough_tokens)
-
-    if not uses_surface:
-        point = _machine_point(
-            pcb_x_mm=target_x,
-            pcb_y_mm=target_y,
-            programmed_z_mm=target_z,
+    if command == "G0":
+        start_point = _evaluate_linear_point(
+            progress=0.0,
+            start_x=start_x,
+            start_y=start_y,
+            start_z=start_z,
+            target_x=target_x,
+            target_y=target_y,
+            target_z=target_z,
             height_map=height_map,
             reference_frame=reference_frame,
-            uses_surface=False,
             line_number=line.line_number,
         )
-        if command == "G0" and len(passthrough_tokens) > 0:
-            return _result(
-                [_format_passthrough_motion_line(
-                    command=explicit_motion or command,
-                    point=point,
-                    previous=_machine_point(
-                        pcb_x_mm=start_x,
-                        pcb_y_mm=start_y,
-                        programmed_z_mm=start_z,
-                        height_map=height_map,
-                        reference_frame=reference_frame,
-                        uses_surface=False,
-                        line_number=line.line_number,
-                    ),
-                    state=state,
-                    include_feed=feed_token,
-                    passthrough_tokens=passthrough_tokens,
-                    comment=line.comment,
-                )],
-                emitted_moves=1,
-                trace=[_trace_entry(line, command, point, uses_surface=False, approx_error_mm=0.0)],
-                delta_values=[point.delta_z_mm],
-                z_values=[point.machine_z_mm],
-            )
+        end_point = _evaluate_linear_point(
+            progress=1.0,
+            start_x=start_x,
+            start_y=start_y,
+            start_z=start_z,
+            target_x=target_x,
+            target_y=target_y,
+            target_z=target_z,
+            height_map=height_map,
+            reference_frame=reference_frame,
+            line_number=line.line_number,
+        )
         return _emit_linear_points(
             line=line,
-            command=explicit_motion or command,
-            points=[point],
-            previous=_machine_point(
-                pcb_x_mm=start_x,
-                pcb_y_mm=start_y,
-                programmed_z_mm=start_z,
-                height_map=height_map,
-                reference_frame=reference_frame,
-                uses_surface=False,
-                line_number=line.line_number,
-            ),
+            command=command,
+            prefix_tokens=prefix_tokens,
+            passthrough_tokens=passthrough_tokens,
+            points=[end_point],
+            previous=start_point,
             state=state,
             include_feed=feed_token,
-            passthrough_tokens=passthrough_tokens,
             approx_error_mm=0.0,
-            uses_surface=False,
-            subdivided=False,
             fused_count=0,
         )
 
-    polyline, subdivisions, max_error = _adaptive_line_points(
+    polyline = _adaptive_linear_polyline(
+        line_number=line.line_number,
         start_x=start_x,
         start_y=start_y,
         start_z=start_z,
@@ -355,33 +442,444 @@ def _transform_linear_line(
         reference_frame=reference_frame,
         max_z_error_mm=max_z_error_mm,
         min_segment_length_mm=min_segment_length_mm,
-        line_number=line.line_number,
     )
-    simplified, fused_count = _simplify_line_points(polyline, max_z_error_mm=max_z_error_mm)
-    if single_line_only and len(simplified) > 1:
+    simplified, fused_count = _simplify_linear_polyline(
+        points=polyline,
+        line_number=line.line_number,
+        start_x=start_x,
+        start_y=start_y,
+        start_z=start_z,
+        target_x=target_x,
+        target_y=target_y,
+        target_z=target_z,
+        height_map=height_map,
+        reference_frame=reference_frame,
+        max_z_error_mm=max_z_error_mm,
+    )
+    max_error = _revalidate_linear_polyline(
+        line_number=line.line_number,
+        start_x=start_x,
+        start_y=start_y,
+        start_z=start_z,
+        target_x=target_x,
+        target_y=target_y,
+        target_z=target_z,
+        points=simplified,
+        height_map=height_map,
+        reference_frame=reference_frame,
+        max_z_error_mm=max_z_error_mm,
+    )
+    if passthrough_tokens and len(simplified) > 2:
         raise ApplicationError(
             f"adaptive_fast no puede subdividir la línea {line.line_number} porque mezcla movimiento con efectos laterales: {' '.join(passthrough_tokens)}."
         )
     return _emit_linear_points(
         line=line,
-        command=explicit_motion or command,
+        command=command,
+        prefix_tokens=prefix_tokens,
+        passthrough_tokens=passthrough_tokens,
         points=simplified[1:],
         previous=simplified[0],
         state=state,
         include_feed=feed_token,
-        passthrough_tokens=passthrough_tokens,
         approx_error_mm=max_error,
-        uses_surface=True,
-        subdivided=subdivisions > 0,
         fused_count=fused_count,
     )
 
 
-def _transform_arc_line(
+def _adaptive_linear_polyline(
+    *,
+    line_number: int,
+    start_x: float,
+    start_y: float,
+    start_z: float,
+    target_x: float,
+    target_y: float,
+    target_z: float,
+    height_map: HeightMap,
+    reference_frame: ReferenceFrame,
+    max_z_error_mm: float,
+    min_segment_length_mm: float,
+) -> list[AdaptivePoint]:
+    polyline: list[AdaptivePoint] = []
+    for left_progress, right_progress, uses_surface_map in _surface_mode_spans(start_z, target_z):
+        left = _evaluate_linear_point(
+            progress=left_progress,
+            start_x=start_x,
+            start_y=start_y,
+            start_z=start_z,
+            target_x=target_x,
+            target_y=target_y,
+            target_z=target_z,
+            height_map=height_map,
+            reference_frame=reference_frame,
+            line_number=line_number,
+            force_uses_surface_map=uses_surface_map,
+        )
+        if not polyline or not _same_point(polyline[-1], left):
+            polyline.append(left)
+        right = _evaluate_linear_point(
+            progress=right_progress,
+            start_x=start_x,
+            start_y=start_y,
+            start_z=start_z,
+            target_x=target_x,
+            target_y=target_y,
+            target_z=target_z,
+            height_map=height_map,
+            reference_frame=reference_frame,
+            line_number=line_number,
+            force_uses_surface_map=uses_surface_map,
+        )
+        _split_linear_span(
+            sink=polyline,
+            left=polyline[-1],
+            right=right,
+            depth=0,
+            line_number=line_number,
+            start_x=start_x,
+            start_y=start_y,
+            start_z=start_z,
+            target_x=target_x,
+            target_y=target_y,
+            target_z=target_z,
+            height_map=height_map,
+            reference_frame=reference_frame,
+            max_z_error_mm=max_z_error_mm,
+            min_segment_length_mm=min_segment_length_mm,
+            surface_mode=uses_surface_map,
+        )
+    return polyline
+
+
+def _split_linear_span(
+    *,
+    sink: list[AdaptivePoint],
+    left: AdaptivePoint,
+    right: AdaptivePoint,
+    depth: int,
+    line_number: int,
+    start_x: float,
+    start_y: float,
+    start_z: float,
+    target_x: float,
+    target_y: float,
+    target_z: float,
+    height_map: HeightMap,
+    reference_frame: ReferenceFrame,
+    max_z_error_mm: float,
+    min_segment_length_mm: float,
+    surface_mode: bool,
+) -> None:
+    validation = _validate_linear_span(
+        line_number=line_number,
+        start_x=start_x,
+        start_y=start_y,
+        start_z=start_z,
+        target_x=target_x,
+        target_y=target_y,
+        target_z=target_z,
+        left=left,
+        right=right,
+        height_map=height_map,
+        reference_frame=reference_frame,
+        extra_progresses=(),
+        surface_mode=surface_mode,
+    )
+    if validation["max_error_mm"] <= max_z_error_mm:
+        sink.append(right)
+        return
+    xy_length = math.dist((left.pcb_x_mm, left.pcb_y_mm), (right.pcb_x_mm, right.pcb_y_mm))
+    if xy_length <= min_segment_length_mm or depth >= MAX_RECURSION_DEPTH:
+        raise ApplicationError(
+            f"adaptive_fast no puede cumplir la tolerancia en la línea {line_number}: error real {validation['max_error_mm']:.6f} mm "
+            f"al alcanzar {'longitud mínima' if xy_length <= min_segment_length_mm else 'profundidad máxima de recursión'}."
+        )
+    midpoint = _evaluate_linear_point(
+        progress=(left.progress + right.progress) / 2.0,
+        start_x=start_x,
+        start_y=start_y,
+        start_z=start_z,
+        target_x=target_x,
+        target_y=target_y,
+        target_z=target_z,
+        height_map=height_map,
+        reference_frame=reference_frame,
+        line_number=line_number,
+        force_uses_surface_map=surface_mode,
+    )
+    _split_linear_span(
+        sink=sink,
+        left=left,
+        right=midpoint,
+        depth=depth + 1,
+        line_number=line_number,
+        start_x=start_x,
+        start_y=start_y,
+        start_z=start_z,
+        target_x=target_x,
+        target_y=target_y,
+        target_z=target_z,
+        height_map=height_map,
+        reference_frame=reference_frame,
+        max_z_error_mm=max_z_error_mm,
+        min_segment_length_mm=min_segment_length_mm,
+        surface_mode=surface_mode,
+    )
+    _split_linear_span(
+        sink=sink,
+        left=midpoint,
+        right=right,
+        depth=depth + 1,
+        line_number=line_number,
+        start_x=start_x,
+        start_y=start_y,
+        start_z=start_z,
+        target_x=target_x,
+        target_y=target_y,
+        target_z=target_z,
+        height_map=height_map,
+        reference_frame=reference_frame,
+        max_z_error_mm=max_z_error_mm,
+        min_segment_length_mm=min_segment_length_mm,
+        surface_mode=surface_mode,
+    )
+
+
+def _validate_linear_span(
+    *,
+    line_number: int,
+    start_x: float,
+    start_y: float,
+    start_z: float,
+    target_x: float,
+    target_y: float,
+    target_z: float,
+    left: AdaptivePoint,
+    right: AdaptivePoint,
+    height_map: HeightMap,
+    reference_frame: ReferenceFrame,
+    extra_progresses: tuple[float, ...] | list[float],
+    surface_mode: bool,
+) -> dict[str, Any]:
+    checkpoints = {0.25, 0.5, 0.75}
+    checkpoints.update(_linear_grid_crossing_params(left, right, height_map))
+    for progress in extra_progresses:
+        if left.progress < float(progress) < right.progress:
+            local_progress = (float(progress) - left.progress) / max(1e-12, right.progress - left.progress)
+            checkpoints.add(local_progress)
+    max_error = 0.0
+    worst_progress = 0.5
+    for local_progress in sorted(value for value in checkpoints if 0.0 < value < 1.0):
+        global_progress = _lerp(left.progress, right.progress, local_progress)
+        point = _evaluate_linear_point(
+            progress=global_progress,
+            start_x=start_x,
+            start_y=start_y,
+            start_z=start_z,
+            target_x=target_x,
+            target_y=target_y,
+            target_z=target_z,
+            height_map=height_map,
+            reference_frame=reference_frame,
+            line_number=line_number,
+            force_uses_surface_map=surface_mode,
+        )
+        expected_machine_z = _lerp(left.machine_z_mm, right.machine_z_mm, local_progress)
+        error = abs(point.machine_z_mm - expected_machine_z)
+        if error > max_error:
+            max_error = error
+            worst_progress = local_progress
+    return {"max_error_mm": max_error, "worst_progress": worst_progress}
+
+
+def _linear_grid_crossing_params(left: AdaptivePoint, right: AdaptivePoint, height_map: HeightMap) -> list[float]:
+    values: set[float] = set()
+    values.update(_axis_crossing_params(left.pcb_x_mm, right.pcb_x_mm, height_map.probe_region.min_x_mm, height_map.grid.paso_x_mm))
+    values.update(_axis_crossing_params(left.pcb_y_mm, right.pcb_y_mm, height_map.probe_region.min_y_mm, height_map.grid.paso_y_mm))
+    return sorted(value for value in values if 0.0 < value < 1.0)
+
+
+def _axis_crossing_params(start_value: float, end_value: float, base_value: float, step_mm: float) -> list[float]:
+    if step_mm <= 0 or math.isclose(start_value, end_value, abs_tol=1e-12):
+        return []
+    lower = min(start_value, end_value)
+    upper = max(start_value, end_value)
+    start_index = math.floor((lower - base_value) / step_mm)
+    end_index = math.ceil((upper - base_value) / step_mm)
+    result: list[float] = []
+    for index in range(start_index, end_index + 1):
+        crossing = base_value + index * step_mm
+        if crossing <= lower or crossing >= upper:
+            continue
+        progress = (crossing - start_value) / (end_value - start_value)
+        if 0.0 < progress < 1.0:
+            result.append(progress)
+    return result
+
+
+def _simplify_polyline_globally(
+    *,
+    points: list[AdaptivePoint],
+    validator,
+    max_z_error_mm: float,
+) -> tuple[list[AdaptivePoint], int]:
+    if len(points) <= 2:
+        return points, 0
+
+    def recurse(left_index: int, right_index: int) -> list[AdaptivePoint]:
+        extras = tuple(point.progress for point in points[left_index + 1:right_index])
+        validation = validator(points[left_index], points[right_index], extras)
+        if validation["max_error_mm"] <= max_z_error_mm:
+            return [points[left_index], points[right_index]]
+        if right_index - left_index <= 1:
+            return [points[left_index], points[right_index]]
+        worst_index = max(
+            range(left_index + 1, right_index),
+            key=lambda index: abs(
+                points[index].machine_z_mm
+                - _lerp(
+                    points[left_index].machine_z_mm,
+                    points[right_index].machine_z_mm,
+                    (points[index].progress - points[left_index].progress)
+                    / max(1e-12, points[right_index].progress - points[left_index].progress),
+                )
+            ),
+        )
+        left = recurse(left_index, worst_index)
+        right = recurse(worst_index, right_index)
+        return left[:-1] + right
+
+    simplified = recurse(0, len(points) - 1)
+    removed = max(0, len(points) - len(simplified))
+    return simplified, removed
+
+
+def _simplify_linear_polyline(
+    *,
+    points: list[AdaptivePoint],
+    line_number: int,
+    start_x: float,
+    start_y: float,
+    start_z: float,
+    target_x: float,
+    target_y: float,
+    target_z: float,
+    height_map: HeightMap,
+    reference_frame: ReferenceFrame,
+    max_z_error_mm: float,
+) -> tuple[list[AdaptivePoint], int]:
+    if len(points) <= 2:
+        return points, 0
+    regions: list[list[AdaptivePoint]] = []
+    current = [points[0]]
+    for point in points[1:]:
+        if point.uses_surface_map != current[-1].uses_surface_map:
+            regions.append(current)
+            current = [point]
+            continue
+        current.append(point)
+    regions.append(current)
+
+    simplified_regions: list[list[AdaptivePoint]] = []
+    removed_total = 0
+    for region in regions:
+        if len(region) <= 2:
+            simplified_regions.append(region)
+            continue
+        simplified, removed = _simplify_polyline_globally(
+            points=region,
+            validator=lambda left, right, extras, surface_mode=region[0].uses_surface_map: _validate_linear_span(
+                line_number=line_number,
+                start_x=start_x,
+                start_y=start_y,
+                start_z=start_z,
+                target_x=target_x,
+                target_y=target_y,
+                target_z=target_z,
+                left=left,
+                right=right,
+                height_map=height_map,
+                reference_frame=reference_frame,
+                extra_progresses=extras,
+                surface_mode=surface_mode,
+            ),
+            max_z_error_mm=max_z_error_mm,
+        )
+        simplified_regions.append(simplified)
+        removed_total += removed
+
+    merged: list[AdaptivePoint] = []
+    for region in simplified_regions:
+        if not region:
+            continue
+        if not merged:
+            merged.extend(region)
+            continue
+        if _same_point(merged[-1], region[0]):
+            merged.extend(region[1:])
+        else:
+            merged.extend(region)
+    return merged, removed_total
+
+
+def _revalidate_linear_polyline(
+    *,
+    line_number: int,
+    start_x: float,
+    start_y: float,
+    start_z: float,
+    target_x: float,
+    target_y: float,
+    target_z: float,
+    points: list[AdaptivePoint],
+    height_map: HeightMap,
+    reference_frame: ReferenceFrame,
+    max_z_error_mm: float,
+) -> float:
+    max_error = 0.0
+    for left, right in zip(points, points[1:]):
+        if left.uses_surface_map != right.uses_surface_map:
+            if not math.isclose(left.progress, right.progress, abs_tol=1e-9):
+                raise ApplicationError(
+                    f"adaptive_fast revalidó la línea {line_number} y encontró una transición de compensación fuera del umbral."
+                )
+            continue
+        validation = _validate_linear_span(
+            line_number=line_number,
+            start_x=start_x,
+            start_y=start_y,
+            start_z=start_z,
+            target_x=target_x,
+            target_y=target_y,
+            target_z=target_z,
+            left=left,
+            right=right,
+            height_map=height_map,
+            reference_frame=reference_frame,
+            extra_progresses=(),
+            surface_mode=left.uses_surface_map,
+        )
+        if validation["max_error_mm"] > max_z_error_mm:
+            raise ApplicationError(
+                f"adaptive_fast revalidó la línea {line_number} y encontró error real {validation['max_error_mm']:.6f} mm por encima de la tolerancia."
+            )
+        max_error = max(max_error, validation["max_error_mm"])
+    return max_error
+
+
+def _transform_arc_motion(
     *,
     line: GCodeLine,
     command: str,
-    explicit_motion: str | None,
+    prefix_tokens: list[str],
+    passthrough_tokens: list[str],
+    feed_token: str | None,
+    state: ModalState,
+    height_map: HeightMap,
+    reference_frame: ReferenceFrame,
+    max_z_error_mm: float,
+    min_segment_length_mm: float,
     start_x: float,
     start_y: float,
     start_z: float,
@@ -389,62 +887,16 @@ def _transform_arc_line(
     target_y: float,
     target_z: float,
     arc_params_mm: dict[str, float],
-    passthrough_tokens: list[str],
-    feed_token: str | None,
     plane: str,
-    state: ModalState,
-    height_map: HeightMap,
-    reference_frame: ReferenceFrame,
-    max_z_error_mm: float,
-    min_segment_length_mm: float,
 ) -> dict[str, Any]:
-    uses_surface = math.dist((start_x, start_y), (target_x, target_y)) > 0 and float(target_z) < 0.0
-    if plane != "G17" and uses_surface:
-        raise ApplicationError(f"adaptive_fast no soporta compensación de arcos fuera del plano G17 en la línea {line.line_number}.")
-    if "R" in arc_params_mm and uses_surface:
+    if plane != "G17":
+        raise ApplicationError(f"adaptive_fast no soporta arcos fuera del plano G17 en la línea {line.line_number}.")
+    if "R" in arc_params_mm:
         raise ApplicationError(f"adaptive_fast bloquea arcos con parámetro R en la línea {line.line_number}.")
-    if "K" in arc_params_mm and uses_surface:
+    if "K" in arc_params_mm:
         raise ApplicationError(f"adaptive_fast bloquea arcos con parámetro K en la línea {line.line_number}.")
-    if ("I" not in arc_params_mm and "J" not in arc_params_mm) and uses_surface:
+    if "I" not in arc_params_mm or "J" not in arc_params_mm:
         raise ApplicationError(f"adaptive_fast requiere I/J para compensar el arco de la línea {line.line_number}.")
-
-    if not uses_surface:
-        point = _machine_point(
-            pcb_x_mm=target_x,
-            pcb_y_mm=target_y,
-            programmed_z_mm=target_z,
-            height_map=height_map,
-            reference_frame=reference_frame,
-            uses_surface=False,
-            line_number=line.line_number,
-        )
-        emitted = _emit_arc_segments(
-            line=line,
-            command=explicit_motion or command,
-            arc_segments=[{
-                "end": point,
-                "i_mm": arc_params_mm.get("I", 0.0),
-                "j_mm": arc_params_mm.get("J", 0.0),
-                "approx_error_mm": 0.0,
-            }],
-            start_point=_machine_point(
-                pcb_x_mm=start_x,
-                pcb_y_mm=start_y,
-                programmed_z_mm=start_z,
-                height_map=height_map,
-                reference_frame=reference_frame,
-                uses_surface=False,
-                line_number=line.line_number,
-            ),
-            state=state,
-            include_feed=feed_token,
-            passthrough_tokens=passthrough_tokens,
-            uses_surface=False,
-            subdivided=False,
-            fused_count=0,
-        )
-        emitted["lines"] = [_append_comment(emitted["lines"][0], line.comment)] if emitted["lines"] else []
-        return emitted
 
     definition = _arc_definition(
         command=command,
@@ -455,7 +907,8 @@ def _transform_arc_line(
         arc_params_mm=arc_params_mm,
         line_number=line.line_number,
     )
-    segments, subdivision_count, max_error = _adaptive_arc_segments(
+    segments = _adaptive_arc_segments(
+        line_number=line.line_number,
         definition=definition,
         start_z=start_z,
         target_z=target_z,
@@ -463,102 +916,36 @@ def _transform_arc_line(
         reference_frame=reference_frame,
         max_z_error_mm=max_z_error_mm,
         min_segment_length_mm=min_segment_length_mm,
-        line_number=line.line_number,
     )
     if passthrough_tokens and len(segments) > 1:
         raise ApplicationError(
             f"adaptive_fast no puede subdividir el arco {line.line_number} porque mezcla movimiento con efectos laterales: {' '.join(passthrough_tokens)}."
         )
-    fused_count = 0
+    max_error = _revalidate_arc_segments(
+        line_number=line.line_number,
+        definition=definition,
+        start_z=start_z,
+        target_z=target_z,
+        segments=segments,
+        height_map=height_map,
+        reference_frame=reference_frame,
+        max_z_error_mm=max_z_error_mm,
+    )
     return _emit_arc_segments(
         line=line,
-        command=explicit_motion or command,
-        arc_segments=segments,
-        start_point=_machine_point(
-            pcb_x_mm=start_x,
-            pcb_y_mm=start_y,
-            programmed_z_mm=start_z,
-            height_map=height_map,
-            reference_frame=reference_frame,
-            uses_surface=True,
-            line_number=line.line_number,
-        ),
+        command=command,
+        prefix_tokens=prefix_tokens,
+        passthrough_tokens=passthrough_tokens,
+        segments=segments,
         state=state,
         include_feed=feed_token,
-        passthrough_tokens=passthrough_tokens,
-        uses_surface=True,
-        subdivided=subdivision_count > 0,
-        fused_count=fused_count,
         max_error=max_error,
     )
 
 
-def _adaptive_line_points(
-    *,
-    start_x: float,
-    start_y: float,
-    start_z: float,
-    target_x: float,
-    target_y: float,
-    target_z: float,
-    height_map: HeightMap,
-    reference_frame: ReferenceFrame,
-    max_z_error_mm: float,
-    min_segment_length_mm: float,
-    line_number: int,
-) -> tuple[list[AdaptivePoint], int, float]:
-    start = _machine_point(
-        pcb_x_mm=start_x,
-        pcb_y_mm=start_y,
-        programmed_z_mm=start_z,
-        height_map=height_map,
-        reference_frame=reference_frame,
-        uses_surface=True,
-        line_number=line_number,
-    )
-    end = _machine_point(
-        pcb_x_mm=target_x,
-        pcb_y_mm=target_y,
-        programmed_z_mm=target_z,
-        height_map=height_map,
-        reference_frame=reference_frame,
-        uses_surface=True,
-        line_number=line_number,
-    )
-    points = [start]
-    stats = {"subdivisions": 0, "max_error": 0.0}
-
-    def recurse(left: AdaptivePoint, right: AdaptivePoint, depth: int) -> None:
-        nonlocal points
-        segment_length = math.dist((left.pcb_x_mm, left.pcb_y_mm), (right.pcb_x_mm, right.pcb_y_mm))
-        if segment_length <= min_segment_length_mm or depth >= MAX_RECURSION_DEPTH:
-            points.append(right)
-            return
-        mid = _line_point(0.5, left, right, height_map=height_map, reference_frame=reference_frame, line_number=line_number)
-        mid_error = abs(mid.delta_z_mm - _lerp(left.delta_z_mm, right.delta_z_mm, 0.5))
-        quarter_error = 0.0
-        if mid_error > max_z_error_mm * 0.5:
-            quarter_1 = _line_point(0.25, left, right, height_map=height_map, reference_frame=reference_frame, line_number=line_number)
-            quarter_3 = _line_point(0.75, left, right, height_map=height_map, reference_frame=reference_frame, line_number=line_number)
-            quarter_error = max(
-                abs(quarter_1.delta_z_mm - _lerp(left.delta_z_mm, right.delta_z_mm, 0.25)),
-                abs(quarter_3.delta_z_mm - _lerp(left.delta_z_mm, right.delta_z_mm, 0.75)),
-            )
-        local_error = max(mid_error, quarter_error)
-        if local_error <= max_z_error_mm:
-            stats["max_error"] = max(stats["max_error"], local_error)
-            points.append(right)
-            return
-        stats["subdivisions"] += 1
-        recurse(left, mid, depth + 1)
-        recurse(mid, right, depth + 1)
-
-    recurse(start, end, 0)
-    return points, int(stats["subdivisions"]), float(stats["max_error"])
-
-
 def _adaptive_arc_segments(
     *,
+    line_number: int,
     definition: ArcDefinition,
     start_z: float,
     target_z: float,
@@ -566,144 +953,205 @@ def _adaptive_arc_segments(
     reference_frame: ReferenceFrame,
     max_z_error_mm: float,
     min_segment_length_mm: float,
+) -> list[tuple[AdaptivePoint, AdaptivePoint]]:
+    segments: list[tuple[AdaptivePoint, AdaptivePoint]] = []
+    for left_progress, right_progress, uses_surface_map in _surface_mode_spans(start_z, target_z):
+        left = _evaluate_arc_point(
+            definition=definition,
+            progress=left_progress,
+            start_z=start_z,
+            target_z=target_z,
+            height_map=height_map,
+            reference_frame=reference_frame,
+            line_number=line_number,
+            force_uses_surface_map=uses_surface_map,
+        )
+        right = _evaluate_arc_point(
+            definition=definition,
+            progress=right_progress,
+            start_z=start_z,
+            target_z=target_z,
+            height_map=height_map,
+            reference_frame=reference_frame,
+            line_number=line_number,
+            force_uses_surface_map=uses_surface_map,
+        )
+        _split_arc_span(
+            sink=segments,
+            left=left,
+            right=right,
+            depth=0,
+            line_number=line_number,
+            definition=definition,
+            start_z=start_z,
+            target_z=target_z,
+            height_map=height_map,
+            reference_frame=reference_frame,
+            max_z_error_mm=max_z_error_mm,
+            min_segment_length_mm=min_segment_length_mm,
+            surface_mode=uses_surface_map,
+        )
+    return segments
+
+
+def _split_arc_span(
+    *,
+    sink: list[tuple[AdaptivePoint, AdaptivePoint]],
+    left: AdaptivePoint,
+    right: AdaptivePoint,
+    depth: int,
     line_number: int,
-) -> tuple[list[dict[str, Any]], int, float]:
-    stats = {"subdivisions": 0, "max_error": 0.0}
-    segments: list[dict[str, Any]] = []
-
-    def recurse(start_progress: float, end_progress: float, depth: int) -> None:
-        sweep = definition.sweep_angle * (end_progress - start_progress)
-        arc_length = abs(sweep) * definition.radius_mm
-        start_point = _arc_point(
-            definition=definition,
-            progress=start_progress,
-            start_z=start_z,
-            target_z=target_z,
-            height_map=height_map,
-            reference_frame=reference_frame,
-            line_number=line_number,
+    definition: ArcDefinition,
+    start_z: float,
+    target_z: float,
+    height_map: HeightMap,
+    reference_frame: ReferenceFrame,
+    max_z_error_mm: float,
+    min_segment_length_mm: float,
+    surface_mode: bool,
+) -> None:
+    validation = _validate_arc_span(
+        line_number=line_number,
+        definition=definition,
+        start_z=start_z,
+        target_z=target_z,
+        left=left,
+        right=right,
+        height_map=height_map,
+        reference_frame=reference_frame,
+        surface_mode=surface_mode,
+    )
+    if validation["max_error_mm"] <= max_z_error_mm:
+        sink.append((left, right))
+        return
+    local_sweep = abs(definition.sweep_angle) * max(1e-12, right.progress - left.progress)
+    arc_length = local_sweep * definition.radius_mm
+    if arc_length <= min_segment_length_mm or depth >= MAX_RECURSION_DEPTH:
+        raise ApplicationError(
+            f"adaptive_fast no puede cumplir la tolerancia en el arco de la línea {line_number}: error real {validation['max_error_mm']:.6f} mm "
+            f"al alcanzar {'longitud mínima' if arc_length <= min_segment_length_mm else 'profundidad máxima de recursión'}."
         )
-        end_point = _arc_point(
-            definition=definition,
-            progress=end_progress,
-            start_z=start_z,
-            target_z=target_z,
-            height_map=height_map,
-            reference_frame=reference_frame,
-            line_number=line_number,
-        )
-        if arc_length <= min_segment_length_mm or depth >= MAX_RECURSION_DEPTH:
-            segments.append(
-                {
-                    "end": end_point,
-                    "i_mm": definition.center_x_mm - start_point.pcb_x_mm,
-                    "j_mm": definition.center_y_mm - start_point.pcb_y_mm,
-                    "approx_error_mm": 0.0,
-                }
-            )
-            return
-        mid_progress = (start_progress + end_progress) / 2.0
-        quarter_1_progress = start_progress + (end_progress - start_progress) * 0.25
-        quarter_3_progress = start_progress + (end_progress - start_progress) * 0.75
-        mid = _arc_point(
-            definition=definition,
-            progress=mid_progress,
-            start_z=start_z,
-            target_z=target_z,
-            height_map=height_map,
-            reference_frame=reference_frame,
-            line_number=line_number,
-        )
-        quarter_1 = _arc_point(
-            definition=definition,
-            progress=quarter_1_progress,
-            start_z=start_z,
-            target_z=target_z,
-            height_map=height_map,
-            reference_frame=reference_frame,
-            line_number=line_number,
-        )
-        quarter_3 = _arc_point(
-            definition=definition,
-            progress=quarter_3_progress,
-            start_z=start_z,
-            target_z=target_z,
-            height_map=height_map,
-            reference_frame=reference_frame,
-            line_number=line_number,
-        )
-        local_error = max(
-            abs(mid.delta_z_mm - _lerp(start_point.delta_z_mm, end_point.delta_z_mm, 0.5)),
-            abs(quarter_1.delta_z_mm - _lerp(start_point.delta_z_mm, end_point.delta_z_mm, 0.25)),
-            abs(quarter_3.delta_z_mm - _lerp(start_point.delta_z_mm, end_point.delta_z_mm, 0.75)),
-        )
-        if local_error <= max_z_error_mm:
-            stats["max_error"] = max(stats["max_error"], local_error)
-            segments.append(
-                {
-                    "end": end_point,
-                    "i_mm": definition.center_x_mm - start_point.pcb_x_mm,
-                    "j_mm": definition.center_y_mm - start_point.pcb_y_mm,
-                    "approx_error_mm": local_error,
-                }
-            )
-            return
-        stats["subdivisions"] += 1
-        recurse(start_progress, mid_progress, depth + 1)
-        recurse(mid_progress, end_progress, depth + 1)
-
-    recurse(0.0, 1.0, 0)
-    return segments, int(stats["subdivisions"]), float(stats["max_error"])
+    midpoint = _evaluate_arc_point(
+        definition=definition,
+        progress=(left.progress + right.progress) / 2.0,
+        start_z=start_z,
+        target_z=target_z,
+        height_map=height_map,
+        reference_frame=reference_frame,
+        line_number=line_number,
+        force_uses_surface_map=surface_mode,
+    )
+    _split_arc_span(
+        sink=sink,
+        left=left,
+        right=midpoint,
+        depth=depth + 1,
+        line_number=line_number,
+        definition=definition,
+        start_z=start_z,
+        target_z=target_z,
+        height_map=height_map,
+        reference_frame=reference_frame,
+        max_z_error_mm=max_z_error_mm,
+        min_segment_length_mm=min_segment_length_mm,
+        surface_mode=surface_mode,
+    )
+    _split_arc_span(
+        sink=sink,
+        left=midpoint,
+        right=right,
+        depth=depth + 1,
+        line_number=line_number,
+        definition=definition,
+        start_z=start_z,
+        target_z=target_z,
+        height_map=height_map,
+        reference_frame=reference_frame,
+        max_z_error_mm=max_z_error_mm,
+        min_segment_length_mm=min_segment_length_mm,
+        surface_mode=surface_mode,
+    )
 
 
-def _simplify_line_points(points: list[AdaptivePoint], *, max_z_error_mm: float) -> tuple[list[AdaptivePoint], int]:
-    if len(points) <= 2:
-        return points, 0
-
-    kept = [points[0]]
-    removed = 0
-    index = 1
-    while index < len(points) - 1:
-        current = points[index]
-        nxt = points[index + 1]
-        previous = kept[-1]
-        if _can_skip_point(previous, current, nxt, max_z_error_mm=max_z_error_mm):
-            removed += 1
-            index += 1
+def _validate_arc_span(
+    *,
+    line_number: int,
+    definition: ArcDefinition,
+    start_z: float,
+    target_z: float,
+    left: AdaptivePoint,
+    right: AdaptivePoint,
+    height_map: HeightMap,
+    reference_frame: ReferenceFrame,
+    surface_mode: bool,
+) -> dict[str, Any]:
+    max_error = 0.0
+    worst_progress = 0.5
+    for local_progress in (0.25, 0.5, 0.75):
+        if not 0.0 < local_progress < 1.0:
             continue
-        kept.append(current)
-        index += 1
-    kept.append(points[-1])
-    return kept, removed
+        global_progress = _lerp(left.progress, right.progress, local_progress)
+        point = _evaluate_arc_point(
+            definition=definition,
+            progress=global_progress,
+            start_z=start_z,
+            target_z=target_z,
+            height_map=height_map,
+            reference_frame=reference_frame,
+            line_number=line_number,
+            force_uses_surface_map=surface_mode,
+        )
+        expected_machine_z = _lerp(left.machine_z_mm, right.machine_z_mm, local_progress)
+        error = abs(point.machine_z_mm - expected_machine_z)
+        if error > max_error:
+            max_error = error
+            worst_progress = local_progress
+    return {"max_error_mm": max_error, "worst_progress": worst_progress}
 
 
-def _can_skip_point(left: AdaptivePoint, middle: AdaptivePoint, right: AdaptivePoint, *, max_z_error_mm: float) -> bool:
-    xy_left = (left.pcb_x_mm, left.pcb_y_mm)
-    xy_middle = (middle.pcb_x_mm, middle.pcb_y_mm)
-    xy_right = (right.pcb_x_mm, right.pcb_y_mm)
-    if math.dist(xy_left, xy_right) <= 0:
-        return False
-    cross = abs((xy_middle[0] - xy_left[0]) * (xy_right[1] - xy_left[1]) - (xy_middle[1] - xy_left[1]) * (xy_right[0] - xy_left[0]))
-    if cross > 1e-9:
-        return False
-    total = math.dist(xy_left, xy_right)
-    progress = math.dist(xy_left, xy_middle) / total
-    expected_delta = _lerp(left.delta_z_mm, right.delta_z_mm, progress)
-    return abs(middle.delta_z_mm - expected_delta) <= max_z_error_mm
+def _revalidate_arc_segments(
+    *,
+    line_number: int,
+    definition: ArcDefinition,
+    start_z: float,
+    target_z: float,
+    segments: list[tuple[AdaptivePoint, AdaptivePoint]],
+    height_map: HeightMap,
+    reference_frame: ReferenceFrame,
+    max_z_error_mm: float,
+) -> float:
+    max_error = 0.0
+    for left, right in segments:
+        validation = _validate_arc_span(
+            line_number=line_number,
+            definition=definition,
+            start_z=start_z,
+            target_z=target_z,
+            left=left,
+            right=right,
+            height_map=height_map,
+            reference_frame=reference_frame,
+            surface_mode=left.uses_surface_map,
+        )
+        if validation["max_error_mm"] > max_z_error_mm:
+            raise ApplicationError(
+                f"adaptive_fast revalidó el arco de la línea {line_number} y encontró error real {validation['max_error_mm']:.6f} mm por encima de la tolerancia."
+            )
+        max_error = max(max_error, validation["max_error_mm"])
+    return max_error
 
 
 def _emit_linear_points(
     *,
     line: GCodeLine,
     command: str,
+    prefix_tokens: list[str],
+    passthrough_tokens: list[str],
     points: list[AdaptivePoint],
     previous: AdaptivePoint,
     state: ModalState,
     include_feed: str | None,
-    passthrough_tokens: list[str],
     approx_error_mm: float,
-    uses_surface: bool,
-    subdivided: bool,
     fused_count: int,
 ) -> dict[str, Any]:
     emitted_lines: list[str] = []
@@ -711,9 +1159,11 @@ def _emit_linear_points(
     delta_values: list[float] = []
     z_values: list[float] = []
     current_previous = previous
+    emitted_moves = len(points)
     for index, point in enumerate(points):
         line_text = _format_motion_line(
             command=command,
+            prefix_tokens=prefix_tokens if index == 0 else [],
             point=point,
             previous=current_previous,
             state=state,
@@ -724,7 +1174,7 @@ def _emit_linear_points(
         if index == 0:
             line_text = _append_comment(line_text, line.comment)
         emitted_lines.append(line_text)
-        trace.append(_trace_entry(line, command, point, uses_surface=uses_surface, approx_error_mm=approx_error_mm))
+        trace.append(_trace_entry(line, command, point, approx_error_mm=approx_error_mm))
         delta_values.append(point.delta_z_mm)
         z_values.append(point.machine_z_mm)
         current_previous = point
@@ -733,8 +1183,8 @@ def _emit_linear_points(
         trace=trace,
         delta_values=delta_values,
         z_values=z_values,
-        emitted_moves=len(emitted_lines),
-        segments_subdivided=1 if subdivided else 0,
+        emitted_moves=emitted_moves,
+        segments_subdivided=max(0, emitted_moves - 1),
         segments_fused=fused_count,
         max_approximation_error_mm=approx_error_mm,
     )
@@ -744,30 +1194,43 @@ def _emit_arc_segments(
     *,
     line: GCodeLine,
     command: str,
-    arc_segments: list[dict[str, Any]],
-    start_point: AdaptivePoint,
+    prefix_tokens: list[str],
+    passthrough_tokens: list[str],
+    segments: list[tuple[AdaptivePoint, AdaptivePoint]],
     state: ModalState,
     include_feed: str | None,
-    passthrough_tokens: list[str],
-    uses_surface: bool,
-    subdivided: bool,
-    fused_count: int,
-    max_error: float = 0.0,
+    max_error: float,
 ) -> dict[str, Any]:
     emitted_lines: list[str] = []
     trace: list[dict[str, Any]] = []
     delta_values: list[float] = []
     z_values: list[float] = []
-    current_start = start_point
-    for index, segment in enumerate(arc_segments):
-        end_point = segment["end"]
+    emitted_moves = len(segments)
+    for index, (start_point, end_point) in enumerate(segments):
         line_text = _format_arc_line(
             command=command,
+            prefix_tokens=prefix_tokens if index == 0 else [],
             point=end_point,
-            previous=current_start,
+            previous=start_point,
             state=state,
-            i_mm=float(segment["i_mm"]),
-            j_mm=float(segment["j_mm"]),
+            i_mm=start_point.pcb_x_mm - start_point.pcb_x_mm + (start_point.machine_x_mm - start_point.machine_x_mm),
+            j_mm=start_point.pcb_y_mm - start_point.pcb_y_mm + (start_point.machine_y_mm - start_point.machine_y_mm),
+            center_x_mm=None,
+            center_y_mm=None,
+            include_feed=include_feed if index == 0 else None,
+        )
+        center_x_mm = _arc_center_x(start_point, end_point, command)
+        center_y_mm = _arc_center_y(start_point, end_point, command)
+        line_text = _format_arc_line(
+            command=command,
+            prefix_tokens=prefix_tokens if index == 0 else [],
+            point=end_point,
+            previous=start_point,
+            state=state,
+            i_mm=center_x_mm - start_point.pcb_x_mm,
+            j_mm=center_y_mm - start_point.pcb_y_mm,
+            center_x_mm=center_x_mm,
+            center_y_mm=center_y_mm,
             include_feed=include_feed if index == 0 else None,
         )
         if index == 0 and passthrough_tokens:
@@ -775,40 +1238,65 @@ def _emit_arc_segments(
         if index == 0:
             line_text = _append_comment(line_text, line.comment)
         emitted_lines.append(line_text)
-        trace.append(_trace_entry(line, command, end_point, uses_surface=uses_surface, approx_error_mm=float(segment.get("approx_error_mm", 0.0))))
+        trace.append(_trace_entry(line, command, end_point, approx_error_mm=max_error))
         delta_values.append(end_point.delta_z_mm)
         z_values.append(end_point.machine_z_mm)
-        current_start = end_point
     return _result(
         emitted_lines,
         trace=trace,
         delta_values=delta_values,
         z_values=z_values,
-        emitted_moves=len(emitted_lines),
-        segments_subdivided=1 if subdivided else 0,
-        segments_fused=fused_count,
+        emitted_moves=emitted_moves,
+        segments_subdivided=max(0, emitted_moves - 1),
+        segments_fused=0,
         max_approximation_error_mm=max_error,
     )
 
 
-def _format_passthrough_motion_line(
+def _arc_center_x(start_point: AdaptivePoint, end_point: AdaptivePoint, command: str) -> float:
+    chord_x = end_point.pcb_x_mm - start_point.pcb_x_mm
+    chord_y = end_point.pcb_y_mm - start_point.pcb_y_mm
+    radius = _arc_radius(start_point, end_point)
+    chord_length = math.hypot(chord_x, chord_y)
+    midpoint_x = (start_point.pcb_x_mm + end_point.pcb_x_mm) / 2.0
+    midpoint_y = (start_point.pcb_y_mm + end_point.pcb_y_mm) / 2.0
+    if chord_length <= FULL_CIRCLE_EPSILON:
+        return midpoint_x
+    offset = math.sqrt(max(radius * radius - (chord_length / 2.0) ** 2, 0.0))
+    normal_x = -chord_y / chord_length
+    sign = -1.0 if command == "G2" else 1.0
+    return midpoint_x + normal_x * offset * sign
+
+
+def _arc_center_y(start_point: AdaptivePoint, end_point: AdaptivePoint, command: str) -> float:
+    chord_x = end_point.pcb_x_mm - start_point.pcb_x_mm
+    chord_y = end_point.pcb_y_mm - start_point.pcb_y_mm
+    radius = _arc_radius(start_point, end_point)
+    chord_length = math.hypot(chord_x, chord_y)
+    midpoint_x = (start_point.pcb_x_mm + end_point.pcb_x_mm) / 2.0
+    midpoint_y = (start_point.pcb_y_mm + end_point.pcb_y_mm) / 2.0
+    if chord_length <= FULL_CIRCLE_EPSILON:
+        return midpoint_y
+    offset = math.sqrt(max(radius * radius - (chord_length / 2.0) ** 2, 0.0))
+    normal_y = chord_x / chord_length
+    sign = -1.0 if command == "G2" else 1.0
+    return midpoint_y + normal_y * offset * sign
+
+
+def _arc_radius(start_point: AdaptivePoint, end_point: AdaptivePoint) -> float:
+    return max(FULL_CIRCLE_EPSILON, math.hypot(end_point.pcb_x_mm - start_point.pcb_x_mm, end_point.pcb_y_mm - start_point.pcb_y_mm) / 2.0)
+
+
+def _format_motion_line(
     *,
     command: str,
+    prefix_tokens: list[str],
     point: AdaptivePoint,
     previous: AdaptivePoint,
     state: ModalState,
     include_feed: str | None,
-    passthrough_tokens: list[str],
-    comment: str | None,
 ) -> str:
-    line = _format_motion_line(command=command, point=point, previous=previous, state=state, include_feed=include_feed)
-    if passthrough_tokens:
-        line = f"{line} {' '.join(passthrough_tokens)}"
-    return _append_comment(line, comment)
-
-
-def _format_motion_line(*, command: str, point: AdaptivePoint, previous: AdaptivePoint, state: ModalState, include_feed: str | None) -> str:
-    parts = [command]
+    parts = [*prefix_tokens, command]
     if state.positioning == "absolute":
         parts.extend(
             [
@@ -833,14 +1321,18 @@ def _format_motion_line(*, command: str, point: AdaptivePoint, previous: Adaptiv
 def _format_arc_line(
     *,
     command: str,
+    prefix_tokens: list[str],
     point: AdaptivePoint,
     previous: AdaptivePoint,
     state: ModalState,
     i_mm: float,
     j_mm: float,
+    center_x_mm: float | None,
+    center_y_mm: float | None,
     include_feed: str | None,
 ) -> str:
-    parts = [command]
+    del center_x_mm, center_y_mm
+    parts = [*prefix_tokens, command]
     if state.positioning == "absolute":
         parts.extend(
             [
@@ -864,19 +1356,72 @@ def _format_arc_line(
     return " ".join(parts)
 
 
-def _machine_point(
+def _evaluate_linear_point(
+    *,
+    progress: float,
+    start_x: float,
+    start_y: float,
+    start_z: float,
+    target_x: float,
+    target_y: float,
+    target_z: float,
+    height_map: HeightMap,
+    reference_frame: ReferenceFrame,
+    line_number: int,
+    force_uses_surface_map: bool | None = None,
+) -> AdaptivePoint:
+    return _evaluate_point(
+        pcb_x_mm=_lerp(start_x, target_x, progress),
+        pcb_y_mm=_lerp(start_y, target_y, progress),
+        programmed_z_mm=_lerp(start_z, target_z, progress),
+        progress=progress,
+        height_map=height_map,
+        reference_frame=reference_frame,
+        line_number=line_number,
+        force_uses_surface_map=force_uses_surface_map,
+    )
+
+
+def _evaluate_arc_point(
+    *,
+    definition: ArcDefinition,
+    progress: float,
+    start_z: float,
+    target_z: float,
+    height_map: HeightMap,
+    reference_frame: ReferenceFrame,
+    line_number: int,
+    force_uses_surface_map: bool | None = None,
+) -> AdaptivePoint:
+    angle = definition.start_angle + definition.sweep_angle * progress
+    pcb_x_mm = definition.center_x_mm + math.cos(angle) * definition.radius_mm
+    pcb_y_mm = definition.center_y_mm + math.sin(angle) * definition.radius_mm
+    return _evaluate_point(
+        pcb_x_mm=pcb_x_mm,
+        pcb_y_mm=pcb_y_mm,
+        programmed_z_mm=_lerp(start_z, target_z, progress),
+        progress=progress,
+        height_map=height_map,
+        reference_frame=reference_frame,
+        line_number=line_number,
+        force_uses_surface_map=force_uses_surface_map,
+    )
+
+
+def _evaluate_point(
     *,
     pcb_x_mm: float,
     pcb_y_mm: float,
     programmed_z_mm: float,
+    progress: float,
     height_map: HeightMap,
     reference_frame: ReferenceFrame,
-    uses_surface: bool,
     line_number: int,
-    progress: float = 1.0,
+    force_uses_surface_map: bool | None = None,
 ) -> AdaptivePoint:
+    uses_surface_map = programmed_z_mm < SURFACE_THRESHOLD_Z_MM if force_uses_surface_map is None else force_uses_surface_map
     delta_z_mm = 0.0
-    if uses_surface:
+    if uses_surface_map:
         interpolation = interpolate_height(height_map, x_mm=pcb_x_mm, y_mm=pcb_y_mm, mode="bruto")
         if interpolation.valor_mm is None:
             raise ApplicationError(f"No se puede compensar la línea {line_number}: mapa sin valor en X={pcb_x_mm:.3f}, Y={pcb_y_mm:.3f}.")
@@ -896,30 +1441,7 @@ def _machine_point(
         machine_y_mm=reference_frame.machine_origin_y_mm + pcb_y_mm,
         machine_z_mm=machine_z_mm,
         delta_z_mm=delta_z_mm,
-    )
-
-
-def _line_point(
-    progress: float,
-    left: AdaptivePoint,
-    right: AdaptivePoint,
-    *,
-    height_map: HeightMap,
-    reference_frame: ReferenceFrame,
-    line_number: int,
-) -> AdaptivePoint:
-    pcb_x_mm = _lerp(left.pcb_x_mm, right.pcb_x_mm, progress)
-    pcb_y_mm = _lerp(left.pcb_y_mm, right.pcb_y_mm, progress)
-    programmed_z_mm = _lerp(left.programmed_z_mm, right.programmed_z_mm, progress)
-    return _machine_point(
-        pcb_x_mm=pcb_x_mm,
-        pcb_y_mm=pcb_y_mm,
-        programmed_z_mm=programmed_z_mm,
-        height_map=height_map,
-        reference_frame=reference_frame,
-        uses_surface=True,
-        line_number=line_number,
-        progress=_lerp(left.progress, right.progress, progress),
+        uses_surface_map=uses_surface_map,
     )
 
 
@@ -941,9 +1463,9 @@ def _arc_definition(
         raise ApplicationError(f"adaptive_fast detectó radio nulo en el arco de la línea {line_number}.")
     if abs(radius_start - radius_end) > max(0.05, radius_start * 0.01):
         raise ApplicationError(f"adaptive_fast detectó un arco inconsistente en la línea {line_number}.")
-    full_circle = math.isclose(start_x, target_x, abs_tol=FULL_CIRCLE_EPSILON) and math.isclose(start_y, target_y, abs_tol=FULL_CIRCLE_EPSILON)
     start_angle = math.atan2(start_y - center_y, start_x - center_x)
     end_angle = math.atan2(target_y - center_y, target_x - center_x)
+    full_circle = math.isclose(start_x, target_x, abs_tol=FULL_CIRCLE_EPSILON) and math.isclose(start_y, target_y, abs_tol=FULL_CIRCLE_EPSILON)
     if full_circle:
         sweep_angle = -2 * math.pi if command == "G2" else 2 * math.pi
     else:
@@ -953,43 +1475,16 @@ def _arc_definition(
         if command == "G3" and sweep_angle <= 0:
             sweep_angle += 2 * math.pi
     return ArcDefinition(
-        clockwise=command == "G2",
+        command=command,
         center_x_mm=center_x,
         center_y_mm=center_y,
         radius_mm=radius_start,
         start_angle=start_angle,
         sweep_angle=sweep_angle,
-        full_circle=full_circle,
     )
 
 
-def _arc_point(
-    *,
-    definition: ArcDefinition,
-    progress: float,
-    start_z: float,
-    target_z: float,
-    height_map: HeightMap,
-    reference_frame: ReferenceFrame,
-    line_number: int,
-) -> AdaptivePoint:
-    angle = definition.start_angle + definition.sweep_angle * progress
-    pcb_x_mm = definition.center_x_mm + math.cos(angle) * definition.radius_mm
-    pcb_y_mm = definition.center_y_mm + math.sin(angle) * definition.radius_mm
-    programmed_z_mm = _lerp(start_z, target_z, progress)
-    return _machine_point(
-        pcb_x_mm=pcb_x_mm,
-        pcb_y_mm=pcb_y_mm,
-        programmed_z_mm=programmed_z_mm,
-        height_map=height_map,
-        reference_frame=reference_frame,
-        uses_surface=True,
-        line_number=line_number,
-        progress=progress,
-    )
-
-
-def _trace_entry(line: GCodeLine, command: str, point: AdaptivePoint, *, uses_surface: bool, approx_error_mm: float) -> dict[str, Any]:
+def _trace_entry(line: GCodeLine, command: str, point: AdaptivePoint, *, approx_error_mm: float) -> dict[str, Any]:
     return {
         "plan_index": 0,
         "line_number": line.line_number,
@@ -1003,9 +1498,14 @@ def _trace_entry(line: GCodeLine, command: str, point: AdaptivePoint, *, uses_su
         "delta_z_mm": point.delta_z_mm,
         "final_z_mm": point.machine_z_mm,
         "feed_mm_min": None,
-        "uses_surface_map": uses_surface,
+        "uses_surface_map": point.uses_surface_map,
         "approximation_error_mm": approx_error_mm,
     }
+
+
+def _looks_like_macro_line(code: str) -> bool:
+    first = code.split()[0]
+    return bool("_" in first and MACRO_WORD_RE.match(first))
 
 
 def _normalize_g_command(raw_value: str | None) -> str:
@@ -1052,6 +1552,31 @@ def _lerp(left: float, right: float, progress: float) -> float:
     return left + (right - left) * progress
 
 
+def _surface_mode_spans(start_z: float, target_z: float) -> list[tuple[float, float, bool]]:
+    if math.isclose(start_z, target_z, abs_tol=1e-12):
+        return [(0.0, 1.0, start_z < SURFACE_THRESHOLD_Z_MM)]
+    crossing = (SURFACE_THRESHOLD_Z_MM - start_z) / (target_z - start_z)
+    spans = [(0.0, 1.0)]
+    if 0.0 < crossing < 1.0:
+        spans = [(0.0, crossing), (crossing, 1.0)]
+    result: list[tuple[float, float, bool]] = []
+    for left, right in spans:
+        midpoint = (left + right) / 2.0
+        uses_surface_map = _lerp(start_z, target_z, midpoint) < SURFACE_THRESHOLD_Z_MM
+        result.append((left, right, uses_surface_map))
+    return result
+
+
+def _same_point(left: AdaptivePoint, right: AdaptivePoint) -> bool:
+    return (
+        math.isclose(left.progress, right.progress, abs_tol=1e-9)
+        and math.isclose(left.machine_x_mm, right.machine_x_mm, abs_tol=1e-9)
+        and math.isclose(left.machine_y_mm, right.machine_y_mm, abs_tol=1e-9)
+        and math.isclose(left.machine_z_mm, right.machine_z_mm, abs_tol=1e-9)
+        and left.uses_surface_map == right.uses_surface_map
+    )
+
+
 def _rms(values: list[float]) -> float | None:
     if not values:
         return None
@@ -1062,6 +1587,14 @@ def _unique(values: list[str]) -> list[str]:
     result: list[str] = []
     for value in values:
         if value and value not in result:
+            result.append(value)
+    return result
+
+
+def _unique_progress(values: list[float]) -> list[float]:
+    result: list[float] = []
+    for value in sorted(values):
+        if not result or not math.isclose(result[-1], value, abs_tol=1e-9):
             result.append(value)
     return result
 
