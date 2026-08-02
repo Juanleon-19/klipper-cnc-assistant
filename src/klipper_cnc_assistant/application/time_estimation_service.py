@@ -47,6 +47,7 @@ class MachineLimits:
 
 UNSUPPORTED_ESTIMATOR_G_CODES = {"G10", "G28", "G53", "G90.1", "G91.1", "G92"}
 MOTION_G_CODES = {"G0", "G1", "G2", "G3"}
+UNKNOWN_DURATION_M_CODES = {"M3", "M4", "M5", "M6"}
 MACRO_WORD_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
@@ -384,8 +385,13 @@ def _parse_line(*, line, state: ModalState) -> dict[str, Any]:
             dwell_time_s = float(token.raw_value) / 1000.0
         elif token.letter == "S" and has_dwell:
             dwell_time_s = float(token.raw_value)
-        elif token.letter in {"M", "T"}:
-            continue
+        elif token.letter == "M":
+            command = f"M{int(float(token.raw_value))}" if token.raw_value is not None else "M"
+            if command in UNKNOWN_DURATION_M_CODES:
+                unknown_time_command = command
+        elif token.letter == "T":
+            raw_tool = token.raw_value or ""
+            unknown_time_command = f"T{raw_tool}" if raw_tool else "T"
 
     has_motion_coordinates = bool(axes_mm or arc_params)
     if unsupported_command is not None:
@@ -548,17 +554,33 @@ def _trapezoid_time(
     nominal = max(1e-6, nominal_mm_s)
     entry = max(0.0, min(entry_mm_s, nominal))
     exit_velocity = max(0.0, min(exit_mm_s, nominal))
-    accel_distance = max(0.0, (nominal * nominal - entry * entry) / (2.0 * accel))
-    decel_distance = max(0.0, (nominal * nominal - exit_velocity * exit_velocity) / (2.0 * accel))
-    if accel_distance + decel_distance <= distance_mm:
-        cruise_distance = distance_mm - accel_distance - decel_distance
-        min_cruise_distance = distance_mm * max(0.0, min(minimum_cruise_ratio, 1.0))
-        if cruise_distance < min_cruise_distance:
-            cruise_distance = min_cruise_distance
+    accel_distance_nominal = max(0.0, (nominal * nominal - entry * entry) / (2.0 * accel))
+    decel_distance_nominal = max(0.0, (nominal * nominal - exit_velocity * exit_velocity) / (2.0 * accel))
+    min_cruise_distance = distance_mm * max(0.0, min(minimum_cruise_ratio, 1.0))
+    max_transition_distance = max(0.0, distance_mm - min_cruise_distance)
+    if max_transition_distance > 0 and accel_distance_nominal + decel_distance_nominal <= max_transition_distance:
+        cruise_distance = distance_mm - accel_distance_nominal - decel_distance_nominal
         return (nominal - entry) / accel + cruise_distance / nominal + (nominal - exit_velocity) / accel
+    if max_transition_distance > 0:
+        peak_sq = max((2.0 * accel * max_transition_distance + entry * entry + exit_velocity * exit_velocity) / 2.0, 0.0)
+        peak = math.sqrt(peak_sq)
+        if peak > nominal:
+            peak = nominal
+        if peak > max(entry, exit_velocity):
+            accel_distance = max(0.0, (peak * peak - entry * entry) / (2.0 * accel))
+            decel_distance = max(0.0, (peak * peak - exit_velocity * exit_velocity) / (2.0 * accel))
+            cruise_distance = max(0.0, distance_mm - accel_distance - decel_distance)
+            cruise_time = 0.0 if peak <= 1e-9 else cruise_distance / peak
+            return max(0.0, (peak - entry) / accel) + cruise_time + max(0.0, (peak - exit_velocity) / accel)
     peak_sq = max((2.0 * accel * distance_mm + entry * entry + exit_velocity * exit_velocity) / 2.0, 0.0)
     peak = math.sqrt(peak_sq)
-    return max(0.0, (peak - entry) / accel) + max(0.0, (peak - exit_velocity) / accel)
+    if peak > nominal:
+        peak = nominal
+    accel_distance = max(0.0, (peak * peak - entry * entry) / (2.0 * accel))
+    decel_distance = max(0.0, (peak * peak - exit_velocity * exit_velocity) / (2.0 * accel))
+    cruise_distance = max(0.0, distance_mm - accel_distance - decel_distance)
+    cruise_time = 0.0 if peak <= 1e-9 else cruise_distance / peak
+    return max(0.0, (peak - entry) / accel) + cruise_time + max(0.0, (peak - exit_velocity) / accel)
 
 
 def _unique(values: list[str]) -> list[str]:

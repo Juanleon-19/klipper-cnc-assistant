@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from klipper_cnc_assistant.application.time_estimation_service import TimeEstimationService
+from klipper_cnc_assistant.application.time_estimation_service import TimeEstimationService, _trapezoid_time
 from klipper_cnc_assistant.storage import JsonProjectRepository
 
 
@@ -127,3 +127,22 @@ class TimeEstimationServiceTests(unittest.TestCase):
         estimate = service.estimate_text("G21\nG90\nG1 X10 F600\nG4 P1000\n")
         self.assertEqual(estimate["unsupported_commands"], [])
         self.assertGreaterEqual(estimate["dwell_time_s"], 1.0)
+
+    def test_unknown_duration_commands_are_reported_instead_of_ignored(self) -> None:
+        service = TimeEstimationService(self.repository, self.runtime)
+        estimate = service.estimate_text("M3 S1000\nM5\nT1\nM6\nSET_PIN VALUE=1\n")
+        self.assertEqual(estimate["confidence"], "low")
+        self.assertIn("M3", estimate["unknown_time_commands"])
+        self.assertIn("M5", estimate["unknown_time_commands"])
+        self.assertIn("T1", estimate["unknown_time_commands"])
+        self.assertIn("M6", estimate["unknown_time_commands"])
+        self.assertIn("SET_PIN", estimate["unknown_time_commands"])
+
+    def test_minimum_cruise_ratio_never_inflates_virtual_distance(self) -> None:
+        baseline = _trapezoid_time(10.0, 10.0, 0.0, 0.0, 100.0, 0.0)
+        medium = _trapezoid_time(10.0, 10.0, 0.0, 0.0, 100.0, 0.5)
+        maximum = _trapezoid_time(10.0, 10.0, 0.0, 0.0, 100.0, 1.0)
+        self.assertGreater(baseline, 0.0)
+        self.assertGreaterEqual(medium, baseline)
+        self.assertGreaterEqual(maximum, baseline)
+        self.assertLessEqual(maximum, 1.2)
