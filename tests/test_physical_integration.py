@@ -209,6 +209,72 @@ class WatchdogMeshRuntime(StatefulMeshRuntime):
         raise RuntimeError("watchdog cancelled probe")
 
 
+class CadenceMeshRuntime(StatefulMeshRuntime):
+    def __init__(self, *, lower_steps: int = 100) -> None:
+        super().__init__()
+        self.lower_steps = lower_steps
+        self.step_started_at: list[float] = []
+        self.step_completed_at: list[float] = []
+
+    def probe_mesh_point(self, point: dict, probe_config: dict | None = None, progress_callback=None) -> dict:
+        if self.movement_lock:
+            raise RuntimeError("movement lock leaked")
+        self.movement_lock = True
+        try:
+            self.entered.set()
+            states = (
+                ("POINT_MOVE_SAFE_Z", {"safe_z_mm": 12.0}),
+                ("POINT_CONFIRM_SAFE_Z", {"observed_z_mm": 12.0}),
+                ("POINT_VERIFY_PROBE_OPEN", {"probe_raw": False, "probe_filtered": False, "last_packet_age_s": 0.01}),
+                ("POINT_MOVE_XY", {"x_mm": point["x_machine"], "y_mm": point["y_machine"]}),
+                ("POINT_CONFIRM_XY", {"x_mm": point["x_machine"], "y_mm": point["y_machine"]}),
+                ("POINT_DESCENT_STARTED", {"probe_step_mm": 0.1, "probe_feed_mm_min": 120.0, "retract_mm": 1.0}),
+            )
+            for state, detail in states:
+                self.transitions.append(state)
+                if progress_callback:
+                    progress_callback(state, detail)
+            for step_index in range(self.lower_steps):
+                command_started_at = time.monotonic()
+                self.step_started_at.append(command_started_at)
+                if progress_callback:
+                    progress_callback("POINT_LOWER_STEP", {"step_mm": 0.1, "feed_mm_min": 120.0, "command_started_at": command_started_at})
+                command_completed_at = time.monotonic()
+                self.step_completed_at.append(command_completed_at)
+                if progress_callback:
+                    progress_callback(
+                        "POINT_CONFIRM_STEP",
+                        {
+                            "step_mm": 0.1,
+                            "z_mm": 10.0 - ((step_index + 1) * 0.1),
+                            "command_started_at": command_started_at,
+                            "command_completed_at": command_completed_at,
+                            "command_duration_s": command_completed_at - command_started_at,
+                        },
+                    )
+            if progress_callback:
+                progress_callback("POINT_CONTACT_DETECTED", {"z_mm": 0.0})
+                progress_callback("POINT_RETRACT", {"retract_mm": 1.0, "feed_mm_min": 120.0})
+                retract_started_at = time.monotonic()
+                retract_completed_at = time.monotonic()
+                progress_callback(
+                    "POINT_CONFIRM_RETRACT",
+                    {
+                        "retract_mm": 1.0,
+                        "z_mm": 1.0,
+                        "command_started_at": retract_started_at,
+                        "command_completed_at": retract_completed_at,
+                        "command_duration_s": retract_completed_at - retract_started_at,
+                    },
+                )
+                progress_callback("POINT_VERIFY_PROBE_OPEN_AFTER_RETRACT", {"probe_raw": False, "probe_filtered": False, "last_packet_age_s": 0.01})
+            self.calls.append(int(point["index"]))
+            self.position.update({"x": float(point["x_machine"]), "y": float(point["y_machine"]), "z": 1.0})
+            return {"z_measured": 0.0, "duration_s": 0.001}
+        finally:
+            self.movement_lock = False
+
+
 class PhysicalIntegrationTest(unittest.TestCase):
     def test_serial_driver_resynchronizes_and_reports_diagnostics(self) -> None:
         with patch("klipper_cnc_assistant.input.serial_driver.serial.Serial", FakeSerial):
@@ -746,6 +812,80 @@ class PhysicalIntegrationTest(unittest.TestCase):
             self.assertEqual(paused["points"][1]["status"], "MEASURED")
             self.assertEqual(runtime.calls, [1])
             self.assertIn("Timeout sin progreso", str(paused["execution"].get("last_error")))
+
+    def test_mesh_worker_limits_persistence_writes_during_100_lower_steps(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            repository, _project_service, project, operation = self._physical_project(temp)
+            service = PhysicalMapService(repository)
+            plan = service.capture_reference_and_plan(
+                project_id=project.id,
+                operation_id=operation.id,
+                machine_origin_x=0.0,
+                machine_origin_y=0.0,
+                reference_z=10.0,
+                machine_position={"x_mm": 0.0, "y_mm": 0.0, "z_mm": 10.0},
+                homed_axes="xyz",
+                machine_label="test",
+                session_id="session",
+                config=PhysicalMeshConfig(grid_mode="manual", rows=2, columns=2, edge_margin_left_mm=0.0, edge_margin_right_mm=0.0, edge_margin_bottom_mm=0.0, edge_margin_top_mm=0.0),
+            )
+            worker = MeshExecutionService(service)
+            runtime = CadenceMeshRuntime(lower_steps=100)
+            point = service.next_pending_point(project.id, plan["map_id"])
+            save_count = 0
+            original_save = repository.save_height_map_payload
+
+            def counting_save(project_id: str, operation_id: str, payload: dict):
+                nonlocal save_count
+                save_count += 1
+                return original_save(project_id, operation_id, payload)
+
+            with patch.object(repository, "save_height_map_payload", side_effect=counting_save):
+                worker._probe_one_point(project.id, plan["map_id"], runtime, point, probe_config=plan.get("probe_config"))
+
+            updated = service.get_by_id(project.id, plan["map_id"])
+            self.assertEqual(runtime.calls, [1])
+            self.assertEqual(updated["points"][1]["status"], "MEASURED")
+            self.assertEqual(updated["execution"]["step_counter"], 100)
+            self.assertLessEqual(save_count, 12)
+
+    def test_mesh_worker_heartbeat_ignores_slow_persistence_during_lower_steps(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            repository, _project_service, project, operation = self._physical_project(temp)
+            service = PhysicalMapService(repository)
+            plan = service.capture_reference_and_plan(
+                project_id=project.id,
+                operation_id=operation.id,
+                machine_origin_x=0.0,
+                machine_origin_y=0.0,
+                reference_z=10.0,
+                machine_position={"x_mm": 0.0, "y_mm": 0.0, "z_mm": 10.0},
+                homed_axes="xyz",
+                machine_label="test",
+                session_id="session",
+                config=PhysicalMeshConfig(grid_mode="manual", rows=2, columns=2, edge_margin_left_mm=0.0, edge_margin_right_mm=0.0, edge_margin_bottom_mm=0.0, edge_margin_top_mm=0.0),
+            )
+            worker = MeshExecutionService(service, point_watchdog_timeout_s=0.05, point_watchdog_poll_s=0.005, point_watchdog_grace_s=0.005)
+            runtime = CadenceMeshRuntime(lower_steps=5)
+            point = service.next_pending_point(project.id, plan["map_id"])
+            original_update = service.update_execution_state
+
+            def slow_update(**kwargs):
+                time.sleep(0.2)
+                return original_update(**kwargs)
+
+            with patch.object(service, "update_execution_state", side_effect=slow_update):
+                worker._probe_one_point(project.id, plan["map_id"], runtime, point, probe_config=plan.get("probe_config"))
+
+            updated = service.get_by_id(project.id, plan["map_id"])
+            self.assertEqual(updated["points"][1]["status"], "MEASURED")
+            self.assertEqual(updated["execution"]["step_counter"], 5)
+            self.assertEqual(runtime.calls, [1])
+            self.assertGreaterEqual(len(runtime.step_started_at), 5)
+            self.assertTrue(
+                all((later - earlier) < 0.05 for earlier, later in zip(runtime.step_started_at, runtime.step_started_at[1:])),
+                runtime.step_started_at,
+            )
 
     def test_pause_before_start_is_idempotent_and_keeps_first_pending_point(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
