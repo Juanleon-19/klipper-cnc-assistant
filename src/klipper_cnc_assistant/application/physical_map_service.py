@@ -165,6 +165,7 @@ class PhysicalMeshConfig:
     max_spacing_mm: float = 10.0
     margin_mm: float = 0.0
     safe_z_mm: float | None = None
+    probe_profile_source: str | None = None
     probe_step_mm: float | None = None
     probe_feed_mm_min: float | None = None
     retract_mm: float | None = None
@@ -194,6 +195,18 @@ class PhysicalMeshConfig:
         ):
             if value is not None and value <= 0:
                 raise ApplicationError(f"{field} debe ser positivo.")
+        source = self.resolved_probe_profile_source()
+        if source == "machine_reference_profile" and any(value is not None for value in (self.probe_step_mm, self.probe_feed_mm_min, self.retract_mm)):
+            raise ApplicationError("El perfil heredado no acepta overrides numéricos del mapa.")
+        if source == "map_override" and any(value is None for value in (self.probe_step_mm, self.probe_feed_mm_min, self.retract_mm)):
+            raise ApplicationError("El override del mapa debe definir paso, velocidad y retracto.")
+
+    def resolved_probe_profile_source(self) -> str:
+        if self.probe_profile_source in {"machine_reference_profile", "map_override"}:
+            return self.probe_profile_source
+        if any(value is not None for value in (self.probe_step_mm, self.probe_feed_mm_min, self.retract_mm)):
+            return "map_override"
+        return "machine_reference_profile"
 
 
 class PhysicalMapService:
@@ -1180,6 +1193,7 @@ class PhysicalMapService:
             "probe_config": {
                 "safe_z_mm": config.safe_z_mm,
                 "reference_z_mm": float(kwargs["reference_z"]),
+                "source": config.resolved_probe_profile_source(),
                 "probe_step_mm": config.probe_step_mm,
                 "probe_feed_mm_min": config.probe_feed_mm_min,
                 "retract_mm": config.retract_mm,

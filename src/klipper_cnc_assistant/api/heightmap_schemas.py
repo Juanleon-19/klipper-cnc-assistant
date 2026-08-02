@@ -153,6 +153,7 @@ class PhysicalMapPlanRequest(BaseModel):
     max_spacing_mm: float = Field(default=10.0, gt=0)
     margin_mm: float = Field(default=0.0, ge=0)
     safe_z_mm: float | None = Field(default=None, gt=0)
+    probe_profile_source: str | None = None
     probe_step_mm: float | None = Field(default=None, gt=0)
     probe_feed_mm_min: float | None = Field(default=None, gt=0)
     retract_mm: float | None = Field(default=None, gt=0)

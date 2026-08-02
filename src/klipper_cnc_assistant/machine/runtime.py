@@ -107,6 +107,30 @@ class ProbeResult:
     captured_at: str
 
 
+@dataclass(frozen=True)
+class ProbeMotionProfile:
+    source: str
+    probe_step_mm: float
+    probe_feed_mm_min: float
+    probe_speed_mm_s: float
+    retract_mm: float
+    retract_feed_mm_min: float
+    retract_speed_mm_s: float
+    probe_open_stable_ms: float
+    settle_tolerance_mm: float
+
+    def to_payload(self, overrides: dict[str, Any] | None = None) -> dict[str, Any]:
+        payload = dict(overrides or {})
+        payload["source"] = self.source
+        payload["effective_probe_step_mm"] = self.probe_step_mm
+        payload["effective_probe_feed_mm_min"] = self.probe_feed_mm_min
+        payload["effective_retract_mm"] = self.retract_mm
+        payload["effective_retract_feed_mm_min"] = self.retract_feed_mm_min
+        payload["effective_probe_open_stable_ms"] = self.probe_open_stable_ms
+        payload["effective_settle_tolerance_mm"] = self.settle_tolerance_mm
+        return payload
+
+
 def utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -276,6 +300,11 @@ class MachineRuntime:
             "reference_probe_retract_feed_mm_min": self.config.probe_retract_speed_mm_s * 60.0,
         }
 
+    def effective_probe_profile_payload(self, probe_config: dict[str, Any] | None = None) -> dict[str, Any]:
+        overrides = dict(probe_config or {})
+        profile = self._reference_probe_profile() if probe_config is None else self._resolve_probe_profile(probe_config)
+        return profile.to_payload(overrides)
+
     def update_machine_settings(self, payload: dict[str, Any]) -> dict[str, float]:
         mapping = {
             "reference_prep_z_mm": "reference_prep_z_mm",
@@ -310,6 +339,48 @@ class MachineRuntime:
             self._settings_path.parent.mkdir(parents=True, exist_ok=True)
             self._settings_path.write_text(json.dumps(self.machine_settings(), indent=2, sort_keys=True))
         return self.machine_settings()
+
+    def _reference_probe_profile(self) -> ProbeMotionProfile:
+        return ProbeMotionProfile(
+            source="machine_reference_profile",
+            probe_step_mm=float(self.config.probe_step_mm),
+            probe_feed_mm_min=float(self.config.probe_lower_speed_mm_s) * 60.0,
+            probe_speed_mm_s=float(self.config.probe_lower_speed_mm_s),
+            retract_mm=float(self.config.probe_retract_mm),
+            retract_feed_mm_min=float(self.config.probe_retract_speed_mm_s) * 60.0,
+            retract_speed_mm_s=float(self.config.probe_retract_speed_mm_s),
+            probe_open_stable_ms=float(self.config.probe_open_stable_ms),
+            settle_tolerance_mm=float(self.config.settle_tolerance_mm),
+        )
+
+    def _resolve_probe_profile(self, probe_config: dict[str, Any] | None) -> ProbeMotionProfile:
+        reference_profile = self._reference_probe_profile()
+        if not probe_config:
+            return reference_profile
+        override_step = self._probe_config_float(probe_config, "probe_step_mm")
+        override_feed = self._probe_config_float(probe_config, "probe_feed_mm_min")
+        override_retract = self._probe_config_float(probe_config, "retract_mm")
+        explicit_source = probe_config.get("source")
+        source = str(explicit_source).strip() if explicit_source is not None else ""
+        if not source:
+            source = "map_override" if any(value is not None for value in (override_step, override_feed, override_retract)) else "machine_reference_profile"
+        if source not in {"machine_reference_profile", "map_override"}:
+            raise MachineRuntimeError("El perfil de sonda del mapa es inválido.")
+        if source == "machine_reference_profile":
+            return reference_profile
+        if override_step is None or override_feed is None or override_retract is None:
+            raise MachineRuntimeError("El override del mapa debe definir paso, velocidad y retracto de sonda.")
+        return ProbeMotionProfile(
+            source="map_override",
+            probe_step_mm=float(override_step),
+            probe_feed_mm_min=float(override_feed),
+            probe_speed_mm_s=float(override_feed) / 60.0,
+            retract_mm=float(override_retract),
+            retract_feed_mm_min=reference_profile.retract_feed_mm_min,
+            retract_speed_mm_s=reference_profile.retract_speed_mm_s,
+            probe_open_stable_ms=reference_profile.probe_open_stable_ms,
+            settle_tolerance_mm=reference_profile.settle_tolerance_mm,
+        )
 
     def start(self) -> None:
         with self._lock:
@@ -853,7 +924,7 @@ class MachineRuntime:
                 self._manual_enabled = False
                 self._diagnostic_input_only = True
                 self._state = MachineRuntimeState.PROBING_REFERENCE
-            probe = self._perform_probe_descent(label="reference_probe")
+            probe = self._perform_probe_descent(label="reference_probe", profile=self._reference_probe_profile())
             with self._lock:
                 self._last_probe_result = probe
                 self._probe_requested = False
@@ -891,16 +962,16 @@ class MachineRuntime:
             self._notify_probe_progress(progress_callback, "POINT_MOVE_SAFE_Z", safe_z_mm=safe_z, initial_z_mm=float(start_snapshot["z"]))
             self._move_absolute(z=safe_z, label="mesh_z_segura")
             safe_observed = machine.get_motion_snapshot()
+            self._notify_probe_progress(progress_callback, "POINT_CONFIRM_SAFE_Z", safe_z_mm=safe_z, observed_z_mm=float(safe_observed["z"]))
             with self._lock:
                 xy_sequence = self._packet_sequence
             self._notify_probe_progress(progress_callback, "POINT_MOVE_XY", x_mm=float(point["x_machine"]), y_mm=float(point["y_machine"]), safe_z_mm=safe_z, observed_z_mm=float(safe_observed["z"]))
             self._move_absolute(x=float(point["x_machine"]), y=float(point["y_machine"]), label=f"mesh_xy_{point['index']}")
-            probe_feed_mm_min = self._probe_config_float(probe_config, "probe_feed_mm_min")
+            xy_observed = machine.get_motion_snapshot()
+            self._notify_probe_progress(progress_callback, "POINT_CONFIRM_XY", x_mm=float(xy_observed["x"]), y_mm=float(xy_observed["y"]), observed_z_mm=float(xy_observed["z"]))
             probe = self._perform_probe_descent(
                 label=f"mesh_probe_{point['index']}",
-                probe_step_mm=self._probe_config_float(probe_config, "probe_step_mm"),
-                probe_speed_mm_s=None if probe_feed_mm_min is None else probe_feed_mm_min / 60.0,
-                retract_mm=self._probe_config_float(probe_config, "retract_mm"),
+                profile=self._resolve_probe_profile(probe_config),
                 open_after_sequence=xy_sequence,
                 progress_callback=progress_callback,
             )
@@ -981,6 +1052,7 @@ class MachineRuntime:
             detail = {"probe_raw": raw, "probe_filtered": filtered, "last_packet_age_s": age, "open_stable_ms": stable_ms, "packet_sequence": sequence, "open_ok": open_ok, "fresh_ok": fresh_ok, "stable_ok": stable_ok, "required_stable_ms": required_stable_ms, "observed_stable_ms": stable_ms}
             # Unit runtimes have no serial driver; production always requires a post-motion packet.
             if not isinstance(self._driver, SerialDriver) and open_ok and fresh_ok and stable_ok:
+                self._notify_probe_progress(progress_callback, stage, **detail)
                 return detail
             if sequence > after_sequence and open_ok and fresh_ok and stable_ok:
                 self._notify_probe_progress(progress_callback, stage, **detail)
@@ -995,9 +1067,7 @@ class MachineRuntime:
         self,
         *,
         label: str,
-        probe_step_mm: float | None = None,
-        probe_speed_mm_s: float | None = None,
-        retract_mm: float | None = None,
+        profile: ProbeMotionProfile,
         open_after_sequence: int | None = None,
         progress_callback: Callable[[str, dict[str, Any]], None] | None = None,
     ) -> ProbeResult:
@@ -1009,9 +1079,6 @@ class MachineRuntime:
             raise MachineRuntimeError("No hay control físico inicializado.")
         if not machine.axis_is_homed("z"):
             raise MachineRuntimeError("Z debe tener homing antes de sondear.")
-        step_size = probe_step_mm if probe_step_mm and probe_step_mm > 0 else self.config.probe_step_mm
-        probe_speed = probe_speed_mm_s if probe_speed_mm_s and probe_speed_mm_s > 0 else self.config.probe_lower_speed_mm_s
-        retract_distance = retract_mm if retract_mm and retract_mm > 0 else self.config.probe_retract_mm
         with self._lock:
             packet_sequence = self._packet_sequence
         self._require_fresh_open_probe(
@@ -1022,6 +1089,14 @@ class MachineRuntime:
         start = machine.get_motion_snapshot()
         start_x = float(start["x"])
         start_y = float(start["y"])
+        self._notify_probe_progress(
+            progress_callback,
+            "POINT_DESCENT_STARTED",
+            source=profile.source,
+            probe_step_mm=profile.probe_step_mm,
+            probe_feed_mm_min=profile.probe_feed_mm_min,
+            retract_mm=profile.retract_mm,
+        )
         while True:
             self._raise_if_cancelled()
             probe_state = self.get_live_probe_state(require_fresh=True)
@@ -1030,31 +1105,54 @@ class MachineRuntime:
             snapshot = machine.get_motion_snapshot()
             current_z = float(snapshot["z"])
             remaining = current_z - machine.z_limits.minimum
-            if remaining <= self.config.settle_tolerance_mm:
+            if remaining <= profile.settle_tolerance_mm:
                 raise MachineRuntimeError("Se alcanzó el límite mínimo Z sin contacto de sonda.")
-            step = min(step_size, remaining)
-            self._notify_probe_progress(progress_callback, "POINT_LOWER_STEP", step_mm=step, feed_mm_min=probe_speed * 60.0)
-            result = jog.move_relative("z", -step, probe_speed)
+            step = min(profile.probe_step_mm, remaining)
+            command_started_at = time.monotonic()
+            self._notify_probe_progress(progress_callback, "POINT_LOWER_STEP", step_mm=step, feed_mm_min=profile.probe_feed_mm_min, command_started_at=command_started_at)
+            result = jog.move_relative("z", -step, profile.probe_speed_mm_s)
             with self._lock:
                 self._last_movement = result
                 self._last_command_text = f"{label}_lower_step"
             self._wait_for_axis("z", float(result["target"]), "paso de sonda", start_position=current_z)
+            observed = machine.get_motion_snapshot()
+            command_completed_at = time.monotonic()
+            self._notify_probe_progress(
+                progress_callback,
+                "POINT_CONFIRM_STEP",
+                step_mm=step,
+                z_mm=float(observed["z"]),
+                command_started_at=command_started_at,
+                command_completed_at=command_completed_at,
+                command_duration_s=command_completed_at - command_started_at,
+            )
         snapshot = machine.get_motion_snapshot()
         contact_z = float(snapshot["z"])
         self._notify_probe_progress(progress_callback, "POINT_CONTACT_DETECTED", z_mm=contact_z)
         retract_available = machine.z_limits.maximum - contact_z
-        if retract_available <= self.config.settle_tolerance_mm:
+        if retract_available <= profile.settle_tolerance_mm:
             raise MachineRuntimeError("No hay margen Z para retraer después del contacto.")
-        retract = min(retract_distance, retract_available)
-        retract_speed = self.config.probe_retract_speed_mm_s
-        self._notify_probe_progress(progress_callback, "POINT_RETRACT", retract_mm=retract, feed_mm_min=retract_speed * 60.0)
+        retract = min(profile.retract_mm, retract_available)
+        self._notify_probe_progress(progress_callback, "POINT_RETRACT", retract_mm=retract, feed_mm_min=profile.retract_feed_mm_min)
         with self._lock:
             retract_sequence = self._packet_sequence
-        result = jog.move_relative("z", retract, retract_speed)
+        command_started_at = time.monotonic()
+        result = jog.move_relative("z", retract, profile.retract_speed_mm_s)
         with self._lock:
             self._last_movement = result
             self._last_command_text = f"{label}_retract"
         self._wait_for_axis("z", float(result["target"]), "retracto de sonda", start_position=contact_z)
+        retract_snapshot = machine.get_motion_snapshot()
+        command_completed_at = time.monotonic()
+        self._notify_probe_progress(
+            progress_callback,
+            "POINT_CONFIRM_RETRACT",
+            retract_mm=retract,
+            z_mm=float(retract_snapshot["z"]),
+            command_started_at=command_started_at,
+            command_completed_at=command_completed_at,
+            command_duration_s=command_completed_at - command_started_at,
+        )
         self._require_fresh_open_probe(
             after_sequence=retract_sequence,
             stage="POINT_VERIFY_PROBE_OPEN_AFTER_RETRACT",

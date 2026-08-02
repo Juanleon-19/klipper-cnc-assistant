@@ -124,6 +124,14 @@ def _reject_active_motion(request: Request) -> None:
         raise ApplicationError("No se puede reiniciar o eliminar mientras existe movimiento físico activo. Pause o cancele de forma segura primero.")
 
 
+def _physical_map_response(request: Request, payload: dict[str, object]) -> PhysicalMapResponse:
+    runtime = request.app.state.machine_runtime
+    enriched = dict(payload)
+    probe_config = enriched.get("probe_config")
+    enriched["probe_config"] = runtime.effective_probe_profile_payload(probe_config if isinstance(probe_config, dict) else None)
+    return PhysicalMapResponse(payload=enriched)
+
+
 def build_router() -> APIRouter:
     router = APIRouter(prefix="/api")
 
@@ -428,6 +436,7 @@ def build_router() -> APIRouter:
                 max_spacing_mm=payload.max_spacing_mm,
                 margin_mm=payload.margin_mm,
                 safe_z_mm=payload.safe_z_mm,
+                probe_profile_source=payload.probe_profile_source,
                 probe_step_mm=payload.probe_step_mm,
                 probe_feed_mm_min=payload.probe_feed_mm_min,
                 retract_mm=payload.retract_mm,
@@ -453,12 +462,13 @@ def build_router() -> APIRouter:
                 max_spacing_mm=payload.max_spacing_mm,
                 margin_mm=payload.margin_mm,
                 safe_z_mm=payload.safe_z_mm,
+                probe_profile_source=payload.probe_profile_source,
                 probe_step_mm=payload.probe_step_mm,
                 probe_feed_mm_min=payload.probe_feed_mm_min,
                 retract_mm=payload.retract_mm,
             ),
         )
-        return PhysicalMapResponse(payload=plan)
+        return _physical_map_response(request, plan)
 
     @router.post("/projects/{project_id}/operations/{operation_id}/physical-map/plan-from-reference", response_model=PhysicalMapResponse)
     def plan_physical_map_from_reference(project_id: str, operation_id: str, payload: PhysicalMapPlanRequest, request: Request) -> PhysicalMapResponse:
@@ -477,6 +487,7 @@ def build_router() -> APIRouter:
             max_spacing_mm=payload.max_spacing_mm,
             margin_mm=payload.margin_mm,
             safe_z_mm=payload.safe_z_mm,
+            probe_profile_source=payload.probe_profile_source,
             probe_step_mm=payload.probe_step_mm,
             probe_feed_mm_min=payload.probe_feed_mm_min,
             retract_mm=payload.retract_mm,
@@ -500,12 +511,12 @@ def build_router() -> APIRouter:
             session_id=session_id,
             config=config,
         )
-        return PhysicalMapResponse(payload=plan)
+        return _physical_map_response(request, plan)
 
     @router.get("/projects/{project_id}/operations/{operation_id}/physical-map", response_model=PhysicalMapResponse)
     def get_physical_map(project_id: str, operation_id: str, request: Request) -> PhysicalMapResponse:
         service = request.app.state.physical_map_service
-        return PhysicalMapResponse(payload=service.get_latest_map(project_id, operation_id))
+        return _physical_map_response(request, service.get_latest_map(project_id, operation_id))
 
 
     @router.get("/projects/{project_id}/operations/{operation_id}/physical-map/history", response_model=list[dict[str, object]])
@@ -516,7 +527,7 @@ def build_router() -> APIRouter:
     def repeat_physical_map(project_id: str, map_id: str, request: Request) -> PhysicalMapResponse:
         _reject_active_motion(request)
         payload = request.app.state.physical_map_service.repeat_measurement(project_id=project_id, map_id=map_id)
-        return PhysicalMapResponse(payload=payload)
+        return _physical_map_response(request, payload)
 
     @router.post("/projects/{project_id}/physical-maps/{map_id:path}/execute-next", response_model=PhysicalMapResponse)
     def execute_next_physical_map_point(project_id: str, map_id: str, request: Request) -> PhysicalMapResponse:
@@ -536,7 +547,7 @@ def build_router() -> APIRouter:
             duration_s=float(result["duration_s"]),
             error=None,
         )
-        return PhysicalMapResponse(payload=updated)
+        return _physical_map_response(request, updated)
 
     @router.post("/projects/{project_id}/physical-maps/{map_id:path}/execute-all", response_model=PhysicalMapResponse)
     def execute_all_physical_map_points(project_id: str, map_id: str, request: Request) -> PhysicalMapResponse:
@@ -545,7 +556,7 @@ def build_router() -> APIRouter:
             map_id=map_id,
             runtime=request.app.state.machine_runtime,
         )
-        return PhysicalMapResponse(payload=updated)
+        return _physical_map_response(request, updated)
 
     @router.get("/projects/{project_id}/physical-maps/{map_id:path}/log", response_model=dict[str, object])
     def get_physical_map_log(project_id: str, map_id: str, request: Request) -> dict[str, object]:
@@ -564,7 +575,7 @@ def build_router() -> APIRouter:
             duration_s=payload.duration_s,
             error=payload.error,
         )
-        return PhysicalMapResponse(payload=updated)
+        return _physical_map_response(request, updated)
 
     @router.post("/projects/{project_id}/physical-maps/{map_id:path}/points/{point_index}/retry", response_model=PhysicalMapResponse)
     def retry_physical_map_point(project_id: str, map_id: str, point_index: int, request: Request) -> PhysicalMapResponse:
@@ -574,18 +585,18 @@ def build_router() -> APIRouter:
         request.app.state.physical_map_service.retry_failed_point(project_id, map_id, point_index)
         payload = request.app.state.mesh_execution_service.start_all(project_id=project_id, map_id=map_id, runtime=runtime)
         payload.update({"retry_accepted": True, "worker_started": True, "point_index": point_index, **readiness})
-        return PhysicalMapResponse(payload=payload)
+        return _physical_map_response(request, payload)
 
     @router.post("/projects/{project_id}/physical-maps/{map_id:path}/points/{point_index}/skip", response_model=PhysicalMapResponse)
     def skip_physical_map_point(project_id: str, map_id: str, point_index: int, request: Request) -> PhysicalMapResponse:
         _reject_active_motion(request)
         payload = request.app.state.physical_map_service.skip_failed_point(project_id, map_id, point_index)
-        return PhysicalMapResponse(payload=payload)
+        return _physical_map_response(request, payload)
 
     @router.post("/projects/{project_id}/physical-maps/{map_id:path}/pause", response_model=PhysicalMapResponse)
     def pause_physical_map(project_id: str, map_id: str, request: Request) -> PhysicalMapResponse:
         updated = request.app.state.mesh_execution_service.pause(project_id=project_id, map_id=map_id)
-        return PhysicalMapResponse(payload=updated)
+        return _physical_map_response(request, updated)
 
     @router.post("/projects/{project_id}/physical-maps/{map_id:path}/resume", response_model=PhysicalMapResponse)
     def resume_physical_map(project_id: str, map_id: str, request: Request) -> PhysicalMapResponse:
@@ -594,11 +605,11 @@ def build_router() -> APIRouter:
             map_id=map_id,
             runtime=request.app.state.machine_runtime,
         )
-        return PhysicalMapResponse(payload=updated)
+        return _physical_map_response(request, updated)
 
     @router.post("/projects/{project_id}/physical-maps/{map_id:path}/cancel", response_model=PhysicalMapResponse)
     def cancel_physical_map(project_id: str, map_id: str, request: Request) -> PhysicalMapResponse:
-        return PhysicalMapResponse(payload=request.app.state.mesh_execution_service.cancel(project_id=project_id, map_id=map_id, runtime=request.app.state.machine_runtime))
+        return _physical_map_response(request, request.app.state.mesh_execution_service.cancel(project_id=project_id, map_id=map_id, runtime=request.app.state.machine_runtime))
 
     @router.get("/projects/{project_id}/operations/{operation_id}/physical-map/height-map", response_model=HeightMapResponse)
     def get_physical_map_as_height_map(project_id: str, operation_id: str, request: Request) -> HeightMapResponse:
