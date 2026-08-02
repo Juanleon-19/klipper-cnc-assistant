@@ -21,6 +21,7 @@ import type {
   CapturedPosition,
   CoordinateReference,
   PhysicalMapExclusion,
+  ProbeProfileSource,
   PhysicalMeshPoint,
   Bounds,
   OperationAnalysis,
@@ -153,6 +154,23 @@ function isPhysicalMapReady(payload: PhysicalMapPayload | null | undefined): pay
   return payload.map_ready_state === "MAP_READY";
 }
 
+function resolveProbeProfileSource(payload: PhysicalMapPayload | null | undefined): ProbeProfileSource {
+  const config = payload?.probe_config;
+  if (config?.source === "map_override") {
+    return "map_override";
+  }
+  return "machine_reference_profile";
+}
+
+function describeMeshProbeState(payload: PhysicalMapPayload | null | undefined): string | null {
+  const execution = payload?.execution;
+  const pointState = typeof execution?.point_state === "string" ? execution.point_state : null;
+  if (pointState === "POINT_DESCENT_STARTED" || pointState === "POINT_LOWER_STEP" || pointState === "POINT_CONFIRM_STEP") {
+    return "Descendiendo: búsqueda de contacto";
+  }
+  return typeof execution?.last_event === "string" ? execution.last_event : null;
+}
+
 export function ProjectWorkspace({
   project,
   busyKey,
@@ -215,6 +233,7 @@ export function ProjectWorkspace({
   const [edgeRetreatBottomInput, setEdgeRetreatBottomInput] = useState("2.0");
   const [edgeRetreatTopInput, setEdgeRetreatTopInput] = useState("2.0");
   const [meshSpacingInput, setMeshSpacingInput] = useState("10");
+  const [probeProfileMode, setProbeProfileMode] = useState<ProbeProfileSource>("machine_reference_profile");
   const [probeStepInput, setProbeStepInput] = useState("0.05");
   const [probeSpeedInput, setProbeSpeedInput] = useState("60");
   const [probeRetractInput, setProbeRetractInput] = useState("1.0");
@@ -239,12 +258,16 @@ export function ProjectWorkspace({
     reference_probe_retract_feed_mm_min: "60",
   });
   const [machineSettingsMessage, setMachineSettingsMessage] = useState("");
+  const physicalMapPollInFlight = useRef(false);
 
   useEffect(() => {
     if (!machine.isPhysical) {
       return;
     }
     void api.getMachineSettings().then((settings) => {
+      const nextReferenceProbeStep = String(settings.reference_probe_step_mm ?? 0.05);
+      const nextReferenceProbeFeed = String(settings.reference_probe_feed_mm_min ?? 60);
+      const nextReferenceProbeRetract = String(settings.reference_probe_retract_mm ?? 1.0);
       setMachineSettingsInput({
         reference_prep_z_mm: String(settings.reference_prep_z_mm ?? 115),
         reference_prep_z_feed_mm_min: String(settings.reference_prep_z_feed_mm_min ?? 180),
@@ -252,15 +275,18 @@ export function ProjectWorkspace({
         no_progress_timeout_s: String(settings.no_progress_timeout_s ?? 60),
         position_tolerance_mm: String(settings.position_tolerance_mm ?? 0.05),
         velocity_tolerance_mm_s: String(settings.velocity_tolerance_mm_s ?? 0.02),
-        reference_probe_step_mm: String(settings.reference_probe_step_mm ?? 0.05),
-        reference_probe_feed_mm_min: String(settings.reference_probe_feed_mm_min ?? 60),
-        reference_probe_retract_mm: String(settings.reference_probe_retract_mm ?? 1.0),
+        reference_probe_step_mm: nextReferenceProbeStep,
+        reference_probe_feed_mm_min: nextReferenceProbeFeed,
+        reference_probe_retract_mm: nextReferenceProbeRetract,
         reference_probe_retract_feed_mm_min: String(settings.reference_probe_retract_feed_mm_min ?? 60),
       });
+      setProbeStepInput((current) => current === "0.05" || probeProfileMode === "machine_reference_profile" ? nextReferenceProbeStep : current);
+      setProbeSpeedInput((current) => current === "60" || probeProfileMode === "machine_reference_profile" ? nextReferenceProbeFeed : current);
+      setProbeRetractInput((current) => current === "1.0" || probeProfileMode === "machine_reference_profile" ? nextReferenceProbeRetract : current);
     }).catch(() => {
       setMachineSettingsMessage("No se pudo leer la configuración avanzada de máquina.");
     });
-  }, [machine.isPhysical]);
+  }, [machine.isPhysical, probeProfileMode]);
 
   useEffect(() => {
     setSelectedOperationId((current) => {
@@ -376,6 +402,10 @@ export function ProjectWorkspace({
     }
     let cancelled = false;
     const poll = async () => {
+      if (physicalMapPollInFlight.current) {
+        return;
+      }
+      physicalMapPollInFlight.current = true;
       try {
         const nextMap = (await api.getPhysicalMap(project.id, selectedOperation.id)).payload;
         if (cancelled) {
@@ -403,15 +433,18 @@ export function ProjectWorkspace({
         }
       } catch {
         // Keep the last visible state and try again on the next tick.
+      } finally {
+        physicalMapPollInFlight.current = false;
       }
     };
     const timer = window.setInterval(() => {
       void poll();
-    }, 1000);
+    }, 1500);
     void poll();
     return () => {
       cancelled = true;
       window.clearInterval(timer);
+      physicalMapPollInFlight.current = false;
     };
   }, [project, selectedOperation, physicalMap?.map_id, physicalMap?.status, physicalMap?.execution]);
 
@@ -515,9 +548,11 @@ export function ProjectWorkspace({
     }
     const meshConfig = typeof physicalMap.mesh_config === "object" && physicalMap.mesh_config ? physicalMap.mesh_config : null;
     const probeConfig = typeof physicalMap.probe_config === "object" && physicalMap.probe_config ? physicalMap.probe_config : null;
+    const nextProbeProfileMode = resolveProbeProfileSource(physicalMap);
     const nextRows = Number(meshConfig?.rows ?? physicalMap.rows);
     const nextColumns = Number(meshConfig?.columns ?? physicalMap.columns);
     const nextGridMode = meshConfig?.grid_mode ?? physicalMap.grid_mode;
+    setProbeProfileMode(nextProbeProfileMode);
     if (nextGridMode === "manual" || nextGridMode === "suggested") {
       setGridDefinitionMode(nextGridMode);
     }
@@ -544,9 +579,9 @@ export function ProjectWorkspace({
       setMeshSpacingInput(String(nextSpacing));
     }
     const nextSafeZ = Number(probeConfig?.safe_z_mm);
-    const nextProbeStep = Number(probeConfig?.probe_step_mm);
-    const nextProbeFeed = Number(probeConfig?.probe_feed_mm_min);
-    const nextRetract = Number(probeConfig?.retract_mm);
+    const nextProbeStep = Number((nextProbeProfileMode === "map_override" ? probeConfig?.probe_step_mm : probeConfig?.effective_probe_step_mm) ?? probeConfig?.probe_step_mm);
+    const nextProbeFeed = Number((nextProbeProfileMode === "map_override" ? probeConfig?.probe_feed_mm_min : probeConfig?.effective_probe_feed_mm_min) ?? probeConfig?.probe_feed_mm_min);
+    const nextRetract = Number((nextProbeProfileMode === "map_override" ? probeConfig?.retract_mm : probeConfig?.effective_retract_mm) ?? probeConfig?.retract_mm);
     if (Number.isFinite(nextSafeZ) && nextSafeZ > 0) {
       setSafeZInput(String(nextSafeZ));
     }
@@ -1292,9 +1327,20 @@ export function ProjectWorkspace({
     const probeHeight = Math.max(0, project.material.alto_mm - edgeBottom - edgeTop);
     const plannedPoints = rows * columns;
     const safeZ = parsePositive(safeZInput);
-    const probeStep = parsePositive(probeStepInput);
-    const probeFeed = parsePositive(probeSpeedInput);
-    const probeRetract = parsePositive(probeRetractInput);
+    const configuredProbeStep = parsePositive(probeStepInput);
+    const configuredProbeFeed = parsePositive(probeSpeedInput);
+    const configuredProbeRetract = parsePositive(probeRetractInput);
+    const currentProbeConfig = physicalMap?.probe_config ?? null;
+    const effectiveProfileSource = resolveProbeProfileSource(physicalMap) ?? probeProfileMode;
+    const inheritedProbeStep = parsePositive(machineSettingsInput.reference_probe_step_mm);
+    const inheritedProbeFeed = parsePositive(machineSettingsInput.reference_probe_feed_mm_min);
+    const inheritedProbeRetract = parsePositive(machineSettingsInput.reference_probe_retract_mm);
+    const effectiveProbeStep = Number(currentProbeConfig?.effective_probe_step_mm ?? (effectiveProfileSource === "map_override" ? configuredProbeStep : inheritedProbeStep));
+    const effectiveProbeFeed = Number(currentProbeConfig?.effective_probe_feed_mm_min ?? (effectiveProfileSource === "map_override" ? configuredProbeFeed : inheritedProbeFeed));
+    const effectiveProbeRetract = Number(currentProbeConfig?.effective_retract_mm ?? (effectiveProfileSource === "map_override" ? configuredProbeRetract : inheritedProbeRetract));
+    const meshProbeStateMessage = describeMeshProbeState(physicalMap);
+    const persistenceCount = typeof physicalMap?.execution?.persistence_count === "number" ? physicalMap.execution.persistence_count : null;
+    const stepCounter = typeof physicalMap?.execution?.step_counter === "number" ? physicalMap.execution.step_counter : null;
     const spacingTarget = parsePositive(meshSpacingInput);
     const executablePoints = physicalMap?.executable_point_count ?? physicalMap?.points?.filter((point) => point.status !== "EXCLUDED").length ?? plannedPoints;
     const excludedPoints = physicalMap?.excluded_count ?? physicalMap?.points?.filter((point) => point.status === "EXCLUDED").length ?? 0;
@@ -1305,9 +1351,9 @@ export function ProjectWorkspace({
     const meshConfigValid = probeWidth > 0
       && probeHeight > 0
       && safeZ !== undefined
-      && probeStep !== undefined
-      && probeFeed !== undefined
-      && probeRetract !== undefined
+      && Number.isFinite(effectiveProbeStep) && effectiveProbeStep > 0
+      && Number.isFinite(effectiveProbeFeed) && effectiveProbeFeed > 0
+      && Number.isFinite(effectiveProbeRetract) && effectiveProbeRetract > 0
       && (gridDefinitionMode === "manual" || spacingTarget !== undefined);
     const filteredPhysicalPoints = (physicalMap?.points ?? []).filter((point) => {
       if (pointFilter === "ALL") return true;
@@ -1315,7 +1361,23 @@ export function ProjectWorkspace({
       if (pointFilter === "PENDING") return ["PENDING", "MOVING", "PROBING"].includes(point.status);
       return point.status === pointFilter;
     });
-    const physicalPlanPayload = { grid_mode: gridDefinitionMode, rows, columns, edge_margin_left_mm: edgeLeft, edge_margin_right_mm: edgeRight, edge_margin_bottom_mm: edgeBottom, edge_margin_top_mm: edgeTop, exclusions: meshExclusions, max_spacing_mm: spacingTarget, margin_mm: 0, safe_z_mm: safeZ, probe_step_mm: probeStep, probe_feed_mm_min: probeFeed, retract_mm: probeRetract };
+    const physicalPlanPayload = {
+      grid_mode: gridDefinitionMode,
+      rows,
+      columns,
+      edge_margin_left_mm: edgeLeft,
+      edge_margin_right_mm: edgeRight,
+      edge_margin_bottom_mm: edgeBottom,
+      edge_margin_top_mm: edgeTop,
+      exclusions: meshExclusions,
+      max_spacing_mm: spacingTarget,
+      margin_mm: 0,
+      safe_z_mm: safeZ,
+      probe_profile_source: probeProfileMode,
+      probe_step_mm: probeProfileMode === "map_override" ? configuredProbeStep : undefined,
+      probe_feed_mm_min: probeProfileMode === "map_override" ? configuredProbeFeed : undefined,
+      retract_mm: probeProfileMode === "map_override" ? configuredProbeRetract : undefined,
+    };
     const mapTabItems: Array<{ id: MapTab; icon: string; label: string; title: string }> = [
       { id: "mapa2d", icon: "▦", label: "Mapa 2D", title: "Ver región, puntos y recorrido de sondeo" },
       { id: "superficie3d", icon: "◭", label: "Superficie 3D", title: "Ver superficie medida sin perder cámara" },
@@ -1429,7 +1491,7 @@ export function ProjectWorkspace({
                       setHeightMapBusy(true);
                       setWorkspaceError("");
                       try {
-                        const suggestion = await api.suggestPhysicalMap(project.id, selectedOperation.id, { grid_mode: "suggested", rows, columns, edge_margin_left_mm: edgeLeft, edge_margin_right_mm: edgeRight, edge_margin_bottom_mm: edgeBottom, edge_margin_top_mm: edgeTop, exclusions: meshExclusions, max_spacing_mm: parsePositive(meshSpacingInput), margin_mm: 0, safe_z_mm: parsePositive(safeZInput), probe_step_mm: parsePositive(probeStepInput), probe_feed_mm_min: parsePositive(probeSpeedInput), retract_mm: parsePositive(probeRetractInput) });
+                        const suggestion = await api.suggestPhysicalMap(project.id, selectedOperation.id, { ...physicalPlanPayload, grid_mode: "suggested" });
                         setMeshSuggestion(suggestion);
                         setMeshRowsInput(String(suggestion.rows));
                         setMeshColumnsInput(String(suggestion.columns));
@@ -1444,11 +1506,27 @@ export function ProjectWorkspace({
                 </div>
               )}
             </div>
-            <div className="form-grid form-grid--dense">
-              <label>Z segura de traslado (mm)<input value={safeZInput} inputMode="decimal" onChange={(event) => { setSafeZInput(event.target.value); invalidateMeshPreview(); }} /></label>
-              <label>Paso de sonda (mm)<input value={probeStepInput} inputMode="decimal" onChange={(event) => { setProbeStepInput(event.target.value); invalidateMeshPreview(); }} /></label>
-              <label>Velocidad de sonda (mm/min)<input value={probeSpeedInput} inputMode="decimal" onChange={(event) => { setProbeSpeedInput(event.target.value); invalidateMeshPreview(); }} /></label>
-              <label>Retracto (mm)<input value={probeRetractInput} inputMode="decimal" onChange={(event) => { setProbeRetractInput(event.target.value); invalidateMeshPreview(); }} /></label>
+            <div className="subpanel subpanel--soft">
+              <div className="section-heading section-heading--stacked">
+                <div><p className="eyebrow">Perfil de sondeo</p><h4>Contrato efectivo de descenso</h4></div>
+                <div className="map-segmented" aria-label="Perfil de sondeo">
+                  <button className={`map-segment-button${probeProfileMode === "machine_reference_profile" ? " map-segment-button--active" : ""}`} type="button" onClick={() => { setProbeProfileMode("machine_reference_profile"); invalidateMeshPreview(); }}>Heredar referencia</button>
+                  <button className={`map-segment-button${probeProfileMode === "map_override" ? " map-segment-button--active" : ""}`} type="button" onClick={() => { setProbeProfileMode("map_override"); invalidateMeshPreview(); }}>Override del mapa</button>
+                </div>
+              </div>
+              <div className="form-grid form-grid--dense">
+                <label>Z segura de traslado (mm)<input value={safeZInput} inputMode="decimal" onChange={(event) => { setSafeZInput(event.target.value); invalidateMeshPreview(); }} /></label>
+                <label>Paso de sonda (mm)<input value={probeStepInput} inputMode="decimal" disabled={probeProfileMode === "machine_reference_profile"} onChange={(event) => { setProbeStepInput(event.target.value); invalidateMeshPreview(); }} /></label>
+                <label>Velocidad de sonda (mm/min)<input value={probeSpeedInput} inputMode="decimal" disabled={probeProfileMode === "machine_reference_profile"} onChange={(event) => { setProbeSpeedInput(event.target.value); invalidateMeshPreview(); }} /></label>
+                <label>Retracto (mm)<input value={probeRetractInput} inputMode="decimal" disabled={probeProfileMode === "machine_reference_profile"} onChange={(event) => { setProbeRetractInput(event.target.value); invalidateMeshPreview(); }} /></label>
+              </div>
+              <div className="info-grid info-grid--double compact-grid">
+                <div className="metric-box"><span>Fuente efectiva</span><strong>{effectiveProfileSource === "map_override" ? "Override del mapa" : "Perfil de referencia"}</strong></div>
+                <div className="metric-box"><span>Paso efectivo</span><strong>{formatMillimeters(Number.isFinite(effectiveProbeStep) ? effectiveProbeStep : null, 3)}</strong></div>
+                <div className="metric-box"><span>Velocidad efectiva</span><strong>{formatMillimeters(Number.isFinite(effectiveProbeFeed) ? effectiveProbeFeed : null, 0)}/min</strong></div>
+                <div className="metric-box"><span>Retracto efectivo</span><strong>{formatMillimeters(Number.isFinite(effectiveProbeRetract) ? effectiveProbeRetract : null, 3)}</strong></div>
+              </div>
+              <p className="muted">{probeProfileMode === "machine_reference_profile" ? "La malla hereda exactamente el paso, la velocidad y el retracto de Tomar referencia. Los campos numéricos quedan solo informativos." : "El mapa usa un override explícito. Este modo debe verse como una sustitución deliberada del perfil de referencia."}</p>
             </div>
             <div className="subpanel subpanel--soft">
               <div className="section-heading"><h4>Retiro del borde del material</h4><label className="inline-check"><input type="checkbox" checked={useUniformEdgeRetreat} onChange={(event) => { setUseUniformEdgeRetreat(event.target.checked); invalidateMeshPreview(); }} /> Usar el mismo retiro en todos los bordes</label></div>
@@ -1491,13 +1569,15 @@ export function ProjectWorkspace({
               <div className="metric-box"><span>Separación X</span><strong>{formatMillimeters(physicalMap?.grid?.dx_mm ?? (columns > 1 ? probeWidth / (columns - 1) : null), 3)}</strong></div>
               <div className="metric-box"><span>Separación Y</span><strong>{formatMillimeters(physicalMap?.grid?.dy_mm ?? (rows > 1 ? probeHeight / (rows - 1) : null), 3)}</strong></div>
               <div className="metric-box"><span>Z segura</span><strong>{formatMillimeters(safeZ, 3)}</strong></div>
-              <div className="metric-box"><span>Paso / velocidad</span><strong>{formatMillimeters(probeStep, 3)} · {formatMillimeters(probeFeed, 0)}/min</strong></div>
-              <div className="metric-box"><span>Retracto</span><strong>{formatMillimeters(probeRetract, 3)}</strong></div>
+              <div className="metric-box"><span>Perfil efectivo</span><strong>{effectiveProfileSource === "map_override" ? "Override" : "Referencia"}</strong></div>
+              <div className="metric-box"><span>Paso / velocidad</span><strong>{formatMillimeters(Number.isFinite(effectiveProbeStep) ? effectiveProbeStep : null, 3)} · {formatMillimeters(Number.isFinite(effectiveProbeFeed) ? effectiveProbeFeed : null, 0)}/min</strong></div>
+              <div className="metric-box"><span>Retracto</span><strong>{formatMillimeters(Number.isFinite(effectiveProbeRetract) ? effectiveProbeRetract : null, 3)}</strong></div>
               <div className="metric-box"><span>Primer punto</span><strong>{firstPhysicalPoint ? `X ${formatMillimeters(firstPhysicalPoint.x_local, 3)} · Y ${formatMillimeters(firstPhysicalPoint.y_local, 3)}` : "Pendiente de preview"}</strong></div>
               <div className="metric-box"><span>Último punto</span><strong>{lastPhysicalPoint ? `X ${formatMillimeters(lastPhysicalPoint.x_local, 3)} · Y ${formatMillimeters(lastPhysicalPoint.y_local, 3)}` : "Pendiente de preview"}</strong></div>
             </div>
             {probeWidth <= 0 || probeHeight <= 0 ? <div className="alert alert--warning">El retiro de los bordes deja una región de sondeo inválida. Reduzca los valores o revise las dimensiones del material.</div> : null}
             {!meshConfigValid ? <div className="alert alert--warning">La configuración de malla es inválida. Revise filas, columnas, límites, separación objetivo y parámetros de sonda antes de continuar.</div> : null}
+            {meshProbeStateMessage ? <div className="alert alert--info">{meshProbeStateMessage}{stepCounter !== null ? ` · pasos ${stepCounter}` : ""}{persistenceCount !== null ? ` · persistencias ${persistenceCount}` : ""}</div> : null}
             {meshValidationMessage ? <div className="alert alert--info">{meshValidationMessage}</div> : null}
             <div className="action-grid">
               <button className="button" type="button" disabled={heightMapBusy || !selectedOperation || !meshConfigValid} onClick={() => void withPhysicalMapAction(async () => {

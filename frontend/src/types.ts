@@ -487,6 +487,33 @@ export type PhysicalMapExclusion = {
   radius_mm?: number | null;
 };
 
+export type ProbeProfileSource = "machine_reference_profile" | "map_override";
+
+export type PhysicalMapProbeConfig = {
+  safe_z_mm?: number | null;
+  source?: ProbeProfileSource;
+  probe_step_mm?: number | null;
+  probe_feed_mm_min?: number | null;
+  retract_mm?: number | null;
+  effective_probe_step_mm?: number | null;
+  effective_probe_feed_mm_min?: number | null;
+  effective_retract_mm?: number | null;
+  effective_retract_feed_mm_min?: number | null;
+  effective_probe_open_stable_ms?: number | null;
+  effective_settle_tolerance_mm?: number | null;
+};
+
+export type PhysicalMapExecution = Record<string, unknown> & {
+  worker_active?: boolean;
+  phase?: string;
+  point_state?: string;
+  last_event?: string;
+  last_progress_at?: string;
+  step_counter?: number;
+  persistence_count?: number;
+  persistence_duration_s?: number;
+};
+
 export type PhysicalMapPayload = Record<string, unknown> & {
   map_id?: string | null;
   preview_id?: string;
@@ -529,7 +556,8 @@ export type PhysicalMapPayload = Record<string, unknown> & {
     max_spacing_mm?: number | null;
     margin_mm?: number | null;
   };
-  probe_config?: { safe_z_mm?: number | null; probe_step_mm?: number | null; probe_feed_mm_min?: number | null; retract_mm?: number | null };
+  probe_config?: PhysicalMapProbeConfig;
+  execution?: PhysicalMapExecution;
   tool_references?: Record<string, unknown>;
 };
 

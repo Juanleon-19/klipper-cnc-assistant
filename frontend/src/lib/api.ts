@@ -66,6 +66,7 @@ export type PhysicalMapPlanPayload = {
   max_spacing_mm?: number;
   margin_mm?: number;
   safe_z_mm?: number;
+  probe_profile_source?: "machine_reference_profile" | "map_override";
   probe_step_mm?: number;
   probe_feed_mm_min?: number;
   retract_mm?: number;
