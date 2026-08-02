@@ -40,6 +40,30 @@ function percent(value: number | null | undefined): string {
   return `${(clamp(value) * 100).toFixed(1)} %`;
 }
 
+function formatDurationSeconds(value: number | null | undefined): string {
+  if (typeof value !== "number" || Number.isNaN(value)) {
+    return "-";
+  }
+  const total = Math.max(0, Math.round(value));
+  const hours = Math.floor(total / 3600);
+  const minutes = Math.floor((total % 3600) / 60);
+  const seconds = total % 60;
+  if (hours > 0) {
+    return `${hours} h ${minutes.toString().padStart(2, "0")} min`;
+  }
+  if (minutes > 0) {
+    return `${minutes} min ${seconds.toString().padStart(2, "0")} s`;
+  }
+  return `${seconds} s`;
+}
+
+function estimateMethodLabel(value: string | null | undefined): string {
+  if (value === "moonraker_analysis") return "Moonraker analysis";
+  if (value === "calibrated") return "calibrado";
+  if (value === "internal") return "interno";
+  return value || "-";
+}
+
 function isConflictDetail(value: unknown): value is JobRunConflictDetail {
   return Boolean(value && typeof value === "object" && "code" in (value as Record<string, unknown>) && "existing_run" in (value as Record<string, unknown>));
 }
@@ -118,6 +142,7 @@ export function ExecutionConsole({ snapshot, error, busy, onPrepare, onStart, on
   const runStatus = snapshot?.run.status ?? snapshot?.operation.execution_status ?? "JOB_DRAFT";
   const showSpindleStopRequired = runStatus === "SPINDLE_STOP_REQUIRED";
   const showToolChangeRequired = runStatus === "TOOL_CHANGE_REQUIRED";
+  const eta = snapshot?.eta;
 
   return (
     <article className="panel execution-console-v2" aria-label="Consola de ejecución en vivo v2">
@@ -174,6 +199,11 @@ export function ExecutionConsole({ snapshot, error, busy, onPrepare, onStart, on
         <div className="metric-box"><span>Archivo real</span><strong className="mono-text execution-console-v2__file">{filename}</strong></div>
         <div className="metric-box"><span>Próxima acción</span><strong>{snapshot?.run.next_action ?? "Prepare el trabajo"}</strong></div>
         <div className="metric-box"><span>Operaciones</span><strong>{`${snapshot?.run.completed_operations ?? 0} de ${snapshot?.run.total_operations ?? 0} operaciones terminadas`}</strong></div>
+        <div className="metric-box"><span>Tiempo transcurrido</span><strong>{formatDurationSeconds(eta?.available ? eta.elapsed_s : snapshot?.moonraker.print_duration ?? 0)}</strong></div>
+        <div className="metric-box"><span>Tiempo restante</span><strong>{eta?.available ? formatDurationSeconds(eta.remaining_s) : "ETA no disponible"}</strong></div>
+        <div className="metric-box"><span>Finalización estimada</span><strong>{eta?.available && eta.completion_at ? formatDate(eta.completion_at) : "-"}</strong></div>
+        <div className="metric-box"><span>Método ETA</span><strong>{estimateMethodLabel(eta?.method)}</strong></div>
+        <div className="metric-box"><span>Confianza</span><strong>{eta?.available ? (eta.confidence ?? "-") : "-"}</strong></div>
       </div>
 
       <div className="execution-console-v2__progress-grid">

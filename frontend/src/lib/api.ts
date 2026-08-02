@@ -1,4 +1,5 @@
 import type {
+  CompensationAudit,
   CompensationPreview,
   CompensatedGCodeResult,
   HealthResponse,
@@ -34,12 +35,16 @@ export type OperationInput = {
   setup_id?: string;
   tool_id?: string | null;
   herramienta?: string | null;
+  compensation_mode?: "legacy" | "adaptive_fast" | null;
+  max_z_error_mm?: number | null;
 };
 
 export type OperationUpdateInput = {
   nombre: string;
   tool_id?: string | null;
   herramienta?: string | null;
+  compensation_mode?: "legacy" | "adaptive_fast" | null;
+  max_z_error_mm?: number | null;
 };
 
 export type PhysicalMapPlanPayload = {
@@ -385,8 +390,12 @@ export const api = {
     request<{ session: ReferenceSession; preview: CompensationPreview }>(`/api/projects/${projectId}/operations/${operationId}/compensation-preview`, {
       method: "POST",
     }),
-  generateCompensatedGCode: (projectId: string, operationId: string) =>
-    request<CompensatedGCodeResult>(`/api/projects/${projectId}/operations/${operationId}/compensated-gcode/generate`, {
+  getCompensationAudit: (projectId: string, operationId: string) =>
+    request<CompensationAudit>(`/api/projects/${projectId}/operations/${operationId}/compensation-audit`, {
+      method: "POST",
+    }),
+  generateCompensatedGCode: (projectId: string, operationId: string, mode?: "legacy" | "adaptive_fast") =>
+    request<CompensatedGCodeResult>(`/api/projects/${projectId}/operations/${operationId}/compensated-gcode/generate${mode ? `?mode=${encodeURIComponent(mode)}` : ""}`, {
       method: "POST",
     }),
   generatedFileUrl: (projectId: string, relativePath: string) =>

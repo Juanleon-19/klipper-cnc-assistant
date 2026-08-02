@@ -5,12 +5,13 @@ import { HeightMapControlPanel } from "../height-map/HeightMapControlPanel";
 import { HeightMapHeatmap } from "../height-map/HeightMapHeatmap";
 import { HeightMapSurface3D } from "../height-map/HeightMapSurface3D";
 import { ToolpathViewer } from "../viewer/ToolpathViewer";
-import { formatDate, formatFileSize, formatMillimeters } from "../../lib/format";
+import { formatDate, formatFileSize, formatMillimeters, formatNumber } from "../../lib/format";
 import { ApiError, api, type OperationInput, type OperationUpdateInput } from "../../lib/api";
 import { parseFiniteNumber } from "../../lib/numbers";
 import { toneForStatus, translateFace, translateOperationType, translateStatus } from "../../lib/ui";
 import type {
   HeightMap,
+  CompensationAudit,
   Operation,
   Project,
   ProjectPayload,
@@ -415,6 +416,23 @@ function isAbortError(error: unknown) {
   );
 }
 
+function formatDurationSeconds(value: number | null | undefined) {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return "-";
+  }
+  const total = Math.max(0, Math.round(value));
+  const hours = Math.floor(total / 3600);
+  const minutes = Math.floor((total % 3600) / 60);
+  const seconds = total % 60;
+  if (hours > 0) {
+    return `${hours} h ${minutes.toString().padStart(2, "0")} min`;
+  }
+  if (minutes > 0) {
+    return `${minutes} min ${seconds.toString().padStart(2, "0")} s`;
+  }
+  return `${seconds} s`;
+}
+
 export function ProjectWorkspace({
   project,
   busyKey,
@@ -493,6 +511,9 @@ export function ProjectWorkspace({
   const [meshPreviewFingerprint, setMeshPreviewFingerprint] = useState<string | null>(null);
   const [jobPlan, setJobPlan] = useState<JobPlan | null>(null);
   const [liveExecution, setLiveExecution] = useState<LiveExecutionSnapshot | null>(null);
+  const [compensationAudit, setCompensationAudit] = useState<CompensationAudit | null>(null);
+  const [compensationAuditBusy, setCompensationAuditBusy] = useState(false);
+  const [compensationToleranceInput, setCompensationToleranceInput] = useState("0.05");
   const [machineSettingsInput, setMachineSettingsInput] = useState({
     reference_prep_z_mm: "115",
     reference_prep_z_feed_mm_min: "180",
@@ -795,6 +816,55 @@ export function ProjectWorkspace({
       nextZReference.x_mm === nextWorkOrigin.x_mm && nextZReference.y_mm === nextWorkOrigin.y_mm
     );
   }, [referenceSession]);
+
+  useEffect(() => {
+    setCompensationToleranceInput(selectedOperation ? String(selectedOperation.max_z_error_mm ?? 0.05) : "0.05");
+  }, [selectedOperation]);
+
+  const getCompensationAuditFn =
+    typeof (api as { getCompensationAudit?: unknown }).getCompensationAudit === "function"
+      ? (api as { getCompensationAudit: (projectId: string, operationId: string) => Promise<CompensationAudit> }).getCompensationAudit.bind(api)
+      : null;
+
+  const refreshCompensationAudit = async () => {
+    if (!project || !selectedOperation || getCompensationAuditFn == null) {
+      setCompensationAudit(null);
+      return;
+    }
+    setCompensationAuditBusy(true);
+    try {
+      setCompensationAudit(await getCompensationAuditFn(project.id, selectedOperation.id));
+    } catch {
+      setCompensationAudit(null);
+    } finally {
+      setCompensationAuditBusy(false);
+    }
+  };
+
+  useEffect(() => {
+    if (!project || !selectedOperation || getCompensationAuditFn == null) {
+      setCompensationAudit(null);
+      return;
+    }
+    let cancelled = false;
+    setCompensationAuditBusy(true);
+    void getCompensationAuditFn(project.id, selectedOperation.id).then((audit) => {
+      if (!cancelled) {
+        setCompensationAudit(audit);
+      }
+    }).catch(() => {
+      if (!cancelled) {
+        setCompensationAudit(null);
+      }
+    }).finally(() => {
+      if (!cancelled) {
+        setCompensationAuditBusy(false);
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [getCompensationAuditFn, project, selectedOperation]);
 
   useEffect(() => {
     const currentMapId = typeof physicalMap?.map_id === "string" ? physicalMap.map_id : null;
@@ -2050,6 +2120,42 @@ export function ProjectWorkspace({
     setExecutionError(null);
   };
 
+  const updateCompensationSettings = async (next: { compensation_mode?: "legacy" | "adaptive_fast"; max_z_error_mm?: number }) => {
+    if (!selectedOperation) {
+      return;
+    }
+    const currentCompensationMode = selectedOperation.compensation_mode ?? "legacy";
+    const currentMaxZError = selectedOperation.max_z_error_mm ?? 0.05;
+    await onUpdateOperation(selectedOperation.id, {
+      nombre: selectedOperation.nombre,
+      tool_id: selectedOperation.tool_id,
+      herramienta: selectedOperation.herramienta,
+      compensation_mode: next.compensation_mode ?? currentCompensationMode,
+      max_z_error_mm: next.max_z_error_mm ?? currentMaxZError,
+    });
+    if (onRefreshProject) {
+      await onRefreshProject();
+    }
+    await refreshCompensationAudit();
+  };
+
+  const downloadCompensatedArtifact = async (mode: "legacy" | "adaptive_fast") => {
+    if (!project || !selectedOperation) {
+      return;
+    }
+    setReferenceBusy(true);
+    setWorkspaceError("");
+    try {
+      const generated = await api.generateCompensatedGCode(project.id, selectedOperation.id, mode);
+      window.open(api.generatedFileUrl(project.id, generated.relative_path), "_blank", "noopener,noreferrer");
+      await refreshCompensationAudit();
+    } catch (error) {
+      setWorkspaceError(error instanceof Error ? error.message : "No fue posible generar el archivo compensado solicitado.");
+    } finally {
+      setReferenceBusy(false);
+    }
+  };
+
   const generateProjectCompensation = async () => {
     if (!project || !selectedSetup || !activeJobFace) {
       return;
@@ -2148,6 +2254,8 @@ export function ProjectWorkspace({
     if (!selectedSetup || !activeJobFace) {
       return null;
     }
+    const currentCompensationMode = selectedOperation?.compensation_mode ?? "legacy";
+    const currentMaxZError = selectedOperation?.max_z_error_mm ?? 0.05;
     return (
       <article className="panel">
         <div className="section-heading section-heading--stacked">
@@ -2160,6 +2268,107 @@ export function ProjectWorkspace({
             <button className="button" type="button" disabled={referenceBusy} onClick={() => void generateProjectCompensation()}>Generar compensación del proyecto</button>
           </div>
         </div>
+        {selectedOperation ? (
+          <div className="stack gap-md">
+            <div className="info-grid info-grid--double compact-grid">
+              <div className="metric-box">
+                <span>Operación seleccionada</span>
+                <strong>{selectedOperation.nombre}</strong>
+              </div>
+              <div className="metric-box">
+                <span>Motor activo</span>
+                <strong>{currentCompensationMode === "adaptive_fast" ? "Adaptativa rápida" : "Legacy"}</strong>
+              </div>
+              <div className="metric-box">
+                <span>Tolerancia Z</span>
+                <strong>{formatMillimeters(currentMaxZError, 3)}</strong>
+              </div>
+              <div className="metric-box">
+                <span>Auditoría</span>
+                <strong>{compensationAuditBusy ? "Calculando..." : compensationAudit ? "Disponible" : "Pendiente"}</strong>
+              </div>
+            </div>
+            <div className="action-grid action-grid--inline">
+              <button className={`button${currentCompensationMode === "legacy" ? "" : " button--ghost"}`} type="button" disabled={referenceBusy} onClick={() => void updateCompensationSettings({ compensation_mode: "legacy" })}>Legacy</button>
+              <button className={`button${currentCompensationMode === "adaptive_fast" ? "" : " button--ghost"}`} type="button" disabled={referenceBusy} onClick={() => void updateCompensationSettings({ compensation_mode: "adaptive_fast" })}>Adaptativa rápida</button>
+              <label className="field-inline">
+                <span>Tolerancia Z (mm)</span>
+                <input
+                  value={compensationToleranceInput}
+                  inputMode="decimal"
+                  onChange={(event) => setCompensationToleranceInput(event.target.value)}
+                  onBlur={() => {
+                    const parsed = Number(compensationToleranceInput);
+                    if (Number.isFinite(parsed) && parsed > 0 && selectedOperation) {
+                      void updateCompensationSettings({ max_z_error_mm: parsed });
+                    }
+                  }}
+                />
+              </label>
+              <button className="button button--ghost" type="button" disabled={compensationAuditBusy || referenceBusy} onClick={() => void refreshCompensationAudit()}>Recalcular auditoría</button>
+              <button className="button button--ghost" type="button" disabled={referenceBusy} onClick={() => void downloadCompensatedArtifact("legacy")}>Descargar legacy</button>
+              <button className="button button--ghost" type="button" disabled={referenceBusy} onClick={() => void downloadCompensatedArtifact("adaptive_fast")}>Descargar adaptive_fast</button>
+            </div>
+            {compensationAudit ? (
+              <div className="table-scroll">
+                <table className="data-table">
+                  <thead>
+                    <tr>
+                      <th>Métrica</th>
+                      <th>Original</th>
+                      <th>Legacy</th>
+                      <th>Adaptive</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr>
+                      <td>Tiempo estimado</td>
+                      <td>{formatDurationSeconds(compensationAudit.original.estimated_time_s)}</td>
+                      <td>{formatDurationSeconds(compensationAudit.legacy.estimated_time_s)}</td>
+                      <td>{formatDurationSeconds(compensationAudit.adaptive_fast.estimated_time_s)}</td>
+                    </tr>
+                    <tr>
+                      <td>Movimientos</td>
+                      <td>{compensationAudit.original.movements_total ?? "-"}</td>
+                      <td>{compensationAudit.legacy.movements_total ?? "-"}</td>
+                      <td>{compensationAudit.adaptive_fast.movements_total ?? "-"}</td>
+                    </tr>
+                    <tr>
+                      <td>Diferencia vs legacy</td>
+                      <td>-</td>
+                      <td>-</td>
+                      <td>{compensationAudit.adaptive_fast.time_difference_pct == null ? "-" : `${formatNumber(compensationAudit.adaptive_fast.time_difference_pct, 2)} %`}</td>
+                    </tr>
+                    <tr>
+                      <td>Error Z máximo</td>
+                      <td>-</td>
+                      <td>{formatMillimeters(compensationAudit.legacy.error_z_max_approximation_mm ?? null, 4)}</td>
+                      <td>{formatMillimeters(compensationAudit.adaptive_fast.error_z_max_approximation_mm ?? null, 4)}</td>
+                    </tr>
+                    <tr>
+                      <td>Segmentos subdivididos</td>
+                      <td>-</td>
+                      <td>{compensationAudit.legacy.segments_subdivided ?? 0}</td>
+                      <td>{compensationAudit.adaptive_fast.segments_subdivided ?? 0}</td>
+                    </tr>
+                    <tr>
+                      <td>Comandos no soportados</td>
+                      <td>{(compensationAudit.original.unsupported_commands ?? []).join(", ") || "-"}</td>
+                      <td>{(compensationAudit.legacy.unsupported_commands ?? []).join(", ") || "-"}</td>
+                      <td>{compensationAudit.adaptive_fast.error ?? ((compensationAudit.adaptive_fast.unsupported_commands ?? []).join(", ") || "-")}</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            ) : <p className="muted">La auditoría comparativa se generará cuando exista mapa válido y archivo analizado para esta operación.</p>}
+            {compensationAudit?.adaptive_fast && compensationAudit.adaptive_fast.eligible === false ? (
+              <div className="alert alert--warning">
+                <strong>Adaptive_fast no es elegible</strong>
+                <p>{compensationAudit.adaptive_fast.error ?? "La auditoría detectó que supera tolerancia, introduce comandos no soportados o no mejora el tiempo frente a legacy."}</p>
+              </div>
+            ) : null}
+          </div>
+        ) : null}
         {jobPlan ? (
           <>
             <div className="info-grid info-grid--double compact-grid">
@@ -2169,6 +2378,7 @@ export function ProjectWorkspace({
               <div className="metric-box"><span>Cambios de herramienta</span><strong>{jobPlan.summary.tool_changes}</strong></div>
               <div className="metric-box"><span>Herramientas distintas</span><strong>{jobPlan.summary.distinct_tools}</strong></div>
               <div className="metric-box"><span>Bloqueadas</span><strong>{jobPlan.summary.blocked_operations}</strong></div>
+              <div className="metric-box"><span>Tiempo compensado</span><strong>{formatDurationSeconds(jobPlan.summary.estimated_time_s)}</strong></div>
             </div>
             <div className="table-scroll">
               <table className="data-table">
@@ -2180,6 +2390,7 @@ export function ProjectWorkspace({
                     <th>Mapa</th>
                     <th>Cobertura</th>
                     <th>Referencia Z</th>
+                    <th>ETA</th>
                     <th>G-code</th>
                   </tr>
                 </thead>
@@ -2195,6 +2406,7 @@ export function ProjectWorkspace({
                       <td>{item.map_status}</td>
                       <td>{item.coverage_status}{item.coverage_detail ? <div className="muted">{item.coverage_detail}</div> : null}</td>
                       <td>{item.reference_status}</td>
+                      <td>{formatDurationSeconds(item.estimated_time_s)}</td>
                       <td>{item.generated_file_name ?? "pendiente"}</td>
                     </tr>
                   ))}

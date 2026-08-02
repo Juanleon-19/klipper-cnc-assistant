@@ -325,6 +325,45 @@ export type CompensationPreview = {
   segmentos: CompensationPreviewSegment[];
 };
 
+export type CompensationAuditSummary = {
+  mode: string;
+  sha256?: string;
+  total_lines?: number;
+  movement_counts?: Record<string, number>;
+  movements_total?: number;
+  movements_added?: number;
+  movements_removed?: number;
+  segments_subdivided?: number;
+  segments_fused?: number;
+  distance_cut_mm?: number | null;
+  distance_rapid_mm?: number | null;
+  distance_xyz_mm?: number | null;
+  correction_z_min_mm?: number | null;
+  correction_z_max_mm?: number | null;
+  correction_rms_mm?: number | null;
+  error_z_max_approximation_mm?: number | null;
+  points_outside_map?: number;
+  extrapolations?: number;
+  unsupported_commands?: string[];
+  estimated_time_s?: number | null;
+  estimation_method?: string | null;
+  estimation_confidence?: string | null;
+  eligible?: boolean;
+  error?: string | null;
+  time_difference_s?: number | null;
+  time_difference_pct?: number | null;
+};
+
+export type CompensationAudit = {
+  selected_mode: "legacy" | "adaptive_fast";
+  recommended_mode: "legacy" | "adaptive_fast";
+  max_z_error_mm: number;
+  original: CompensationAuditSummary;
+  legacy: CompensationAuditSummary;
+  adaptive_fast: CompensationAuditSummary;
+  warnings: string[];
+};
+
 export type Setup = {
   id: string;
   nombre: string;
@@ -349,6 +388,8 @@ export type Operation = {
   sha256: string | null;
   tool_id: string | null;
   herramienta: string | null;
+  compensation_mode?: "legacy" | "adaptive_fast";
+  max_z_error_mm?: number;
   estado: string;
   analisis: OperationAnalysis | null;
 };
@@ -574,6 +615,13 @@ export type CompensatedGCodeResult = {
   metadata_path: string;
   metadata: Record<string, unknown>;
   preview: Record<string, unknown>;
+  selected_mode?: "legacy" | "adaptive_fast";
+  effective_mode?: "legacy" | "adaptive_fast";
+  time_estimate?: {
+    estimated_time_s?: number | null;
+    method?: string | null;
+    confidence?: string | null;
+  };
 };
 
 export type ExecutionCheck = {
@@ -614,6 +662,12 @@ export type JobOperationPlan = {
   generated_file: string | null;
   generated_file_name: string | null;
   generated_metadata_path?: string | null;
+  time_estimate?: {
+    estimated_time_s?: number | null;
+    method?: string | null;
+    confidence?: string | null;
+  } | null;
+  estimated_time_s?: number | null;
   compensation_status: string;
   preflight_status: string;
   execution_status: string;
@@ -638,6 +692,7 @@ export type JobPlan = {
     tool_changes: number;
     distinct_tools: number;
     blocked_operations: number;
+    estimated_time_s?: number;
   };
   manifest_path: string | null;
   created_at: string;
@@ -666,6 +721,12 @@ export type JobRunOperation = {
   remote_file?: string | null;
   machine_status?: Record<string, unknown> | null;
   observed_printing?: boolean;
+  time_estimate?: {
+    estimated_time_s?: number | null;
+    method?: string | null;
+    confidence?: string | null;
+  } | null;
+  estimated_time_s?: number | null;
 };
 
 export type JobRunEvent = {
@@ -795,6 +856,7 @@ export type LiveExecutionSnapshot = {
     file_position: number | null;
     file_size: number | null;
     print_duration: number | null;
+    total_duration?: number | null;
     message: string | null;
     updated_at: string;
   };
@@ -840,4 +902,19 @@ export type LiveExecutionSnapshot = {
   };
   events: JobRunEvent[];
   job_run: JobRun | null;
+  eta?: {
+    available: boolean;
+    reason?: string | null;
+    method?: string | null;
+    confidence?: string | null;
+    progress?: number;
+    elapsed_s?: number;
+    predicted_elapsed_s?: number;
+    predicted_total_s?: number;
+    remaining_s?: number;
+    completion_at?: string | null;
+    calibration_factor?: number;
+    filename?: string | null;
+    state?: string | null;
+  };
 };
