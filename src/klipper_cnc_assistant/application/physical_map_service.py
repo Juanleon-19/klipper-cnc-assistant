@@ -268,6 +268,7 @@ class PhysicalMapService:
         config: PhysicalMeshConfig | None = None,
         machine_origin_x: float | None = None,
         machine_origin_y: float | None = None,
+        reference_z: float | None = None,
     ) -> dict[str, Any]:
         project = self._load_project(project_id)
         operation = project.get_operation(operation_id)
@@ -333,14 +334,56 @@ class PhysicalMapService:
             "points": points,
             "serpentine_path": [{"index": point["index"], "x_local": point["x_local"], "y_local": point["y_local"], "x_machine": point.get("x_machine"), "y_machine": point.get("y_machine"), "status": point.get("status")} for point in points],
             "reference_point": reference_point,
-            "warnings": [] if machine_origin_x is not None and machine_origin_y is not None else ["Vista previa en coordenadas PCB. Complete la referencia para calcular las coordenadas CNC."],
-            "valid_for_execution": machine_origin_x is not None and machine_origin_y is not None,
+            "warnings": (
+                []
+                if machine_origin_x is not None and machine_origin_y is not None and reference_z is not None
+                else ["Vista previa en coordenadas PCB. Complete la referencia para calcular las coordenadas CNC."]
+            ),
+            "valid_for_execution": machine_origin_x is not None and machine_origin_y is not None and reference_z is not None,
             "estimated_distance_mm": total_distance,
             "estimated_time_s": self._estimate_time_s(points, total_distance, selected_config),
             "created_at": now,
             "updated_at": now,
         }
         return payload
+
+    def preview_mesh_from_saved_reference(
+        self,
+        *,
+        project_id: str,
+        operation_id: str,
+        config: PhysicalMeshConfig | None = None,
+    ) -> dict[str, Any]:
+        context = self._saved_preview_context(project_id, operation_id)
+        return self.preview_mesh(
+            project_id=project_id,
+            operation_id=operation_id,
+            config=config,
+            machine_origin_x=context.get("machine_origin_x"),
+            machine_origin_y=context.get("machine_origin_y"),
+            reference_z=context.get("reference_z"),
+        )
+
+    def plan_from_saved_reference(
+        self,
+        *,
+        project_id: str,
+        operation_id: str,
+        config: PhysicalMeshConfig | None = None,
+    ) -> dict[str, Any]:
+        context = self._saved_reference_context(project_id, operation_id)
+        return self.capture_reference_and_plan(
+            project_id=project_id,
+            operation_id=operation_id,
+            machine_origin_x=context["machine_origin_x"],
+            machine_origin_y=context["machine_origin_y"],
+            reference_z=context["reference_z"],
+            machine_position=context["machine_position"],
+            homed_axes=context["homed_axes"],
+            machine_label=context["machine_label"],
+            session_id=context["session_id"],
+            config=config,
+        )
 
     def capture_reference_and_plan(
         self,
@@ -364,6 +407,9 @@ class PhysicalMapService:
             selected_config = replace(selected_config, rows=int(suggestion["rows"]), columns=int(suggestion["columns"]))
 
         existing = self._latest_surface_map(project_id, operation)
+        if existing and existing.get("status") == "CANCELLED":
+            self._archive_payload(project_id, existing, replaced_by=None)
+            existing = None
         if existing and self._compatible_surface_map(existing, operation, machine_origin_x, machine_origin_y, selected_config):
             payload = self._with_tool_reference(
                 existing,
@@ -1612,7 +1658,7 @@ class PhysicalMapService:
         return f"{_slug(setup_id)}/{_slug(_tool_key(operation))}"
 
     def _map_id(self, setup_id: str, operation: OperacionPCB, origin_x: float, origin_y: float, config: PhysicalMeshConfig) -> str:
-        stamp = utc_now().strftime("%Y%m%d-%H%M%S")
+        stamp = utc_now().strftime("%Y%m%d-%H%M%S-%f")
         return f"measured/{self._map_prefix(setup_id, operation)}/{stamp}_x{origin_x:.3f}_y{origin_y:.3f}_r{config.rows}_c{config.columns}_e{config.edge_margin_left_mm:.3f}-{config.edge_margin_right_mm:.3f}-{config.edge_margin_bottom_mm:.3f}-{config.edge_margin_top_mm:.3f}"
 
     def _latest_surface_map(self, project_id: str, operation: OperacionPCB) -> dict[str, Any] | None:
@@ -1641,6 +1687,8 @@ class PhysicalMapService:
         if payload.get("schema_version") != "surface-map-v2":
             return False
         if payload.get("setup_id") != operation.setup_id or payload.get("face") != operation.cara:
+            return False
+        if payload.get("status") == "CANCELLED":
             return False
         if not _same_number(payload.get("machine_origin_x", origin_x), origin_x) or not _same_number(payload.get("machine_origin_y", origin_y), origin_y):
             return False
@@ -1696,6 +1744,43 @@ class PhysicalMapService:
             "homed_axes": homed_axes,
             "machine_label": machine_label,
             "session_id": session_id,
+        }
+
+    def _saved_reference_context(self, project_id: str, operation_id: str) -> dict[str, Any]:
+        project = self._load_project(project_id)
+        operation = project.get_operation(operation_id)
+        setup = project.get_setup(operation.setup_id)
+        origin = setup.preparacion.origen_trabajo
+        z_reference = setup.preparacion.referencia_z
+        if origin is None or z_reference is None or z_reference.z_mm is None:
+            raise ApplicationError("La malla física requiere origen X/Y y referencia Z guardados antes de armarse.")
+        machine_label = z_reference.maquina or origin.maquina
+        homed_axes = z_reference.homed_axes or origin.homed_axes
+        session_id = z_reference.sesion or origin.sesion
+        return {
+            "machine_origin_x": float(origin.x_mm),
+            "machine_origin_y": float(origin.y_mm),
+            "reference_z": float(z_reference.z_mm),
+            "machine_position": {
+                "x_mm": float(z_reference.x_mm),
+                "y_mm": float(z_reference.y_mm),
+                "z_mm": float(z_reference.z_mm),
+            },
+            "machine_label": machine_label,
+            "homed_axes": homed_axes,
+            "session_id": session_id,
+        }
+
+    def _saved_preview_context(self, project_id: str, operation_id: str) -> dict[str, Any]:
+        project = self._load_project(project_id)
+        operation = project.get_operation(operation_id)
+        setup = project.get_setup(operation.setup_id)
+        origin = setup.preparacion.origen_trabajo
+        z_reference = setup.preparacion.referencia_z
+        return {
+          "machine_origin_x": None if origin is None else float(origin.x_mm),
+          "machine_origin_y": None if origin is None else float(origin.y_mm),
+          "reference_z": None if z_reference is None or z_reference.z_mm is None else float(z_reference.z_mm),
         }
 
     def _with_tool_reference(self, payload: dict[str, Any], **kwargs) -> dict[str, Any]:

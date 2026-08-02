@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from time import perf_counter
+
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse
 from starlette.datastructures import UploadFile
@@ -447,7 +449,8 @@ def build_router() -> APIRouter:
     @router.post("/projects/{project_id}/operations/{operation_id}/physical-map/preview", response_model=PhysicalMapResponse)
     def preview_physical_map(project_id: str, operation_id: str, payload: PhysicalMapPlanRequest, request: Request) -> PhysicalMapResponse:
         service = request.app.state.physical_map_service
-        plan = service.preview_mesh(
+        started_at = perf_counter()
+        plan = service.preview_mesh_from_saved_reference(
             project_id=project_id,
             operation_id=operation_id,
             config=PhysicalMeshConfig(
@@ -468,12 +471,12 @@ def build_router() -> APIRouter:
                 retract_mm=payload.retract_mm,
             ),
         )
+        plan["preview_backend_duration_ms"] = round((perf_counter() - started_at) * 1000.0, 3)
+        plan["preview_point_count"] = int(plan.get("point_count") or 0)
         return _physical_map_response(request, plan)
 
     @router.post("/projects/{project_id}/operations/{operation_id}/physical-map/plan-from-reference", response_model=PhysicalMapResponse)
     def plan_physical_map_from_reference(project_id: str, operation_id: str, payload: PhysicalMapPlanRequest, request: Request) -> PhysicalMapResponse:
-        runtime = request.app.state.machine_runtime
-        reference_service = request.app.state.reference_session_service
         physical_map_service = request.app.state.physical_map_service
         config = PhysicalMeshConfig(
             grid_mode=payload.grid_mode,
@@ -492,23 +495,9 @@ def build_router() -> APIRouter:
             probe_feed_mm_min=payload.probe_feed_mm_min,
             retract_mm=payload.retract_mm,
         )
-        observation = runtime.capture_probe_reference_observation()
-        probe = observation["position"]
-        machine_label = str(observation.get("machine_label") or "physical")
-        homed_axes = observation.get("homed_axes")
-        session_id = observation.get("session_id")
-        reference_service.capture_physical_work_origin(project_id, operation_id, position=probe, machine_label=machine_label, homed_axes=homed_axes, session_id=session_id)
-        reference_service.capture_physical_z_reference(project_id, operation_id, position=probe, machine_label=machine_label, homed_axes=homed_axes, session_id=session_id)
-        plan = physical_map_service.capture_reference_and_plan(
+        plan = physical_map_service.plan_from_saved_reference(
             project_id=project_id,
             operation_id=operation_id,
-            machine_origin_x=probe["x_mm"],
-            machine_origin_y=probe["y_mm"],
-            reference_z=probe["z_mm"],
-            machine_position=probe,
-            homed_axes=homed_axes,
-            machine_label=machine_label,
-            session_id=session_id,
             config=config,
         )
         return _physical_map_response(request, plan)
