@@ -269,6 +269,8 @@ def build_router() -> APIRouter:
             setup_id=payload.setup_id,
             tool_id=payload.tool_id,
             herramienta=payload.herramienta,
+            compensation_mode=payload.compensation_mode,
+            max_z_error_mm=payload.max_z_error_mm,
         )
         return operation_to_response(operation)
 
@@ -281,6 +283,8 @@ def build_router() -> APIRouter:
             nombre=payload.nombre,
             tool_id=payload.tool_id,
             herramienta=payload.herramienta,
+            compensation_mode=payload.compensation_mode,
+            max_z_error_mm=payload.max_z_error_mm,
         )
         return operation_to_response(operation)
 
@@ -712,9 +716,37 @@ def build_router() -> APIRouter:
         session = _reference_session_to_response(result["session"])
         return {"session": session.model_dump(), "preview": preview.model_dump()}
 
+    @router.post("/projects/{project_id}/operations/{operation_id}/compensation-audit", response_model=dict[str, object])
+    def compensation_audit(project_id: str, operation_id: str, request: Request) -> dict[str, object]:
+        compensated = request.app.state.compensated_gcode_service.build_comparison_report(project_id, operation_id)
+        artifacts = compensated.pop("_artifacts", {})
+        estimator = request.app.state.time_estimation_service
+        for key in ("original", "legacy", "adaptive_fast"):
+            artifact_text = artifacts.get(key)
+            if not artifact_text:
+                continue
+            estimate = estimator.estimate_text(str(artifact_text))
+            compensated[key]["estimated_time_s"] = estimate.get("estimated_time_s")
+            compensated[key]["estimation_method"] = estimate.get("method")
+            compensated[key]["estimation_confidence"] = estimate.get("confidence")
+            compensated[key]["unsupported_commands"] = list(dict.fromkeys(list(compensated[key].get("unsupported_commands") or []) + list(estimate.get("unsupported_commands") or [])))
+        adaptive = compensated.get("adaptive_fast") or {}
+        legacy = compensated.get("legacy") or {}
+        adaptive_time = adaptive.get("estimated_time_s")
+        legacy_time = legacy.get("estimated_time_s")
+        if adaptive_time is not None and legacy_time is not None:
+            adaptive["time_difference_s"] = float(adaptive_time) - float(legacy_time)
+            adaptive["time_difference_pct"] = None if float(legacy_time) == 0 else ((float(adaptive_time) - float(legacy_time)) / float(legacy_time)) * 100.0
+            adaptive["eligible"] = bool(
+                adaptive.get("eligible")
+                and (adaptive.get("time_difference_s") or 0.0) < 0.0
+            )
+            compensated["recommended_mode"] = "adaptive_fast" if adaptive.get("eligible") else "legacy"
+        return compensated
+
     @router.post("/projects/{project_id}/operations/{operation_id}/compensated-gcode/generate", response_model=dict[str, object])
-    def generate_compensated_gcode(project_id: str, operation_id: str, request: Request) -> dict[str, object]:
-        return request.app.state.compensated_gcode_service.generate(project_id, operation_id)
+    def generate_compensated_gcode(project_id: str, operation_id: str, request: Request, mode: str | None = None) -> dict[str, object]:
+        return request.app.state.compensated_gcode_service.generate(project_id, operation_id, mode=mode)
 
     @router.get("/projects/{project_id}/generated/{file_path:path}")
     def download_generated_file(project_id: str, file_path: str, request: Request) -> FileResponse:

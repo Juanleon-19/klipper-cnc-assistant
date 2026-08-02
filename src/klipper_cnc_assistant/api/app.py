@@ -18,6 +18,7 @@ from klipper_cnc_assistant.application import (
     ProjectService,
     ReferenceSessionService,
     SystemStatusService,
+    TimeEstimationService,
 )
 from klipper_cnc_assistant.domain import DomainError, ProjectValidationError
 from klipper_cnc_assistant.execution import JobService, MeshExecutionService
@@ -47,6 +48,7 @@ def create_app(
     physical_map_service = PhysicalMapService(repository)
     mesh_execution_service = MeshExecutionService(physical_map_service)
     compensated_gcode_service = CompensatedGCodeService(repository, physical_map_service)
+    time_estimation_service = TimeEstimationService(repository, machine_runtime)
     reference_session_service = ReferenceSessionService(
         repository,
         height_map_service,
@@ -59,6 +61,7 @@ def create_app(
         reference_session_service,
         compensated_gcode_service,
         machine_runtime,
+        time_estimation_service=time_estimation_service,
     )
     system_status_service = SystemStatusService(
         repository,
@@ -78,6 +81,7 @@ def create_app(
     app.state.physical_map_service = physical_map_service
     app.state.mesh_execution_service = mesh_execution_service
     app.state.compensated_gcode_service = compensated_gcode_service
+    app.state.time_estimation_service = time_estimation_service
     app.state.job_service = job_service
     app.state.machine_session_service = machine_session_service
     app.state.machine_runtime = machine_runtime

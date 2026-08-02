@@ -106,6 +106,15 @@ class MoonrakerClient:
             "/server/info"
         )
 
+    def get_analysis_status(self):
+        return self._get("/server/analysis/status")
+
+    def estimate_analysis(self, filename, estimator_config=None):
+        payload = {"filename": filename}
+        if estimator_config:
+            payload["estimator_config"] = estimator_config
+        return self._post("/server/analysis/estimate", json_payload=payload)
+
     def query_objects(
         self,
         objects,

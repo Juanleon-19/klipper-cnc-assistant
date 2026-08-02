@@ -4,6 +4,7 @@ from .heightmap_service import HeightMapService
 from .physical_map_service import PhysicalMapService
 from .reference_service import ReferenceSessionService
 from .services import MachineSessionService, ProjectService, SystemStatusService
+from .time_estimation_service import TimeEstimationService
 from klipper_cnc_assistant.execution import JobService, MeshExecutionService
 
 __all__ = [
@@ -18,4 +19,5 @@ __all__ = [
     "ProjectService",
     "ReferenceSessionService",
     "SystemStatusService",
+    "TimeEstimationService",
 ]

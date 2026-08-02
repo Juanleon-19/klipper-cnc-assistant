@@ -14,6 +14,7 @@ from klipper_cnc_assistant.application.compensated_gcode_service import Compensa
 from klipper_cnc_assistant.application.errors import ApplicationError, NotFoundError
 from klipper_cnc_assistant.application.physical_map_service import PhysicalMapService
 from klipper_cnc_assistant.application.reference_service import ReferenceSessionService
+from klipper_cnc_assistant.application.time_estimation_service import TimeEstimationService
 from klipper_cnc_assistant.domain import BoardFace, OperacionPCB, ProjectValidationError
 from klipper_cnc_assistant.heightmap.coverage import DOMAIN_TOLERANCE_MM, build_coverage_report
 from klipper_cnc_assistant.moonraker.client import MoonrakerClient, MoonrakerError
@@ -154,6 +155,7 @@ class MoonrakerJobAdapter:
             "file_size": virtual_sdcard.get("file_size"),
             "file_path": virtual_sdcard.get("file_path"),
             "print_duration": print_stats.get("print_duration"),
+            "total_duration": print_stats.get("total_duration"),
             "active": bool(virtual_sdcard.get("is_active")),
             "is_active": bool(virtual_sdcard.get("is_active")),
             "live_position": motion_report.get("live_position"),
@@ -195,6 +197,7 @@ class JobService:
         compensated_gcode_service: CompensatedGCodeService,
         runtime: Any,
         *,
+        time_estimation_service: TimeEstimationService | None = None,
         adapter_factory: Callable[[Any], MoonrakerJobAdapter] = MoonrakerJobAdapter,
     ) -> None:
         self.repository = repository
@@ -202,6 +205,7 @@ class JobService:
         self.reference_service = reference_service
         self.compensated_gcode_service = compensated_gcode_service
         self.runtime = runtime
+        self.time_estimation_service = time_estimation_service
         self.adapter_factory = adapter_factory
         self._lock = threading.RLock()
         self._threads: dict[tuple[str, str, str], threading.Thread] = {}
@@ -221,11 +225,19 @@ class JobService:
             if item["blocking"]:
                 continue
             try:
-                generated_results[item["operation_id"]] = self.compensated_gcode_service.generate(
+                generated = self.compensated_gcode_service.generate(
                     project_id,
                     item["operation_id"],
                     require_tool_reference=False,
                 )
+                if self.time_estimation_service is not None:
+                    estimate = self.time_estimation_service.estimate_project_file(
+                        project_id=project_id,
+                        relative_path=str(generated["relative_path"]),
+                    )
+                    generated["time_estimate"] = estimate
+                    self._merge_generated_metadata(project_id, str(generated["metadata_path"]), {"time_estimate": estimate})
+                generated_results[item["operation_id"]] = generated
             except Exception as error:
                 generated_results[item["operation_id"]] = {"error": str(error)}
         refreshed = self._build_plan(context, generated_results=generated_results)
@@ -354,6 +366,9 @@ class JobService:
                 sync_reason = "observed_printing_missing"
         elif worker_alive is False and str(run.get("state")) in RUN_ACTIVE_STATES:
             sync_reason = "watcher_inactive"
+        eta = self._build_eta_snapshot(run, operation, status, expected, observed)
+        if eta.get("available") and "eta_ratio_ema" in run:
+            self._save_run(context, run)
         return {
             "moonraker": {
                 "connected": bool(status.get("connected", True)),
@@ -365,6 +380,7 @@ class JobService:
                 "file_position": status.get("file_position"),
                 "file_size": status.get("file_size"),
                 "print_duration": status.get("print_duration"),
+                "total_duration": status.get("total_duration"),
                 "message": status.get("message"),
                 "updated_at": status.get("updated_at") or _iso_now(),
             },
@@ -410,6 +426,7 @@ class JobService:
             },
             "events": self._dedupe_events(run.get("events") or []),
             "job_run": run,
+            "eta": eta,
         }
 
     def describe_run_conflict(self, *, project_id: str, setup_id: str, face: str) -> dict[str, Any]:
@@ -480,6 +497,7 @@ class JobService:
         items: list[dict[str, Any]] = []
         for file in sorted(history_dir.glob("*.json"), key=lambda item: item.stat().st_mtime, reverse=True):
             payload = json.loads(file.read_text(encoding="utf-8"))
+            history_summary = payload.get("history_summary") or {}
             items.append(
                 {
                     "run_id": payload.get("run_id"),
@@ -489,6 +507,12 @@ class JobService:
                     "tool_changes_completed": payload.get("summary", {}).get("tool_changes_completed", 0),
                     "operations_completed": payload.get("summary", {}).get("operations_completed", 0),
                     "manifest_path": payload.get("manifest_path"),
+                    "original_estimated_time_s": history_summary.get("original_estimated_time_s"),
+                    "compensated_estimated_time_s": history_summary.get("compensated_estimated_time_s"),
+                    "actual_print_duration_s": history_summary.get("actual_print_duration_s"),
+                    "estimation_error_pct": history_summary.get("estimation_error_pct"),
+                    "calibration_factor": history_summary.get("calibration_factor"),
+                    "entries": payload.get("history_entries", []),
                 }
             )
         return items
@@ -838,6 +862,8 @@ class JobService:
                 operation["progress"] = 1.0
                 operation["finished_at"] = _iso_now()
                 operation["completed_at"] = operation["finished_at"]
+                operation["actual_print_duration_s"] = None if status.get("print_duration") is None else float(status.get("print_duration") or 0.0)
+                operation["actual_total_duration_s"] = None if status.get("total_duration") is None else float(status.get("total_duration") or 0.0)
                 current["summary"]["operations_completed"] = sum(1 for item in current["operations"] if item["execution_status"] == "COMPLETED")
                 current["state"] = "NEXT_OPERATION_READY"
                 current["next_action"] = "Preparando siguiente operación"
@@ -989,10 +1015,20 @@ class JobService:
             binding = initial_reference_binding
             previous_tool_key = tool_key
             generated = generated_by_operation.get(operation.id)
+            generated_metadata = generated.get("metadata") if isinstance(generated, dict) else None
             coverage = coverage_by_operation.get(operation.id)
             reference_status = self._reference_status(active_map, operation, binding)
             calibration = self._tool_installation_calibration(active_map, operation, binding)
             blocking_reasons: list[str] = []
+            original_time_estimate: dict[str, Any] | None = None
+            if self.time_estimation_service is not None and operation.archivo_gcode:
+                try:
+                    original_time_estimate = self.time_estimation_service.estimate_project_file(
+                        project_id=context.project_id,
+                        relative_path=str(operation.archivo_gcode),
+                    )
+                except Exception:
+                    original_time_estimate = None
             if operation.archivo_gcode is None:
                 blocking_reasons.append("Falta G-code original.")
             if operation.analisis is None:
@@ -1028,6 +1064,15 @@ class JobService:
                     "generated_file": None if generated is None else generated["relative_path"],
                     "generated_file_name": None if generated is None else Path(str(generated["relative_path"])).name,
                     "generated_metadata_path": None if generated is None else generated.get("metadata_path"),
+                    "time_estimate": None if generated is None else generated.get("time_estimate"),
+                    "estimated_time_s": None if generated is None else (generated.get("time_estimate") or {}).get("estimated_time_s"),
+                    "original_time_estimate": original_time_estimate,
+                    "original_estimated_time_s": None if original_time_estimate is None else original_time_estimate.get("estimated_time_s"),
+                    "source_file_hash": None if generated_metadata is None else generated_metadata.get("original_hash"),
+                    "generated_file_hash": None if generated_metadata is None else generated_metadata.get("generated_hash"),
+                    "compensation_mode": None if generated_metadata is None else generated_metadata.get("compensation_mode", "legacy"),
+                    "algorithm_version": None if generated_metadata is None else generated_metadata.get("algorithm_version"),
+                    "max_z_error_mm": operation.max_z_error_mm,
                     "compensation_status": "COMPENSADO" if generated is not None else "PENDIENTE",
                     "preflight_status": "PENDIENTE",
                     "execution_status": "PENDING",
@@ -1054,6 +1099,8 @@ class JobService:
                 "tool_changes": tool_change_count,
                 "distinct_tools": len(distinct_tools),
                 "blocked_operations": sum(1 for item in operation_rows if item["blocking"]),
+                "original_estimated_time_s": sum(float(item.get("original_estimated_time_s") or 0.0) for item in operation_rows),
+                "estimated_time_s": sum(float(item.get("estimated_time_s") or 0.0) for item in operation_rows),
             },
             "manifest_path": self._existing_manifest_path(context),
             "created_at": _iso_now(),
@@ -1126,6 +1173,16 @@ class JobService:
                     "reference_status": item["reference_status"],
                     "generated_file": item["generated_file"],
                     "generated_file_name": item["generated_file_name"],
+                    "generated_metadata_path": item.get("generated_metadata_path"),
+                    "time_estimate": item.get("time_estimate"),
+                    "estimated_time_s": item.get("estimated_time_s"),
+                    "original_time_estimate": item.get("original_time_estimate"),
+                    "original_estimated_time_s": item.get("original_estimated_time_s"),
+                    "source_file_hash": item.get("source_file_hash"),
+                    "generated_file_hash": item.get("generated_file_hash"),
+                    "compensation_mode": item.get("compensation_mode"),
+                    "algorithm_version": item.get("algorithm_version"),
+                    "max_z_error_mm": item.get("max_z_error_mm"),
                     "execution_status": "PENDING",
                     "started_at": None,
                     "completed_at": None,
@@ -1140,6 +1197,8 @@ class JobService:
                 "operations_completed": 0,
                 "tool_changes_required": plan["summary"]["tool_changes"],
                 "tool_changes_completed": 0,
+                "original_estimated_time_s": sum(float(item.get("original_estimated_time_s") or 0.0) for item in plan["operations"]),
+                "estimated_time_s": sum(float(item.get("estimated_time_s") or 0.0) for item in plan["operations"]),
             },
             "timeline": [
                 {
@@ -1257,6 +1316,7 @@ class JobService:
         return {
             "relative_path": row["generated_file"],
             "metadata_path": row.get("generated_metadata_path"),
+            "time_estimate": row.get("time_estimate"),
         }
 
     def _latest_generated_by_operation(
@@ -1295,6 +1355,8 @@ class JobService:
                     "relative_path": self._relative_to_project(project_id, file_path),
                     "metadata_path": self._relative_to_project(project_id, metadata_path),
                     "plan_hash": metadata.get("generated_hash"),
+                    "time_estimate": metadata.get("time_estimate"),
+                    "metadata": metadata,
                 }
                 break
         return results
@@ -1323,6 +1385,9 @@ class JobService:
         if metadata.get("generated_hash") != hashlib.sha256(file_path.read_bytes()).hexdigest():
             return False
         if metadata.get("tool_id") != _tool_key(operation):
+            return False
+        metadata_mode = str(metadata.get("compensation_mode") or "legacy")
+        if metadata_mode != str(operation.compensation_mode):
             return False
         reference = (active_map.get("tool_references") or {}).get(_tool_key(operation))
         if isinstance(reference, dict) and reference.get("valid"):
@@ -1516,6 +1581,7 @@ class JobService:
 
     def _archive_run(self, context: JobContext, run: dict[str, Any]) -> None:
         archived = dict(run)
+        self._prepare_history_snapshot(archived)
         self._write_archived_run(context, archived)
         self._save_run(context, run)
 
@@ -1526,6 +1592,65 @@ class JobService:
         history_file = self._history_dir(context) / filename
         history_file.write_text(json.dumps(run, ensure_ascii=True, indent=2, sort_keys=True), encoding="utf-8")
         return history_file
+
+    def _prepare_history_snapshot(self, run: dict[str, Any]) -> None:
+        operations = list(run.get("operations") or [])
+        entries: list[dict[str, Any]] = []
+        original_total = 0.0
+        compensated_total = 0.0
+        actual_total = 0.0
+        actual_present = False
+        for operation in operations:
+            original_estimated = operation.get("original_estimated_time_s")
+            compensated_estimated = operation.get("estimated_time_s")
+            actual_duration = operation.get("actual_print_duration_s")
+            if original_estimated is not None:
+                original_total += float(original_estimated)
+            if compensated_estimated is not None:
+                compensated_total += float(compensated_estimated)
+            if actual_duration is not None:
+                actual_total += float(actual_duration)
+                actual_present = True
+            estimation_error_pct = None
+            if actual_duration is not None and compensated_estimated not in {None, 0}:
+                estimation_error_pct = ((float(actual_duration) - float(compensated_estimated)) / float(compensated_estimated)) * 100.0
+            entries.append(
+                {
+                    "project_id": run.get("project_id"),
+                    "operation_id": operation.get("operation_id"),
+                    "map_id": run.get("active_map_id"),
+                    "source_file_hash": operation.get("source_file_hash"),
+                    "generated_file_hash": operation.get("generated_file_hash"),
+                    "compensation_mode": operation.get("compensation_mode") or "legacy",
+                    "algorithm_version": operation.get("algorithm_version"),
+                    "max_z_error_mm": operation.get("max_z_error_mm"),
+                    "original_estimated_time_s": original_estimated,
+                    "compensated_estimated_time_s": compensated_estimated,
+                    "actual_print_duration_s": actual_duration,
+                    "estimation_error_pct": estimation_error_pct,
+                    "calibration_factor": None,
+                    "status": operation.get("execution_status"),
+                    "created_at": operation.get("started_at") or run.get("started_at") or run.get("updated_at"),
+                    "completed_at": operation.get("completed_at") or run.get("completed_at"),
+                }
+            )
+        calibration_factor = run.get("eta_ratio_ema")
+        if calibration_factor is None and actual_present and compensated_total > 0:
+            calibration_factor = actual_total / compensated_total
+        run["history_entries"] = entries
+        run["history_summary"] = {
+            "original_estimated_time_s": original_total,
+            "compensated_estimated_time_s": compensated_total,
+            "actual_print_duration_s": actual_total if actual_present else None,
+            "estimation_error_pct": None if not actual_present or compensated_total <= 0 else ((actual_total - compensated_total) / compensated_total) * 100.0,
+            "calibration_factor": calibration_factor,
+            "status": run.get("state"),
+            "created_at": run.get("started_at") or run.get("updated_at"),
+            "completed_at": run.get("completed_at"),
+        }
+        if calibration_factor is not None:
+            for entry in run["history_entries"]:
+                entry["calibration_factor"] = calibration_factor
 
     def _supervisor_thread(self, context: JobContext) -> threading.Thread | None:
         return self._threads.get((context.project_id, context.setup_id, context.face))
@@ -1543,6 +1668,7 @@ class JobService:
             "file_size": None,
             "file_path": None,
             "print_duration": None,
+            "total_duration": None,
             "active": False,
             "is_active": False,
             "updated_at": _iso_now(),
@@ -1568,6 +1694,7 @@ class JobService:
                 "file_position": status.get("file_position"),
                 "file_size": status.get("file_size"),
                 "print_duration": status.get("print_duration"),
+                "total_duration": status.get("total_duration"),
                 "message": status.get("message"),
                 "updated_at": status.get("updated_at") or _iso_now(),
             },
@@ -1658,6 +1785,90 @@ class JobService:
 
     def _relative_to_project(self, project_id: str, path: Path) -> str:
         return path.relative_to(self._project_dir(project_id)).as_posix()
+
+    def _merge_generated_metadata(self, project_id: str, metadata_path: str, updates: dict[str, Any]) -> None:
+        absolute = self.repository.project_dir(project_id) / metadata_path
+        payload = json.loads(absolute.read_text(encoding="utf-8"))
+        payload.update(updates)
+        absolute.write_text(json.dumps(payload, ensure_ascii=True, indent=2, sort_keys=True), encoding="utf-8")
+
+    def _build_eta_snapshot(
+        self,
+        run: dict[str, Any],
+        operation: dict[str, Any] | None,
+        status: dict[str, Any],
+        expected_filename: str,
+        observed_filename: str,
+    ) -> dict[str, Any]:
+        estimate = (operation or {}).get("time_estimate") or {}
+        offset_table = list(estimate.get("offset_table") or [])
+        predicted_total = estimate.get("estimated_time_s")
+        if (
+            operation is None
+            or not expected_filename
+            or expected_filename != observed_filename
+            or not offset_table
+            or predicted_total in {None, 0}
+        ):
+            return {
+                "available": False,
+                "reason": "filename_mismatch_or_missing_estimate",
+                "method": None,
+                "confidence": None,
+            }
+        file_position = status.get("file_position")
+        print_duration = status.get("print_duration")
+        try:
+            predicted_elapsed = self._interpolate_cumulative_seconds(offset_table, float(file_position or 0.0))
+            predicted_total_s = float(predicted_total)
+            actual_elapsed = float(print_duration or 0.0)
+        except (TypeError, ValueError):
+            return {
+                "available": False,
+                "reason": "invalid_eta_inputs",
+                "method": None,
+                "confidence": None,
+            }
+        ratio = float(run.get("eta_ratio_ema") or 1.0)
+        if predicted_elapsed > 0.1 and actual_elapsed >= 0.0:
+            measured_ratio = actual_elapsed / predicted_elapsed
+            ratio = max(0.25, min(4.0, ratio * 0.7 + measured_ratio * 0.3))
+            run["eta_ratio_ema"] = ratio
+            run["updated_at"] = _iso_now()
+        remaining = max(0.0, predicted_total_s - predicted_elapsed) * ratio
+        completion = _utc_now().timestamp() + remaining
+        method = str(estimate.get("method") or "internal")
+        if ratio != 1.0 and method != "moonraker_analysis":
+            method = "calibrated"
+        return {
+            "available": True,
+            "method": method,
+            "confidence": estimate.get("confidence", "medium"),
+            "progress": self._clamp_progress(status.get("progress")),
+            "elapsed_s": actual_elapsed,
+            "predicted_elapsed_s": predicted_elapsed,
+            "predicted_total_s": predicted_total_s,
+            "remaining_s": remaining,
+            "completion_at": datetime.fromtimestamp(completion, tz=timezone.utc).isoformat(),
+            "calibration_factor": ratio,
+            "filename": observed_filename,
+            "state": status.get("print_state"),
+        }
+
+    def _interpolate_cumulative_seconds(self, offset_table: list[dict[str, Any]], file_position: float) -> float:
+        previous_offset = 0.0
+        previous_seconds = 0.0
+        for row in offset_table:
+            current_offset = float(row.get("file_byte_offset") or 0.0)
+            current_seconds = float(row.get("predicted_cumulative_seconds") or 0.0)
+            if file_position <= current_offset:
+                if current_offset <= previous_offset:
+                    return current_seconds
+                progress = (file_position - previous_offset) / (current_offset - previous_offset)
+                return previous_seconds + (current_seconds - previous_seconds) * max(0.0, min(1.0, progress))
+            previous_offset = current_offset
+            previous_seconds = current_seconds
+        return previous_seconds
 
     def _load_project(self, project_id: str):
         try:

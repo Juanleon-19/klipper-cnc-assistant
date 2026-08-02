@@ -12,6 +12,7 @@ from klipper_cnc_assistant import __version__
 from klipper_cnc_assistant.domain import (
     AgujeroAlineacion,
     BoardFace,
+    CompensationMode,
     ConfiguracionAlineacion,
     FlipAxis,
     MachineSessionStatus,
@@ -193,6 +194,8 @@ class ProjectService:
         setup_id: str | None = None,
         tool_id: str | None = None,
         herramienta: str | None = None,
+        compensation_mode: str | None = None,
+        max_z_error_mm: float | None = None,
     ) -> OperacionPCB:
         project = self._load_project(project_id)
         target_setup_id = setup_id or project.montajes[0].id
@@ -217,6 +220,8 @@ class ProjectService:
             setup_id=target_setup_id,
             tool_id=_canonical_tool_id(tool_id, herramienta),
             herramienta=herramienta,
+            compensation_mode=CompensationMode(compensation_mode or CompensationMode.LEGACY),
+            max_z_error_mm=0.05 if max_z_error_mm is None else float(max_z_error_mm),
         )
         updated = project.add_operation(operation)
         self.repository.save_project(updated)
@@ -230,6 +235,8 @@ class ProjectService:
         nombre: str,
         tool_id: str | None = None,
         herramienta: str | None = None,
+        compensation_mode: str | None = None,
+        max_z_error_mm: float | None = None,
     ) -> OperacionPCB:
         project = self._load_project(project_id)
         operation = project.get_operation(operation_id)
@@ -238,6 +245,8 @@ class ProjectService:
             nombre=nombre,
             tool_id=_canonical_tool_id(tool_id, herramienta),
             herramienta=herramienta,
+            compensation_mode=operation.compensation_mode if compensation_mode is None else CompensationMode(compensation_mode),
+            max_z_error_mm=operation.max_z_error_mm if max_z_error_mm is None else float(max_z_error_mm),
         )
         updated = project.replace_operation(updated_operation)
         self.repository.save_project(updated)
@@ -259,6 +268,8 @@ class ProjectService:
             setup_id=source.setup_id,
             tool_id=source.tool_id,
             herramienta=source.herramienta,
+            compensation_mode=str(source.compensation_mode),
+            max_z_error_mm=source.max_z_error_mm,
         )
 
     def move_operation(

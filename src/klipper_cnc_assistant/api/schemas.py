@@ -80,12 +80,16 @@ class OperationCreateRequest(BaseModel):
     setup_id: str | None = None
     tool_id: str | None = None
     herramienta: str | None = None
+    compensation_mode: str | None = None
+    max_z_error_mm: float | None = Field(default=None, gt=0)
 
 
 class OperationUpdateRequest(BaseModel):
     nombre: str = Field(min_length=1)
     tool_id: str | None = None
     herramienta: str | None = None
+    compensation_mode: str | None = None
+    max_z_error_mm: float | None = Field(default=None, gt=0)
 
 
 class OperationMoveRequest(BaseModel):
@@ -219,6 +223,8 @@ class OperationResponse(BaseModel):
     sha256: str | None
     tool_id: str | None
     herramienta: str | None
+    compensation_mode: str
+    max_z_error_mm: float
     estado: str
     analisis: OperationAnalysisResponse | None
 
@@ -380,6 +386,8 @@ def operation_to_response(operation: OperacionPCB) -> OperationResponse:
         sha256=operation.sha256,
         tool_id=operation.tool_id,
         herramienta=operation.herramienta,
+        compensation_mode=str(operation.compensation_mode),
+        max_z_error_mm=operation.max_z_error_mm,
         estado=operation.estado,
         analisis=None if operation.analisis is None else analysis_to_response(operation.analisis),
     )
