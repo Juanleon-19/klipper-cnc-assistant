@@ -16,6 +16,7 @@ MAX_RECURSION_DEPTH = 12
 MAX_EMITTED_MOVES = 50_000
 FULL_CIRCLE_EPSILON = 1e-6
 SURFACE_THRESHOLD_Z_MM = 0.0
+DEFAULT_RAPID_CLEARANCE_MARGIN_MM = 0.05
 UNSUPPORTED_G_CODES = {"G10", "G28", "G53", "G90.1", "G91.1", "G92"}
 SETUP_G_CODES = {"G17", "G18", "G19", "G20", "G21", "G90", "G91", "G94"}
 MOTION_G_CODES = {"G0", "G1", "G2", "G3"}
@@ -73,6 +74,22 @@ class EmissionState:
     last_emitted_point: AdaptivePoint | None = None
 
 
+@dataclass(frozen=True)
+class RapidClearancePolicy:
+    configured_safe_z_mm: float | None
+    configured_safe_z_source: str | None
+    max_positive_map_delta_mm: float
+    rapid_clearance_margin_mm: float
+    required_rapid_z_mm: float
+
+
+@dataclass
+class RapidClearanceState:
+    policy: RapidClearancePolicy
+    minimum_programmed_g0_z_mm: float | None = None
+    blocking_reason: str | None = None
+
+
 def generate_adaptive_gcode(
     *,
     original_text: str,
@@ -82,10 +99,22 @@ def generate_adaptive_gcode(
     operation_id: str,
     operation_name: str,
     min_segment_length_mm: float,
+    configured_safe_z_mm: float | None = None,
+    configured_safe_z_source: str | None = None,
+    rapid_clearance_margin_mm: float = DEFAULT_RAPID_CLEARANCE_MARGIN_MM,
+    enforce_rapid_clearance: bool = True,
 ) -> dict[str, Any]:
     lines = tokenize_gcode(original_text)
     state = ModalState()
     emission_state = EmissionState()
+    rapid_clearance_state = RapidClearanceState(
+        policy=_build_rapid_clearance_policy(
+            height_map=height_map,
+            configured_safe_z_mm=configured_safe_z_mm,
+            configured_safe_z_source=configured_safe_z_source,
+            rapid_clearance_margin_mm=rapid_clearance_margin_mm,
+        )
+    )
     plane = "G17"
     output_lines = [
         "; Klipper CNC Assistant - plan compensado adaptativo",
@@ -108,6 +137,7 @@ def generate_adaptive_gcode(
             line=line,
             state=state,
             emission_state=emission_state,
+            rapid_clearance_state=rapid_clearance_state,
             plane=plane,
             height_map=height_map,
             reference_frame=reference_frame,
@@ -138,6 +168,8 @@ def generate_adaptive_gcode(
     if unsupported_commands:
         detail = ", ".join(_unique(unsupported_commands)[:6])
         raise ApplicationError(f"adaptive_fast bloqueado por comandos o construcciones no soportadas: {detail}.")
+    if enforce_rapid_clearance and rapid_clearance_state.blocking_reason:
+        raise ApplicationError(rapid_clearance_state.blocking_reason)
 
     return {
         "output": "\n".join(output_lines) + "\n",
@@ -158,6 +190,14 @@ def generate_adaptive_gcode(
             "outside_points": outside_points,
             "extrapolations": 0,
             "movement_limit": MAX_EMITTED_MOVES,
+            "configured_safe_z_mm": rapid_clearance_state.policy.configured_safe_z_mm,
+            "configured_safe_z_source": rapid_clearance_state.policy.configured_safe_z_source,
+            "required_rapid_z_mm": rapid_clearance_state.policy.required_rapid_z_mm,
+            "minimum_programmed_g0_z_mm": rapid_clearance_state.minimum_programmed_g0_z_mm,
+            "rapid_clearance_margin_mm": rapid_clearance_state.policy.rapid_clearance_margin_mm,
+            "rapid_clearance_verified": rapid_clearance_state.blocking_reason is None,
+            "rapid_clearance_block_reason": rapid_clearance_state.blocking_reason,
+            "max_positive_map_delta_mm": rapid_clearance_state.policy.max_positive_map_delta_mm,
         },
     }
 
@@ -167,6 +207,7 @@ def _transform_line(
     line: GCodeLine,
     state: ModalState,
     emission_state: EmissionState,
+    rapid_clearance_state: RapidClearanceState,
     plane: str,
     height_map: HeightMap,
     reference_frame: ReferenceFrame,
@@ -199,6 +240,7 @@ def _transform_line(
             feed_token=parsed.feed_token,
             state=state,
             emission_state=emission_state,
+            rapid_clearance_state=rapid_clearance_state,
             height_map=height_map,
             reference_frame=reference_frame,
             max_z_error_mm=max_z_error_mm,
@@ -219,6 +261,7 @@ def _transform_line(
             feed_token=parsed.feed_token,
             state=state,
             emission_state=emission_state,
+            rapid_clearance_state=rapid_clearance_state,
             height_map=height_map,
             reference_frame=reference_frame,
             max_z_error_mm=max_z_error_mm,
@@ -396,6 +439,7 @@ def _transform_linear_motion(
     feed_token: str | None,
     state: ModalState,
     emission_state: EmissionState,
+    rapid_clearance_state: RapidClearanceState,
     height_map: HeightMap,
     reference_frame: ReferenceFrame,
     max_z_error_mm: float,
@@ -410,7 +454,6 @@ def _transform_linear_motion(
     if command == "G0":
         start_point, end_point = _validate_safe_g0(
             line_number=line.line_number,
-            progress=0.0,
             start_x=start_x,
             start_y=start_y,
             start_z=start_z,
@@ -419,6 +462,7 @@ def _transform_linear_motion(
             target_z=target_z,
             height_map=height_map,
             reference_frame=reference_frame,
+            rapid_clearance_state=rapid_clearance_state,
         )
         return _emit_linear_points(
             line=line,
@@ -880,6 +924,7 @@ def _transform_arc_motion(
     feed_token: str | None,
     state: ModalState,
     emission_state: EmissionState,
+    rapid_clearance_state: RapidClearanceState,
     height_map: HeightMap,
     reference_frame: ReferenceFrame,
     max_z_error_mm: float,
@@ -1536,6 +1581,59 @@ def _surface_mode_spans(start_z: float, target_z: float) -> list[tuple[float, fl
     return result
 
 
+def _build_rapid_clearance_policy(
+    *,
+    height_map: HeightMap,
+    configured_safe_z_mm: float | None,
+    configured_safe_z_source: str | None,
+    rapid_clearance_margin_mm: float,
+) -> RapidClearancePolicy:
+    max_positive_map_delta_mm = _max_positive_map_delta_mm(height_map)
+    configured = None if configured_safe_z_mm is None else float(configured_safe_z_mm)
+    required_rapid_z_mm = max(
+        configured if configured is not None else float("-inf"),
+        max_positive_map_delta_mm + float(rapid_clearance_margin_mm),
+    )
+    if not math.isfinite(required_rapid_z_mm):
+        required_rapid_z_mm = max_positive_map_delta_mm + float(rapid_clearance_margin_mm)
+    return RapidClearancePolicy(
+        configured_safe_z_mm=configured,
+        configured_safe_z_source=configured_safe_z_source,
+        max_positive_map_delta_mm=max_positive_map_delta_mm,
+        rapid_clearance_margin_mm=float(rapid_clearance_margin_mm),
+        required_rapid_z_mm=required_rapid_z_mm,
+    )
+
+
+def _max_positive_map_delta_mm(height_map: HeightMap) -> float:
+    values = [
+        float(sample.z_mm)
+        for sample in height_map.muestras
+        if sample.incluida and sample.z_mm is not None and float(sample.z_mm) > 0.0
+    ]
+    return max(values) if values else 0.0
+
+
+def _rapid_clearance_message(
+    *,
+    line_number: int,
+    reason: str,
+    start_z: float,
+    target_z: float,
+    policy: RapidClearancePolicy,
+) -> str:
+    configured_source = policy.configured_safe_z_source or "ausente"
+    configured_safe_z = "ausente" if policy.configured_safe_z_mm is None else f"{policy.configured_safe_z_mm:.3f} mm"
+    return (
+        f"L{line_number}: G0 bloqueado: {reason}. "
+        f"Z programada inicio={start_z:.3f} mm, fin={target_z:.3f} mm; "
+        f"Z segura requerida={policy.required_rapid_z_mm:.3f} mm; "
+        f"delta máximo del mapa={policy.max_positive_map_delta_mm:.3f} mm; "
+        f"margen={policy.rapid_clearance_margin_mm:.3f} mm; "
+        f"configured_safe_z_mm={configured_safe_z}; fuente={configured_source}."
+    )
+
+
 def _surface_transition_progress(start_z: float, target_z: float) -> float | None:
     if math.isclose(start_z, target_z, abs_tol=1e-12):
         return None
@@ -1571,7 +1669,6 @@ def _interval_sample_points(left_local: float, right_local: float) -> list[float
 def _validate_safe_g0(
     *,
     line_number: int,
-    progress: float,
     start_x: float,
     start_y: float,
     start_z: float,
@@ -1580,8 +1677,8 @@ def _validate_safe_g0(
     target_z: float,
     height_map: HeightMap,
     reference_frame: ReferenceFrame,
+    rapid_clearance_state: RapidClearanceState,
 ) -> tuple[AdaptivePoint, AdaptivePoint]:
-    del progress
     start_point = _evaluate_linear_point(
         progress=0.0,
         start_x=start_x,
@@ -1610,19 +1707,47 @@ def _validate_safe_g0(
     y_moves = not math.isclose(start_y, target_y, abs_tol=1e-9)
     z_moves = not math.isclose(start_z, target_z, abs_tol=1e-9)
     xy_moves = x_moves or y_moves
+    rapid_clearance_state.minimum_programmed_g0_z_mm = _min_optional(
+        rapid_clearance_state.minimum_programmed_g0_z_mm,
+        min(start_z, target_z),
+    )
+    violation_reason: str | None = None
+    required_rapid_z_mm = rapid_clearance_state.policy.required_rapid_z_mm
+    has_configured_safe_z = rapid_clearance_state.policy.configured_safe_z_mm is not None
 
     if xy_moves and not z_moves:
-        if start_z < SURFACE_THRESHOLD_Z_MM or target_z < SURFACE_THRESHOLD_Z_MM:
-            raise ApplicationError(f"L{line_number}: G0 bloqueado: XY rápido bajo Z=0 no es seguro.")
-        return start_point, end_point
-    if z_moves and not xy_moves:
-        if target_z < start_z - 1e-9 or target_z < SURFACE_THRESHOLD_Z_MM:
-            raise ApplicationError(f"L{line_number}: G0 bloqueado: plunge rápido hacia zona de corte no permitido.")
-        return start_point, end_point
-    if xy_moves and z_moves:
-        if min(start_z, target_z) < SURFACE_THRESHOLD_Z_MM or (start_z - SURFACE_THRESHOLD_Z_MM) * (target_z - SURFACE_THRESHOLD_Z_MM) <= 0:
-            raise ApplicationError(f"L{line_number}: G0 bloqueado: diagonal rápida que atraviesa la superficie.")
-        raise ApplicationError(f"L{line_number}: G0 bloqueado: solo se permite XY seguro o retracción vertical.")
+        if not has_configured_safe_z:
+            violation_reason = "falta una altura segura de desplazamiento configurada"
+        elif start_z < required_rapid_z_mm or target_z < required_rapid_z_mm:
+            if math.isclose(start_z, SURFACE_THRESHOLD_Z_MM, abs_tol=1e-9) or math.isclose(target_z, SURFACE_THRESHOLD_Z_MM, abs_tol=1e-9):
+                violation_reason = "G0 XY en Z=0 no permitido"
+            elif start_z < 0.0 or target_z < 0.0:
+                violation_reason = "G0 XY bajo Z=0 no permitido"
+            else:
+                violation_reason = "G0 XY por debajo del clearance requerido"
+    elif z_moves and not xy_moves:
+        if target_z <= start_z + 1e-9:
+            violation_reason = "G0 plunge rápido no permitido"
+        elif not has_configured_safe_z:
+            violation_reason = "falta una altura segura de desplazamiento configurada"
+        elif target_z < required_rapid_z_mm:
+            violation_reason = "retracción vertical insuficiente para alcanzar la altura segura"
+    elif xy_moves and z_moves:
+        if not has_configured_safe_z:
+            violation_reason = "falta una altura segura de desplazamiento configurada"
+        elif min(start_z, target_z) < required_rapid_z_mm:
+            violation_reason = "G0 diagonal que entra o cruza por debajo del clearance"
+        else:
+            violation_reason = "G0 diagonal rápida no permitida; solo se permite XY seguro o retracción vertical"
+
+    if violation_reason and rapid_clearance_state.blocking_reason is None:
+        rapid_clearance_state.blocking_reason = _rapid_clearance_message(
+            line_number=line_number,
+            reason=violation_reason,
+            start_z=start_z,
+            target_z=target_z,
+            policy=rapid_clearance_state.policy,
+        )
     return start_point, end_point
 
 
@@ -1721,6 +1846,10 @@ def _unique_progress(values: list[float]) -> list[float]:
         if not result or not math.isclose(result[-1], value, abs_tol=1e-9):
             result.append(value)
     return result
+
+
+def _min_optional(current: float | None, candidate: float) -> float:
+    return candidate if current is None else min(current, candidate)
 
 
 def _result(

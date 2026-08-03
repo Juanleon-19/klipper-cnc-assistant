@@ -162,6 +162,8 @@ class AdaptiveCompensationTests(unittest.TestCase):
             machine_origin_y_mm=200.0,
             surface_reference_z_mm=10.0,
         )
+        self.default_safe_rapid_z_mm = 0.3
+        self.default_rapid_clearance_margin_mm = 0.05
 
     def test_flat_mesh_does_not_add_unnecessary_segments(self) -> None:
         height_map = build_height_map(lambda _x, _y: 0.0)
@@ -219,6 +221,7 @@ class AdaptiveCompensationTests(unittest.TestCase):
             operation_id="op",
             operation_name="rapid",
             min_segment_length_mm=0.05,
+            configured_safe_z_mm=self.default_safe_rapid_z_mm,
         )
         motions = [line for line in result["output"].splitlines() if line.startswith("G0")]
         self.assertEqual(len(motions), 2)
@@ -234,13 +237,14 @@ class AdaptiveCompensationTests(unittest.TestCase):
             operation_id="op",
             operation_name="g0-retract",
             min_segment_length_mm=0.05,
+            configured_safe_z_mm=self.default_safe_rapid_z_mm,
         )
         rapid = [record for record in emitted_motion_records(result["output"]) if record["command"] == "G0"][-1]
         self.assertAlmostEqual(float(rapid["end"][2]), 11.0, places=6)
 
     def test_g0_xy_below_surface_is_blocked_with_line_and_reason(self) -> None:
         height_map = build_height_map(lambda _x, _y: 0.0)
-        with self.assertRaisesRegex(ApplicationError, r"L4: G0 bloqueado: XY rápido bajo Z=0"):
+        with self.assertRaisesRegex(ApplicationError, r"L4: G0 bloqueado: G0 XY bajo Z=0 no permitido"):
             generate_adaptive_gcode(
                 original_text="G21\nG90\nG1 X0 Y0 Z-0.1 F120\nG0 X20 Y0\n",
                 height_map=height_map,
@@ -249,11 +253,12 @@ class AdaptiveCompensationTests(unittest.TestCase):
                 operation_id="op",
                 operation_name="g0-xy-below",
                 min_segment_length_mm=0.05,
+                configured_safe_z_mm=self.default_safe_rapid_z_mm,
             )
 
     def test_g0_plunge_toward_cut_is_blocked_with_line_and_reason(self) -> None:
         height_map = build_height_map(lambda _x, _y: 0.0)
-        with self.assertRaisesRegex(ApplicationError, r"L3: G0 bloqueado: plunge rápido hacia zona de corte"):
+        with self.assertRaisesRegex(ApplicationError, r"L3: G0 bloqueado: G0 plunge rápido no permitido"):
             generate_adaptive_gcode(
                 original_text="G21\nG90\nG0 Z-0.1\n",
                 height_map=height_map,
@@ -266,7 +271,7 @@ class AdaptiveCompensationTests(unittest.TestCase):
 
     def test_g0_diagonal_crossing_surface_is_blocked_with_line_and_reason(self) -> None:
         height_map = build_height_map(lambda _x, _y: 0.0)
-        with self.assertRaisesRegex(ApplicationError, r"L3: G0 bloqueado: diagonal rápida que atraviesa la superficie"):
+        with self.assertRaisesRegex(ApplicationError, r"L3: G0 bloqueado: G0 diagonal que entra o cruza por debajo del clearance"):
             generate_adaptive_gcode(
                 original_text="G21\nG90\nG0 X20 Y0 Z-0.1\n",
                 height_map=height_map,
@@ -275,7 +280,136 @@ class AdaptiveCompensationTests(unittest.TestCase):
                 operation_id="op",
                 operation_name="g0-diagonal",
                 min_segment_length_mm=0.05,
+                configured_safe_z_mm=self.default_safe_rapid_z_mm,
             )
+
+    def test_g0_xy_at_surface_is_blocked_when_map_requires_clearance(self) -> None:
+        height_map = build_height_map(lambda _x, _y: 0.20)
+        with self.assertRaisesRegex(ApplicationError, r"L3: G0 bloqueado: G0 XY en Z=0 no permitido"):
+            generate_adaptive_gcode(
+                original_text="G21\nG90\nG0 X20 Y0 Z0\n",
+                height_map=height_map,
+                reference_frame=self.reference,
+                max_z_error_mm=0.01,
+                operation_id="op",
+                operation_name="g0-z0",
+                min_segment_length_mm=0.05,
+                configured_safe_z_mm=0.10,
+                rapid_clearance_margin_mm=self.default_rapid_clearance_margin_mm,
+            )
+
+    def test_g0_xy_with_positive_z_below_required_clearance_is_blocked(self) -> None:
+        height_map = build_height_map(lambda _x, _y: 0.20)
+        with self.assertRaisesRegex(ApplicationError, r"L5: G0 bloqueado: G0 XY por debajo del clearance requerido"):
+            generate_adaptive_gcode(
+                original_text="G21\nG90\nG0 Z0.3\nG1 Z0.1 F120\nG0 X20 Y0\n",
+                height_map=height_map,
+                reference_frame=self.reference,
+                max_z_error_mm=0.01,
+                operation_id="op",
+                operation_name="g0-z0.1",
+                min_segment_length_mm=0.05,
+                configured_safe_z_mm=0.10,
+                rapid_clearance_margin_mm=self.default_rapid_clearance_margin_mm,
+            )
+
+    def test_g0_xy_exactly_at_required_clearance_is_allowed(self) -> None:
+        height_map = build_height_map(lambda _x, _y: 0.20)
+        result = generate_adaptive_gcode(
+            original_text="G21\nG90\nG0 Z0.25\nG0 X20 Y0\n",
+            height_map=height_map,
+            reference_frame=self.reference,
+            max_z_error_mm=0.01,
+            operation_id="op",
+            operation_name="g0-exact-clearance",
+            min_segment_length_mm=0.05,
+            configured_safe_z_mm=0.10,
+            rapid_clearance_margin_mm=self.default_rapid_clearance_margin_mm,
+        )
+        self.assertTrue(result["preview"]["rapid_clearance_verified"])
+        self.assertAlmostEqual(result["preview"]["required_rapid_z_mm"], 0.25, places=6)
+        self.assertAlmostEqual(result["preview"]["minimum_programmed_g0_z_mm"], 0.0, places=6)
+
+    def test_g0_xy_above_required_clearance_is_allowed(self) -> None:
+        height_map = build_height_map(lambda _x, _y: 0.20)
+        result = generate_adaptive_gcode(
+            original_text="G21\nG90\nG0 Z0.3\nG0 X20 Y0\n",
+            height_map=height_map,
+            reference_frame=self.reference,
+            max_z_error_mm=0.01,
+            operation_id="op",
+            operation_name="g0-above-clearance",
+            min_segment_length_mm=0.05,
+            configured_safe_z_mm=0.10,
+            rapid_clearance_margin_mm=self.default_rapid_clearance_margin_mm,
+        )
+        rapid = [record for record in emitted_motion_records(result["output"]) if record["command"] == "G0"][-1]
+        self.assertAlmostEqual(float(rapid["end"][2]), 10.3, places=6)
+
+    def test_g0_vertical_retract_only_to_zero_is_blocked_when_required_clearance_is_higher(self) -> None:
+        height_map = build_height_map(lambda _x, _y: 0.20)
+        with self.assertRaisesRegex(ApplicationError, r"L4: G0 bloqueado: retracción vertical insuficiente para alcanzar la altura segura"):
+            generate_adaptive_gcode(
+                original_text="G21\nG90\nG1 X10 Y0 Z-0.1 F120\nG0 Z0\n",
+                height_map=height_map,
+                reference_frame=self.reference,
+                max_z_error_mm=0.01,
+                operation_id="op",
+                operation_name="g0-zero-retract",
+                min_segment_length_mm=0.05,
+                configured_safe_z_mm=0.10,
+                rapid_clearance_margin_mm=self.default_rapid_clearance_margin_mm,
+            )
+
+    def test_g0_diagonal_above_full_clearance_is_blocked_by_policy(self) -> None:
+        height_map = build_height_map(lambda _x, _y: 0.20)
+        with self.assertRaisesRegex(
+            ApplicationError,
+            r"L4: G0 bloqueado: G0 diagonal rápida no permitida; solo se permite XY seguro o retracción vertical",
+        ):
+            generate_adaptive_gcode(
+                original_text="G21\nG90\nG0 Z0.3\nG0 X20 Y0 Z0.35\n",
+                height_map=height_map,
+                reference_frame=self.reference,
+                max_z_error_mm=0.01,
+                operation_id="op",
+                operation_name="g0-diagonal-above",
+                min_segment_length_mm=0.05,
+                configured_safe_z_mm=0.10,
+                rapid_clearance_margin_mm=self.default_rapid_clearance_margin_mm,
+            )
+
+    def test_g0_diagonal_crossing_required_clearance_is_blocked(self) -> None:
+        height_map = build_height_map(lambda _x, _y: 0.20)
+        with self.assertRaisesRegex(ApplicationError, r"L4: G0 bloqueado: G0 diagonal que entra o cruza por debajo del clearance"):
+            generate_adaptive_gcode(
+                original_text="G21\nG90\nG0 Z0.3\nG0 X20 Y0 Z0.2\n",
+                height_map=height_map,
+                reference_frame=self.reference,
+                max_z_error_mm=0.01,
+                operation_id="op",
+                operation_name="g0-diagonal-crossing-clearance",
+                min_segment_length_mm=0.05,
+                configured_safe_z_mm=0.10,
+                rapid_clearance_margin_mm=self.default_rapid_clearance_margin_mm,
+            )
+
+    def test_missing_safe_z_marks_preview_non_executable_in_permissive_mode(self) -> None:
+        height_map = build_height_map(lambda _x, _y: 0.20)
+        result = generate_adaptive_gcode(
+            original_text="G21\nG90\nG0 X20 Y0 Z0.3\n",
+            height_map=height_map,
+            reference_frame=self.reference,
+            max_z_error_mm=0.01,
+            operation_id="op",
+            operation_name="g0-missing-safe-z",
+            min_segment_length_mm=0.05,
+            enforce_rapid_clearance=False,
+            rapid_clearance_margin_mm=self.default_rapid_clearance_margin_mm,
+        )
+        self.assertFalse(result["preview"]["rapid_clearance_verified"])
+        self.assertIn("falta una altura segura de desplazamiento configurada", str(result["preview"]["rapid_clearance_block_reason"]))
+        self.assertAlmostEqual(result["preview"]["required_rapid_z_mm"], 0.25, places=6)
 
     def test_relative_mode_is_preserved(self) -> None:
         height_map = build_height_map(lambda _x, _y: 0.0)
@@ -287,6 +421,7 @@ class AdaptiveCompensationTests(unittest.TestCase):
             operation_id="op",
             operation_name="relative",
             min_segment_length_mm=0.05,
+            configured_safe_z_mm=self.default_safe_rapid_z_mm,
         )
         self.assertIn("\nG91\n", result["output"])
         self.assertNotIn("\nG90\n", result["output"])
@@ -427,64 +562,74 @@ class AdaptiveCompensationTests(unittest.TestCase):
     def test_pure_z_plunge_uses_surface_delta_at_current_xy(self) -> None:
         height_map = build_height_map(lambda x_mm, y_mm: 0.01 * x_mm + 0.001 * y_mm)
         result = generate_adaptive_gcode(
-            original_text="G21\nG90\nG0 X10 Y10\nG1 Z-0.1 F120\n",
+            original_text="G21\nG90\nG0 Z0.3\nG0 X10 Y10\nG1 Z-0.1 F120\n",
             height_map=height_map,
             reference_frame=self.reference,
             max_z_error_mm=0.01,
             operation_id="op",
             operation_name="plunge",
             min_segment_length_mm=0.05,
+            configured_safe_z_mm=self.default_safe_rapid_z_mm,
         )
-        plunge = next(line for line in result["output"].splitlines() if line.startswith("G1 "))
-        self.assertIn("X110", plunge)
-        self.assertIn("Y210", plunge)
-        self.assertIn("Z10.01", plunge)
+        motions = [line for line in result["output"].splitlines() if line.startswith("G1 ")]
+        self.assertEqual(len(motions), 2)
+        self.assertIn("X110", motions[-1])
+        self.assertIn("Y210", motions[-1])
+        self.assertIn("Z10.01", motions[-1])
         self.assertAlmostEqual(result["preview"]["trace"][-1]["delta_z_mm"], 0.11, places=6)
 
     def test_relative_plunge_uses_last_emitted_machine_position(self) -> None:
         height_map = build_height_map(lambda x_mm, y_mm: 0.01 * x_mm + 0.001 * y_mm)
         result = generate_adaptive_gcode(
-            original_text="G21\nG91\nG0 X10 Y10\nG1 Z-0.1 F120\n",
+            original_text="G21\nG91\nG0 Z0.3\nG0 X10 Y10\nG1 Z-0.4 F120\n",
             height_map=height_map,
             reference_frame=self.reference,
             max_z_error_mm=0.01,
             operation_id="op",
             operation_name="relative-plunge",
             min_segment_length_mm=0.05,
+            configured_safe_z_mm=self.default_safe_rapid_z_mm,
         )
         motions = [record for record in emitted_motion_records(result["output"]) if record["command"] == "G1"]
-        self.assertEqual(len(motions), 1)
-        plunge = motions[0]
-        self.assertAlmostEqual(float(plunge["start"][2]), 0.0, places=6)
-        self.assertAlmostEqual(float(plunge["end"][2]), 0.01, places=6)
-        self.assertIn("Z0.01", str(plunge["raw"]))
+        self.assertEqual(len(motions), 2)
+        self.assertAlmostEqual(float(motions[0]["start"][2]), 0.3, places=6)
+        self.assertAlmostEqual(float(motions[0]["end"][2]), 0.0, places=6)
+        self.assertAlmostEqual(float(motions[0]["end"][2]), float(motions[1]["start"][2]), places=6)
+        self.assertAlmostEqual(float(motions[1]["end"][2]), 0.01, places=6)
+        self.assertIn("Z0.01", str(motions[-1]["raw"]))
 
     def test_xy_cut_after_pure_z_plunge_keeps_compensated_start(self) -> None:
         height_map = build_height_map(lambda x_mm, _y: 0.005 * x_mm)
         result = generate_adaptive_gcode(
-            original_text="G21\nG90\nG0 X10 Y0\nG1 Z-0.1 F120\nG1 X20 F120\n",
+            original_text="G21\nG90\nG0 Z0.3\nG0 X10 Y0\nG1 Z-0.1 F120\nG1 X20 F120\n",
             height_map=height_map,
             reference_frame=self.reference,
             max_z_error_mm=0.005,
             operation_id="op",
             operation_name="plunge-then-cut",
             min_segment_length_mm=0.05,
+            configured_safe_z_mm=self.default_safe_rapid_z_mm,
         )
         motions = [line for line in result["output"].splitlines() if line.startswith("G1 ")]
-        self.assertEqual(len(motions), 2)
-        self.assertIn("X120", motions[1])
-        self.assertIn("Z10", motions[1])
+        self.assertEqual(len(motions), 3)
+        records = [record for record in emitted_motion_records(result["output"]) if record["command"] == "G1"]
+        self.assertAlmostEqual(float(records[1]["end"][0]), float(records[2]["start"][0]), places=6)
+        self.assertAlmostEqual(float(records[1]["end"][1]), float(records[2]["start"][1]), places=6)
+        self.assertAlmostEqual(float(records[1]["end"][2]), float(records[2]["start"][2]), places=6)
+        self.assertIn("X120", motions[-1])
+        self.assertIn("Z10", motions[-1])
 
     def test_retract_to_surface_keeps_compensation_until_crossing(self) -> None:
         height_map = build_height_map(lambda x_mm, _y: 0.005 * x_mm)
         result = generate_adaptive_gcode(
-            original_text="G21\nG90\nG0 X10 Y0\nG1 Z-0.1 F120\nG1 Z0 F120\n",
+            original_text="G21\nG90\nG0 Z0.3\nG0 X10 Y0\nG1 Z-0.1 F120\nG1 Z0 F120\n",
             height_map=height_map,
             reference_frame=self.reference,
             max_z_error_mm=0.01,
             operation_id="op",
             operation_name="retract",
             min_segment_length_mm=0.05,
+            configured_safe_z_mm=self.default_safe_rapid_z_mm,
         )
         motions = [line for line in result["output"].splitlines() if line.startswith("G1 ")]
         self.assertIn("Z10.05", motions[-1])
@@ -493,17 +638,19 @@ class AdaptiveCompensationTests(unittest.TestCase):
     def test_relative_retract_uses_last_emitted_machine_position(self) -> None:
         height_map = build_height_map(lambda x_mm, _y: 0.005 * x_mm)
         result = generate_adaptive_gcode(
-            original_text="G21\nG91\nG0 X10 Y0\nG1 Z-0.1 F120\nG1 Z0.1 F120\n",
+            original_text="G21\nG91\nG0 Z0.3\nG0 X10 Y0\nG1 Z-0.4 F120\nG1 Z0.1 F120\n",
             height_map=height_map,
             reference_frame=self.reference,
             max_z_error_mm=0.01,
             operation_id="op",
             operation_name="relative-retract",
             min_segment_length_mm=0.05,
+            configured_safe_z_mm=self.default_safe_rapid_z_mm,
         )
         motions = [record for record in emitted_motion_records(result["output"]) if record["command"] == "G1"]
-        self.assertEqual(len(motions), 2)
+        self.assertEqual(len(motions), 3)
         self.assertAlmostEqual(float(motions[0]["end"][2]), float(motions[1]["start"][2]), places=6)
+        self.assertAlmostEqual(float(motions[1]["end"][2]), float(motions[2]["start"][2]), places=6)
         self.assertIn("Z0.1", str(motions[-1]["raw"]))
 
     def test_ramp_crossing_surface_threshold_is_split_at_crossing(self) -> None:
@@ -516,6 +663,7 @@ class AdaptiveCompensationTests(unittest.TestCase):
             operation_id="op",
             operation_name="ramp",
             min_segment_length_mm=0.05,
+            configured_safe_z_mm=self.default_safe_rapid_z_mm,
         )
         motions = [record for record in emitted_motion_records(result["output"]) if record["command"] == "G1"]
         self.assertGreaterEqual(len(motions), 2)
@@ -530,26 +678,28 @@ class AdaptiveCompensationTests(unittest.TestCase):
     def test_safe_retraction_finishes_without_surface_compensation(self) -> None:
         height_map = build_height_map(lambda x_mm, _y: 0.005 * x_mm)
         result = generate_adaptive_gcode(
-            original_text="G21\nG90\nG0 X10 Y0\nG1 Z-0.1 F120\nG1 Z1 F120\n",
+            original_text="G21\nG90\nG0 Z0.3\nG0 X10 Y0\nG1 Z-0.1 F120\nG1 Z1 F120\n",
             height_map=height_map,
             reference_frame=self.reference,
             max_z_error_mm=0.01,
             operation_id="op",
             operation_name="safe-retract",
             min_segment_length_mm=0.05,
+            configured_safe_z_mm=self.default_safe_rapid_z_mm,
         )
         self.assertAlmostEqual(result["preview"]["trace"][-1]["delta_z_mm"], 0.0, places=6)
 
     def test_global_motion_continuity_uses_previous_real_endpoint(self) -> None:
         height_map = build_height_map(lambda x_mm, y_mm: 0.01 * x_mm + 0.001 * y_mm)
         result = generate_adaptive_gcode(
-            original_text="G21\nG91\nG0 X10 Y10\nG1 Z-0.1 F120\nG1 X10 Z0.05 F120\nG1 Z0.05 F120\n",
+            original_text="G21\nG91\nG0 Z0.3\nG0 X10 Y10\nG1 Z-0.4 F120\nG1 X10 Z0.05 F120\nG1 Z0.05 F120\n",
             height_map=height_map,
             reference_frame=self.reference,
             max_z_error_mm=0.01,
             operation_id="op",
             operation_name="continuity",
             min_segment_length_mm=0.05,
+            configured_safe_z_mm=self.default_safe_rapid_z_mm,
         )
         motions = emitted_motion_records(result["output"])
         for previous, current in zip(motions, motions[1:]):

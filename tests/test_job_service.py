@@ -148,6 +148,15 @@ class RecordingTimeEstimationService:
     def __init__(self) -> None:
         self.calls: list[dict[str, object]] = []
 
+    def estimate_text(self, text: str) -> dict[str, object]:
+        return {
+            "estimated_time_s": 40.0,
+            "method": "internal",
+            "confidence": "medium",
+            "distribution_detail": "Distribución temporal calculada por el estimador interno.",
+            "unsupported_commands": [],
+        }
+
     def estimate_project_file(self, *, project_id: str, relative_path: str, remote_filename: str | None = None) -> dict[str, object]:
         self.calls.append({
             "project_id": project_id,
@@ -704,6 +713,25 @@ class JobServiceTest(unittest.TestCase):
 
         adaptive_row = next(item for item in plan["operations"] if item["operation_id"] == operation.id)
         self.assertIsNone(adaptive_row["generated_file"])
+
+    def test_missing_safe_rapid_height_keeps_adaptive_experimental_and_legacy_available(self) -> None:
+        operation = self.project_service.get_project(self.project_id).operations_for_setup(self.setup_id)[0]
+        self.project_service.update_operation(
+            project_id=self.project_id,
+            operation_id=operation.id,
+            nombre=operation.nombre,
+            compensation_mode="adaptive_fast",
+            max_z_error_mm=operation.max_z_error_mm,
+        )
+
+        report = self.compensated_service.build_comparison_report(self.project_id, operation.id)
+
+        self.assertFalse(report["adaptive_fast"]["eligible"])
+        self.assertFalse(report["adaptive_fast"]["executable"])
+        self.assertTrue(report["adaptive_fast"]["experimental_available"])
+        self.assertIsNone(report["adaptive_fast"]["configured_safe_z_mm"])
+        self.assertIn("falta una altura segura de desplazamiento configurada", str(report["adaptive_fast"]["error"]))
+        self.assertTrue(report["legacy"]["executable"])
 
     def test_paused_eta_does_not_consume_print_duration(self) -> None:
         run = {"eta_ratio_ema": 1.0}

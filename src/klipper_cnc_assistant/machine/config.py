@@ -53,6 +53,7 @@ class MachineRuntimeConfig:
     probe_retract_mm: float
     probe_retract_speed_mm_s: float
     spindle_control_mode: SpindleControlMode = SpindleControlMode.MANUAL
+    safe_z_is_configured: bool = False
 
     @property
     def mode_label(self) -> str:
@@ -83,6 +84,7 @@ def _env_int(name: str, default: int) -> int:
 def load_machine_runtime_config() -> MachineRuntimeConfig:
     raw_mode = os.getenv("MACHINE_MODE", "simulated").strip().lower()
     mode = MachineMode.PHYSICAL if raw_mode == "physical" else MachineMode.SIMULATED
+    safe_z_env = os.getenv("MACHINE_SAFE_Z")
     return MachineRuntimeConfig(
         mode=mode,
         spindle_control_mode=SpindleControlMode(os.getenv("SPINDLE_CONTROL_MODE", "manual").strip().lower() or "manual"),
@@ -120,4 +122,5 @@ def load_machine_runtime_config() -> MachineRuntimeConfig:
         probe_lower_speed_mm_s=_env_float("PROBE_LOWER_SPEED", 1.0),
         probe_retract_mm=_env_float("PROBE_RETRACT_DISTANCE", 1.0),
         probe_retract_speed_mm_s=_env_float("PROBE_RETRACT_SPEED", 1.0),
+        safe_z_is_configured=safe_z_env is not None and bool(str(safe_z_env).strip()),
     )
