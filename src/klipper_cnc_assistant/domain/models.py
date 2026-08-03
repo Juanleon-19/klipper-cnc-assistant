@@ -65,6 +65,11 @@ class PreparationState(StrEnum):
     COMPENSACION_PREVISUALIZADA = "compensacion_previsualizada"
 
 
+class CompensationMode(StrEnum):
+    LEGACY = "legacy"
+    ADAPTIVE_FAST = "adaptive_fast"
+
+
 @dataclass(frozen=True)
 class MaterialBruto:
     ancho_mm: float
@@ -322,6 +327,8 @@ class OperacionPCB:
     sha256: str | None = None
     tool_id: str | None = None
     herramienta: str | None = None
+    compensation_mode: CompensationMode = CompensationMode.LEGACY
+    max_z_error_mm: float = 0.05
     analisis: OperationAnalysis | None = None
     estado: OperationStatus = OperationStatus.ESPERANDO_ARCHIVO
 
@@ -345,6 +352,10 @@ class OperacionPCB:
         if self.tamano_archivo_bytes is not None and self.tamano_archivo_bytes < 0:
             raise ProjectValidationError(
                 "El tamano del archivo no puede ser negativo."
+            )
+        if self.max_z_error_mm <= 0:
+            raise ProjectValidationError(
+                "La tolerancia maxima de error Z debe ser positiva."
             )
 
     def with_gcode(

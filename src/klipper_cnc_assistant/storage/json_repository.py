@@ -13,6 +13,7 @@ from klipper_cnc_assistant.domain import (
     AnalysisIssue,
     BoardFace,
     Bounds3D,
+    CompensationMode,
     ConfiguracionAlineacion,
     CapturedPosition,
     CoordinateReference,
@@ -140,6 +141,7 @@ class JsonProjectRepository:
             or "current_setup_id" not in payload
             or any("placement_revision" not in item for item in payload.get("montajes", []))
             or any(_canonical_tool_id(item.get("tool_id"), item.get("herramienta")) != item.get("tool_id") for item in payload.get("operaciones", []))
+            or any("compensation_mode" not in item or "max_z_error_mm" not in item for item in payload.get("operaciones", []))
         )
 
     def project_dir(
@@ -351,6 +353,8 @@ class JsonProjectRepository:
             "sha256": operation.sha256,
             "tool_id": operation.tool_id,
             "herramienta": operation.herramienta,
+            "compensation_mode": str(operation.compensation_mode),
+            "max_z_error_mm": operation.max_z_error_mm,
             "analisis": self._serialize_analysis(operation.analisis),
             "estado": operation.estado,
         }
@@ -580,6 +584,8 @@ class JsonProjectRepository:
             sha256=payload.get("sha256"),
             tool_id=_canonical_tool_id(payload.get("tool_id"), payload.get("herramienta")),
             herramienta=payload.get("herramienta"),
+            compensation_mode=CompensationMode(payload.get("compensation_mode", CompensationMode.LEGACY)),
+            max_z_error_mm=float(payload.get("max_z_error_mm", 0.05)),
             analisis=self._deserialize_analysis(payload.get("analisis")),
             estado=OperationStatus(payload.get("estado", OperationStatus.ESPERANDO_ARCHIVO)),
         )

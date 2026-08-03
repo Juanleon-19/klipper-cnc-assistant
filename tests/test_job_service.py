@@ -144,6 +144,37 @@ class FakeAdapter:
         return {"probe": dict(self.runtime._last_probe)}
 
 
+class RecordingTimeEstimationService:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+
+    def estimate_text(self, text: str) -> dict[str, object]:
+        return {
+            "estimated_time_s": 40.0,
+            "method": "internal",
+            "confidence": "medium",
+            "distribution_detail": "Distribución temporal calculada por el estimador interno.",
+            "unsupported_commands": [],
+        }
+
+    def estimate_project_file(self, *, project_id: str, relative_path: str, remote_filename: str | None = None) -> dict[str, object]:
+        self.calls.append({
+            "project_id": project_id,
+            "relative_path": relative_path,
+            "remote_filename": remote_filename,
+        })
+        return {
+            "estimated_time_s": 42.5 if remote_filename else 40.0,
+            "method": "moonraker_analysis" if remote_filename else "internal",
+            "confidence": "high" if remote_filename else "medium",
+            "distribution_detail": "Moonraker aporta el tiempo total; la distribución temporal por file_position proviene del estimador interno escalado." if remote_filename else "Distribución temporal calculada por el estimador interno.",
+            "offset_table": [
+                {"file_byte_offset": 10.0, "predicted_cumulative_seconds": 20.0},
+                {"file_byte_offset": 20.0, "predicted_cumulative_seconds": 42.5 if remote_filename else 40.0},
+            ],
+        }
+
+
 class JobServiceTest(unittest.TestCase):
     def setUp(self) -> None:
         self.tempdir = tempfile.TemporaryDirectory()
@@ -153,7 +184,8 @@ class JobServiceTest(unittest.TestCase):
         self.machine_session_service = MachineSessionService()
         self.reference_service = ReferenceSessionService(self.repository, None, self.machine_session_service, None)  # type: ignore[arg-type]
         self.physical_map_service = PhysicalMapService(self.repository)
-        self.compensated_service = CompensatedGCodeService(self.repository, self.physical_map_service)
+        self.time_estimation_service = RecordingTimeEstimationService()
+        self.compensated_service = CompensatedGCodeService(self.repository, self.physical_map_service, self.time_estimation_service)
         self.runtime = FakeRuntime()
         self.adapter = FakeAdapter(self.runtime)
         self.job_service = JobService(
@@ -162,6 +194,7 @@ class JobServiceTest(unittest.TestCase):
             self.reference_service,
             self.compensated_service,
             self.runtime,
+            time_estimation_service=self.time_estimation_service,
             adapter_factory=lambda runtime: self.adapter,
         )
         self.project = self.project_service.create_project(nombre="PCB test", ancho_mm=80.0, alto_mm=60.0)
@@ -600,6 +633,145 @@ class JobServiceTest(unittest.TestCase):
             live["synchronization"]["reason"],
             "filename_mismatch",
         )
+
+    def test_eta_snapshot_keeps_moonraker_method_with_scaled_internal_distribution(self) -> None:
+        run = {"eta_ratio_ema": 1.0}
+        operation = {
+            "time_estimate": {
+                "estimated_time_s": 42.5,
+                "method": "moonraker_analysis",
+                "confidence": "high",
+                "distribution_detail": "Moonraker aporta el tiempo total; la distribución temporal por file_position proviene del estimador interno escalado.",
+                "offset_table": [
+                    {"file_byte_offset": 10.0, "predicted_cumulative_seconds": 20.0},
+                    {"file_byte_offset": 20.0, "predicted_cumulative_seconds": 42.5},
+                ],
+            }
+        }
+        status = {
+            "file_position": 10.0,
+            "progress": 0.5,
+            "print_duration": 19.0,
+            "print_state": "printing",
+        }
+
+        eta = self.job_service._build_eta_snapshot(
+            run=run,
+            operation=operation,
+            status=status,
+            expected_filename="job.gcode",
+            observed_filename="job.gcode",
+        )
+
+        self.assertTrue(eta["available"])
+        self.assertEqual(eta["method"], "moonraker_analysis")
+        self.assertIn("interno escalado", eta["detail"])
+
+    def test_post_upload_analysis_uses_remote_item_path_and_updates_metadata(self) -> None:
+        self.job_service.generate_project_compensation(project_id=self.project_id, setup_id=self.setup_id, face="superior")
+        run = self.job_service.prepare_run(project_id=self.project_id, setup_id=self.setup_id, face="superior")
+        context = self.job_service._context(self.project_id, self.setup_id, "superior")
+
+        self.job_service._execute_next_operation(context, run)
+
+        persisted = self.job_service._load_run(context)
+        assert persisted is not None
+        operation = persisted["operations"][0]
+        self.assertEqual(self.time_estimation_service.calls[-1]["remote_filename"], operation["remote_file"])
+        self.assertEqual(operation["time_estimate"]["method"], "moonraker_analysis")
+        metadata_path = self.repository.project_dir(self.project_id) / str(operation["generated_metadata"])
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        self.assertEqual(metadata["time_estimate"]["method"], "moonraker_analysis")
+        self.assertEqual(metadata["time_estimate"]["estimated_time_s"], 42.5)
+
+    def test_experimental_adaptive_artifact_is_excluded_from_executable_plan(self) -> None:
+        operation = self.project_service.get_project(self.project_id).operations_for_setup(self.setup_id)[0]
+        self.project_service.update_operation(
+            project_id=self.project_id,
+            operation_id=operation.id,
+            nombre=operation.nombre,
+            compensation_mode="adaptive_fast",
+            max_z_error_mm=operation.max_z_error_mm,
+        )
+
+        original_build_report = self.compensated_service.build_comparison_report
+
+        def force_experimental(project_id: str, operation_id: str) -> dict[str, object]:
+            report = original_build_report(project_id, operation_id)
+            if operation_id == operation.id:
+                report["adaptive_fast"]["eligible"] = False
+                report["adaptive_fast"]["executable"] = False
+                report["adaptive_fast"]["error"] = "Adaptive_fast solo puede descargarse como experimental."
+                report["recommended_mode"] = "legacy"
+            return report
+
+        self.compensated_service.build_comparison_report = force_experimental  # type: ignore[assignment]
+        try:
+            plan = self.job_service.generate_project_compensation(project_id=self.project_id, setup_id=self.setup_id, face="superior")
+        finally:
+            self.compensated_service.build_comparison_report = original_build_report  # type: ignore[assignment]
+
+        adaptive_row = next(item for item in plan["operations"] if item["operation_id"] == operation.id)
+        self.assertIsNone(adaptive_row["generated_file"])
+
+    def test_missing_safe_rapid_height_keeps_adaptive_experimental_and_legacy_available(self) -> None:
+        operation = self.project_service.get_project(self.project_id).operations_for_setup(self.setup_id)[0]
+        self.project_service.update_operation(
+            project_id=self.project_id,
+            operation_id=operation.id,
+            nombre=operation.nombre,
+            compensation_mode="adaptive_fast",
+            max_z_error_mm=operation.max_z_error_mm,
+        )
+
+        report = self.compensated_service.build_comparison_report(self.project_id, operation.id)
+
+        self.assertFalse(report["adaptive_fast"]["eligible"])
+        self.assertFalse(report["adaptive_fast"]["executable"])
+        self.assertTrue(report["adaptive_fast"]["experimental_available"])
+        self.assertIsNone(report["adaptive_fast"]["configured_safe_z_mm"])
+        self.assertIn("falta una altura segura de desplazamiento configurada", str(report["adaptive_fast"]["error"]))
+        self.assertTrue(report["legacy"]["executable"])
+
+    def test_paused_eta_does_not_consume_print_duration(self) -> None:
+        run = {"eta_ratio_ema": 1.0}
+        operation = {
+            "time_estimate": {
+                "estimated_time_s": 30.0,
+                "method": "internal",
+                "confidence": "medium",
+                "offset_table": [
+                    {"file_byte_offset": 10.0, "predicted_cumulative_seconds": 10.0},
+                    {"file_byte_offset": 20.0, "predicted_cumulative_seconds": 20.0},
+                    {"file_byte_offset": 30.0, "predicted_cumulative_seconds": 30.0},
+                ],
+            }
+        }
+        status = {
+            "file_position": 10.0,
+            "progress": 0.333,
+            "print_duration": 9.0,
+            "print_state": "paused",
+        }
+
+        first = self.job_service._build_eta_snapshot(
+            run=run,
+            operation=operation,
+            status=status,
+            expected_filename="job.gcode",
+            observed_filename="job.gcode",
+        )
+        second = self.job_service._build_eta_snapshot(
+            run=run,
+            operation=operation,
+            status=status,
+            expected_filename="job.gcode",
+            observed_filename="job.gcode",
+        )
+
+        self.assertTrue(first["available"])
+        self.assertEqual(first["elapsed_s"], second["elapsed_s"])
+        self.assertEqual(first["remaining_s"], second["remaining_s"])
 
     def test_watcher_error_is_persisted(self) -> None:
         self.job_service.generate_project_compensation(project_id=self.project_id, setup_id=self.setup_id, face="superior")

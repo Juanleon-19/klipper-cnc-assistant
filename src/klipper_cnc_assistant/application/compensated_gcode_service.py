@@ -8,8 +8,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from klipper_cnc_assistant.application.adaptive_compensation import (
+    ReferenceFrame as AdaptiveReferenceFrame,
+    generate_adaptive_gcode,
+)
 from klipper_cnc_assistant.application.errors import ApplicationError, NotFoundError
-from klipper_cnc_assistant.domain import OperacionPCB, ProjectValidationError
+from klipper_cnc_assistant.domain import CompensationMode, OperacionPCB, ProjectValidationError
+from klipper_cnc_assistant.gcode import analyze_gcode_text
 from klipper_cnc_assistant.heightmap import HeightGrid, HeightMap, HeightSample, ProbeRegion, SampleQuality, interpolate_height
 from klipper_cnc_assistant.heightmap.coverage import DOMAIN_TOLERANCE_MM, build_coverage_report, segment_uses_surface_map
 from klipper_cnc_assistant.storage import JsonProjectRepository
@@ -80,15 +85,27 @@ def compensate_cut_point(*, pcb: PcbCoordinates, programmed_z_mm: float | None, 
 
 
 class CompensatedGCodeService:
-    ALGORITHM_VERSION = "compensated-gcode-v1"
+    LEGACY_ALGORITHM_VERSION = "compensated-gcode-v1"
+    ADAPTIVE_ALGORITHM_VERSION = "adaptive-fast-v1"
 
-    def __init__(self, repository: JsonProjectRepository, physical_map_service) -> None:
+    def __init__(self, repository: JsonProjectRepository, physical_map_service, time_estimation_service=None, machine_runtime=None) -> None:
         self.repository = repository
         self.physical_map_service = physical_map_service
+        self.time_estimation_service = time_estimation_service
+        self.machine_runtime = machine_runtime
 
-    def generate(self, project_id: str, operation_id: str, *, max_segment_mm: float | None = None, require_tool_reference: bool = True) -> dict[str, Any]:
+    def generate(
+        self,
+        project_id: str,
+        operation_id: str,
+        *,
+        mode: str | None = None,
+        max_segment_mm: float | None = None,
+        require_tool_reference: bool = True,
+    ) -> dict[str, Any]:
         project = self._load_project(project_id)
         operation = project.get_operation(operation_id)
+        setup = project.get_setup(operation.setup_id)
         if operation.analisis is None:
             raise ApplicationError("La operación requiere análisis G-code antes de generar compensación.")
         if not operation.archivo_gcode:
@@ -112,18 +129,61 @@ class CompensatedGCodeService:
                 "Amplíe la región medida antes de compensar." + detail
             )
 
-        original = self.repository.read_project_file(project_id, operation.archivo_gcode)
-        original_hash = hashlib.sha256(original.encode("utf-8")).hexdigest()
         sample_spacing = self._sample_spacing_mm(height_map)
         segment_limit = max_segment_mm or max(0.25, sample_spacing / 2.0)
         reference_frame = self._reference_frame(physical_map, operation)
-        lines, preview = self._build_compensated_lines(operation, height_map, segment_limit, reference_frame)
-        output = "\n".join(lines) + "\n"
+        selected_mode = CompensationMode(mode or str(operation.compensation_mode))
+        original = self.repository.read_project_file(project_id, operation.archivo_gcode)
+        original_hash = hashlib.sha256(original.encode("utf-8")).hexdigest()
         map_hash = hashlib.sha256(json.dumps(physical_map, sort_keys=True).encode("utf-8")).hexdigest()
+        executable = True
+        artifact_kind = "production"
+        artifact_warning: str | None = None
+        adaptive_settings = self._adaptive_clearance_settings(physical_map=physical_map, reference_frame=reference_frame)
+        if selected_mode == CompensationMode.ADAPTIVE_FAST:
+            audit = self.build_comparison_report(project_id, operation_id)
+            adaptive_summary = audit["adaptive_fast"]
+            executable = bool(adaptive_summary.get("eligible"))
+            artifact_kind = "production" if executable else "experimental"
+            artifact_warning = None if executable else str(
+                adaptive_summary.get("error")
+                or "Adaptive_fast no es elegible para ejecución; se generó únicamente un artefacto experimental no ejecutable."
+            )
+            adaptive = generate_adaptive_gcode(
+                original_text=original,
+                height_map=height_map,
+                reference_frame=AdaptiveReferenceFrame(**reference_frame.__dict__),
+                max_z_error_mm=operation.max_z_error_mm,
+                operation_id=operation.id,
+                operation_name=operation.nombre,
+                min_segment_length_mm=max(0.05, min(segment_limit / 4.0, operation.max_z_error_mm)),
+                configured_safe_z_mm=adaptive_settings["configured_safe_z_mm"],
+                configured_safe_z_source=adaptive_settings["configured_safe_z_source"],
+                rapid_clearance_margin_mm=adaptive_settings["rapid_clearance_margin_mm"],
+                enforce_rapid_clearance=executable,
+            )
+            preview = adaptive["preview"]
+            output = adaptive["output"]
+            algorithm_version = self.ADAPTIVE_ALGORITHM_VERSION
+        else:
+            lines, preview = self._build_compensated_lines(operation, height_map, segment_limit, reference_frame)
+            output = "\n".join(lines) + "\n"
+            algorithm_version = self.LEGACY_ALGORITHM_VERSION
+        audit_fingerprint = self._build_artifact_fingerprint(
+            operation_id=operation.id,
+            original_hash=original_hash,
+            map_hash=map_hash,
+            reference_frame=reference_frame,
+            compensation_mode=selected_mode.value,
+            max_z_error_mm=float(operation.max_z_error_mm),
+            algorithm_version=algorithm_version,
+            placement_revision=setup.placement_revision,
+        )
 
         relative_dir = Path("generated") / "compensated"
-        safe_name = f"{operation.id}_{_stamp()}_compensated.gcode"
-        metadata_name = f"{operation.id}_{_stamp()}_compensated.json"
+        stamp = _stamp()
+        safe_name = f"{operation.id}_{stamp}_{selected_mode.value}_compensated.gcode"
+        metadata_name = f"{operation.id}_{stamp}_{selected_mode.value}_compensated.json"
         project_dir = self.repository.project_dir(project_id)
         (project_dir / relative_dir).mkdir(parents=True, exist_ok=True)
         relative_path = relative_dir / safe_name
@@ -139,17 +199,30 @@ class CompensatedGCodeService:
             "map_hash": map_hash,
             "reference_required": physical_map.get("tool_references", {}).get(_tool_key(operation)),
             "created_at": _now().isoformat(),
+            "placement_revision": setup.placement_revision,
             "original_path": operation.archivo_gcode,
             "original_hash": original_hash,
             "generated_hash": hashlib.sha256(output.encode("utf-8")).hexdigest(),
-            "algorithm_version": self.ALGORITHM_VERSION,
+            "algorithm_version": algorithm_version,
+            "compensation_mode": selected_mode.value,
+            "audit_fingerprint": audit_fingerprint,
+            "artifact_kind": artifact_kind,
+            "executable": executable,
+            "artifact_warning": artifact_warning,
+            "max_z_error_mm": operation.max_z_error_mm,
             "max_segment_mm": segment_limit,
             "reference_frame": reference_frame.__dict__,
             "movement_trace": preview["trace"],
             "compensation_delta_min_mm": preview["delta_z_min_mm"],
             "compensation_delta_max_mm": preview["delta_z_max_mm"],
+            "compensation_delta_rms_mm": preview.get("delta_z_rms_mm"),
             "segments_before": len(operation.analisis.segmentos_vista_previa),
             "segments_after": preview["emitted_points"],
+            "segments_subdivided": preview.get("segments_subdivided", 0),
+            "segments_fused": preview.get("segments_fused", 0),
+            "max_approximation_error_mm": preview.get("max_approximation_error_mm"),
+            "unsupported_commands": preview.get("unsupported_commands", []),
+            "outside_points": preview.get("outside_points", []),
             "warnings": preview["warnings"],
             "convention": "machine_xy=pcb_xy+machine_origin; cutting_z=reference_z+surface_delta+programmed_z; safe_z=reference_z+programmed_z",
         }
@@ -160,7 +233,13 @@ class CompensatedGCodeService:
             metadata_path=metadata_path.as_posix(),
             metadata=metadata,
             preview=preview,
-        ).__dict__
+        ).__dict__ | {
+            "selected_mode": selected_mode.value,
+            "effective_mode": selected_mode.value,
+            "executable": executable,
+            "artifact_kind": artifact_kind,
+            "warning": artifact_warning,
+        }
 
     def resolve_generated_file(self, project_id: str, relative_path: str) -> Path:
         if not relative_path.startswith("generated/compensated/"):
@@ -173,6 +252,237 @@ class CompensatedGCodeService:
         if not target.exists():
             raise NotFoundError("El archivo compensado solicitado no existe.")
         return target
+
+    def build_comparison_report(self, project_id: str, operation_id: str) -> dict[str, Any]:
+        project = self._load_project(project_id)
+        operation = project.get_operation(operation_id)
+        if operation.analisis is None or not operation.archivo_gcode:
+            raise ApplicationError("La operación requiere análisis y archivo original para auditar compensación.")
+        physical_map = self.physical_map_service.get_active(project_id, operation_id)
+        self._validate_map_for_operation(physical_map, operation, require_tool_reference=False)
+        height_map = self._height_map_from_payload(physical_map["height_map"])
+        reference_frame = self._reference_frame(physical_map, operation)
+        setup = project.get_setup(operation.setup_id)
+        original = self.repository.read_project_file(project_id, operation.archivo_gcode)
+        original_hash = hashlib.sha256(original.encode("utf-8")).hexdigest()
+        map_hash = hashlib.sha256(json.dumps(physical_map, sort_keys=True).encode("utf-8")).hexdigest()
+        adaptive_settings = self._adaptive_clearance_settings(physical_map=physical_map, reference_frame=reference_frame)
+        sample_spacing = self._sample_spacing_mm(height_map)
+        segment_limit = max(0.25, sample_spacing / 2.0)
+        original_summary = self._summarize_artifact(
+            label="original",
+            text=original,
+            operation=operation,
+            preview={"trace": [], "segments_subdivided": 0, "segments_fused": 0, "max_approximation_error_mm": 0.0, "outside_points": [], "unsupported_commands": []},
+            analysis=operation.analisis,
+        )
+        legacy_lines, legacy_preview = self._build_compensated_lines(operation, height_map, segment_limit, reference_frame)
+        legacy_text = "\n".join(legacy_lines) + "\n"
+        legacy_summary = self._summarize_artifact(
+            label="legacy",
+            text=legacy_text,
+            operation=operation,
+            preview=legacy_preview,
+        )
+        legacy_summary["audit_fingerprint"] = self._build_artifact_fingerprint(
+            operation_id=operation.id,
+            original_hash=original_hash,
+            map_hash=map_hash,
+            reference_frame=reference_frame,
+            compensation_mode=CompensationMode.LEGACY.value,
+            max_z_error_mm=float(operation.max_z_error_mm),
+            algorithm_version=self.LEGACY_ALGORITHM_VERSION,
+            placement_revision=setup.placement_revision,
+        )
+        legacy_summary["executable"] = True
+        adaptive_summary: dict[str, Any]
+        adaptive_error: str | None = None
+        adaptive_artifact_text: str | None = None
+        try:
+            adaptive = generate_adaptive_gcode(
+                original_text=original,
+                height_map=height_map,
+                reference_frame=AdaptiveReferenceFrame(**reference_frame.__dict__),
+                max_z_error_mm=operation.max_z_error_mm,
+                operation_id=operation.id,
+                operation_name=operation.nombre,
+                min_segment_length_mm=max(0.05, min(segment_limit / 4.0, operation.max_z_error_mm)),
+                configured_safe_z_mm=adaptive_settings["configured_safe_z_mm"],
+                configured_safe_z_source=adaptive_settings["configured_safe_z_source"],
+                rapid_clearance_margin_mm=adaptive_settings["rapid_clearance_margin_mm"],
+                enforce_rapid_clearance=True,
+            )
+            adaptive_artifact_text = adaptive["output"]
+            adaptive_summary = self._summarize_artifact(
+                label="adaptive_fast",
+                text=adaptive["output"],
+                operation=operation,
+                preview=adaptive["preview"],
+            )
+            adaptive_summary["audit_fingerprint"] = self._build_artifact_fingerprint(
+                operation_id=operation.id,
+                original_hash=original_hash,
+                map_hash=map_hash,
+                reference_frame=reference_frame,
+                compensation_mode=CompensationMode.ADAPTIVE_FAST.value,
+                max_z_error_mm=float(operation.max_z_error_mm),
+                algorithm_version=self.ADAPTIVE_ALGORITHM_VERSION,
+                placement_revision=setup.placement_revision,
+            )
+            adaptive_error = None
+        except Exception as error:
+            try:
+                adaptive = generate_adaptive_gcode(
+                    original_text=original,
+                    height_map=height_map,
+                    reference_frame=AdaptiveReferenceFrame(**reference_frame.__dict__),
+                    max_z_error_mm=operation.max_z_error_mm,
+                    operation_id=operation.id,
+                    operation_name=operation.nombre,
+                    min_segment_length_mm=max(0.05, min(segment_limit / 4.0, operation.max_z_error_mm)),
+                    configured_safe_z_mm=adaptive_settings["configured_safe_z_mm"],
+                    configured_safe_z_source=adaptive_settings["configured_safe_z_source"],
+                    rapid_clearance_margin_mm=adaptive_settings["rapid_clearance_margin_mm"],
+                    enforce_rapid_clearance=False,
+                )
+                adaptive_artifact_text = adaptive["output"]
+                adaptive_summary = self._summarize_artifact(
+                    label="adaptive_fast",
+                    text=adaptive["output"],
+                    operation=operation,
+                    preview=adaptive["preview"],
+                )
+                adaptive_summary["audit_fingerprint"] = self._build_artifact_fingerprint(
+                    operation_id=operation.id,
+                    original_hash=original_hash,
+                    map_hash=map_hash,
+                    reference_frame=reference_frame,
+                    compensation_mode=CompensationMode.ADAPTIVE_FAST.value,
+                    max_z_error_mm=float(operation.max_z_error_mm),
+                    algorithm_version=self.ADAPTIVE_ALGORITHM_VERSION,
+                    placement_revision=setup.placement_revision,
+                )
+                adaptive_summary["eligible"] = False
+                adaptive_summary["executable"] = False
+                adaptive_summary["experimental_available"] = True
+                adaptive_summary["error"] = str(error)
+            except Exception:
+                adaptive_summary = {
+                    "mode": "adaptive_fast",
+                    "eligible": False,
+                    "error": str(error),
+                    "unsupported_commands": [],
+                    "error_z_max_approximation_mm": None,
+                    "executable": False,
+                    "experimental_available": False,
+                    "audit_fingerprint": self._build_artifact_fingerprint(
+                        operation_id=operation.id,
+                        original_hash=original_hash,
+                        map_hash=map_hash,
+                        reference_frame=reference_frame,
+                        compensation_mode=CompensationMode.ADAPTIVE_FAST.value,
+                        max_z_error_mm=float(operation.max_z_error_mm),
+                        algorithm_version=self.ADAPTIVE_ALGORITHM_VERSION,
+                        placement_revision=setup.placement_revision,
+                    ),
+                }
+            adaptive_error = str(error)
+        self._attach_time_estimates(
+            original_text=original,
+            legacy_text=legacy_text,
+            adaptive_text=adaptive_artifact_text,
+            summaries={
+                "original": original_summary,
+                "legacy": legacy_summary,
+                "adaptive_fast": adaptive_summary,
+            },
+        )
+        adaptive_within_tolerance = adaptive_error is None and float(adaptive_summary.get("error_z_max_approximation_mm") or 0.0) <= float(operation.max_z_error_mm)
+        adaptive_supported = adaptive_error is None and not adaptive_summary.get("unsupported_commands")
+        adaptive_clearance_ok = bool(adaptive_summary.get("rapid_clearance_verified", True))
+        adaptive_time = adaptive_summary.get("estimated_time_s")
+        legacy_time = legacy_summary.get("estimated_time_s")
+        adaptive_time_ok = adaptive_time is not None and legacy_time is not None and float(adaptive_time) <= float(legacy_time) * 1.005
+        adaptive_eligible = bool(adaptive_within_tolerance and adaptive_supported and adaptive_time_ok and adaptive_clearance_ok)
+        if adaptive_time is not None and legacy_time is not None:
+            adaptive_summary["time_difference_s"] = float(adaptive_time) - float(legacy_time)
+            adaptive_summary["time_difference_pct"] = None if float(legacy_time) == 0 else ((float(adaptive_time) - float(legacy_time)) / float(legacy_time)) * 100.0
+        if adaptive_error is None:
+            adaptive_summary["eligible"] = adaptive_eligible
+            adaptive_summary["executable"] = adaptive_eligible
+            adaptive_summary["experimental_available"] = True
+            if not adaptive_eligible and not adaptive_summary.get("error"):
+                adaptive_summary["error"] = str(
+                    adaptive_summary.get("rapid_clearance_block_reason")
+                    or "Adaptive_fast solo queda disponible como artefacto experimental: la auditoría no pudo demostrar elegibilidad ejecutable frente a legacy."
+                )
+        selected_mode = str(operation.compensation_mode)
+        recommended_mode = "adaptive_fast" if adaptive_eligible else "legacy"
+        return {
+            "selected_mode": selected_mode,
+            "recommended_mode": recommended_mode,
+            "max_z_error_mm": operation.max_z_error_mm,
+            "original": original_summary,
+            "legacy": legacy_summary,
+            "adaptive_fast": adaptive_summary,
+            "warnings": [message for message in [adaptive_error] if message],
+            "_artifacts": {
+                "original": original,
+                "legacy": legacy_text,
+                "adaptive_fast": adaptive_artifact_text,
+            },
+        }
+
+    def _attach_time_estimates(
+        self,
+        *,
+        original_text: str,
+        legacy_text: str,
+        adaptive_text: str | None,
+        summaries: dict[str, dict[str, Any]],
+    ) -> None:
+        if self.time_estimation_service is None:
+            return
+        artifacts = {
+            "original": original_text,
+            "legacy": legacy_text,
+            "adaptive_fast": adaptive_text,
+        }
+        for key, text in artifacts.items():
+            if not text:
+                continue
+            estimate = self.time_estimation_service.estimate_text(str(text))
+            summaries[key]["estimated_time_s"] = estimate.get("estimated_time_s")
+            summaries[key]["estimation_method"] = estimate.get("method")
+            summaries[key]["estimation_confidence"] = estimate.get("confidence")
+            summaries[key]["estimation_detail"] = estimate.get("distribution_detail") or estimate.get("distribution_method")
+            summaries[key]["unsupported_commands"] = list(
+                dict.fromkeys(list(summaries[key].get("unsupported_commands") or []) + list(estimate.get("unsupported_commands") or []))
+            )
+
+    def _build_artifact_fingerprint(
+        self,
+        *,
+        operation_id: str,
+        original_hash: str,
+        map_hash: str,
+        reference_frame: ReferenceFrame,
+        compensation_mode: str,
+        max_z_error_mm: float,
+        algorithm_version: str,
+        placement_revision: str | None,
+    ) -> str:
+        payload = {
+            "algorithm_version": algorithm_version,
+            "compensation_mode": compensation_mode,
+            "map_hash": map_hash,
+            "max_z_error_mm": max_z_error_mm,
+            "operation_id": operation_id,
+            "original_hash": original_hash,
+            "placement_revision": placement_revision,
+            "reference_frame": reference_frame.__dict__,
+        }
+        return hashlib.sha256(json.dumps(payload, ensure_ascii=True, sort_keys=True).encode("utf-8")).hexdigest()
 
     def _validate_map_for_operation(self, physical_map: dict[str, Any], operation: OperacionPCB, *, require_tool_reference: bool = True) -> None:
         if physical_map.get("schema_version") != "surface-map-v2":
@@ -198,11 +508,72 @@ class CompensatedGCodeService:
             surface_reference_z_mm=float(surface_reference_z),
         )
 
+    def _summarize_artifact(
+        self,
+        *,
+        label: str,
+        text: str,
+        operation: OperacionPCB,
+        preview: dict[str, Any],
+        analysis=None,
+    ) -> dict[str, Any]:
+        resolved_analysis = operation.analisis if analysis is None else analysis
+        if label != "original":
+            resolved_analysis = analyze_gcode_text(text)
+        movement_counts = {"G0": 0, "G1": 0, "G2": 0, "G3": 0}
+        distance_cut_mm = 0.0
+        distance_rapid_mm = 0.0
+        distance_xyz_mm = 0.0
+        for segment in resolved_analysis.segmentos_vista_previa:
+            movement_counts[segment.tipo] = movement_counts.get(segment.tipo, 0) + 1
+            distance_xyz_mm += float(segment.distancia_mm)
+            if segment.tipo == "G0":
+                distance_rapid_mm += float(segment.distancia_mm)
+            else:
+                distance_cut_mm += float(segment.distancia_mm)
+        trace = list(preview.get("trace") or [])
+        corrections = [float(item.get("delta_z_mm") or 0.0) for item in trace if item.get("delta_z_mm") is not None]
+        original_movements = len(operation.analisis.segmentos_vista_previa)
+        movements = sum(movement_counts.values())
+        return {
+            "mode": label,
+            "sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+            "total_lines": len(text.splitlines()),
+            "movement_counts": movement_counts,
+            "movements_total": movements,
+            "movements_added": max(0, movements - original_movements),
+            "movements_removed": max(0, original_movements - movements),
+            "segments_subdivided": int(preview.get("segments_subdivided", 0)),
+            "segments_fused": int(preview.get("segments_fused", 0)),
+            "distance_cut_mm": distance_cut_mm,
+            "distance_rapid_mm": distance_rapid_mm,
+            "distance_xyz_mm": distance_xyz_mm,
+            "correction_z_min_mm": min(corrections) if corrections else None,
+            "correction_z_max_mm": max(corrections) if corrections else None,
+            "correction_rms_mm": math.sqrt(sum(value * value for value in corrections) / len(corrections)) if corrections else None,
+            "error_z_max_approximation_mm": preview.get("max_approximation_error_mm", 0.0),
+            "points_outside_map": len(preview.get("outside_points") or []),
+            "extrapolations": int(preview.get("extrapolations", 0)),
+            "unsupported_commands": list(preview.get("unsupported_commands") or []),
+            "required_rapid_z_mm": preview.get("required_rapid_z_mm"),
+            "minimum_programmed_g0_z_mm": preview.get("minimum_programmed_g0_z_mm"),
+            "rapid_clearance_margin_mm": preview.get("rapid_clearance_margin_mm"),
+            "rapid_clearance_verified": preview.get("rapid_clearance_verified", True),
+            "rapid_clearance_block_reason": preview.get("rapid_clearance_block_reason"),
+            "max_positive_map_delta_mm": preview.get("max_positive_map_delta_mm"),
+            "configured_safe_z_mm": preview.get("configured_safe_z_mm"),
+            "configured_safe_z_source": preview.get("configured_safe_z_source"),
+            "estimated_time_s": None,
+            "estimation_method": None,
+            "estimation_confidence": None,
+            "estimation_detail": None,
+        }
+
     def _build_compensated_lines(self, operation: OperacionPCB, height_map: HeightMap, max_segment_mm: float, reference_frame: ReferenceFrame) -> tuple[list[str], dict[str, Any]]:
         lines = [
             "; Klipper CNC Assistant - plan compensado inmutable",
             f"; Operacion: {operation.nombre} ({operation.id})",
-            f"; Algoritmo: {self.ALGORITHM_VERSION}",
+            f"; Algoritmo: {self.LEGACY_ALGORITHM_VERSION}",
             f"; PCB -> CNC: X+{reference_frame.machine_origin_x_mm:.5f} Y+{reference_frame.machine_origin_y_mm:.5f}; Zref={reference_frame.surface_reference_z_mm:.5f}",
             "; Corte: Z_maquina=Zref+delta_superficie+Z_programada",
             "; Viaje seguro: Z_maquina=Zref+Z_programada",
@@ -328,3 +699,31 @@ class CompensatedGCodeService:
             raise NotFoundError(str(error)) from error
         except ProjectValidationError as error:
             raise ApplicationError(str(error)) from error
+
+    def _adaptive_clearance_settings(self, *, physical_map: dict[str, Any], reference_frame: ReferenceFrame) -> dict[str, Any]:
+        probe = physical_map.get("probe_config") if isinstance(physical_map.get("probe_config"), dict) else {}
+        configured_safe_z_mm = probe.get("safe_z_mm") if isinstance(probe, dict) else None
+        if configured_safe_z_mm is not None:
+            return {
+                "configured_safe_z_mm": float(configured_safe_z_mm),
+                "configured_safe_z_source": "map.probe_config.safe_z_mm",
+                "rapid_clearance_margin_mm": self._rapid_clearance_margin_mm(),
+            }
+        runtime = self.machine_runtime
+        config = getattr(runtime, "config", None) if runtime is not None else None
+        if config is not None and getattr(config, "safe_z_is_configured", False):
+            absolute_safe_z = float(config.safe_z_mm)
+            return {
+                "configured_safe_z_mm": absolute_safe_z - float(reference_frame.surface_reference_z_mm),
+                "configured_safe_z_source": "machine_runtime.config.safe_z_mm",
+                "rapid_clearance_margin_mm": self._rapid_clearance_margin_mm(),
+            }
+        return {
+            "configured_safe_z_mm": None,
+            "configured_safe_z_source": None,
+            "rapid_clearance_margin_mm": self._rapid_clearance_margin_mm(),
+        }
+
+    def _rapid_clearance_margin_mm(self) -> float:
+        config = getattr(getattr(self.machine_runtime, "config", None), "settle_tolerance_mm", None)
+        return float(config) if config is not None else 0.05
