@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { MachineContext, type MachineContextValue } from "../system/MachineContext";
@@ -385,6 +385,28 @@ const project: Project = {
   estado_general: "valido",
 };
 
+const projectWithSecondOperation: Project = {
+  ...project,
+  operaciones: [
+    project.operaciones[0],
+    {
+      ...project.operaciones[0],
+      id: "op_2",
+      nombre: "Taladrado 1,0 mm",
+      tipo: "taladrado",
+      orden: 1,
+      archivo_gcode: "originals/job-2.nc",
+      nombre_archivo_original: "job-2.nc",
+      sha256: "def",
+      herramienta: "Broca 1.0 mm",
+      analisis: {
+        ...project.operaciones[0].analisis!,
+        cantidad_movimientos: 3,
+      },
+    },
+  ],
+};
+
 const physicalMachine: MachineContextValue = {
   runtime: {
     state: "WAITING_FOR_XY_REFERENCE",
@@ -439,10 +461,11 @@ function requireRuntime(machine: MachineContextValue) {
 
 const physicalRuntime = requireRuntime(physicalMachine);
 
-function renderWorkspace(machine?: MachineContextValue, options?: { onRefreshProject?: () => Promise<void>; onProjectStateChange?: (project: Project) => void }) {
+function renderWorkspace(machine?: MachineContextValue, options?: { onRefreshProject?: () => Promise<void>; onProjectStateChange?: (project: Project) => void; project?: Project }) {
+  const workspaceProject = options?.project ?? project;
   const workspace = (
     <ProjectWorkspace
-      project={project}
+      project={workspaceProject}
       busyKey={null}
       savingProject={false}
       onSaveProject={vi.fn()}
@@ -1663,6 +1686,133 @@ describe("ProjectWorkspace", () => {
     expect(await screen.findByRole("button", { name: /Adaptativa rápida/i })).toBeDisabled();
     expect(screen.getByRole("button", { name: /Descargar adaptive experimental/i })).toBeInTheDocument();
     expect(screen.getByText(/solo se permite descargar un artefacto experimental no ejecutable/i)).toBeInTheDocument();
+  });
+
+  it("solicita la auditoría una sola vez al abrir con una operación válida", async () => {
+    const pendingAudit = deferred<typeof compensationAudit>();
+    apiMock.getCompensationAudit.mockReturnValueOnce(pendingAudit.promise);
+
+    renderWorkspace();
+
+    await waitFor(() => expect(apiMock.getCompensationAudit).toHaveBeenCalledTimes(1));
+    expect(apiMock.getCompensationAudit).toHaveBeenCalledWith(
+      project.id,
+      project.operaciones[0].id,
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    );
+  });
+
+  it("no repite la auditoría por rerenders después de resolver la solicitud", async () => {
+    const pendingAudit = deferred<typeof compensationAudit>();
+    apiMock.getCompensationAudit.mockReturnValueOnce(pendingAudit.promise);
+
+    renderWorkspace();
+
+    await waitFor(() => expect(apiMock.getCompensationAudit).toHaveBeenCalledTimes(1));
+
+    await act(async () => {
+      pendingAudit.resolve(compensationAudit);
+      await pendingAudit.promise;
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /^Ejecución$/i }));
+
+    expect(await screen.findByText(/Plan multioperación listo para ejecución/i)).toBeInTheDocument();
+    await waitFor(() => expect(apiMock.getCompensationAudit).toHaveBeenCalledTimes(1));
+    expect(screen.getByText(/^Disponible$/i)).toBeInTheDocument();
+  });
+
+  it("no entra en ciclo cuando la auditoría responde 404", async () => {
+    apiMock.getCompensationAudit.mockRejectedValueOnce(new ApiError("Auditoría no disponible.", 404));
+
+    renderWorkspace();
+
+    await waitFor(() => expect(apiMock.getCompensationAudit).toHaveBeenCalledTimes(1));
+
+    fireEvent.click(screen.getByRole("button", { name: /^Ejecución$/i }));
+
+    expect(await screen.findByText(/Auditoría no disponible\./i)).toBeInTheDocument();
+    await waitFor(() => expect(apiMock.getCompensationAudit).toHaveBeenCalledTimes(1));
+    expect(screen.getByText(/^No disponible$/i)).toBeInTheDocument();
+  });
+
+  it("cambiar de operación produce exactamente una solicitud adicional", async () => {
+    apiMock.getCompensationAudit.mockResolvedValue(compensationAudit);
+
+    renderWorkspace(undefined, { project: projectWithSecondOperation });
+
+    await waitFor(() => expect(apiMock.getCompensationAudit).toHaveBeenCalledTimes(1));
+    fireEvent.click(screen.getByRole("button", { name: /^Trayectoria$/i }));
+
+    fireEvent.change(screen.getByLabelText(/Operación activa/i), { target: { value: "op_2" } });
+
+    await waitFor(() => expect(apiMock.getCompensationAudit).toHaveBeenCalledTimes(2));
+    expect(apiMock.getCompensationAudit).toHaveBeenLastCalledWith(
+      project.id,
+      "op_2",
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    );
+  });
+
+  it("Recalcular auditoría produce exactamente una solicitud adicional sin duplicados", async () => {
+    apiMock.getCompensationAudit.mockResolvedValue(compensationAudit);
+
+    renderWorkspace();
+
+    await waitFor(() => expect(apiMock.getCompensationAudit).toHaveBeenCalledTimes(1));
+
+    fireEvent.click(screen.getByRole("button", { name: /^Ejecución$/i }));
+    const refreshButton = await screen.findByRole("button", { name: /Recalcular auditoría/i });
+    fireEvent.click(refreshButton);
+
+    await waitFor(() => expect(apiMock.getCompensationAudit).toHaveBeenCalledTimes(2));
+    expect(apiMock.getCompensationAudit).toHaveBeenNthCalledWith(
+      2,
+      project.id,
+      project.operaciones[0].id,
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    );
+  });
+
+  it("ignora respuestas obsoletas al cambiar de operación mientras la auditoría sigue pendiente", async () => {
+    const firstAudit = deferred<typeof compensationAudit>();
+    const secondAudit = deferred<typeof compensationAudit>();
+    const staleAudit = {
+      ...compensationAudit,
+      original: { ...compensationAudit.original, estimated_time_s: 11 },
+    };
+    const freshAudit = {
+      ...compensationAudit,
+      original: { ...compensationAudit.original, estimated_time_s: 42 },
+    };
+    apiMock.getCompensationAudit
+      .mockReturnValueOnce(firstAudit.promise)
+      .mockReturnValueOnce(secondAudit.promise);
+
+    renderWorkspace(undefined, { project: projectWithSecondOperation });
+
+    await waitFor(() => expect(apiMock.getCompensationAudit).toHaveBeenCalledTimes(1));
+    fireEvent.click(screen.getByRole("button", { name: /^Trayectoria$/i }));
+
+    fireEvent.change(screen.getByLabelText(/Operación activa/i), { target: { value: "op_2" } });
+    await waitFor(() => expect(apiMock.getCompensationAudit).toHaveBeenCalledTimes(2));
+
+    await act(async () => {
+      secondAudit.resolve(freshAudit);
+      await secondAudit.promise;
+    });
+
+    await act(async () => {
+      firstAudit.resolve(staleAudit);
+      await firstAudit.promise;
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /^Ejecución$/i }));
+
+    await waitFor(() => expect(screen.getAllByText("Taladrado 1,0 mm").length).toBeGreaterThan(0));
+    expect(await screen.findByText(/42 s/i)).toBeInTheDocument();
+    expect(screen.queryByText(/^11 s$/i)).toBeNull();
+    await waitFor(() => expect(apiMock.getCompensationAudit).toHaveBeenCalledTimes(2));
   });
 
 });
