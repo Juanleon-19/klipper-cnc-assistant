@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { useMachineStatus } from "../system/MachineContext";
 import { HeightMapControlPanel } from "../height-map/HeightMapControlPanel";
@@ -61,6 +61,12 @@ type HeightMapSource = "SIMULATED" | "MEASURED";
 type ReferenceFieldErrors = Partial<Record<"x_mm" | "y_mm" | "z_mm", string>>;
 type InputState = { x_mm: string; y_mm: string };
 type ZInputState = { x_mm: string; y_mm: string; z_mm: string };
+
+type CompensationAuditRequester = (
+  projectId: string,
+  operationId: string,
+  options?: { signal?: AbortSignal },
+) => Promise<CompensationAudit>;
 
 
 const operationTypeOptions = [
@@ -126,6 +132,15 @@ function combineOperationAnalyses(base: OperationAnalysis, operations: Operation
     desbordes_material: analyses.flatMap((analysis) => analysis.desbordes_material),
     cabe_en_material: analyses.every((analysis) => analysis.cabe_en_material !== false),
   };
+}
+
+const getCompensationAuditRequest =
+  typeof (api as { getCompensationAudit?: unknown }).getCompensationAudit === "function"
+    ? (api as { getCompensationAudit: CompensationAuditRequester }).getCompensationAudit
+    : null;
+
+function isAbortedRequest(error: unknown) {
+  return error instanceof DOMException && error.name === "AbortError";
 }
 
 
@@ -513,6 +528,7 @@ export function ProjectWorkspace({
   const [liveExecution, setLiveExecution] = useState<LiveExecutionSnapshot | null>(null);
   const [compensationAudit, setCompensationAudit] = useState<CompensationAudit | null>(null);
   const [compensationAuditBusy, setCompensationAuditBusy] = useState(false);
+  const [compensationAuditError, setCompensationAuditError] = useState<string | null>(null);
   const [compensationToleranceInput, setCompensationToleranceInput] = useState("0.05");
   const [machineSettingsInput, setMachineSettingsInput] = useState({
     reference_prep_z_mm: "115",
@@ -530,10 +546,13 @@ export function ProjectWorkspace({
   const physicalMapPollInFlight = useRef(false);
   const meshPreviewAbortRef = useRef<AbortController | null>(null);
   const meshPreviewRequestIdRef = useRef(0);
+  const compensationAuditAbortRef = useRef<AbortController | null>(null);
+  const compensationAuditRequestIdRef = useRef(0);
   const hydratedPhysicalMapIdRef = useRef<string | null>(null);
   const physicalMapWorkerActive = physicalMap?.execution?.worker_active === true;
   const physicalMapWorkerGeneration = physicalMap?.execution?.worker_generation ?? null;
   const physicalMapReadyId = machine.isPhysical && isPhysicalMapReady(physicalMap) ? physicalMap.map_id : null;
+  const projectId = project?.id ?? null;
 
   useEffect(() => {
     if (!machine.isPhysical) {
@@ -576,6 +595,7 @@ export function ProjectWorkspace({
     () => project?.operaciones.find((operation) => operation.id === selectedOperationId) ?? null,
     [project, selectedOperationId]
   );
+  const activeOperationId = selectedOperation?.id ?? null;
 
   const selectedSetup = useMemo(
     () => project?.montajes.find((setup) => setup.id === selectedSetupId) ?? project?.montajes[0] ?? null,
@@ -821,50 +841,72 @@ export function ProjectWorkspace({
     setCompensationToleranceInput(selectedOperation ? String(selectedOperation.max_z_error_mm ?? 0.05) : "0.05");
   }, [selectedOperation]);
 
-  const getCompensationAuditFn =
-    typeof (api as { getCompensationAudit?: unknown }).getCompensationAudit === "function"
-      ? (api as { getCompensationAudit: (projectId: string, operationId: string) => Promise<CompensationAudit> }).getCompensationAudit.bind(api)
-      : null;
-
-  const refreshCompensationAudit = async () => {
-    if (!project || !selectedOperation || getCompensationAuditFn == null) {
+  const requestCompensationAudit = useCallback(async (nextProjectId: string, nextOperationId: string) => {
+    if (getCompensationAuditRequest == null) {
       setCompensationAudit(null);
+      setCompensationAuditError("La auditoría comparativa no está disponible en este build.");
+      setCompensationAuditBusy(false);
       return;
     }
+    compensationAuditAbortRef.current?.abort();
+    const controller = new AbortController();
+    compensationAuditAbortRef.current = controller;
+    const requestId = compensationAuditRequestIdRef.current + 1;
+    compensationAuditRequestIdRef.current = requestId;
     setCompensationAuditBusy(true);
+    setCompensationAuditError(null);
     try {
-      setCompensationAudit(await getCompensationAuditFn(project.id, selectedOperation.id));
-    } catch {
+      const audit = await getCompensationAuditRequest(nextProjectId, nextOperationId, { signal: controller.signal });
+      if (compensationAuditRequestIdRef.current !== requestId || controller.signal.aborted) {
+        return;
+      }
+      setCompensationAudit(audit);
+      setCompensationAuditError(null);
+    } catch (error) {
+      if (compensationAuditRequestIdRef.current !== requestId || controller.signal.aborted || isAbortedRequest(error)) {
+        return;
+      }
       setCompensationAudit(null);
+      setCompensationAuditError(error instanceof ApiError ? error.message : "La auditoría comparativa no está disponible para esta operación.");
     } finally {
-      setCompensationAuditBusy(false);
+      if (compensationAuditRequestIdRef.current === requestId && !controller.signal.aborted) {
+        setCompensationAuditBusy(false);
+      }
+      if (compensationAuditAbortRef.current === controller) {
+        compensationAuditAbortRef.current = null;
+      }
     }
+  }, []);
+
+  const refreshCompensationAudit = async () => {
+    if (!projectId || !activeOperationId) {
+      setCompensationAudit(null);
+      setCompensationAuditError(null);
+      setCompensationAuditBusy(false);
+      return;
+    }
+    await requestCompensationAudit(projectId, activeOperationId);
   };
 
   useEffect(() => {
-    if (!project || !selectedOperation || getCompensationAuditFn == null) {
+    compensationAuditAbortRef.current?.abort();
+    compensationAuditAbortRef.current = null;
+    compensationAuditRequestIdRef.current += 1;
+    if (!projectId || !activeOperationId || getCompensationAuditRequest == null) {
       setCompensationAudit(null);
+      setCompensationAuditError(null);
+      setCompensationAuditBusy(false);
       return;
     }
-    let cancelled = false;
-    setCompensationAuditBusy(true);
-    void getCompensationAuditFn(project.id, selectedOperation.id).then((audit) => {
-      if (!cancelled) {
-        setCompensationAudit(audit);
-      }
-    }).catch(() => {
-      if (!cancelled) {
-        setCompensationAudit(null);
-      }
-    }).finally(() => {
-      if (!cancelled) {
-        setCompensationAuditBusy(false);
-      }
-    });
+    setCompensationAudit(null);
+    setCompensationAuditError(null);
+    void requestCompensationAudit(projectId, activeOperationId);
     return () => {
-      cancelled = true;
+      compensationAuditAbortRef.current?.abort();
+      compensationAuditAbortRef.current = null;
+      compensationAuditRequestIdRef.current += 1;
     };
-  }, [getCompensationAuditFn, project, selectedOperation]);
+  }, [activeOperationId, projectId, requestCompensationAudit]);
 
   useEffect(() => {
     const currentMapId = typeof physicalMap?.map_id === "string" ? physicalMap.map_id : null;
@@ -2290,7 +2332,7 @@ export function ProjectWorkspace({
               </div>
               <div className="metric-box">
                 <span>Auditoría</span>
-                <strong>{compensationAuditBusy ? "Calculando..." : compensationAudit ? "Disponible" : "Pendiente"}</strong>
+                <strong>{compensationAuditBusy ? "Calculando..." : compensationAudit ? "Disponible" : compensationAuditError ? "No disponible" : "Pendiente"}</strong>
               </div>
             </div>
             <div className="action-grid action-grid--inline">
@@ -2377,6 +2419,8 @@ export function ProjectWorkspace({
                   </tbody>
                 </table>
               </div>
+            ) : compensationAuditError ? (
+              <p className="muted">{compensationAuditError}</p>
             ) : <p className="muted">La auditoría comparativa se generará cuando exista mapa válido y archivo analizado para esta operación.</p>}
             {compensationAudit?.adaptive_fast && compensationAudit.adaptive_fast.eligible === false ? (
               <div className="alert alert--warning">
