@@ -390,9 +390,10 @@ export const api = {
     request<{ session: ReferenceSession; preview: CompensationPreview }>(`/api/projects/${projectId}/operations/${operationId}/compensation-preview`, {
       method: "POST",
     }),
-  getCompensationAudit: (projectId: string, operationId: string) =>
+  getCompensationAudit: (projectId: string, operationId: string, options?: { signal?: AbortSignal }) =>
     request<CompensationAudit>(`/api/projects/${projectId}/operations/${operationId}/compensation-audit`, {
       method: "POST",
+      signal: options?.signal,
     }),
   generateCompensatedGCode: (projectId: string, operationId: string, mode?: "legacy" | "adaptive_fast") =>
     request<CompensatedGCodeResult>(`/api/projects/${projectId}/operations/${operationId}/compensated-gcode/generate${mode ? `?mode=${encodeURIComponent(mode)}` : ""}`, {
