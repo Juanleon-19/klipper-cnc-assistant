@@ -2,15 +2,17 @@ from __future__ import annotations
 
 from typing import Any
 
-from .mesh_execution_service import MeshExecutionService, RECOVERY_PENDING_MESSAGE
+from .manual_retry_mesh_execution_service import MeshExecutionService
+from .mesh_execution_service import RECOVERY_PENDING_MESSAGE
 
 
 class RecoverableMeshExecutionService(MeshExecutionService):
     """Fail-closed adapter for mesh recovery ownership checks.
 
     Production mesh execution must receive the public ownership contract from
-    MachineRuntime.  Missing or malformed ownership information is treated as
+    MachineRuntime. Missing or malformed ownership information is treated as
     unsafe instead of falling back to an optimistic movement_lock=False value.
+    Physical point retries remain manual through the base contract.
     """
 
     def _runtime_motion_ownership(self, runtime: Any) -> dict[str, Any]:
