@@ -1,8 +1,9 @@
-import { useEffect } from "react";
+import { useState } from "react";
 
 import { summarizeMachineMode, toneForStatus, translateStatus } from "../../lib/ui";
 import type { HealthResponse, MachineRuntime, MachineSession, SystemInfoResponse } from "../../types";
 import { StatusBadge } from "../../components/StatusBadge";
+import { reconnectRuntime } from "./runtimeApi";
 
 type SystemPageProps = {
   health: HealthResponse | null;
@@ -45,28 +46,35 @@ export function SystemPage({ health, systemInfo, machineSession, machineRuntime,
   const movementAuthorized = machineRuntime?.safety?.movement_authorized === true;
   const runtimeState = machineRuntime?.state ?? "DISCONNECTED";
   const canConnect = physical && runtimeState === "DISCONNECTED";
+  const [reconnectingRuntime, setReconnectingRuntime] = useState(false);
+  const [reconnectError, setReconnectError] = useState("");
+  const reconnectBlocked = [
+    "HOMING",
+    "MOVING_TO_SAFE_Z",
+    "MOVING_TO_CENTER",
+    "PROBING_REFERENCE",
+    "MESH_PROBING",
+    "STOPPING",
+  ].includes(runtimeState);
 
-  useEffect(() => {
-    let stopped = false;
-    let inFlight = false;
-    const refreshRuntime = async () => {
-      if (stopped || inFlight) return;
-      inFlight = true;
-      try {
-        await onRuntimeRefresh();
-      } catch {
-        // El botón manual muestra errores; el polling no debe dejar la vista en estado ocupado.
-      } finally {
-        inFlight = false;
-      }
-    };
-    void refreshRuntime();
-    const id = window.setInterval(() => { void refreshRuntime(); }, 200);
-    return () => {
-      stopped = true;
-      window.clearInterval(id);
-    };
-  }, [onRuntimeRefresh]);
+  const handleRuntimeReconnect = async () => {
+    if (!physical || reconnectingRuntime || refreshing || reconnectBlocked) return;
+    const confirmed = window.confirm(
+      "Se reiniciará únicamente la conexión interna del runtime (Moonraker/telemetría/Arduino). " +
+      "No se reinicia Klipper ni el servicio y no se enviará movimiento. ¿Continuar?"
+    );
+    if (!confirmed) return;
+    setReconnectingRuntime(true);
+    setReconnectError("");
+    try {
+      await reconnectRuntime();
+      await onRefresh();
+    } catch (error) {
+      setReconnectError(error instanceof Error ? error.message : "No fue posible reconectar el runtime.");
+    } finally {
+      setReconnectingRuntime(false);
+    }
+  };
 
   return (
     <div className="page-stack system-physical">
@@ -79,7 +87,7 @@ export function SystemPage({ health, systemInfo, machineSession, machineRuntime,
           <div className="toolbar-inline">
             <StatusBadge tone={physical ? "danger" : "info"}>{mode}</StatusBadge>
             <StatusBadge tone={toneForStatus(machineRuntime?.health ?? health?.estado)}>{translateStatus(machineRuntime?.health ?? health?.estado)}</StatusBadge>
-            <button className="button button--ghost" type="button" onClick={() => void onRefresh()} disabled={refreshing}>
+            <button className="button button--ghost" type="button" onClick={() => void onRefresh()} disabled={refreshing || reconnectingRuntime}>
               {refreshing ? "Actualizando..." : "Actualizar"}
             </button>
           </div>
@@ -87,15 +95,21 @@ export function SystemPage({ health, systemInfo, machineSession, machineRuntime,
         <p className="muted">MODO {mode} — esta pantalla muestra diagnóstico técnico, conexión, estado de entradas y parada de emergencia.</p>
         <p className="muted">Las operaciones de preparación y sondeo se realizan dentro del montaje activo.</p>
         {machineRuntime?.last_error ? <div className="alert alert--error">{machineRuntime.last_error}</div> : null}
+        {reconnectError ? <div className="alert alert--error">{reconnectError}</div> : null}
       </article>
 
       <div className="machine-action-strip">
-        <button className="button" type="button" onClick={() => void onMachineAction("connect")} disabled={!canConnect || refreshing}>Conectar diagnóstico</button>
-        <button className="button button--ghost" type="button" onClick={() => void onMachineAction("diagnostic")} disabled={!physical || refreshing || runtimeState === "DISCONNECTED"}>Modo diagnóstico</button>
-        <button className="button button--ghost" type="button" onClick={() => void onRuntimeRefresh()} disabled={refreshing}>Actualizar runtime</button>
-        <button className="button button--ghost" type="button" onClick={() => void onMachineAction("cancel")} disabled={!physical || refreshing || runtimeState === "DISCONNECTED"}>Cancelar operación técnica</button>
-        <button className="button button--danger" type="button" onClick={() => { if (window.confirm("Enviar M112 a Klipper y bloquear movimientos?")) void onMachineAction("emergency"); }} disabled={!physical || refreshing || runtimeState === "DISCONNECTED"}>Emergencia M112</button>
+        <button className="button" type="button" onClick={() => void onMachineAction("connect")} disabled={!canConnect || refreshing || reconnectingRuntime}>Conectar diagnóstico</button>
+        <button className="button button--ghost" type="button" onClick={() => void onMachineAction("reconnect-arduino")} disabled={!physical || refreshing || reconnectingRuntime || runtimeState === "DISCONNECTED"}>Reconectar Arduino</button>
+        <button className="button button--ghost" type="button" onClick={() => void handleRuntimeReconnect()} disabled={!physical || refreshing || reconnectingRuntime || reconnectBlocked}>
+          {reconnectingRuntime ? "Reconectando runtime..." : "Reconectar runtime"}
+        </button>
+        <button className="button button--ghost" type="button" onClick={() => void onMachineAction("diagnostic")} disabled={!physical || refreshing || reconnectingRuntime || runtimeState === "DISCONNECTED"}>Modo diagnóstico</button>
+        <button className="button button--ghost" type="button" onClick={() => void onRuntimeRefresh()} disabled={refreshing || reconnectingRuntime}>Actualizar runtime</button>
+        <button className="button button--ghost" type="button" onClick={() => void onMachineAction("cancel")} disabled={!physical || refreshing || reconnectingRuntime || runtimeState === "DISCONNECTED"}>Cancelar operación técnica</button>
+        <button className="button button--danger" type="button" onClick={() => { if (window.confirm("Enviar M112 a Klipper y bloquear movimientos?")) void onMachineAction("emergency"); }} disabled={!physical || refreshing || reconnectingRuntime || runtimeState === "DISCONNECTED"}>Emergencia M112</button>
       </div>
+      <p className="muted">El runtime se actualiza desde el sondeo global de la aplicación; esta vista no crea un segundo polling de alta frecuencia.</p>
       {!physical ? <p className="form-error">Conectar está bloqueado porque el backend inició en modo SIMULADO. Configure MACHINE_MODE=physical en el servicio y reinicie solo la aplicación.</p> : null}
 
       <div className="info-grid info-grid--triple">

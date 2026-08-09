@@ -3,6 +3,7 @@ from __future__ import annotations
 import time
 from typing import Any
 
+from .config import MachineMode
 from .runtime import MachineRuntime, MachineRuntimeError, MachineRuntimeState
 
 
@@ -35,6 +36,15 @@ _SEVERE_STATES = {
     MachineRuntimeState.DISCONNECTED,
     MachineRuntimeState.STOPPING,
     MachineRuntimeState.CANCELLED,
+}
+
+_RECONNECT_BLOCKING_STATES = {
+    MachineRuntimeState.HOMING,
+    MachineRuntimeState.MOVING_TO_SAFE_Z,
+    MachineRuntimeState.MOVING_TO_CENTER,
+    MachineRuntimeState.PROBING_REFERENCE,
+    MachineRuntimeState.MESH_PROBING,
+    MachineRuntimeState.STOPPING,
 }
 
 
@@ -135,6 +145,38 @@ class RecoverableMachineRuntime(MachineRuntime):
             if self._state is MachineRuntimeState.MESH_PROBING:
                 self._state = MachineRuntimeState.MESH_PAUSED
             return True
+
+    def reconnect_runtime(self) -> dict[str, Any]:
+        """Reconnect the complete physical runtime without bypassing ownership.
+
+        This is intentionally different from Arduino-only reconnect. It tears
+        down Moonraker telemetry and the serial manager, then creates a fresh
+        diagnostic session. It refuses to run while any physical operation,
+        movement lock or mesh cleanup still owns the machine.
+        """
+        if self.config.mode is not MachineMode.PHYSICAL:
+            raise MachineRuntimeError("La reconexión completa solo está disponible en modo FÍSICO.")
+
+        ownership = self.motion_ownership_snapshot()
+        if (
+            ownership.get("active_operation") is not None
+            or bool(ownership.get("movement_lock"))
+            or bool(ownership.get("recovery_pending"))
+        ):
+            raise MachineRuntimeError(
+                str(ownership.get("reason") or RECOVERY_PENDING_MESSAGE)
+            )
+
+        with self._lock:
+            if self._state in _RECONNECT_BLOCKING_STATES:
+                raise MachineRuntimeError(
+                    f"No se puede reconectar el runtime durante {self._state.value}. "
+                    "Cancele o espere a que termine la operación actual."
+                )
+            self._event("warning", "Reconexión completa del runtime solicitada; el movimiento permanece bloqueado.")
+
+        self.stop()
+        return self.connect()
 
     def cancel_operation(
         self,
