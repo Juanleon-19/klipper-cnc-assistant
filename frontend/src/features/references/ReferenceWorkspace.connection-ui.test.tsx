@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { MachineRuntime, Operation } from "../../types";
@@ -120,7 +120,6 @@ function renderReference(options?: {
 
 describe("ReferenceWorkspace connection and workflow UI", () => {
   beforeEach(() => {
-    vi.useFakeTimers();
     vi.spyOn(window, "confirm").mockReturnValue(true);
   });
 
@@ -131,14 +130,12 @@ describe("ReferenceWorkspace connection and workflow UI", () => {
   });
 
   it("muestra el estado general de conexión en rojo o verde", () => {
-    const disconnected = renderReference({ connected: false });
-    const disconnectedBadge = screen.getByText("SIN CONEXIÓN");
-    expect(disconnectedBadge).toHaveClass("status-badge--danger");
-
-    disconnected.onConnectRuntime.mockClear();
+    renderReference({ connected: false });
+    expect(screen.getByText("SIN CONEXIÓN")).toHaveClass("status-badge--danger");
   });
 
   it("muestra Reconectar runtime si Conectar no queda listo después de 10 segundos", () => {
+    vi.useFakeTimers();
     const { onConnectRuntime } = renderReference({ connected: false });
 
     fireEvent.click(screen.getByRole("button", { name: "Conectar runtime" }));
@@ -154,6 +151,7 @@ describe("ReferenceWorkspace connection and workflow UI", () => {
   });
 
   it("usa la reconexión completa existente y refresca el runtime", async () => {
+    vi.useFakeTimers();
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,
       status: 200,
@@ -167,28 +165,32 @@ describe("ReferenceWorkspace connection and workflow UI", () => {
     act(() => {
       vi.advanceTimersByTime(10_000);
     });
-    fireEvent.click(screen.getByRole("button", { name: "Reconectar runtime" }));
 
-    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Reconectar runtime" }));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(fetchMock).toHaveBeenCalledWith(
       "/api/machine/reconnect-runtime",
       expect.objectContaining({ method: "POST" })
     );
-    await waitFor(() => expect(refreshRuntime).toHaveBeenCalledTimes(1));
+    expect(refreshRuntime).toHaveBeenCalledTimes(1);
   });
 
-  it("mantiene diagnóstico Arduino y detalles de Home fuera del flujo principal", () => {
+  it("mantiene diagnóstico Arduino y configuración avanzada de Home fuera del flujo principal", () => {
     renderReference({ connected: true });
 
     expect(screen.getByText("Diagnóstico avanzado de conexión")).toBeInTheDocument();
-    expect(screen.getByText("Detalles de preparación y telemetría")).toBeInTheDocument();
+    expect(screen.getByText(/Configuración avanzada de movimiento/i)).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "4. Posición segura de cambio de herramienta" })).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "5. Medir referencia Z" })).toBeInTheDocument();
   });
 
   it("muestra verde cuando todos los enlaces del runtime están listos", () => {
     renderReference({ connected: true });
-
     expect(screen.getByText("CONECTADO")).toHaveClass("status-badge--success");
   });
 });
