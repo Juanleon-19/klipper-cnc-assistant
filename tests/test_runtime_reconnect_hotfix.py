@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import unittest
 
+from klipper_cnc_assistant.api.machine_routes import build_machine_router
 from klipper_cnc_assistant.machine.config import MachineMode, MachineRuntimeConfig
 from klipper_cnc_assistant.machine.recoverable_runtime import RecoverableMachineRuntime
 from klipper_cnc_assistant.machine.runtime import MachineRuntimeError, MachineRuntimeState
@@ -66,6 +67,17 @@ class FakeReconnectRuntime(RecoverableMachineRuntime):
 
 
 class RuntimeReconnectHotfixTest(unittest.TestCase):
+    def test_reconnect_runtime_endpoint_is_registered_as_post(self) -> None:
+        router = build_machine_router()
+        matches = [
+            route
+            for route in router.routes
+            if getattr(route, "path", None) == "/api/machine/reconnect-runtime"
+        ]
+
+        self.assertEqual(len(matches), 1)
+        self.assertIn("POST", matches[0].methods)
+
     def test_reconnect_restarts_only_runtime_session_when_idle(self) -> None:
         runtime = FakeReconnectRuntime()
         with runtime._lock:
