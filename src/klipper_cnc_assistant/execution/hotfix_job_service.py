@@ -4,7 +4,6 @@ from pathlib import Path
 from typing import Any
 
 from klipper_cnc_assistant.application.errors import ApplicationError
-from klipper_cnc_assistant.domain import OperacionPCB
 
 from .job_service import (
     JOB_PLAN_SCHEMA,
