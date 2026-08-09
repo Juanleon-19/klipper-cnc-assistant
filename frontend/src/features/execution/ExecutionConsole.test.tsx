@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
 import { ApiError } from "../../lib/api";
@@ -107,6 +107,76 @@ describe("ExecutionConsole", () => {
     expect(screen.queryByText(/^info$/i)).toBeNull();
   });
 
+  it("muestra checks aprobados, fallidos y sus detalles cuando el trabajo no está listo", () => {
+    render(
+      <ExecutionConsole
+        snapshot={{
+          ...baseSnapshot,
+          run: { ...baseSnapshot.run, status: "JOB_VALIDATING", available_actions: [] },
+          job_run: {
+            ...(baseSnapshot.job_run as NonNullable<typeof baseSnapshot.job_run>),
+            state: "JOB_VALIDATING",
+            ready: false,
+            checks: [
+              { name: "modo_fisico", ok: true, detail: "MACHINE_MODE=physical requerido para ejecutar." },
+              { name: "homing", ok: false, detail: "Homing actual: pendiente." },
+              { name: "mapa_activo", ok: true, detail: "Mapa físico activo del montaje." },
+              { name: "referencia_inicial", ok: false, detail: "Falta referencia Z de la herramienta inicial." },
+            ],
+            available_actions: [],
+          },
+        }}
+        error={null}
+        busy={false}
+        onPrepare={vi.fn()}
+        onStart={vi.fn()}
+        onAction={vi.fn()}
+        onArchiveStale={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText(/Preparación del trabajo/i)).toBeInTheDocument();
+    expect(screen.getByText(/Trabajo no listo/i)).toBeInTheDocument();
+    expect(screen.getByText(/OK · Modo físico/i)).toBeInTheDocument();
+    expect(screen.getByText(/OK · Mapa físico/i)).toBeInTheDocument();
+    expect(screen.getByText(/FALLA · Homing XYZ/i)).toBeInTheDocument();
+    expect(screen.getByText(/FALLA · Referencia inicial/i)).toBeInTheDocument();
+    expect(screen.getByText(/Homing actual: pendiente\./i)).toBeInTheDocument();
+    expect(screen.getByText(/Falta referencia Z de la herramienta inicial\./i)).toBeInTheDocument();
+    expect(screen.getByText(/Bloqueos que debes resolver/i)).toBeInTheDocument();
+  });
+
+  it("muestra el estado listo cuando todos los checks están OK", () => {
+    render(
+      <ExecutionConsole
+        snapshot={{
+          ...baseSnapshot,
+          run: { ...baseSnapshot.run, status: "JOB_READY", available_actions: ["start"] },
+          job_run: {
+            ...(baseSnapshot.job_run as NonNullable<typeof baseSnapshot.job_run>),
+            state: "JOB_READY",
+            ready: true,
+            checks: [
+              { name: "modo_fisico", ok: true, detail: "MACHINE_MODE=physical requerido para ejecutar." },
+              { name: "archivos_compensados", ok: true, detail: "Cada operación activa tiene archivo compensado generado." },
+            ],
+            available_actions: ["start"],
+          },
+        }}
+        error={null}
+        busy={false}
+        onPrepare={vi.fn()}
+        onStart={vi.fn()}
+        onAction={vi.fn()}
+        onArchiveStale={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText(/Trabajo listo para iniciar/i)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Iniciar trabajo" })).toBeInTheDocument();
+    expect(screen.queryByText(/Bloqueos que debes resolver/i)).toBeNull();
+  });
+
   it("muestra banner de desincronización y no duplica el botón de inicio", () => {
     render(
       <ExecutionConsole
@@ -129,6 +199,49 @@ describe("ExecutionConsole", () => {
 
     expect(screen.getByText(/DESINCRONIZACIÓN/i)).toBeInTheDocument();
     expect(screen.getAllByRole("button", { name: "Iniciar trabajo" })).toHaveLength(1);
+  });
+
+  it("no dispara prepare automáticamente en render ni rerender, y el click manual hace una sola petición", () => {
+    const onPrepare = vi.fn();
+    const { rerender } = render(
+      <ExecutionConsole
+        snapshot={{
+          ...baseSnapshot,
+          run: { ...baseSnapshot.run, status: "JOB_VALIDATING", available_actions: [] },
+          job_run: { ...(baseSnapshot.job_run as NonNullable<typeof baseSnapshot.job_run>), state: "JOB_VALIDATING", available_actions: [] },
+        }}
+        error={null}
+        busy={false}
+        onPrepare={onPrepare}
+        onStart={vi.fn()}
+        onAction={vi.fn()}
+        onArchiveStale={vi.fn()}
+      />,
+    );
+
+    expect(onPrepare).not.toHaveBeenCalled();
+
+    rerender(
+      <ExecutionConsole
+        snapshot={{
+          ...baseSnapshot,
+          run: { ...baseSnapshot.run, status: "JOB_VALIDATING", available_actions: [] },
+          job_run: { ...(baseSnapshot.job_run as NonNullable<typeof baseSnapshot.job_run>), state: "JOB_VALIDATING", available_actions: [] },
+        }}
+        error={null}
+        busy={false}
+        onPrepare={onPrepare}
+        onStart={vi.fn()}
+        onAction={vi.fn()}
+        onArchiveStale={vi.fn()}
+      />,
+    );
+
+    expect(onPrepare).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: /Preparar trabajo/i }));
+
+    expect(onPrepare).toHaveBeenCalledTimes(1);
   });
 
   it("separa la confirmación de spindle detenido y herramienta cambiada", () => {
@@ -192,6 +305,7 @@ describe("ExecutionConsole", () => {
 
     expect(screen.getByRole("button", { name: /Continuar trabajo/i })).toBeInTheDocument();
   });
+
   it("no muestra cerrar ejecución obsoleta para un JOB_VALIDATING nuevo", () => {
     render(
       <ExecutionConsole
@@ -279,5 +393,4 @@ describe("ExecutionConsole", () => {
     expect(screen.getByText(/job-run\/setup-main\/superior\/20260722-040230/i)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /Cerrar ejecución obsoleta/i })).toBeInTheDocument();
   });
-
 });
