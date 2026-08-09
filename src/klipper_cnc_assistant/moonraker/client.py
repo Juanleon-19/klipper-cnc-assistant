@@ -4,6 +4,9 @@ from pathlib import Path
 import requests
 
 
+UPLOAD_TIMEOUT_FLOOR_S = 30.0
+
+
 class MoonrakerError(Exception):
     pass
 
@@ -168,13 +171,14 @@ class MoonrakerClient:
         data = {"root": "gcodes", "path": remote_dir, "print": "true" if print_file else "false"}
         if checksum:
             data["checksum"] = checksum
+        upload_timeout = max(float(self.timeout), UPLOAD_TIMEOUT_FLOOR_S)
         try:
             with file_path.open("rb") as handle:
                 response = self.session.post(
                     f"{self.base_url}/server/files/upload",
                     data=data,
                     files={"file": (file_path.name, handle, "text/plain")},
-                    timeout=self.timeout,
+                    timeout=upload_timeout,
                 )
             content_type = response.headers.get("Content-Type", "")
             body_text = response.text
@@ -189,6 +193,12 @@ class MoonrakerClient:
                     f"body={body_text[:1000]!r}"
                 )
             payload = response.json()
+        except requests.Timeout as error:
+            raise MoonrakerTimeout(
+                "Moonraker upload timed out after "
+                f"{upload_timeout:.1f}s; the server outcome is uncertain and no automatic retry was attempted. "
+                f"local_name={file_path.name!r} remote_dir={remote_dir!r}"
+            ) from error
         except requests.RequestException as error:
             raise MoonrakerError(f"Moonraker upload failed: {error}") from error
         except ValueError as error:
