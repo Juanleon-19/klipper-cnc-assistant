@@ -1035,14 +1035,6 @@ class JobService:
             calibration = self._tool_installation_calibration(active_map, operation, binding)
             blocking_reasons: list[str] = []
             original_time_estimate: dict[str, Any] | None = None
-            if self.time_estimation_service is not None and operation.archivo_gcode:
-                try:
-                    original_time_estimate = self.time_estimation_service.estimate_project_file(
-                        project_id=context.project_id,
-                        relative_path=str(operation.archivo_gcode),
-                    )
-                except Exception:
-                    original_time_estimate = None
             if operation.archivo_gcode is None:
                 blocking_reasons.append("Falta G-code original.")
             if operation.analisis is None:
