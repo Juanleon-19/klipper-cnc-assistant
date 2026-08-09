@@ -32,6 +32,18 @@ class MeshFailureRecoveryGuardTest(unittest.TestCase):
         self.assertEqual(runtime.snapshot()["state"], "MESH_PAUSED")
         _reject_active_motion(request)
 
+    def test_recovery_pending_does_not_hide_a_severe_runtime_state(self) -> None:
+        runtime = RecoverableMachineRuntime(_config())
+        with runtime._lock:
+            runtime._state = MachineRuntimeState.DEGRADED
+
+        runtime.mark_motion_recovery_pending(RECOVERY_PENDING_MESSAGE)
+
+        self.assertEqual(runtime.snapshot()["state"], "DEGRADED")
+        ownership = runtime.motion_ownership_snapshot()
+        self.assertEqual(ownership["state"], "DEGRADED")
+        self.assertFalse(ownership["can_start_motion"])
+
     def test_legacy_nonzero_retry_argument_cannot_enable_automatic_physical_retries(self) -> None:
         service = MeshExecutionService(_PhysicalMapStub(), max_point_retries=2)
         self.assertEqual(service.max_point_retries, 0)
