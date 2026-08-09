@@ -58,13 +58,14 @@ class RecoverableMachineRuntime(MachineRuntime):
         watchdog cleanup the inner probe may already have moved the internal
         state to MESH_PAUSED while its ownership is still being reconciled.
         Publishing MESH_PROBING for that short interval keeps those existing
-        guards fail-closed without weakening their behaviour.
+        guards fail-closed without hiding a genuinely severe runtime state.
         """
         payload = super().snapshot()
         with self._lock:
             recovery_pending = bool(self._motion_recovery_pending)
             recovery_reason = self._motion_recovery_reason
-        if recovery_pending:
+            internal_state = self._state
+        if recovery_pending and internal_state not in _SEVERE_STATES:
             payload["state"] = MachineRuntimeState.MESH_PROBING.value
         payload["recovery_pending"] = recovery_pending
         payload["recovery_reason"] = recovery_reason
