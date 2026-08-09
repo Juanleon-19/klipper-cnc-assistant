@@ -47,6 +47,7 @@ jobs:
             tests.test_job_plan_hotfix \
             tests.test_machine_runtime \
             tests.test_mesh_failure_recovery_hotfix \
+            tests.test_mesh_failure_recovery_guards \
             tests.test_moonraker_client \
             tests.test_physical_integration \
             tests.test_project_service \
