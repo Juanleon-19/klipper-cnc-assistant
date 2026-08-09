@@ -5,9 +5,12 @@
 Antes de modificar el repositorio, leer en este orden:
 
 1. `AGENTS.md`
-2. `README.md`
-3. `PLAN.md`, si existe
-4. `docs/architecture.md`
+2. `docs/CURRENT_STATE.md`, si existe
+3. `README.md`
+4. `PLAN.md`, si existe
+5. `docs/architecture.md`
+
+Si `docs/CURRENT_STATE.md` contradice GitHub `main`, el proceso debe detenerse y reconciliar primero esa diferencia. Ninguna rama histórica, worktree, backup o copia local debe asumirse como más nueva sin comparar su SHA con `origin/main`.
 
 ## Politica de ramas
 
@@ -63,6 +66,14 @@ Si un archivo sensible ya esta versionado:
 - En hosts fisicos activos, preferir validacion segura en modo simulado o subconjuntos que no inicialicen hardware.
 - No presentar una prueba bloqueada por seguridad como si hubiera sido ejecutada.
 - Documentar comando, resultado, fallos preexistentes y alcance exacto de la validacion.
+
+## Coordinacion entre agentes
+
+- GitHub `main` es la referencia de codigo integrado; `docs/CURRENT_STATE.md` es la referencia narrativa del estado operativo.
+- Codex debe comprobar estado local del host antes de diagnosticar y no debe tratar ramas o copias locales como autoridad sin compararlas con `origin/main`.
+- ChatGPT coordina alcance, arquitectura, revision de PR y CI; Codex puede inspeccionar y modificar el workspace local en una rama asignada.
+- El usuario mantiene la autoridad exclusiva sobre merge, deploy, reinicios y acciones fisicas.
+- No trabajar dos agentes sobre la misma rama o los mismos archivos al mismo tiempo sin un handoff explícito.
 
 ## Commits
 
