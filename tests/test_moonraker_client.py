@@ -6,8 +6,16 @@ import threading
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from unittest.mock import Mock
 
-from klipper_cnc_assistant.moonraker.client import MoonrakerClient, MoonrakerError
+import requests
+
+from klipper_cnc_assistant.moonraker.client import (
+    UPLOAD_TIMEOUT_FLOOR_S,
+    MoonrakerClient,
+    MoonrakerError,
+    MoonrakerTimeout,
+)
 
 
 class _CaptureServer(ThreadingHTTPServer):
@@ -119,6 +127,35 @@ class MoonrakerClientUploadTest(unittest.TestCase):
         result = client.upload_file(local_path=self.local_file, remote_dir="klipper-cnc-assistant/proj", print_file=True)
 
         self.assertEqual(result["item"]["path"], "klipper-cnc-assistant/proj/file.gcode")
+
+    def test_upload_uses_longer_timeout_floor_than_short_request_timeout(self) -> None:
+        payload = {
+            "item": {"path": "klipper-cnc-assistant/proj/file.gcode", "root": "gcodes"},
+            "print_started": True,
+            "print_queued": False,
+        }
+        response = Mock()
+        response.status_code = 201
+        response.headers = {"Content-Type": "application/json"}
+        response.text = json.dumps(payload)
+        response.json.return_value = payload
+        client = MoonrakerClient("http://moonraker.local", timeout=2.0)
+        client.session.post = Mock(return_value=response)
+
+        client.upload_file(local_path=self.local_file, remote_dir="klipper-cnc-assistant/proj", print_file=True)
+
+        self.assertEqual(client.session.post.call_count, 1)
+        self.assertEqual(client.session.post.call_args.kwargs["timeout"], UPLOAD_TIMEOUT_FLOOR_S)
+        self.assertGreater(UPLOAD_TIMEOUT_FLOOR_S, client.timeout)
+
+    def test_upload_timeout_is_not_retried_automatically(self) -> None:
+        client = MoonrakerClient("http://moonraker.local", timeout=2.0)
+        client.session.post = Mock(side_effect=requests.Timeout("slow upload"))
+
+        with self.assertRaisesRegex(MoonrakerTimeout, "outcome is uncertain and no automatic retry"):
+            client.upload_file(local_path=self.local_file, remote_dir="klipper-cnc-assistant/proj", print_file=True)
+
+        self.assertEqual(client.session.post.call_count, 1)
 
     def test_upload_requires_http_201(self) -> None:
         payload = {
