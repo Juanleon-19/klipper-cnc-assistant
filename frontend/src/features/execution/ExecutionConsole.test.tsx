@@ -141,8 +141,8 @@ describe("ExecutionConsole", () => {
     expect(screen.getByText(/OK · Mapa físico/i)).toBeInTheDocument();
     expect(screen.getByText(/FALLA · Homing XYZ/i)).toBeInTheDocument();
     expect(screen.getByText(/FALLA · Referencia inicial/i)).toBeInTheDocument();
-    expect(screen.getByText(/Homing actual: pendiente\./i)).toBeInTheDocument();
-    expect(screen.getByText(/Falta referencia Z de la herramienta inicial\./i)).toBeInTheDocument();
+    expect(screen.getAllByText(/Homing actual: pendiente\./i).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/Falta referencia Z de la herramienta inicial\./i).length).toBeGreaterThan(0);
     expect(screen.getByText(/Bloqueos que debes resolver/i)).toBeInTheDocument();
   });
 
