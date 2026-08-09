@@ -568,6 +568,11 @@ export type PhysicalMapPayload = Record<string, unknown> & {
   status?: string;
   source?: string;
   point_count?: number;
+  preview_request_duration_ms?: number;
+  preview_backend_duration_ms?: number;
+  arm_request_duration_ms?: number;
+  arm_backend_duration_ms?: number;
+  arm_point_count?: number;
   excluded_count?: number;
   executable_point_count?: number;
   mesh_configuration_fingerprint?: string;

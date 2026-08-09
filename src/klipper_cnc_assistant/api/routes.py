@@ -506,12 +506,16 @@ def build_router() -> APIRouter:
             probe_feed_mm_min=payload.probe_feed_mm_min,
             retract_mm=payload.retract_mm,
         )
+        started_at = perf_counter()
         plan = physical_map_service.plan_from_saved_reference(
             project_id=project_id,
             operation_id=operation_id,
             config=config,
         )
-        return _physical_map_response(request, plan)
+        response_plan = dict(plan)
+        response_plan["arm_backend_duration_ms"] = round((perf_counter() - started_at) * 1000.0, 3)
+        response_plan["arm_point_count"] = int(response_plan.get("point_count") or len(response_plan.get("points") or []))
+        return _physical_map_response(request, response_plan)
 
     @router.get("/projects/{project_id}/operations/{operation_id}/physical-map", response_model=PhysicalMapResponse)
     def get_physical_map(project_id: str, operation_id: str, request: Request) -> PhysicalMapResponse:

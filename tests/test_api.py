@@ -265,6 +265,8 @@ class ApiTest(unittest.TestCase):
         self.assertEqual(measured["rows"], 3)
         self.assertEqual(measured["columns"], 4)
         self.assertEqual(measured["point_count"], 12)
+        self.assertGreaterEqual(measured["arm_backend_duration_ms"], 0)
+        self.assertEqual(measured["arm_point_count"], 12)
         self.assertEqual(measured["mesh_config"]["edge_margin_left_mm"], 1.5)
         self.assertEqual(measured["mesh_config"]["edge_margin_right_mm"], 2.5)
         self.assertEqual(measured["mesh_config"]["edge_margin_bottom_mm"], 3.5)

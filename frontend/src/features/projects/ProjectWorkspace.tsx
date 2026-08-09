@@ -485,11 +485,15 @@ export function ProjectWorkspace({
   const [referenceSession, setReferenceSession] = useState<ReferenceSession | null>(null);
   const [heightMapBusy, setHeightMapBusy] = useState(false);
   const [previewBusy, setPreviewBusy] = useState(false);
+  const [armMeshBusy, setArmMeshBusy] = useState(false);
   const [mapActionBusy, setMapActionBusy] = useState(false);
   const [suggestionBusy, setSuggestionBusy] = useState(false);
   const [referenceBusy, setReferenceBusy] = useState(false);
+  const [compensationBusy, setCompensationBusy] = useState(false);
   const [referenceMoveResult, setReferenceMoveResult] = useState<{ reference_x: number; reference_y: number; preparation_z: number; final_state: string; message: string } | null>(null);
   const referenceMoveInFlight = useRef(false);
+  const armMeshInFlight = useRef(false);
+  const compensationInFlight = useRef(false);
   const startJobInFlight = useRef(false);
   const [workspaceError, setWorkspaceError] = useState("");
   const [executionError, setExecutionError] = useState<ApiError | null>(null);
@@ -1797,8 +1801,10 @@ export function ProjectWorkspace({
     const visibleStatus = String(visibleMesh?.status ?? visibleMesh?.map_ready_state ?? "sin mapa medido");
     const previewRequestDurationMs = typeof meshPreview?.preview_request_duration_ms === "number" ? meshPreview.preview_request_duration_ms : null;
     const previewBackendDurationMs = typeof meshPreview?.preview_backend_duration_ms === "number" ? meshPreview.preview_backend_duration_ms : null;
+    const armRequestDurationMs = typeof physicalMap?.arm_request_duration_ms === "number" ? physicalMap.arm_request_duration_ms : null;
+    const armBackendDurationMs = typeof physicalMap?.arm_backend_duration_ms === "number" ? physicalMap.arm_backend_duration_ms : null;
     const physicalMapCancelled = physicalMap?.status === "CANCELLED";
-    const startMapDisabled = mapActionBusy || !physicalMapId || !physicalMap || Boolean(meshPreview) || isPhysicalMapReady(physicalMap) || physicalMapCancelled;
+    const startMapDisabled = armMeshBusy || mapActionBusy || !physicalMapId || !physicalMap || Boolean(meshPreview) || isPhysicalMapReady(physicalMap) || physicalMapCancelled;
     const requestMeshPreview = async () => {
       if (!selectedOperation || !currentMeshFingerprint) {
         return;
@@ -1846,23 +1852,35 @@ export function ProjectWorkspace({
       }
     };
     const armMeshPreview = async () => {
-      if (!selectedOperation || !meshPreview || !currentMeshFingerprint || !physicalReady) {
+      if (armMeshInFlight.current || !selectedOperation || !meshPreview || !currentMeshFingerprint || !physicalReady) {
         return;
       }
       if (meshPreviewFingerprint !== currentMeshFingerprint) {
         setMeshValidationMessage("La configuración cambió después de la preview. Regénere la vista previa antes de armar.");
         return;
       }
-      await withPhysicalMapAction(async () => {
-        const persisted = (await api.planPhysicalMapFromReference(project.id, selectedOperation.id, physicalPlanPayload)).payload;
-        const comparison = previewMatchesPersisted(meshPreview, persisted);
-        if (!comparison.matches) {
-          throw new Error(buildPreviewMismatchMessage(comparison.differingFields));
-        }
-        setActiveMapTab("mapa2d");
-        setMeshValidationMessage("Sondeo armado. El mapa persistido coincide con la vista previa actual y queda listo para iniciar.");
-        return persisted;
-      }, { clearPreview: true });
+      armMeshInFlight.current = true;
+      setArmMeshBusy(true);
+      const startedAt = performance.now();
+      try {
+        await withPhysicalMapAction(async () => {
+          const response = await api.planPhysicalMapFromReference(project.id, selectedOperation.id, physicalPlanPayload);
+          const persisted: PhysicalMapPayload = {
+            ...response.payload,
+            arm_request_duration_ms: Number((performance.now() - startedAt).toFixed(3)),
+          };
+          const comparison = previewMatchesPersisted(meshPreview, persisted);
+          if (!comparison.matches) {
+            throw new Error(buildPreviewMismatchMessage(comparison.differingFields));
+          }
+          setActiveMapTab("mapa2d");
+          setMeshValidationMessage("Sondeo armado. El mapa persistido coincide con la vista previa actual y queda listo para iniciar.");
+          return persisted;
+        }, { clearPreview: true });
+      } finally {
+        armMeshInFlight.current = false;
+        setArmMeshBusy(false);
+      }
     };
     const mapTabItems: Array<{ id: MapTab; icon: string; label: string; title: string }> = [
       { id: "mapa2d", icon: "▦", label: "Mapa 2D", title: "Ver región, puntos y recorrido de sondeo" },
@@ -2060,23 +2078,25 @@ export function ProjectWorkspace({
               <div className="metric-box"><span>Último punto</span><strong>{lastPhysicalPoint ? `X ${formatMillimeters(lastPhysicalPoint.x_local, 3)} · Y ${formatMillimeters(lastPhysicalPoint.y_local, 3)}` : "Pendiente de preview"}</strong></div>
               <div className="metric-box"><span>Preview request</span><strong>{typeof previewRequestDurationMs === "number" ? `${previewRequestDurationMs.toFixed(1)} ms` : "-"}</strong></div>
               <div className="metric-box"><span>Preview backend</span><strong>{typeof previewBackendDurationMs === "number" ? `${previewBackendDurationMs.toFixed(1)} ms` : "-"}</strong></div>
+              {typeof armRequestDurationMs === "number" ? <div className="metric-box"><span>Armado total</span><strong>{armRequestDurationMs.toFixed(1)} ms</strong></div> : null}
+              {typeof armBackendDurationMs === "number" ? <div className="metric-box"><span>Armado servidor</span><strong>{armBackendDurationMs.toFixed(1)} ms</strong></div> : null}
             </div>
             {probeWidth <= 0 || probeHeight <= 0 ? <div className="alert alert--warning">El retiro de los bordes deja una región de sondeo inválida. Reduzca los valores o revise las dimensiones del material.</div> : null}
             {!meshConfigValid ? <div className="alert alert--warning">La configuración de malla es inválida. Revise filas, columnas, límites, separación objetivo y parámetros de sonda antes de continuar.</div> : null}
             {meshProbeStateMessage ? <div className="alert alert--info">{meshProbeStateMessage}{stepCounter !== null ? ` · pasos ${stepCounter}` : ""}{persistenceCount !== null ? ` · persistencias ${persistenceCount}` : ""}</div> : null}
             {meshValidationMessage ? <div className="alert alert--info">{meshValidationMessage}</div> : null}
             <div className="action-grid">
-              <button className="button" type="button" disabled={previewBusy || !selectedOperation || !meshConfigValid} onClick={() => void requestMeshPreview()}>{previewBusy ? "Generando vista previa…" : "1. Generar vista previa de malla"}</button>
+              <button className="button" type="button" disabled={previewBusy || armMeshBusy || !selectedOperation || !meshConfigValid} onClick={() => void requestMeshPreview()}>{previewBusy ? "Generando vista previa…" : "1. Generar vista previa de malla"}</button>
               {previewBusy ? <button className="button button--ghost" type="button" onClick={() => clearMeshPreview("Generación de vista previa cancelada.")}>Cancelar generación</button> : null}
-              <button className="button" type="button" disabled={!meshPreview} onClick={() => setMeshValidationMessage(physicalFailedPoints > 0 ? `La malla tiene ${physicalFailedPoints} punto(s) fallidos o pendientes de reintento.` : "Cobertura geométrica revisada. No se extrapola fuera de la región interior ni sobre exclusiones.")}>2. Validar límites</button>
-              <button className="button" type="button" disabled={!meshPreview || !physicalReady || meshPreviewFingerprint !== currentMeshFingerprint || physicalMap?.status === "MESH_COMPLETE"} onClick={() => void armMeshPreview()}>3. Armar sondeo</button>
-              <button className="button" type="button" disabled={startMapDisabled} onClick={() => void withPhysicalMapAction(async () => (await api.executeAllPhysicalMapPoints(project.id, physicalMapId)).payload)}>{mapActionBusy ? "Iniciando sondeo…" : "4. Iniciar sondeo automático"}</button>
+              <button className="button" type="button" disabled={armMeshBusy || !meshPreview} onClick={() => setMeshValidationMessage(physicalFailedPoints > 0 ? `La malla tiene ${physicalFailedPoints} punto(s) fallidos o pendientes de reintento.` : "Cobertura geométrica revisada. No se extrapola fuera de la región interior ni sobre exclusiones.")}>2. Validar límites</button>
+              <button className="button" type="button" disabled={armMeshBusy || mapActionBusy || !meshPreview || !physicalReady || meshPreviewFingerprint !== currentMeshFingerprint || physicalMap?.status === "MESH_COMPLETE"} onClick={() => void armMeshPreview()}>{armMeshBusy ? "Armando sondeo…" : "3. Armar sondeo"}</button>
+              <button className="button" type="button" disabled={startMapDisabled} onClick={() => void withPhysicalMapAction(async () => (await api.executeAllPhysicalMapPoints(project.id, physicalMapId)).payload)}>{mapActionBusy && !armMeshBusy ? "Iniciando sondeo…" : "4. Iniciar sondeo automático"}</button>
               <button className="button button--ghost" type="button" disabled={!physicalMapId} onClick={() => void withPhysicalMapAction(async () => {
                 if (!physicalMapId) return null;
                 const result = await api.repeatPhysicalMap(project.id, physicalMapId);
                 setActiveMapTab("mapa2d"); setMeshValidationMessage("Mapa anterior archivado. Nueva versión vacía generada con punto #0 X0/Y0 y todos los nodos pendientes. Confirme antes de mover."); return result.payload;
               })} title="Conserva origen X/Y y receta; archiva el mapa actual y vuelve a medir referencia y nodos.">Repetir medición completa</button>
-              <button className="button button--ghost" type="button" disabled={!meshPreview && !previewBusy} onClick={() => clearMeshPreview("Vista previa limpia. La configuración, la referencia y los mapas persistidos se conservaron.")}>Limpiar vista previa</button>
+              <button className="button button--ghost" type="button" disabled={armMeshBusy || (!meshPreview && !previewBusy)} onClick={() => clearMeshPreview("Vista previa limpia. La configuración, la referencia y los mapas persistidos se conservaron.")}>Limpiar vista previa</button>
               <button className="button button--ghost" type="button" disabled={mapActionBusy || !physicalMapId} onClick={() => void withPhysicalMapAction(async () => (await api.pausePhysicalMap(project.id, physicalMapId)).payload)}>Pausar</button>
               <button className="button button--ghost" type="button" disabled={mapActionBusy || !physicalMapId} onClick={() => void withPhysicalMapAction(async () => (await api.resumePhysicalMap(project.id, physicalMapId)).payload)}>Reanudar</button>
               <button className="button button--ghost" type="button" disabled={mapActionBusy || !physicalMapId || physicalFailedPoints === 0} onClick={() => void withPhysicalMapAction(async () => (await api.executeAllPhysicalMapPoints(project.id, physicalMapId)).payload)}>Reintentar puntos fallidos</button>
@@ -2202,10 +2222,11 @@ export function ProjectWorkspace({
   };
 
   const generateProjectCompensation = async () => {
-    if (!project || !selectedSetup || !activeJobFace) {
+    if (compensationInFlight.current || !project || !selectedSetup || !activeJobFace) {
       return;
     }
-    setReferenceBusy(true);
+    compensationInFlight.current = true;
+    setCompensationBusy(true);
     setWorkspaceError("");
     try {
       const plan = await api.generateProjectCompensation(project.id, selectedSetup.id, activeJobFace);
@@ -2214,7 +2235,8 @@ export function ProjectWorkspace({
     } catch (error) {
       setWorkspaceError(error instanceof Error ? error.message : "No fue posible generar la compensación del proyecto.");
     } finally {
-      setReferenceBusy(false);
+      compensationInFlight.current = false;
+      setCompensationBusy(false);
     }
   };
 
@@ -2303,6 +2325,7 @@ export function ProjectWorkspace({
     const currentMaxZError = selectedOperation?.max_z_error_mm ?? 0.05;
     const adaptiveExecutable = compensationAudit?.adaptive_fast?.executable !== false;
     const adaptiveDownloadLabel = adaptiveExecutable ? "Descargar adaptive_fast" : "Descargar adaptive experimental";
+    const compensationControlsBusy = referenceBusy || compensationBusy;
     return (
       <article className="panel">
         <div className="section-heading section-heading--stacked">
@@ -2311,8 +2334,8 @@ export function ProjectWorkspace({
             <h3>Plan multioperación listo para ejecución — {translateFace(activeJobFace)}</h3>
           </div>
           <div className="toolbar-inline">
-            <button className="button button--ghost" type="button" disabled={referenceBusy} onClick={() => void prepareJobRun()}>Revalidar plan</button>
-            <button className="button" type="button" disabled={referenceBusy} onClick={() => void generateProjectCompensation()}>Generar compensación del proyecto</button>
+            <button className="button button--ghost" type="button" disabled={compensationControlsBusy} onClick={() => void prepareJobRun()}>Revalidar plan</button>
+            <button className="button" type="button" disabled={compensationControlsBusy} onClick={() => void generateProjectCompensation()}>{compensationBusy ? "Generando compensación…" : "Generar compensación del proyecto"}</button>
           </div>
         </div>
         {selectedOperation ? (
@@ -2336,8 +2359,8 @@ export function ProjectWorkspace({
               </div>
             </div>
             <div className="action-grid action-grid--inline">
-              <button className={`button${currentCompensationMode === "legacy" ? "" : " button--ghost"}`} type="button" disabled={referenceBusy} onClick={() => void updateCompensationSettings({ compensation_mode: "legacy" })}>Legacy</button>
-              <button className={`button${currentCompensationMode === "adaptive_fast" ? "" : " button--ghost"}`} type="button" disabled={referenceBusy || !adaptiveExecutable} onClick={() => void updateCompensationSettings({ compensation_mode: "adaptive_fast" })}>Adaptativa rápida</button>
+              <button className={`button${currentCompensationMode === "legacy" ? "" : " button--ghost"}`} type="button" disabled={compensationControlsBusy} onClick={() => void updateCompensationSettings({ compensation_mode: "legacy" })}>Legacy</button>
+              <button className={`button${currentCompensationMode === "adaptive_fast" ? "" : " button--ghost"}`} type="button" disabled={compensationControlsBusy || !adaptiveExecutable} onClick={() => void updateCompensationSettings({ compensation_mode: "adaptive_fast" })}>Adaptativa rápida</button>
               <label className="field-inline">
                 <span>Tolerancia Z (mm)</span>
                 <input
@@ -2352,9 +2375,9 @@ export function ProjectWorkspace({
                   }}
                 />
               </label>
-              <button className="button button--ghost" type="button" disabled={compensationAuditBusy || referenceBusy} onClick={() => void refreshCompensationAudit()}>Recalcular auditoría</button>
-              <button className="button button--ghost" type="button" disabled={referenceBusy} onClick={() => void downloadCompensatedArtifact("legacy")}>Descargar legacy</button>
-              <button className="button button--ghost" type="button" disabled={referenceBusy} onClick={() => void downloadCompensatedArtifact("adaptive_fast")}>{adaptiveDownloadLabel}</button>
+              <button className="button button--ghost" type="button" disabled={compensationAuditBusy || compensationControlsBusy} onClick={() => void refreshCompensationAudit()}>Recalcular auditoría</button>
+              <button className="button button--ghost" type="button" disabled={compensationControlsBusy} onClick={() => void downloadCompensatedArtifact("legacy")}>Descargar legacy</button>
+              <button className="button button--ghost" type="button" disabled={compensationControlsBusy} onClick={() => void downloadCompensatedArtifact("adaptive_fast")}>{adaptiveDownloadLabel}</button>
             </div>
             {compensationAudit ? (
               <div className="table-scroll">
