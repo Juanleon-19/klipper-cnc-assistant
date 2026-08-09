@@ -22,8 +22,10 @@ from klipper_cnc_assistant.application import (
 )
 from klipper_cnc_assistant.domain import DomainError, ProjectValidationError
 from klipper_cnc_assistant.execution import JobService, MeshExecutionService
-from klipper_cnc_assistant.machine.config import load_machine_runtime_config
-from klipper_cnc_assistant.machine.runtime import MachineRuntime, MachineRuntimeError
+from klipper_cnc_assistant.execution.recoverable_mesh_execution_service import RecoverableMeshExecutionService
+from klipper_cnc_assistant.machine.config import MachineMode, load_machine_runtime_config
+from klipper_cnc_assistant.machine.recoverable_runtime import RecoverableMachineRuntime
+from klipper_cnc_assistant.machine.runtime import MachineRuntimeError
 from klipper_cnc_assistant.storage import JsonProjectRepository
 
 from .machine_routes import build_machine_router
@@ -41,12 +43,16 @@ def create_app(
     )
     repository = JsonProjectRepository(resolved_data_dir)
     machine_session_service = MachineSessionService()
-    machine_runtime = MachineRuntime(load_machine_runtime_config(), settings_path=resolved_data_dir / "machine_runtime_settings.json")
+    machine_runtime = RecoverableMachineRuntime(load_machine_runtime_config(), settings_path=resolved_data_dir / "machine_runtime_settings.json")
     machine_session_service.machine_mode = "fisico" if machine_runtime.config.mode.value == "physical" else "simulado"
     project_service = ProjectService(repository)
     height_map_service = HeightMapService(repository)
     physical_map_service = PhysicalMapService(repository)
-    mesh_execution_service = MeshExecutionService(physical_map_service)
+    mesh_execution_service = (
+        RecoverableMeshExecutionService(physical_map_service)
+        if machine_runtime.config.mode is MachineMode.PHYSICAL
+        else MeshExecutionService(physical_map_service)
+    )
     time_estimation_service = TimeEstimationService(repository, machine_runtime)
     compensated_gcode_service = CompensatedGCodeService(repository, physical_map_service, time_estimation_service, machine_runtime)
     reference_session_service = ReferenceSessionService(

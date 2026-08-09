@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from queue import Empty, SimpleQueue
 import threading
 import time
@@ -38,6 +39,19 @@ POINT_STATES = (
     "MESH_CANCELING",
 )
 
+RECOVERY_PENDING_MESSAGE = "Esperando finalización segura del sondeo anterior. No se iniciará un nuevo movimiento."
+BLOCKING_RUNTIME_STATES = {"ERROR", "DEGRADED", "DISCONNECTED", "STOPPING"}
+
+
+@dataclass
+class ProbeThreadOwnership:
+    thread: threading.Thread
+    finished: threading.Event
+    point_index: int
+    timed_out: bool = False
+    cleanup_pending: bool = False
+    error: str | None = None
+
 
 def _iso_now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -50,21 +64,25 @@ class MeshExecutionService:
         self,
         physical_map_service: PhysicalMapService,
         *,
-        max_point_retries: int = 2,
+        max_point_retries: int = 0,
         point_watchdog_timeout_s: float | None = None,
         point_watchdog_poll_s: float = 0.05,
         point_watchdog_grace_s: float = 0.2,
     ) -> None:
         self.physical_map_service = physical_map_service
-        self.max_point_retries = 0
+        self.max_point_retries = max(0, int(max_point_retries))
         self.point_watchdog_timeout_s = point_watchdog_timeout_s
         self.point_watchdog_poll_s = point_watchdog_poll_s
         self.point_watchdog_grace_s = point_watchdog_grace_s
         self._lock = threading.Lock()
         self._threads: dict[tuple[str, str], threading.Thread] = {}
+        self._probe_threads: dict[tuple[str, str], ProbeThreadOwnership] = {}
         self._cancel_requests: dict[tuple[str, str], threading.Event] = {}
 
     def start_all(self, *, project_id: str, map_id: str, runtime: Any) -> dict[str, Any]:
+        guard = self.motion_ownership_snapshot(runtime=runtime, project_id=project_id, map_id=map_id)
+        if not guard["can_start_motion"]:
+            raise ApplicationError(str(guard["reason"]))
         payload = self.physical_map_service.validate_resume_context(project_id=project_id, map_id=map_id)
         if payload.get("status") in {"CANCELLED", "MESH_COMPLETE"}:
             raise ApplicationError("La malla no está en un estado ejecutable.")
@@ -191,7 +209,7 @@ class MeshExecutionService:
             pass
         return updated
 
-    def reconcile_map_state(self, *, project_id: str, map_id: str) -> dict[str, Any]:
+    def reconcile_map_state(self, *, project_id: str, map_id: str, runtime: Any | None = None) -> dict[str, Any]:
         key = (project_id, map_id)
         with self._lock:
             self._prune_dead_threads_locked()
@@ -199,6 +217,23 @@ class MeshExecutionService:
             worker_alive = bool(thread and thread.is_alive())
         payload = self.physical_map_service.get_by_id(project_id, map_id)
         execution = payload.get("execution") or {}
+        if runtime is not None:
+            guard = self.motion_ownership_snapshot(runtime=runtime, project_id=project_id, map_id=map_id)
+            if guard["recovery_pending"]:
+                return self.physical_map_service.update_execution_state(
+                    project_id=project_id,
+                    map_id=map_id,
+                    worker_active=worker_alive,
+                    point_state=str(execution.get("point_state") or payload.get("status") or "POINT_FAILED"),
+                    last_event=str(guard["reason"]),
+                    error=str(guard["reason"]),
+                    metadata={
+                        "phase": execution.get("phase") or "paused",
+                        "recovery_pending": True,
+                        "recovery_block_reason": str(guard["reason"]),
+                        "last_progress_at": execution.get("last_progress_at") or _iso_now(),
+                    },
+                )
         if worker_alive:
             if not execution.get("worker_active"):
                 return self.physical_map_service.update_execution_state(
@@ -235,7 +270,7 @@ class MeshExecutionService:
         deadline = time.monotonic() + timeout_s
         while True:
             with self._lock:
-                threads = list(self._threads.values())
+                threads = list(self._threads.values()) + [ownership.thread for ownership in self._probe_threads.values()]
             live = [thread for thread in threads if thread.is_alive()]
             if not live:
                 return True
@@ -244,6 +279,93 @@ class MeshExecutionService:
                 return False
             for thread in live:
                 thread.join(min(0.05, remaining))
+
+    def motion_ownership_snapshot(
+        self,
+        *,
+        runtime: Any,
+        project_id: str | None = None,
+        map_id: str | None = None,
+    ) -> dict[str, Any]:
+        runtime_ownership = self._runtime_motion_ownership(runtime)
+        key = (project_id, map_id) if project_id is not None and map_id is not None else None
+        should_clear_runtime_pending = False
+        with self._lock:
+            self._prune_dead_threads_locked()
+            finished_probe_keys = [
+                other_key
+                for other_key, ownership in self._probe_threads.items()
+                if not ownership.thread.is_alive()
+            ]
+            if finished_probe_keys and runtime_ownership.get("active_operation") is None and not runtime_ownership.get("movement_lock"):
+                for other_key in finished_probe_keys:
+                    self._probe_threads.pop(other_key, None)
+                should_clear_runtime_pending = True
+            worker_same = False
+            worker_other = False
+            for other_key, thread in self._threads.items():
+                if not thread.is_alive():
+                    continue
+                if key is not None and other_key == key:
+                    worker_same = True
+                else:
+                    worker_other = True
+            probe_same = False
+            probe_other = False
+            cleanup_same = False
+            cleanup_other = False
+            for other_key, ownership in self._probe_threads.items():
+                alive = ownership.thread.is_alive()
+                same_key = key is not None and other_key == key
+                if alive:
+                    if same_key:
+                        probe_same = True
+                    else:
+                        probe_other = True
+                if ownership.cleanup_pending or ownership.timed_out:
+                    if same_key:
+                        cleanup_same = True
+                    else:
+                        cleanup_other = True
+        if should_clear_runtime_pending and hasattr(runtime, "clear_motion_recovery_pending"):
+            try:
+                runtime.clear_motion_recovery_pending()
+            except Exception:
+                pass
+            runtime_ownership = self._runtime_motion_ownership(runtime)
+        state = str(runtime_ownership.get("state") or "")
+        blocked_by_state = state in BLOCKING_RUNTIME_STATES
+        runtime_active = bool(runtime_ownership.get("active"))
+        recovery_pending = bool(runtime_ownership.get("recovery_pending")) or cleanup_same or cleanup_other or probe_same or probe_other
+        incompatible_worker = worker_same or worker_other
+        incompatible_probe = probe_same or probe_other
+        active = runtime_active or incompatible_worker or incompatible_probe or blocked_by_state
+        if blocked_by_state:
+            reason = str(runtime_ownership.get("reason") or f"El runtime físico no está listo: {state}.")
+        elif recovery_pending or runtime_ownership.get("movement_lock") or runtime_ownership.get("active_operation") is not None:
+            reason = RECOVERY_PENDING_MESSAGE
+        elif worker_same:
+            reason = "La malla ya tiene un worker activo y no puede iniciarse dos veces."
+        elif worker_other:
+            reason = "Ya hay una operación física de malla en curso."
+        else:
+            reason = None
+        return {
+            "state": state,
+            "active": active,
+            "can_start_motion": not active and not blocked_by_state,
+            "reason": reason,
+            "recovery_pending": recovery_pending,
+            "runtime": runtime_ownership,
+            "active_operation": runtime_ownership.get("active_operation"),
+            "movement_lock": bool(runtime_ownership.get("movement_lock")),
+            "worker_active": worker_same or worker_other,
+            "probe_thread_active": probe_same or probe_other,
+            "probe_thread_same_map": probe_same,
+            "probe_thread_other_map": probe_other,
+            "cleanup_pending_same_map": cleanup_same,
+            "cleanup_pending_other_map": cleanup_other,
+        }
 
     def _run(self, project_id: str, map_id: str, runtime: Any) -> None:
         key = (project_id, map_id)
@@ -304,7 +426,7 @@ class MeshExecutionService:
                     )
                     return
                 try:
-                    snapshot = self._require_current_machine_state(runtime)
+                    self._require_current_machine_state(runtime)
                 except Exception as error:
                     self.physical_map_service.mark_status(
                         project_id=project_id,
@@ -371,6 +493,7 @@ class MeshExecutionService:
                         "last_progress_at": execution.get("last_progress_at") or _iso_now(),
                     },
                 )
+            self.motion_ownership_snapshot(runtime=runtime, project_id=project_id, map_id=map_id)
             self._log_transition("MESH_WORKER_END", project_id, map_id, execution=execution)
 
     def _probe_one_point(self, project_id: str, map_id: str, runtime: Any, point: dict[str, Any], *, probe_config: dict[str, Any] | None = None) -> None:
@@ -603,6 +726,7 @@ class MeshExecutionService:
                         },
                     )
                     return
+                guard = self.motion_ownership_snapshot(runtime=runtime, project_id=project_id, map_id=map_id)
                 if attempts <= self.max_point_retries:
                     self._persist_execution_state(
                         project_id=project_id,
@@ -635,12 +759,18 @@ class MeshExecutionService:
                     error=str(error),
                     target=target,
                     observed=observed,
-                    last_event=f"Punto {point_index + 1}: falló después de {attempts} intentos; la malla queda pausada.",
+                    last_event=(
+                        RECOVERY_PENDING_MESSAGE
+                        if guard["recovery_pending"]
+                        else f"Punto {point_index + 1}: falló después de {attempts} intentos; la malla queda pausada."
+                    ),
                     metadata={
                         "phase": "failed",
                         "worker_generation": worker_generation,
                         "pause_requested": True,
                         "pause_reason": "Punto fallido; requiere decisión explícita del operador.",
+                        "recovery_pending": guard["recovery_pending"],
+                        "recovery_block_reason": guard["reason"],
                         "last_progress_at": progress_state["iso"],
                         **self._progress_metrics(progress_state),
                     },
@@ -683,6 +813,7 @@ class MeshExecutionService:
         result_holder: dict[str, Any] = {}
         error_holder: dict[str, BaseException] = {}
         finished = threading.Event()
+        key = (project_id, map_id)
 
         def run_probe() -> None:
             try:
@@ -699,6 +830,8 @@ class MeshExecutionService:
 
         thread = threading.Thread(target=run_probe, name=f"mesh-point-{map_id}-{point_index}", daemon=True)
         thread.start()
+        with self._lock:
+            self._probe_threads[key] = ProbeThreadOwnership(thread=thread, finished=finished, point_index=point_index)
         timeout_s = self.point_watchdog_timeout_s
         if timeout_s is None:
             timeout_s = float(getattr(getattr(runtime, "config", None), "no_progress_timeout_s", 60.0) or 60.0)
@@ -729,16 +862,19 @@ class MeshExecutionService:
             if elapsed_without_progress <= timeout_s:
                 continue
             try:
+                runtime.cancel_operation(reason=RECOVERY_PENDING_MESSAGE, preserve_mesh_pause=True)
+            except TypeError:
                 runtime.cancel_operation()
             except Exception:
                 pass
+            timeout_message = f"Timeout sin progreso durante {elapsed_without_progress:.3f} s en el punto {point_index + 1}/{total_points}."
             self.physical_map_service.update_execution_state(
                 project_id=project_id,
                 map_id=map_id,
                 worker_active=True,
                 point_state="POINT_FAILED",
                 point_index=point_index,
-                error=f"Timeout sin progreso durante {elapsed_without_progress:.3f} s en el punto {point_index + 1}.",
+                error=timeout_message,
                 last_event="Watchdog: el punto excedió el timeout lógico sin progreso visible.",
                 metadata={
                     "phase": "watchdog_timeout",
@@ -748,7 +884,37 @@ class MeshExecutionService:
                 },
             )
             finished.wait(self.point_watchdog_grace_s)
-            raise TimeoutError(f"Timeout sin progreso durante {elapsed_without_progress:.3f} s en el punto {point_index + 1}/{total_points}.")
+            cleanup_pending = not finished.is_set() or thread.is_alive()
+            with self._lock:
+                ownership = self._probe_threads.get(key)
+                if ownership is not None:
+                    ownership.timed_out = True
+                    ownership.cleanup_pending = cleanup_pending
+                    ownership.error = timeout_message
+            if cleanup_pending:
+                if hasattr(runtime, "mark_motion_recovery_pending"):
+                    try:
+                        runtime.mark_motion_recovery_pending(RECOVERY_PENDING_MESSAGE)
+                    except Exception:
+                        pass
+                self.physical_map_service.update_execution_state(
+                    project_id=project_id,
+                    map_id=map_id,
+                    worker_active=False,
+                    point_state="POINT_FAILED",
+                    point_index=point_index,
+                    error=timeout_message,
+                    last_event=RECOVERY_PENDING_MESSAGE,
+                    metadata={
+                        "phase": "watchdog_cleanup_pending",
+                        "worker_generation": worker_generation,
+                        "recovery_pending": True,
+                        "recovery_block_reason": RECOVERY_PENDING_MESSAGE,
+                        "last_progress_at": progress_state["iso"],
+                        **self._progress_metrics(progress_state),
+                    },
+                )
+            raise TimeoutError(timeout_message)
         self._drain_progress_updates(
             progress_updates,
             project_id=project_id,
@@ -762,6 +928,7 @@ class MeshExecutionService:
             worker_generation=worker_generation,
             progress_state=progress_state,
         )
+        self.motion_ownership_snapshot(runtime=runtime, project_id=project_id, map_id=map_id)
         if "error" in error_holder:
             raise error_holder["error"]
         return dict(result_holder["result"])
@@ -957,6 +1124,26 @@ class MeshExecutionService:
         if isinstance(safety, dict) and safety.get("serial_recent") is False:
             raise ApplicationError("Arduino obsoleto; no se inicia el sondeo.")
         return snapshot if isinstance(snapshot, dict) else {}
+
+    def _runtime_motion_ownership(self, runtime: Any) -> dict[str, Any]:
+        snapshot_fn = getattr(runtime, "motion_ownership_snapshot", None)
+        if snapshot_fn is not None:
+            snapshot = snapshot_fn()
+            if isinstance(snapshot, dict):
+                return snapshot
+        snapshot_fn = getattr(runtime, "snapshot", None)
+        snapshot = snapshot_fn() if snapshot_fn is not None else {}
+        state = str(snapshot.get("state") or "")
+        active_operation = snapshot.get("active_operation")
+        return {
+            "state": state,
+            "active_operation": active_operation,
+            "movement_lock": False,
+            "active": active_operation is not None,
+            "recovery_pending": False,
+            "reason": None if state not in BLOCKING_RUNTIME_STATES else f"El runtime físico no está listo: {state}.",
+            "can_start_motion": active_operation is None and state not in BLOCKING_RUNTIME_STATES,
+        }
 
     def _prune_dead_threads_locked(self) -> None:
         for other_key, thread in list(self._threads.items()):
