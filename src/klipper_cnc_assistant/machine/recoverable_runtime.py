@@ -43,13 +43,32 @@ class RecoverableMachineRuntime(MachineRuntime):
 
     The normal runtime owns the physical movement lock and operation context.
     This subclass only makes that ownership public and gives mesh probing a
-    recoverable failure state.  It does not relax any motion or safety guard.
+    recoverable failure state. It does not relax any motion or safety guard.
     """
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self._motion_recovery_pending = False
         self._motion_recovery_reason: str | None = None
+
+    def snapshot(self) -> dict[str, Any]:
+        """Expose cleanup as active probing until physical ownership is clear.
+
+        Legacy route guards still inspect ``snapshot()['state']``. During a
+        watchdog cleanup the inner probe may already have moved the internal
+        state to MESH_PAUSED while its ownership is still being reconciled.
+        Publishing MESH_PROBING for that short interval keeps those existing
+        guards fail-closed without weakening their behaviour.
+        """
+        payload = super().snapshot()
+        with self._lock:
+            recovery_pending = bool(self._motion_recovery_pending)
+            recovery_reason = self._motion_recovery_reason
+        if recovery_pending:
+            payload["state"] = MachineRuntimeState.MESH_PROBING.value
+        payload["recovery_pending"] = recovery_pending
+        payload["recovery_reason"] = recovery_reason
+        return payload
 
     def motion_ownership_snapshot(self) -> dict[str, Any]:
         """Return an atomic view of physical ownership used by mesh guards."""
@@ -59,7 +78,7 @@ class RecoverableMachineRuntime(MachineRuntime):
             recovery_pending = bool(self._motion_recovery_pending)
 
             # A mesh state without any remaining ownership is stale, not proof
-            # that a movement is still running.  Reconcile it here while all
+            # that a movement is still running. Reconcile it here while all
             # runtime ownership signals are observed under the runtime lock.
             if (
                 self._state is MachineRuntimeState.MESH_PROBING
