@@ -1,9 +1,10 @@
-import type { MutableRefObject, ReactNode } from "react";
+import { useEffect, useState, type MutableRefObject, type ReactNode } from "react";
 
 import { StatusBadge } from "../../components/StatusBadge";
 import { formatMillimeters } from "../../lib/format";
 import type { HeightMap, MachineRuntime, Operation, ReferenceSession, ReferenceStep, CapturedPosition } from "../../types";
 import type { MachineContextValue } from "../system/MachineContext";
+import { reconnectRuntime } from "../system/runtimeApi";
 
 type InputState = { x_mm: string; y_mm: string };
 type ZInputState = { x_mm: string; y_mm: string; z_mm: string };
@@ -62,6 +63,8 @@ type ReferenceWorkspaceProps = {
   onWorkOriginChange: (field: "x_mm" | "y_mm", value: string) => void;
   onZReferenceChange: (field: "x_mm" | "y_mm" | "z_mm", value: string) => void;
 };
+
+const CONNECT_RECOVERY_DELAY_MS = 10_000;
 
 export function ReferenceWorkspace({
   machine,
@@ -141,6 +144,61 @@ export function ReferenceWorkspace({
   const canGoToReference = machine.isPhysical && Boolean(referenceSession?.referencia_z) && Boolean(selectedOperation) && !runtime?.active_operation;
   const arduinoState = String(arduino.connection_state ?? arduino.state ?? "DISCONNECTED");
   const reconnectBlocked = !machine.isPhysical || referenceBusy || machine.refreshing || machine.runtimeState === "STOPPING" || Boolean(activeOperation) || runtime?.mode === "SIMULATED" || arduinoState === "CONNECTING" || arduinoState === "RETRY_WAIT" || arduinoState === "DISCOVERING";
+  const httpState = String(moonraker.http_state ?? "").toUpperCase();
+  const websocketState = String(moonraker.websocket_state ?? moonraker.telemetry_state ?? "").toUpperCase();
+  const arduinoStateNormalized = arduinoState.toUpperCase();
+  const moonrakerHttpConnected = machine.connected || moonraker.http_connected === true || httpState === "CONNECTED";
+  const websocketConnected = moonraker.websocket_connected === true || websocketState === "CONNECTED";
+  const arduinoConnected = arduino.open === true || ["CONNECTED", "OPEN", "READY"].includes(arduinoStateNormalized);
+  const runtimeConnected = machine.isPhysical && machine.runtimeState !== "DISCONNECTED" && moonrakerHttpConnected && websocketConnected && machine.klipperReady && arduinoConnected;
+  const runtimeReconnectBlocked = !machine.isPhysical || referenceBusy || Boolean(activeOperation) || ["HOMING", "MOVING_TO_SAFE_Z", "MOVING_TO_CENTER", "PROBING_REFERENCE", "MESH_PROBING", "STOPPING"].includes(machine.runtimeState);
+  const [connectAttemptStarted, setConnectAttemptStarted] = useState(false);
+  const [showRuntimeRecovery, setShowRuntimeRecovery] = useState(false);
+  const [reconnectingRuntime, setReconnectingRuntime] = useState(false);
+  const [runtimeReconnectError, setRuntimeReconnectError] = useState("");
+
+  useEffect(() => {
+    if (runtimeConnected) {
+      setConnectAttemptStarted(false);
+      setShowRuntimeRecovery(false);
+      setRuntimeReconnectError("");
+      return;
+    }
+    if (!connectAttemptStarted) return;
+    const timer = window.setTimeout(() => setShowRuntimeRecovery(true), CONNECT_RECOVERY_DELAY_MS);
+    return () => window.clearTimeout(timer);
+  }, [connectAttemptStarted, runtimeConnected]);
+
+  const handleConnectRuntime = () => {
+    setRuntimeReconnectError("");
+    setShowRuntimeRecovery(false);
+    setConnectAttemptStarted(true);
+    onConnectRuntime();
+  };
+
+  const handleReconnectRuntime = async () => {
+    if (reconnectingRuntime || runtimeReconnectBlocked) return;
+    const confirmed = window.confirm(
+      "Se reiniciará únicamente la conexión interna del runtime (Moonraker/telemetría/Arduino). " +
+      "No se reinicia Klipper ni el servicio y no se enviará movimiento. ¿Continuar?"
+    );
+    if (!confirmed) return;
+    setReconnectingRuntime(true);
+    setRuntimeReconnectError("");
+    try {
+      await reconnectRuntime();
+      await machine.refreshRuntime();
+      setConnectAttemptStarted(false);
+      setShowRuntimeRecovery(false);
+    } catch (error) {
+      setRuntimeReconnectError(error instanceof Error ? error.message : "No fue posible reconectar el runtime.");
+    } finally {
+      setReconnectingRuntime(false);
+    }
+  };
+
+  const connectionTone = runtimeConnected ? "success" : connectAttemptStarted && !showRuntimeRecovery ? "info" : "danger";
+  const connectionLabel = runtimeConnected ? "CONECTADO" : connectAttemptStarted && !showRuntimeRecovery ? "CONECTANDO…" : "SIN CONEXIÓN";
 
   if (machine.isPhysical) {
     return (
@@ -166,65 +224,85 @@ export function ReferenceWorkspace({
         </article>
 
         <article className="panel">
-          <div className="section-heading"><h3>1. Conexión y diagnóstico</h3></div>
-          <p className="muted">Conecta Moonraker HTTP, WebSocket, Klipper y Arduino. En diagnóstico puede observar joystick, botón externo y sonda sin movimiento.</p>
-          <div className="action-grid action-grid--inline">
-            <button className="button" type="button" disabled={!canConnect || machine.refreshing} onClick={onConnectRuntime}>Conectar runtime</button>
-            <button className="button button--ghost" type="button" disabled={!machine.isPhysical || machine.refreshing || machine.runtimeState === "DISCONNECTED"} onClick={onDiagnosticMode}>Modo diagnóstico</button>
-            <button className="button button--ghost" type="button" disabled={reconnectBlocked} onClick={onReconnectArduino}>Reconectar Arduino</button>
+          <div className="section-heading">
+            <h3>1. Conexión</h3>
+            <StatusBadge tone={connectionTone}>{connectionLabel}</StatusBadge>
           </div>
-          <p className="muted">Reconectar Arduino no habilita movimiento. La nueva sesión queda en diagnóstico, con control manual desactivado y `ready_for_jog = false`.</p>
-          <dl className="definition-grid definition-grid--compact">
-            <div><dt>Puerto configurado</dt><dd>{String(arduino.configured_port ?? arduino.port ?? "-")}</dd></div>
-            <div><dt>Puerto conectado</dt><dd>{String(arduino.connected_port ?? arduino.port ?? "-")}</dd></div>
-            <div><dt>USB identidad</dt><dd>{String(((arduino.usb_identity as Record<string, unknown> | null)?.serial_number) ?? ((arduino.usb_identity as Record<string, unknown> | null)?.port) ?? "sin identidad")}</dd></div>
-            <div><dt>Generación</dt><dd>{String(arduino.generation ?? 0)}</dd></div>
-            <div><dt>Reconexiones</dt><dd>{String(arduino.reconnects ?? 0)}</dd></div>
-            <div><dt>Paquetes válidos</dt><dd>{String(arduino.valid_packets ?? 0)}</dd></div>
-            <div><dt>Edad último paquete</dt><dd>{typeof arduino.last_packet_age_s === "number" ? `${Number(arduino.last_packet_age_s).toFixed(2)} s` : "-"}</dd></div>
-            <div><dt>HTTP activa</dt><dd>{typeof moonraker.last_http_observation_age_s === "number" ? `${Number(moonraker.last_http_observation_age_s).toFixed(2)} s` : "sin consulta"}</dd></div>
-            <div><dt>Edad último WS</dt><dd>{typeof moonraker.last_websocket_message_age_s === "number" ? `${Number(moonraker.last_websocket_message_age_s).toFixed(2)} s` : "sin mensajes"}</dd></div>
-            <div><dt>Edad de posición</dt><dd>{typeof moonraker.last_position_age_s === "number" ? `${Number(moonraker.last_position_age_s).toFixed(2)} s` : "sin posición"}</dd></div>
-            <div><dt>Dirección joystick</dt><dd>{String(controller.direction ?? "CENTER")}</dd></div>
-            <div><dt>Botón externo</dt><dd>{controller.external_button ? "pulsado" : "reposo"}</dd></div>
-            <div><dt>Sonda actual</dt><dd>{String(probeLive.display_state ?? (controller.probe ? "TRIGGERED" : "OPEN"))}</dd></div>
-            <div><dt>Probe raw / filtrada</dt><dd>{String(probeLive.raw_value ?? controller.probe ?? false)} / {String(probeLive.filtered_triggered ?? controller.probe ?? false)}</dd></div>
-            <div><dt>Edad del paquete</dt><dd>{typeof probeLive.packet_age_s === "number" ? `${(Number(probeLive.packet_age_s) * 1000).toFixed(0)} ms` : "-"}</dd></div>
-            <div><dt>Estable / mínimo</dt><dd>{probeStableMs === null ? "-" : `${probeStableMs.toFixed(0)} ms`} / {probeRequiredStableMs === null ? "-" : `${probeRequiredStableMs.toFixed(0)} ms`}</dd></div>
-            <div><dt>Precheck</dt><dd>OPEN {probeOpenOk ? "✓" : "✗"} · FRESH {probeFreshOk ? "✓" : "✗"} · STABLE {probeStableMs !== null && probeRequiredStableMs !== null && probeStableMs >= probeRequiredStableMs ? "✓" : "✗"}</dd></div>
-            <div><dt>Telemetría</dt><dd>{String(moonraker.telemetry_state ?? "DISCONNECTED")}</dd></div>
-            <div><dt>Operación activa</dt><dd>{activeOperation ? `${String(activeOperation.operation_type)} #${String(activeOperation.generation)}` : "ninguna"}</dd></div>
-            <div><dt>Última excepción</dt><dd>{String(moonraker.last_websocket_error ?? moonraker.last_http_error ?? runtime?.last_error ?? "-")}</dd></div>
-          </dl>
-          {lastProbeFailure ? <div className="alert alert--warning">Último fallo de sonda (histórico): {String(lastProbeFailure.error ?? "-")}</div> : null}
+          <p className="muted">Conecta Moonraker, telemetría, Klipper y Arduino. La conexión no habilita movimiento por sí sola.</p>
+          <div className="action-grid action-grid--inline">
+            <button className="button" type="button" disabled={!canConnect || machine.refreshing} onClick={handleConnectRuntime}>Conectar runtime</button>
+            <button className="button button--ghost" type="button" disabled={!machine.isPhysical || machine.refreshing || machine.runtimeState === "DISCONNECTED"} onClick={onDiagnosticMode}>Modo diagnóstico</button>
+            {showRuntimeRecovery && !runtimeConnected ? (
+              <button className="button" type="button" disabled={runtimeReconnectBlocked || reconnectingRuntime} onClick={() => void handleReconnectRuntime()}>
+                {reconnectingRuntime ? "Reconectando runtime..." : "Reconectar runtime"}
+              </button>
+            ) : null}
+          </div>
+          {connectAttemptStarted && !runtimeConnected && !showRuntimeRecovery ? <p className="muted">Esperando conexión. Si no queda lista en 10 s aparecerá la recuperación del runtime.</p> : null}
+          {showRuntimeRecovery && !runtimeConnected ? <div className="alert alert--warning">La conexión no quedó lista después de 10 s. Puede intentar una reconexión completa del runtime sin reiniciar Klipper ni el servicio.</div> : null}
+          {runtimeReconnectError ? <div className="alert alert--error">{runtimeReconnectError}</div> : null}
+          <details className="advanced-settings">
+            <summary>Diagnóstico avanzado de conexión</summary>
+            <div className="action-grid action-grid--inline">
+              <button className="button button--ghost" type="button" disabled={reconnectBlocked} onClick={onReconnectArduino}>Reconectar solo Arduino</button>
+            </div>
+            <p className="muted">Use la reconexión del Arduino solo para fallos exclusivamente seriales. Para una recuperación general use Reconectar runtime.</p>
+            <dl className="definition-grid definition-grid--compact">
+              <div><dt>Puerto configurado</dt><dd>{String(arduino.configured_port ?? arduino.port ?? "-")}</dd></div>
+              <div><dt>Puerto conectado</dt><dd>{String(arduino.connected_port ?? arduino.port ?? "-")}</dd></div>
+              <div><dt>USB identidad</dt><dd>{String(((arduino.usb_identity as Record<string, unknown> | null)?.serial_number) ?? ((arduino.usb_identity as Record<string, unknown> | null)?.port) ?? "sin identidad")}</dd></div>
+              <div><dt>Generación</dt><dd>{String(arduino.generation ?? 0)}</dd></div>
+              <div><dt>Reconexiones</dt><dd>{String(arduino.reconnects ?? 0)}</dd></div>
+              <div><dt>Paquetes válidos</dt><dd>{String(arduino.valid_packets ?? 0)}</dd></div>
+              <div><dt>Edad último paquete</dt><dd>{typeof arduino.last_packet_age_s === "number" ? `${Number(arduino.last_packet_age_s).toFixed(2)} s` : "-"}</dd></div>
+              <div><dt>HTTP activa</dt><dd>{typeof moonraker.last_http_observation_age_s === "number" ? `${Number(moonraker.last_http_observation_age_s).toFixed(2)} s` : "sin consulta"}</dd></div>
+              <div><dt>Edad último WS</dt><dd>{typeof moonraker.last_websocket_message_age_s === "number" ? `${Number(moonraker.last_websocket_message_age_s).toFixed(2)} s` : "sin mensajes"}</dd></div>
+              <div><dt>Edad de posición</dt><dd>{typeof moonraker.last_position_age_s === "number" ? `${Number(moonraker.last_position_age_s).toFixed(2)} s` : "sin posición"}</dd></div>
+              <div><dt>Dirección joystick</dt><dd>{String(controller.direction ?? "CENTER")}</dd></div>
+              <div><dt>Botón externo</dt><dd>{controller.external_button ? "pulsado" : "reposo"}</dd></div>
+              <div><dt>Sonda actual</dt><dd>{String(probeLive.display_state ?? (controller.probe ? "TRIGGERED" : "OPEN"))}</dd></div>
+              <div><dt>Probe raw / filtrada</dt><dd>{String(probeLive.raw_value ?? controller.probe ?? false)} / {String(probeLive.filtered_triggered ?? controller.probe ?? false)}</dd></div>
+              <div><dt>Edad del paquete</dt><dd>{typeof probeLive.packet_age_s === "number" ? `${(Number(probeLive.packet_age_s) * 1000).toFixed(0)} ms` : "-"}</dd></div>
+              <div><dt>Estable / mínimo</dt><dd>{probeStableMs === null ? "-" : `${probeStableMs.toFixed(0)} ms`} / {probeRequiredStableMs === null ? "-" : `${probeRequiredStableMs.toFixed(0)} ms`}</dd></div>
+              <div><dt>Precheck</dt><dd>OPEN {probeOpenOk ? "✓" : "✗"} · FRESH {probeFreshOk ? "✓" : "✗"} · STABLE {probeStableMs !== null && probeRequiredStableMs !== null && probeStableMs >= probeRequiredStableMs ? "✓" : "✗"}</dd></div>
+              <div><dt>Telemetría</dt><dd>{String(moonraker.telemetry_state ?? "DISCONNECTED")}</dd></div>
+              <div><dt>Operación activa</dt><dd>{activeOperation ? `${String(activeOperation.operation_type)} #${String(activeOperation.generation)}` : "ninguna"}</dd></div>
+              <div><dt>Última excepción</dt><dd>{String(moonraker.last_websocket_error ?? moonraker.last_http_error ?? runtime?.last_error ?? "-")}</dd></div>
+            </dl>
+            {lastProbeFailure ? <div className="alert alert--warning">Último fallo de sonda (histórico): {String(lastProbeFailure.error ?? "-")}</div> : null}
+          </details>
         </article>
 
         <article className="panel">
-          <div className="section-heading"><h3>2. Home, Z de preparación y centro</h3></div>
-          <p className="muted">El backend envía G28, confirma `toolhead.homed_axes`, mueve primero Z a la altura de preparación configurada y después mueve X/Y al centro real calculado desde límites Klipper.</p>
+          <div className="section-heading"><h3>2. Home y preparación</h3></div>
+          <p className="muted">Hace home, lleva Z a la altura segura de preparación y después posiciona X/Y en el centro calculado de la máquina.</p>
           <div className="info-grid info-grid--double compact-grid">
-            <div className="metric-box"><span>Z de preparación</span><strong>{formatMillimeters(referencePrepZ, 3)}</strong></div>
-            <div className="metric-box"><span>Velocidad Z</span><strong>{referencePrepZFeed.toFixed(0)} mm/min · {(referencePrepZFeed / 60).toFixed(3)} mm/s</strong></div>
-            <div className="metric-box"><span>Centro calculado</span><strong>X {formatMillimeters(centerX, 3)} · Y {formatMillimeters(centerY, 3)}</strong></div>
-            <div className="metric-box"><span>Velocidad centro X/Y</span><strong>{referencePrepXyFeed.toFixed(0)} mm/min · {(referencePrepXyFeed / 60).toFixed(3)} mm/s</strong></div>
+            <div className="metric-box"><span>Homing</span><strong>{machine.homedAxes || "pendiente"}</strong></div>
             <div className="metric-box"><span>Posición actual</span><strong>X {formatMillimeters(typeof position?.x === "number" ? Number(position.x) : null, 3)} · Y {formatMillimeters(typeof position?.y === "number" ? Number(position.y) : null, 3)} · Z {formatMillimeters(typeof position?.z === "number" ? Number(position.z) : null, 3)}</strong></div>
-            <div className="metric-box"><span>Z en vivo</span><strong>{formatMillimeters(typeof livePosition?.z === "number" ? Number(livePosition.z) : null, 3)}</strong></div>
-            <div className="metric-box"><span>Z comandada</span><strong>{formatMillimeters(typeof commandedPosition?.z === "number" ? Number(commandedPosition.z) : null, 3)}</strong></div>
-            <div className="metric-box"><span>Velocidad observada</span><strong>{typeof position?.velocity === "number" ? `${Number(position.velocity).toFixed(3)} mm/s` : "-"}</strong></div>
-            <div className="metric-box"><span>Fuente de posición</span><strong>{String(position?.source ?? "-")}</strong></div>
-            <div className="metric-box"><span>Objetivo configurado</span><strong>X {formatMillimeters(centerX, 3)} · Y {formatMillimeters(centerY, 3)} · Z {formatMillimeters(referencePrepZ, 3)}</strong></div>
+            <div className="metric-box"><span>Objetivo de preparación</span><strong>X {formatMillimeters(centerX, 3)} · Y {formatMillimeters(centerY, 3)} · Z {formatMillimeters(referencePrepZ, 3)}</strong></div>
             <div className="metric-box"><span>Etapa actual</span><strong>{String(preparationStage?.name ?? "pendiente")}</strong></div>
-            <div className="metric-box"><span>Objetivo enviado</span><strong>X {formatMillimeters(typeof movementTarget?.x === "number" ? Number(movementTarget.x) : null, 3)} · Y {formatMillimeters(typeof movementTarget?.y === "number" ? Number(movementTarget.y) : null, 3)} · Z {formatMillimeters(typeof movementTarget?.z === "number" ? Number(movementTarget.z) : null, 3)}</strong></div>
-            <div className="metric-box"><span>Timeout calculado</span><strong>{typeof lastMovement?.timeout_s === "number" ? `${Number(lastMovement.timeout_s).toFixed(1)} s` : "-"}</strong></div>
-            <div className="metric-box"><span>Z viva anterior</span><strong>{formatMillimeters(typeof lastMovement?.previous_live_z === "number" ? Number(lastMovement.previous_live_z) : null, 3)}</strong></div>
-            <div className="metric-box"><span>Z viva actual</span><strong>{formatMillimeters(typeof lastMovement?.current_live_z === "number" ? Number(lastMovement.current_live_z) : null, 3)}</strong></div>
-            <div className="metric-box"><span>Distancia anterior</span><strong>{formatMillimeters(typeof lastMovement?.previous_distance_mm === "number" ? Number(lastMovement.previous_distance_mm) : null, 3)}</strong></div>
-            <div className="metric-box"><span>Distancia actual</span><strong>{formatMillimeters(typeof lastMovement?.current_distance_mm === "number" ? Number(lastMovement.current_distance_mm) : null, 3)}</strong></div>
-            <div className="metric-box"><span>Fuente viva</span><strong>{String(lastMovement?.live_position_source ?? "-")}</strong></div>
-            <div className="metric-box"><span>Muestras alejándose</span><strong>{typeof lastMovement?.consecutive_away_samples === "number" ? String(lastMovement.consecutive_away_samples) : "-"}</strong></div>
           </div>
+          <button className="button" type="button" disabled={!canInitialize || referenceBusy || machine.refreshing} onClick={onInitialize}>Realizar homing, subir Z e ir al centro</button>
           <details className="advanced-settings">
-            <summary>Configuración avanzada de movimiento</summary>
+            <summary>Detalles de preparación y telemetría</summary>
+            <div className="info-grid info-grid--double compact-grid">
+              <div className="metric-box"><span>Z de preparación</span><strong>{formatMillimeters(referencePrepZ, 3)}</strong></div>
+              <div className="metric-box"><span>Velocidad Z</span><strong>{referencePrepZFeed.toFixed(0)} mm/min · {(referencePrepZFeed / 60).toFixed(3)} mm/s</strong></div>
+              <div className="metric-box"><span>Centro calculado</span><strong>X {formatMillimeters(centerX, 3)} · Y {formatMillimeters(centerY, 3)}</strong></div>
+              <div className="metric-box"><span>Velocidad centro X/Y</span><strong>{referencePrepXyFeed.toFixed(0)} mm/min · {(referencePrepXyFeed / 60).toFixed(3)} mm/s</strong></div>
+              <div className="metric-box"><span>Z en vivo</span><strong>{formatMillimeters(typeof livePosition?.z === "number" ? Number(livePosition.z) : null, 3)}</strong></div>
+              <div className="metric-box"><span>Z comandada</span><strong>{formatMillimeters(typeof commandedPosition?.z === "number" ? Number(commandedPosition.z) : null, 3)}</strong></div>
+              <div className="metric-box"><span>Velocidad observada</span><strong>{typeof position?.velocity === "number" ? `${Number(position.velocity).toFixed(3)} mm/s` : "-"}</strong></div>
+              <div className="metric-box"><span>Fuente de posición</span><strong>{String(position?.source ?? "-")}</strong></div>
+              <div className="metric-box"><span>Objetivo enviado</span><strong>X {formatMillimeters(typeof movementTarget?.x === "number" ? Number(movementTarget.x) : null, 3)} · Y {formatMillimeters(typeof movementTarget?.y === "number" ? Number(movementTarget.y) : null, 3)} · Z {formatMillimeters(typeof movementTarget?.z === "number" ? Number(movementTarget.z) : null, 3)}</strong></div>
+              <div className="metric-box"><span>Timeout calculado</span><strong>{typeof lastMovement?.timeout_s === "number" ? `${Number(lastMovement.timeout_s).toFixed(1)} s` : "-"}</strong></div>
+              <div className="metric-box"><span>Z viva anterior</span><strong>{formatMillimeters(typeof lastMovement?.previous_live_z === "number" ? Number(lastMovement.previous_live_z) : null, 3)}</strong></div>
+              <div className="metric-box"><span>Z viva actual</span><strong>{formatMillimeters(typeof lastMovement?.current_live_z === "number" ? Number(lastMovement.current_live_z) : null, 3)}</strong></div>
+              <div className="metric-box"><span>Distancia anterior</span><strong>{formatMillimeters(typeof lastMovement?.previous_distance_mm === "number" ? Number(lastMovement.previous_distance_mm) : null, 3)}</strong></div>
+              <div className="metric-box"><span>Distancia actual</span><strong>{formatMillimeters(typeof lastMovement?.current_distance_mm === "number" ? Number(lastMovement.current_distance_mm) : null, 3)}</strong></div>
+              <div className="metric-box"><span>Fuente viva</span><strong>{String(lastMovement?.live_position_source ?? "-")}</strong></div>
+              <div className="metric-box"><span>Muestras alejándose</span><strong>{typeof lastMovement?.consecutive_away_samples === "number" ? String(lastMovement.consecutive_away_samples) : "-"}</strong></div>
+            </div>
             <div className="form-grid form-grid--dense">
               <label>Z de preparación (mm)<input value={machineSettingsInput.reference_prep_z_mm} inputMode="decimal" onChange={(event) => onMachineSettingChange("reference_prep_z_mm", event.target.value)} /></label>
               <label>Velocidad Z de preparación (mm/min)<input value={machineSettingsInput.reference_prep_z_feed_mm_min} inputMode="decimal" onChange={(event) => onMachineSettingChange("reference_prep_z_feed_mm_min", event.target.value)} /></label>
@@ -238,15 +316,14 @@ export function ReferenceWorkspace({
               <button className="button button--ghost" type="button" disabled={!canInitialize || referenceBusy || machine.refreshing} onClick={onInitialize}>Repetir preparación</button>
             </div>
             {machineSettingsMessage ? <p className="muted">{machineSettingsMessage}</p> : null}
+            <div className="workflow-steps-grid">
+              {initializationSteps.map((step, index) => (
+                <div className="workflow-step-card" key={`${String(step.name)}-${index}`}>
+                  <div className="workflow-step-card__header"><span className="workflow-step">{index + 1}</span><div><strong>{String(step.name)}</strong><p className="muted">{String(step.detail ?? "")}</p></div><StatusBadge tone={String(step.status) === "ok" ? "success" : "warning"}>{String(step.status)}</StatusBadge></div>
+                </div>
+              ))}
+            </div>
           </details>
-          <button className="button" type="button" disabled={!canInitialize || referenceBusy || machine.refreshing} onClick={onInitialize}>Realizar homing, subir Z e ir al centro</button>
-          <div className="workflow-steps-grid">
-            {initializationSteps.map((step, index) => (
-              <div className="workflow-step-card" key={`${String(step.name)}-${index}`}>
-                <div className="workflow-step-card__header"><span className="workflow-step">{index + 1}</span><div><strong>{String(step.name)}</strong><p className="muted">{String(step.detail ?? "")}</p></div><StatusBadge tone={String(step.status) === "ok" ? "success" : "warning"}>{String(step.status)}</StatusBadge></div>
-              </div>
-            ))}
-          </div>
         </article>
 
         <article className="panel">
@@ -263,7 +340,7 @@ export function ReferenceWorkspace({
         </article>
 
         <article className="panel">
-          <div className="section-heading"><h3>Posición segura de cambio de herramienta</h3></div>
+          <div className="section-heading"><h3>4. Posición segura de cambio de herramienta</h3></div>
           <p className="muted">Estas son coordenadas de máquina, no el origen X0/Y0 de FlatCAM ni la referencia Z de la PCB.</p>
           <div className="info-grid info-grid--double compact-grid">
             <div className="metric-box"><span>X cambio</span><strong>{formatMillimeters(toolChangeX, 3)}</strong></div>
@@ -281,7 +358,7 @@ export function ReferenceWorkspace({
         </article>
 
         <article className="panel">
-          <div className="section-heading"><h3>4. Medir referencia</h3></div>
+          <div className="section-heading"><h3>5. Medir referencia Z</h3></div>
           <div className="form-grid form-grid--dense">
             <label>Paso de sonda (mm)<input value={machineSettingsInput.reference_probe_step_mm} inputMode="decimal" disabled={referenceBusy || machine.runtimeState === "PROBING_REFERENCE"} onChange={(event) => onMachineSettingChange("reference_probe_step_mm", event.target.value)} /></label>
             <label>Velocidad de sonda (mm/min)<input value={machineSettingsInput.reference_probe_feed_mm_min} inputMode="decimal" disabled={referenceBusy || machine.runtimeState === "PROBING_REFERENCE"} onChange={(event) => onMachineSettingChange("reference_probe_feed_mm_min", event.target.value)} /></label>
