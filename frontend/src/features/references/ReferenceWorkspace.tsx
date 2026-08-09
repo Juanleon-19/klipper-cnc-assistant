@@ -232,6 +232,7 @@ export function ReferenceWorkspace({
           <div className="action-grid action-grid--inline">
             <button className="button" type="button" disabled={!canConnect || machine.refreshing} onClick={handleConnectRuntime}>Conectar runtime</button>
             <button className="button button--ghost" type="button" disabled={!machine.isPhysical || machine.refreshing || machine.runtimeState === "DISCONNECTED"} onClick={onDiagnosticMode}>Modo diagnóstico</button>
+            <button className="button button--ghost" type="button" disabled={reconnectBlocked} onClick={onReconnectArduino}>Reconectar Arduino</button>
             {showRuntimeRecovery && !runtimeConnected ? (
               <button className="button" type="button" disabled={runtimeReconnectBlocked || reconnectingRuntime} onClick={() => void handleReconnectRuntime()}>
                 {reconnectingRuntime ? "Reconectando runtime..." : "Reconectar runtime"}
@@ -243,10 +244,7 @@ export function ReferenceWorkspace({
           {runtimeReconnectError ? <div className="alert alert--error">{runtimeReconnectError}</div> : null}
           <details className="advanced-settings">
             <summary>Diagnóstico avanzado de conexión</summary>
-            <div className="action-grid action-grid--inline">
-              <button className="button button--ghost" type="button" disabled={reconnectBlocked} onClick={onReconnectArduino}>Reconectar solo Arduino</button>
-            </div>
-            <p className="muted">Use la reconexión del Arduino solo para fallos exclusivamente seriales. Para una recuperación general use Reconectar runtime.</p>
+            <p className="muted">Use Reconectar Arduino solo para fallos exclusivamente seriales. Para una recuperación general use Reconectar runtime.</p>
             <dl className="definition-grid definition-grid--compact">
               <div><dt>Puerto configurado</dt><dd>{String(arduino.configured_port ?? arduino.port ?? "-")}</dd></div>
               <div><dt>Puerto conectado</dt><dd>{String(arduino.connected_port ?? arduino.port ?? "-")}</dd></div>
@@ -255,7 +253,7 @@ export function ReferenceWorkspace({
               <div><dt>Reconexiones</dt><dd>{String(arduino.reconnects ?? 0)}</dd></div>
               <div><dt>Paquetes válidos</dt><dd>{String(arduino.valid_packets ?? 0)}</dd></div>
               <div><dt>Edad último paquete</dt><dd>{typeof arduino.last_packet_age_s === "number" ? `${Number(arduino.last_packet_age_s).toFixed(2)} s` : "-"}</dd></div>
-              <div><dt>HTTP activa</dt><dd>{typeof moonraker.last_http_observation_age_s === "number" ? `${Number(moonraker.last_http_observation_age_s).toFixed(2)} s` : "sin consulta"}</dd></div>
+              <div><dt>Moonraker HTTP</dt><dd>{typeof moonraker.last_http_observation_age_s === "number" ? `${Number(moonraker.last_http_observation_age_s).toFixed(2)} s` : "sin consulta"}</dd></div>
               <div><dt>Edad último WS</dt><dd>{typeof moonraker.last_websocket_message_age_s === "number" ? `${Number(moonraker.last_websocket_message_age_s).toFixed(2)} s` : "sin mensajes"}</dd></div>
               <div><dt>Edad de posición</dt><dd>{typeof moonraker.last_position_age_s === "number" ? `${Number(moonraker.last_position_age_s).toFixed(2)} s` : "sin posición"}</dd></div>
               <div><dt>Dirección joystick</dt><dd>{String(controller.direction ?? "CENTER")}</dd></div>
@@ -274,7 +272,7 @@ export function ReferenceWorkspace({
         </article>
 
         <article className="panel">
-          <div className="section-heading"><h3>2. Home y preparación</h3></div>
+          <div className="section-heading"><h3>2. Home, Z de preparación y centro</h3></div>
           <p className="muted">Hace home, lleva Z a la altura segura de preparación y después posiciona X/Y en el centro calculado de la máquina.</p>
           <div className="info-grid info-grid--double compact-grid">
             <div className="metric-box"><span>Homing</span><strong>{machine.homedAxes || "pendiente"}</strong></div>
@@ -282,9 +280,12 @@ export function ReferenceWorkspace({
             <div className="metric-box"><span>Objetivo de preparación</span><strong>X {formatMillimeters(centerX, 3)} · Y {formatMillimeters(centerY, 3)} · Z {formatMillimeters(referencePrepZ, 3)}</strong></div>
             <div className="metric-box"><span>Etapa actual</span><strong>{String(preparationStage?.name ?? "pendiente")}</strong></div>
           </div>
-          <button className="button" type="button" disabled={!canInitialize || referenceBusy || machine.refreshing} onClick={onInitialize}>Realizar homing, subir Z e ir al centro</button>
+          <div className="action-grid action-grid--inline">
+            <button className="button" type="button" disabled={!canInitialize || referenceBusy || machine.refreshing} onClick={onInitialize}>Realizar homing, subir Z e ir al centro</button>
+            <button className="button button--ghost" type="button" disabled={!machine.isPhysical || referenceBusy || machine.refreshing} onClick={onSaveMachineSettings}>Guardar configuración</button>
+          </div>
           <details className="advanced-settings">
-            <summary>Detalles de preparación y telemetría</summary>
+            <summary>Configuración avanzada de movimiento y telemetría</summary>
             <div className="info-grid info-grid--double compact-grid">
               <div className="metric-box"><span>Z de preparación</span><strong>{formatMillimeters(referencePrepZ, 3)}</strong></div>
               <div className="metric-box"><span>Velocidad Z</span><strong>{referencePrepZFeed.toFixed(0)} mm/min · {(referencePrepZFeed / 60).toFixed(3)} mm/s</strong></div>
@@ -312,7 +313,6 @@ export function ReferenceWorkspace({
               <label>Tolerancia de velocidad (mm/s)<input value={machineSettingsInput.velocity_tolerance_mm_s} inputMode="decimal" onChange={(event) => onMachineSettingChange("velocity_tolerance_mm_s", event.target.value)} /></label>
             </div>
             <div className="action-grid action-grid--inline">
-              <button className="button button--ghost" type="button" disabled={!machine.isPhysical || referenceBusy || machine.refreshing} onClick={onSaveMachineSettings}>Guardar configuración</button>
               <button className="button button--ghost" type="button" disabled={!canInitialize || referenceBusy || machine.refreshing} onClick={onInitialize}>Repetir preparación</button>
             </div>
             {machineSettingsMessage ? <p className="muted">{machineSettingsMessage}</p> : null}
