@@ -1,5 +1,4 @@
-from .hotfix_job_service import JobService
-from .job_service import MoonrakerJobAdapter
+from .job_service import JobService, MoonrakerJobAdapter
 from .mesh_execution_service import MeshExecutionService
 
 __all__ = [
