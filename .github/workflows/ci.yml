@@ -42,6 +42,7 @@ jobs:
             tests.test_gcode_analysis \
             tests.test_heightmap \
             tests.test_job_service \
+            tests.test_job_plan_hotfix \
             tests.test_moonraker_client \
             tests.test_project_service \
             tests.test_web_mvp

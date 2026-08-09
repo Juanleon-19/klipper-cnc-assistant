@@ -25,6 +25,19 @@ const ACTION_LABELS: Record<string, string> = {
   continue: "Continuar trabajo",
 };
 
+const CHECK_LABELS: Record<string, string> = {
+  modo_fisico: "Modo físico",
+  runtime_conectado: "Moonraker HTTP",
+  websocket: "WebSocket",
+  klipper_ready: "Klipper listo",
+  homing: "Homing XYZ",
+  mapa_activo: "Mapa físico",
+  plan_generado: "Plan generado",
+  operaciones_bloqueadas: "Operaciones compensables",
+  archivos_compensados: "Archivos compensados",
+  referencia_inicial: "Referencia inicial",
+};
+
 const STARTABLE_STATES = new Set(["JOB_READY"]);
 const ARCHIVE_CANDIDATE_STATES = new Set(["JOB_VALIDATING", "JOB_STARTING", "OPERATION_PREFLIGHT", "OPERATION_UPLOADING", "WAITING_FOR_KLIPPER", "PRINT_QUEUED", "OPERATION_RUNNING", "RECOVERY_REQUIRED", "SPINDLE_STOP_REQUIRED", "TOOL_CHANGE_REQUIRED", "READY_TO_RESUME", "OPERATION_PAUSED", "JOB_PAUSED", "NEXT_OPERATION_READY"]);
 const TOOL_WAIT_STATES = new Set(["SPINDLE_STOP_REQUIRED", "TOOL_CHANGE_REQUIRED", "TOOL_CHANGE_CONFIRMED", "MOVING_TO_REFERENCE", "CALIBRATING_TOOL", "REGENERATING_COMPENSATION", "VALIDATING_REGENERATED_PLAN", "READY_TO_RESUME"]);
@@ -64,6 +77,11 @@ function estimateMethodLabel(value: string | null | undefined): string {
   return value || "-";
 }
 
+function preflightCheckLabel(name: string | null | undefined): string {
+  const key = String(name ?? "");
+  return CHECK_LABELS[key] ?? key;
+}
+
 function isConflictDetail(value: unknown): value is JobRunConflictDetail {
   return Boolean(value && typeof value === "object" && "code" in (value as Record<string, unknown>) && "existing_run" in (value as Record<string, unknown>));
 }
@@ -87,9 +105,9 @@ function canArchiveStale(snapshot: LiveExecutionSnapshot | null, detail: JobRunC
 function executionTone(value: string | null | undefined): "success" | "warning" | "danger" | "info" | "neutral" {
   const state = String(value ?? "").toUpperCase();
   if (["JOB_COMPLETE", "COMPLETED", "READY_TO_RESUME"].includes(state)) return "success";
-  if (["SPINDLE_STOP_REQUIRED", "SPINDLE_STOP_CONFIRMED", "TOOL_CHANGE_REQUIRED", "TOOL_CHANGE_CONFIRMED", "RETRACTING", "MOVING_TO_REFERENCE", "CALIBRATING_TOOL", "REGENERATING_COMPENSATION", "VALIDATING_REGENERATED_PLAN"].includes(state)) return "warning";
+  if (["SPINDLE_STOP_REQUIRED", "SPINDLE_STOP_CONFIRMED", "TOOL_CHANGE_REQUIRED", "TOOL_CHANGE_CONFIRMED", "RETRACTING", "MOVING_TO_REFERENCE", "CALIBRATING_TOOL", "REGENERATING_COMPENSATION", "VALIDATING_REGENERATED_PLAN", "JOB_VALIDATING"].includes(state)) return "warning";
   if (["JOB_ERROR", "FAILED", "ERROR", "CANCELLED", "JOB_CANCELLED"].includes(state)) return "danger";
-  if (["OPERATION_RUNNING", "RUNNING", "WAITING_FOR_KLIPPER", "OPERATION_STARTING", "OPERATION_UPLOADING"].includes(state)) return "info";
+  if (["OPERATION_RUNNING", "RUNNING", "WAITING_FOR_KLIPPER", "OPERATION_STARTING", "OPERATION_UPLOADING", "JOB_READY"].includes(state)) return "info";
   return "neutral";
 }
 
@@ -143,6 +161,15 @@ export function ExecutionConsole({ snapshot, error, busy, onPrepare, onStart, on
   const showSpindleStopRequired = runStatus === "SPINDLE_STOP_REQUIRED";
   const showToolChangeRequired = runStatus === "TOOL_CHANGE_REQUIRED";
   const eta = snapshot?.eta;
+  const checks = jobRun?.checks ?? [];
+  const failedChecks = checks.filter((check) => !check.ok);
+  const showPreflightSummary = runStatus === "JOB_READY" || runStatus === "JOB_VALIDATING" || checks.length > 0;
+  const readinessTitle = runStatus === "JOB_READY" ? "Trabajo listo para iniciar" : "Trabajo no listo";
+  const readinessDetail = runStatus === "JOB_READY"
+    ? "Todos los checks requeridos están aprobados."
+    : failedChecks.length > 0
+      ? "Revise y resuelva los checks fallidos antes de iniciar."
+      : "El trabajo sigue en validación. Revise el estado actual antes de iniciar.";
 
   return (
     <article className="panel execution-console-v2" aria-label="Consola de ejecución en vivo v2">
@@ -167,6 +194,39 @@ export function ExecutionConsole({ snapshot, error, busy, onPrepare, onStart, on
           <strong>Cambie la herramienta</strong>
           <p>Instale la herramienta requerida y pulse Herramienta cambiada.</p>
         </div>
+      ) : null}
+
+      {showPreflightSummary ? (
+        <section className="execution-panel" aria-label="Preparación del trabajo">
+          <div className="section-heading"><h4>Preparación del trabajo</h4></div>
+          <div className={`alert ${runStatus === "JOB_READY" ? "alert--success" : "alert--warning"}`}>
+            <strong>{readinessTitle}</strong>
+            <p>{readinessDetail}</p>
+          </div>
+          {checks.length ? (
+            <div className="stack gap-sm">
+              {checks.map((check) => (
+                <div className="subpanel subpanel--soft" key={`${check.name}:${check.ok ? "ok" : "fail"}`}>
+                  <strong>{check.ok ? "OK" : "FALLA"} · {preflightCheckLabel(check.name)}</strong>
+                  <p>{check.detail}</p>
+                  <p className="muted mono-text">{check.name}</p>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <p className="muted">Todavía no hay checks persistidos para esta ejecución.</p>
+          )}
+          {failedChecks.length ? (
+            <div className="alert alert--warning">
+              <strong>Bloqueos que debes resolver</strong>
+              <ul>
+                {failedChecks.map((check) => (
+                  <li key={`blocker:${check.name}`}>{check.detail}</li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
+        </section>
       ) : null}
 
       {error ? (
