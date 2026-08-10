@@ -1391,8 +1391,8 @@ export function ProjectWorkspace({
                       />
                     </label>
                     <div className="operation-row__actions">
-                      <button type="button" className="icon-button" aria-label={"Mover arriba " + operation.nombre} aria-busy={busyKey === "operation:move:" + operation.id} disabled={Boolean(busyKey?.startsWith("operation:move:")) || index === 0} onClick={() => void onMoveOperation(operation.id, "up")}>↑</button>
-                      <button type="button" className="icon-button" aria-label={"Mover abajo " + operation.nombre} aria-busy={busyKey === "operation:move:" + operation.id} disabled={Boolean(busyKey?.startsWith("operation:move:")) || index === operations.length - 1} onClick={() => void onMoveOperation(operation.id, "down")}>↓</button>
+                      <button type="button" className="icon-button" aria-label={"Mover arriba " + operation.nombre} disabled={index === 0} onClick={() => void onMoveOperation(operation.id, "up")}>↑</button>
+                      <button type="button" className="icon-button" aria-label={"Mover abajo " + operation.nombre} disabled={index === operations.length - 1} onClick={() => void onMoveOperation(operation.id, "down")}>↓</button>
                       <button type="button" className="button button--ghost" onClick={async () => {
                         const name = window.prompt("Nuevo nombre de la operación", operation.nombre)?.trim();
                         if (name) {

@@ -16,6 +16,12 @@ describe("reorderOperations", () => {
     expect(result.find((item) => item.id === "x")?.orden).toBe(0);
   });
 
+  it("permite encadenar varios movimientos optimistas sin esperar al servidor", () => {
+    const first = reorderOperations(operations, "c", "up");
+    const second = reorderOperations(first, "c", "up");
+    expect(second.filter((item) => item.setup_id === "main").sort((a, b) => a.orden - b.orden).map((item) => item.id)).toEqual(["c", "a", "b"]);
+  });
+
   it("devuelve la misma referencia cuando intenta salir del límite", () => {
     expect(reorderOperations(operations, "a", "up")).toBe(operations);
     expect(reorderOperations(operations, "c", "down")).toBe(operations);
