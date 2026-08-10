@@ -1815,4 +1815,124 @@ describe("ProjectWorkspace", () => {
     await waitFor(() => expect(apiMock.getCompensationAudit).toHaveBeenCalledTimes(2));
   });
 
+
+  it("muestra Armando sondeo, bloquea doble POST y conserva la ejecución física separada", async () => {
+    const pendingArm = deferred<{ payload: Record<string, unknown> }>();
+    apiMock.planPhysicalMapFromReference.mockReturnValueOnce(pendingArm.promise);
+    renderWorkspace(physicalMachine);
+
+    fireEvent.click(screen.getByRole("button", { name: /Mapa de alturas/i }));
+    await screen.findByText(/Mapa medido físicamente/i);
+    fireEvent.change(screen.getByLabelText(/^Filas$/i), { target: { value: "2" } });
+    fireEvent.change(screen.getByLabelText(/^Columnas$/i), { target: { value: "2" } });
+    fireEvent.click(screen.getByRole("button", { name: /Generar vista previa de malla/i }));
+    await waitFor(() => expect(apiMock.previewPhysicalMap).toHaveBeenCalledTimes(1));
+
+    const armButton = await screen.findByRole("button", { name: /^3\. Armar sondeo$/i });
+    await waitFor(() => expect(armButton).toBeEnabled());
+    fireEvent.click(armButton);
+    fireEvent.click(armButton);
+
+    expect(await screen.findByRole("button", { name: /Armando sondeo…/i })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /^4\. Iniciar sondeo automático$/i })).toBeDisabled();
+    expect(apiMock.planPhysicalMapFromReference).toHaveBeenCalledTimes(1);
+    expect(apiMock.executeAllPhysicalMapPoints).not.toHaveBeenCalled();
+
+    await act(async () => {
+      pendingArm.resolve({
+        payload: {
+          map_id: "measured/manual-2x2",
+          status: "MESH_PLANNED",
+          source: "MEASURED",
+          point_count: 4,
+          mesh_configuration_fingerprint: "fingerprint/manual-2x2/config",
+          mesh_geometry_fingerprint: "fingerprint/manual-2x2/geometry",
+          arm_backend_duration_ms: 12.5,
+          arm_point_count: 4,
+        },
+      });
+      await pendingArm.promise;
+    });
+
+    await waitFor(() => expect(screen.queryByRole("button", { name: /Armando sondeo…/i })).toBeNull());
+    expect(apiMock.planPhysicalMapFromReference).toHaveBeenCalledTimes(1);
+    expect(screen.getByText("Armado servidor")).toBeInTheDocument();
+    expect(screen.getByText("12.5 ms")).toBeInTheDocument();
+    expect(screen.getByText("Armado total")).toBeInTheDocument();
+  });
+
+  it("libera Armar sondeo tras error y permite reintento manual", async () => {
+    const pendingArm = deferred<{ payload: Record<string, unknown> }>();
+    apiMock.planPhysicalMapFromReference.mockReturnValueOnce(pendingArm.promise);
+    renderWorkspace(physicalMachine);
+
+    fireEvent.click(screen.getByRole("button", { name: /Mapa de alturas/i }));
+    await screen.findByText(/Mapa medido físicamente/i);
+    fireEvent.change(screen.getByLabelText(/^Filas$/i), { target: { value: "2" } });
+    fireEvent.change(screen.getByLabelText(/^Columnas$/i), { target: { value: "2" } });
+    fireEvent.click(screen.getByRole("button", { name: /Generar vista previa de malla/i }));
+    await waitFor(() => expect(apiMock.previewPhysicalMap).toHaveBeenCalledTimes(1));
+    fireEvent.click(await screen.findByRole("button", { name: /^3\. Armar sondeo$/i }));
+
+    await act(async () => {
+      pendingArm.reject(new Error("Fallo controlado al armar sondeo."));
+      try {
+        await pendingArm.promise;
+      } catch {
+        // expected rejection
+      }
+    });
+
+    expect(await screen.findByText(/Fallo controlado al armar sondeo/i)).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByRole("button", { name: /^3\. Armar sondeo$/i })).toBeEnabled());
+    expect(apiMock.executeAllPhysicalMapPoints).not.toHaveBeenCalled();
+  });
+
+  it("muestra Generando compensación y evita doble generación", async () => {
+    const pendingCompensation = deferred<JobPlan>();
+    apiMock.generateProjectCompensation.mockReturnValueOnce(pendingCompensation.promise);
+    renderWorkspace(physicalMachine);
+
+    fireEvent.click(screen.getByRole("button", { name: /^Ejecución$/i }));
+    const generateButton = await screen.findByRole("button", { name: /Generar compensación del proyecto/i });
+    fireEvent.click(generateButton);
+    fireEvent.click(generateButton);
+
+    expect(await screen.findByRole("button", { name: /Generando compensación…/i })).toBeDisabled();
+    expect(apiMock.generateProjectCompensation).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole("button", { name: /Revalidar plan/i })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Iniciar trabajo" })).toBeDisabled();
+    expect(screen.getByLabelText(/Tolerancia Z \(mm\)/i)).toBeDisabled();
+
+    await act(async () => {
+      pendingCompensation.resolve(jobPlan);
+      await pendingCompensation.promise;
+    });
+
+    await waitFor(() => expect(screen.getByRole("button", { name: /Generar compensación del proyecto/i })).toBeEnabled());
+    expect(apiMock.generateProjectCompensation).toHaveBeenCalledTimes(1);
+  });
+
+  it("libera Generar compensación tras error sin retry automático", async () => {
+    const pendingCompensation = deferred<JobPlan>();
+    apiMock.generateProjectCompensation.mockReturnValueOnce(pendingCompensation.promise);
+    renderWorkspace(physicalMachine);
+
+    fireEvent.click(screen.getByRole("button", { name: /^Ejecución$/i }));
+    fireEvent.click(await screen.findByRole("button", { name: /Generar compensación del proyecto/i }));
+
+    await act(async () => {
+      pendingCompensation.reject(new Error("Fallo controlado de compensación."));
+      try {
+        await pendingCompensation.promise;
+      } catch {
+        // expected rejection
+      }
+    });
+
+    expect(await screen.findByText(/Fallo controlado de compensación/i)).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByRole("button", { name: /Generar compensación del proyecto/i })).toBeEnabled());
+    expect(apiMock.generateProjectCompensation).toHaveBeenCalledTimes(1);
+  });
+
 });
