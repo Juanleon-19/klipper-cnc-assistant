@@ -9,7 +9,6 @@ import { SystemBanner } from "./features/system/SystemBanner";
 import { MachineContext, buildMachineContextValue, type MachineAction } from "./features/system/MachineContext";
 import { SystemPage } from "./features/system/SystemPage";
 import { api, type OperationInput, type OperationUpdateInput } from "./lib/api";
-import { reorderOperations } from "./lib/operationOrder";
 import { getRecentProject, toneForStatus, translateStatus } from "./lib/ui";
 import type {
   HealthResponse,
