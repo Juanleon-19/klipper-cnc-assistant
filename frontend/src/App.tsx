@@ -9,6 +9,7 @@ import { SystemBanner } from "./features/system/SystemBanner";
 import { MachineContext, buildMachineContextValue, type MachineAction } from "./features/system/MachineContext";
 import { SystemPage } from "./features/system/SystemPage";
 import { api, type OperationInput, type OperationUpdateInput } from "./lib/api";
+import { reorderOperations } from "./lib/operationOrder";
 import { getRecentProject, toneForStatus, translateStatus } from "./lib/ui";
 import type {
   HealthResponse,
@@ -282,15 +283,29 @@ export default function App() {
   };
 
   const handleMoveOperation = async (operationId: string, direction: "up" | "down") => {
-    if (!selectedProjectId) {
+    if (!selectedProjectId || !selectedProject || busyKey?.startsWith("operation:move:")) {
       return;
     }
+    const optimisticOperations = reorderOperations(selectedProject.operaciones, operationId, direction);
+    if (optimisticOperations === selectedProject.operaciones) {
+      return;
+    }
+    const optimisticProject = { ...selectedProject, operaciones: optimisticOperations };
+    const optimisticMoved = optimisticOperations.find((item) => item.id === operationId);
     setBusyKey("operation:move:" + operationId);
     setError("");
+    setProjects((current) => current.map((item) => (item.id === selectedProjectId ? optimisticProject : item)));
     try {
-      await api.moveOperation(selectedProjectId, operationId, direction);
-      await syncProject(selectedProjectId);
+      const moved = await api.moveOperation(selectedProjectId, operationId, direction);
+      if (!optimisticMoved || moved.orden !== optimisticMoved.orden) {
+        await syncProject(selectedProjectId);
+      }
     } catch (requestError) {
+      try {
+        await syncProject(selectedProjectId);
+      } catch {
+        setProjects((current) => current.map((item) => (item.id === selectedProjectId ? selectedProject : item)));
+      }
       setError(requestError instanceof Error ? requestError.message : "No fue posible reordenar la operación.");
     } finally {
       setBusyKey(null);
