@@ -278,7 +278,8 @@ class MeshFailureRecoveryHotfixTest(unittest.TestCase):
 
         self.assertFalse(guard["can_start_motion"])
         self.assertTrue(guard["recovery_pending"])
-        self.assertEqual(guard["reason"], RECOVERY_PENDING_MESSAGE)
+        self.assertTrue(guard["reason"].startswith(RECOVERY_PENDING_MESSAGE))
+        self.assertIn("ownership físico verificable", guard["reason"])
 
     def test_automatic_point_retries_are_disabled_by_default(self) -> None:
         service = RecoverableMeshExecutionService(_PhysicalMapStub())

@@ -343,7 +343,9 @@ class MeshExecutionService:
         if blocked_by_state:
             reason = str(runtime_ownership.get("reason") or f"El runtime físico no está listo: {state}.")
         elif recovery_pending or runtime_ownership.get("movement_lock") or runtime_ownership.get("active_operation") is not None:
-            reason = RECOVERY_PENDING_MESSAGE
+            reason = str(runtime_ownership.get("reason") or RECOVERY_PENDING_MESSAGE)
+        elif runtime_active:
+            reason = str(runtime_ownership.get("reason") or f"El runtime físico no está listo para iniciar el sondeo: {state or 'UNKNOWN'}.")
         elif worker_same:
             reason = "La malla ya tiene un worker activo y no puede iniciarse dos veces."
         elif worker_other:
