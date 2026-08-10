@@ -851,6 +851,8 @@ class MachineRuntime:
         self._require_physical_ready()
         if not self._movement_lock.acquire(blocking=False):
             raise MachineRuntimeError("Ya hay un movimiento u operación física activa.")
+        with self._lock:
+            preserve_reference_captured = self._state is MachineRuntimeState.REFERENCE_CAPTURED
         context = self._begin_operation_context("reference_move")
         preparation_z = float(self.config.reference_prep_z_mm)
         try:
@@ -880,7 +882,11 @@ class MachineRuntime:
             self._event("info", f"REFERENCE_MOVE_XY: moviendo a X={float(reference_x):.3f} Y={float(reference_y):.3f} mm.")
             self._move_absolute(x=float(reference_x), y=float(reference_y), label="reference_move_xy", feed_mm_min=REFERENCE_PREP_XY_FEED_MM_MIN)
             with self._lock:
-                self._state = MachineRuntimeState.WAITING_FOR_XY_REFERENCE
+                self._state = (
+                    MachineRuntimeState.REFERENCE_CAPTURED
+                    if preserve_reference_captured
+                    else MachineRuntimeState.WAITING_FOR_XY_REFERENCE
+                )
                 self._event("info", "REFERENCE_MOVE_COMPLETE: máquina ubicada en el punto de referencia.")
             return {"accepted": True, "reference_x": float(reference_x), "reference_y": float(reference_y), "preparation_z": preparation_z, "final_state": "REFERENCE_MOVE_COMPLETE", "message": "Máquina ubicada en el punto de referencia."}
         except Exception as error:
