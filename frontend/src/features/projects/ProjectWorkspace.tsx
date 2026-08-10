@@ -2366,6 +2366,7 @@ export function ProjectWorkspace({
                 <input
                   value={compensationToleranceInput}
                   inputMode="decimal"
+                  disabled={compensationControlsBusy}
                   onChange={(event) => setCompensationToleranceInput(event.target.value)}
                   onBlur={() => {
                     const parsed = Number(compensationToleranceInput);
@@ -2514,7 +2515,7 @@ export function ProjectWorkspace({
       <ExecutionConsole
         snapshot={liveExecution}
         error={executionError}
-        busy={referenceBusy}
+        busy={referenceBusy || compensationBusy}
         onPrepare={prepareJobRun}
         onStart={startJobRun}
         onAction={runJobAction}

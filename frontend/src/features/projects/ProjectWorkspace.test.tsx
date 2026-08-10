@@ -1901,6 +1901,8 @@ describe("ProjectWorkspace", () => {
     expect(await screen.findByRole("button", { name: /Generando compensación…/i })).toBeDisabled();
     expect(apiMock.generateProjectCompensation).toHaveBeenCalledTimes(1);
     expect(screen.getByRole("button", { name: /Revalidar plan/i })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Iniciar trabajo" })).toBeDisabled();
+    expect(screen.getByLabelText(/Tolerancia Z \(mm\)/i)).toBeDisabled();
 
     await act(async () => {
       pendingCompensation.resolve(jobPlan);
