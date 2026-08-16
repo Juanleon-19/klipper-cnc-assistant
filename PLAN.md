@@ -1,40 +1,56 @@
 # Plan de cierre del producto
 
-Fecha de actualización: Thursday, July 30, 2026
+Fecha de actualización: 2026-08-16
 
-El proyecto se organiza en cuatro fases independientes. Cada fase debe ejecutarse en su propia rama y solo puede integrarse en `main` después de revisión técnica, pruebas reproducibles y aprobación explícita del usuario.
+El proyecto se organiza en cinco fases. Cada cambio funcional se desarrolla en una rama independiente y solo puede integrarse en `main` después de revisión técnica, pruebas reproducibles y aprobación explícita del usuario.
 
 ## Fase 1 — Auditoría, arquitectura y organización
 
-- Auditar el estado Git, el despliegue real y las copias candidatas.
-- Documentar la procedencia funcional de cada componente útil.
-- Verificar la arquitectura actual y definir la arquitectura objetivo.
-- Reorganizar el repositorio sin cambiar comportamiento funcional de forma deliberada.
-- Dejar la documentación base y la estructura estable del repositorio.
+- Auditar estado Git, despliegue real y copias candidatas.
+- Documentar procedencia funcional y arquitectura.
+- Reorganizar backend/frontend sin cambiar deliberadamente comportamiento.
+- Establecer CI y política de configuración externa.
 
-Estado: completada y fusionada en `main`
+Estado: **completada e integrada**.
 
 ## Fase 2 — Referencias, Arduino y conectividad
 
-- Cerrar la pestaña `Referencia` y preservar la persistencia existente.
-- Consolidar Arduino, `SerialDriver`, reconexión y límites de seguridad.
-- Separar Moonraker HTTP, transporte WebSocket, frescura de posición y observación activa.
-- Añadir pruebas automatizadas reproducibles para reconexión, telemetría y referencias.
+- Runtime físico con Moonraker HTTP/WebSocket y Arduino.
+- Reconexión segura y telemetría diferenciada.
+- Homing, origen X/Y, referencia Z y flujo de Referencia.
+- Guards para acciones físicas y recuperación de conexión.
 
-Estado: activa en `fase-2/referencias-conectividad`
+Estado: **implementada e integrada**. Incluida en la regresión física final.
 
 ## Fase 3 — Mapa de alturas y compensación
 
-- Cerrar el flujo de mapa medido, persistencia y reanudación.
-- Asegurar cobertura, validación de dominio y compensación reproducible.
-- Separar claramente simulación, medición física y generación compensada.
+- Preview y mapa persistido equivalentes de forma canónica.
+- Sondeo físico, persistencia incremental, pausa/recuperación y coverage.
+- Compensación legacy/adaptive, auditoría y artefactos ejecutables.
 
-Estado: pendiente
+Estado: **implementada e integrada**. El mapa físico ha sido ejercitado; incluida en la regresión final.
 
-## Fase 4 — Ejecución, recuperación y cierre del producto
+## Fase 4 — Ejecución, recuperación y JobRun
 
-- Cerrar consola de ejecución, `JobRun`, recuperación y trazabilidad.
-- Asegurar preflight, cambio de herramienta, reanudación y cancelación segura.
-- Validar el producto completo contra la arquitectura aprobada y dejar criterio de cierre.
+- Plan multioperación y preflight.
+- Upload/seguimiento Moonraker y progreso en vivo.
+- Cambio de herramienta, nueva referencia y regeneración de compensación.
+- Pausa, cancelación, recuperación y cierre de ejecuciones obsoletas.
 
-Estado: pendiente
+Estado: **implementada e integrada; validación física integral final pendiente**.
+
+## Fase 5 — Estabilización y cierre de producción
+
+- Ejecutar la campaña física final sobre una línea base fija.
+- Corregir únicamente defectos reproducibles mediante hotfixes aislados.
+- Confirmar suites automatizadas y build final.
+- Actualizar documentación operativa y fijar SHA estable de cierre.
+
+Estado: **activa**.
+
+## Línea base de validación
+
+- SHA: `af0099dda64fd9394045766b8475b689cf69a320`.
+- Rama de referencia: `baseline/physical-validation-2026-08-16`.
+- Checklist: `docs/FINAL_VALIDATION.md`.
+- Estado operativo: `docs/CURRENT_STATE.md`.
