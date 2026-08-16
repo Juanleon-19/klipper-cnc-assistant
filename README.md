@@ -1,39 +1,49 @@
 # Klipper CNC Assistant
 
-Estado de referencia: Fase 2 activa en `fase-2/referencias-conectividad`.
-Fecha de referencia: Thursday, July 30, 2026.
+Estado de referencia: **Fase 5 — estabilización y cierre**.
+Fecha de referencia: 2026-08-16.
 
-Klipper CNC Assistant es una aplicacion web para preparar trabajos CNC basados en G-code sobre una maquina controlada por Klipper. El producto combina un backend FastAPI, un frontend React, persistencia JSON local y una frontera fisica que integra Moonraker, Klipper y un controlador Arduino.
+Klipper CNC Assistant es una aplicación web para preparar y ejecutar trabajos CNC basados en G-code sobre una máquina controlada por Klipper. El producto combina un backend FastAPI, un frontend React, persistencia JSON local y una frontera física que integra Moonraker, Klipper y un controlador Arduino.
 
-## Capacidades confirmadas
+## Estado actual
 
-- gestion de proyectos, montajes y operaciones;
-- analisis de G-code y visor tecnico;
-- persistencia JSON local de proyectos, referencias, mapas y artefactos;
-- runtime fisico con Moonraker HTTP, Moonraker WebSocket y entrada serial Arduino;
-- reconexion segura del Arduino sobre una unica autoridad serial;
-- semantica separada de transporte WebSocket, frescura de posicion y observacion HTTP;
-- captura de referencias fisicas basada en observacion activa antes de persistir;
-- pestana `Referencia` extraida como feature del frontend.
+Las fases funcionales principales ya están implementadas e integradas en `main`:
 
-## Capacidades todavia incompletas
+- gestión de proyectos, montajes y operaciones;
+- análisis de G-code y visor técnico;
+- reordenamiento rápido y persistente de operaciones;
+- runtime físico con Moonraker HTTP/WebSocket y Arduino;
+- conexión/reconexión, homing y referencias X/Y/Z;
+- preview y sondeo de mapa de alturas físico;
+- persistencia y recuperación del mapa;
+- compensación legacy/adaptive y auditoría;
+- generación de artefactos compensados;
+- plan y preflight multioperación;
+- JobRun, upload Moonraker, progreso y ETA;
+- cambio de herramienta, nueva referencia y regeneración de operaciones posteriores;
+- pausa, cancelación, recuperación y cierre de ejecuciones obsoletas.
 
-- mapa de alturas fisico y compensacion completa;
-- ejecucion fisica de trabajos, recuperacion y cierre del flujo `JobRun`;
-- validacion fisica integral de la reconexion Arduino y de la captura de referencias sobre la CNC real.
+La campaña activa es la **validación física integral de cierre**. No se considera una fase de desarrollo de nuevas funcionalidades.
 
-Esas areas quedan fuera de Fase 2 y no se repararon deliberadamente en esta rama.
+## Línea base de validación final
 
-## Seguridad
+- SHA: `af0099dda64fd9394045766b8475b689cf69a320`
+- Rama: `baseline/physical-validation-2026-08-16`
+- Estado operativo: [docs/CURRENT_STATE.md](docs/CURRENT_STATE.md)
+- Checklist de validación: [docs/FINAL_VALIDATION.md](docs/FINAL_VALIDATION.md)
+- Plan por fases: [PLAN.md](PLAN.md)
+
+## Política de cambios
 
 - No trabajar directamente en `main`.
-- No enviar G-code, homing, jog, probe, spindle ni ejecucion de trabajos sin autorizacion explicita del usuario.
-- No reiniciar ni reconfigurar `systemd`, Klipper, Moonraker, Arduino ni la maquina durante desarrollo o pruebas seguras.
-- No publicar secretos, `.env`, datos reales de produccion, mapas fisicos, referencias reales ni G-code privado.
-- Mantener la configuracion operativa fuera del repositorio, en `/etc/klipper-cnc-assistant/`.
-- Usar solo configuraciones seguras o simuladas durante pruebas automatizadas.
+- Todo defecto reproducible descubierto durante validación se corrige en una rama `hotfix/...` independiente.
+- Cada cambio funcional requiere pruebas, PR, CI y aprobación explícita antes de merge/deploy.
+- La rama `baseline/physical-validation-2026-08-16` no se mueve durante la campaña.
+- No enviar G-code, homing, jog, probe, spindle ni ejecución física sin autorización explícita.
+- No reiniciar Klipper o Moonraker como parte de un cambio de aplicación salvo que exista una necesidad distinta y explícitamente autorizada.
+- No versionar secretos, configuración operativa real, mapas físicos, referencias reales ni G-code privado.
 
-## Estructura principal
+## Arquitectura
 
 ```text
 src/klipper_cnc_assistant/
@@ -69,15 +79,7 @@ docs/
 
 Arquitectura detallada: [docs/architecture.md](docs/architecture.md)
 
-Auditoria Fase 1: [docs/recovery/current-project-audit.md](docs/recovery/current-project-audit.md)
-
-Linea base de Fase 2: [docs/phase-2/references-connectivity-baseline.md](docs/phase-2/references-connectivity-baseline.md)
-
-Resultado de Fase 2: [docs/phase-2/references-connectivity-result.md](docs/phase-2/references-connectivity-result.md)
-
-Plan por fases: [PLAN.md](PLAN.md)
-
-## Instalacion
+## Instalación de desarrollo
 
 Backend:
 
@@ -96,39 +98,14 @@ cd frontend
 npm ci
 ```
 
-## Desarrollo
+## Pruebas seguras
 
-Backend local seguro:
-
-```bash
-source .venv/bin/activate
-MACHINE_MODE=simulated MACHINE_AUTO_CONNECT=false PYTHONPATH=src python -m klipper_cnc_assistant serve --host 127.0.0.1 --port 8010 --data-dir /tmp/kca-dev-data
-```
-
-Analisis de G-code sin hardware:
-
-```bash
-source .venv/bin/activate
-PYTHONPATH=src python -m klipper_cnc_assistant check-gcode ruta/al/archivo.nc
-```
-
-Frontend local:
-
-```bash
-cd frontend
-npm run dev
-```
-
-## Pruebas
-
-Linea segura de backend usada en Fase 2:
+Backend:
 
 ```bash
 source .venv/bin/activate
 MACHINE_MODE=simulated MACHINE_AUTO_CONNECT=false PYTHONPATH=src python -m unittest discover -s tests -v
 ```
-
-Si alguna suite intenta inicializar hardware, ejecutar la linea base documentada en `docs/phase-2/references-connectivity-baseline.md` mas las pruebas nuevas de Fase 2.
 
 Frontend:
 
@@ -139,20 +116,4 @@ npm run test
 npm run build
 ```
 
-## Ejecucion
-
-CLI soportada:
-
-```bash
-python -m klipper_cnc_assistant serve --host 127.0.0.1 --port 8000 --data-dir data
-python -m klipper_cnc_assistant check-gcode archivo.nc
-```
-
-La aplicacion activa del host no se modifica desde esta rama. El desarrollo de Fase 2 se realiza exclusivamente en `/home/impresora/klipper-cnc-assistant-fase2`.
-
-## Estado de fases
-
-- Fase 1: completada y fusionada en `main`.
-- Fase 2: activa en `fase-2/referencias-conectividad`.
-- Fase 3: pendiente.
-- Fase 4: pendiente.
+Las pruebas automatizadas no sustituyen la campaña física descrita en `docs/FINAL_VALIDATION.md`.
