@@ -46,6 +46,8 @@ class MachineInitializationRequest(BaseModel):
 
 class MachineSettingsRequest(BaseModel):
     reference_prep_z_mm: float | None = None
+    long_tool_change_clearance_z_mm: float | None = None
+    # Alias transitorio de lectura/escritura para clientes anteriores al hotfix.
     long_tool_reference_prep_z_mm: float | None = None
     reference_prep_z_feed_mm_min: float | None = None
     move_total_timeout_s: float | None = None

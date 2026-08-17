@@ -457,7 +457,6 @@ export type MachineRuntime = {
   klipper: Record<string, unknown>;
   preparation?: {
     reference_prep_z_mm?: number;
-    long_tool_reference_prep_z_mm?: number;
     reference_prep_z_feed_mm_min?: number;
     reference_prep_z_speed_mm_s?: number;
     reference_prep_xy_feed_mm_min?: number;
@@ -467,7 +466,17 @@ export type MachineRuntime = {
     target?: { x_mm?: number | null; y_mm?: number | null; z_mm?: number | null } | null;
     sequence?: string[];
   };
-  tool_change?: { x_mm?: number; y_mm?: number; z_mm?: number; z_feed_mm_min?: number; z_speed_mm_s?: number };
+  tool_change?: {
+    x_mm?: number;
+    y_mm?: number;
+    z_mm?: number;
+    clearance_z_mm?: number;
+    long_tool_clearance_z_mm?: number;
+    work_z_mm?: number;
+    z_positive_up?: boolean;
+    z_feed_mm_min?: number;
+    z_speed_mm_s?: number;
+  };
   arduino: Record<string, unknown>;
   probe_live?: Record<string, unknown>;
   last_probe_failure?: Record<string, unknown> | null;
@@ -673,6 +682,7 @@ export type JobOperationPlan = {
   tool_name: string;
   tool_key: string;
   tool_reference_profile?: ToolReferenceProfile;
+  tool_change_clearance_z_mm?: number;
   reference_prep_z_mm?: number;
   tool_changed: boolean;
   map_status: string;
@@ -730,6 +740,7 @@ export type JobRunOperation = {
   tool_name: string;
   tool_key: string;
   tool_reference_profile?: ToolReferenceProfile;
+  tool_change_clearance_z_mm?: number;
   reference_prep_z_mm?: number;
   tool_changed: boolean;
   reference_status: string;
@@ -920,6 +931,11 @@ export type LiveExecutionSnapshot = {
     required_tool: string | null;
     tool?: string | null;
     tool_reference_profile?: ToolReferenceProfile;
+    tool_change_profile?: ToolReferenceProfile;
+    tool_change_clearance_z_mm?: number | null;
+    outgoing_tool?: string | null;
+    outgoing_tool_change_profile?: ToolReferenceProfile;
+    outgoing_tool_change_clearance_z_mm?: number | null;
     reference_prep_z_mm?: number | null;
     last_error?: {
       code: string;

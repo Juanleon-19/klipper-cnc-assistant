@@ -180,8 +180,8 @@ class MoonrakerJobAdapter:
             return {"mode": "manual", "command_sent": False}
         return self._client().send_gcode("M5")
 
-    def move_to_tool_change_position(self) -> dict[str, Any]:
-        return self.runtime.move_to_tool_change_position()
+    def move_to_tool_change_position(self, *, tool_change_profile: str = "standard") -> dict[str, Any]:
+        return self.runtime.move_to_tool_change_position(tool_change_profile=tool_change_profile)
 
     def move_to_reference_point(
         self,
@@ -193,7 +193,19 @@ class MoonrakerJobAdapter:
         return self.runtime.go_to_reference_point(
             reference_x=x_mm,
             reference_y=y_mm,
-            tool_reference_profile=tool_reference_profile,
+        )
+
+    def move_from_tool_change_to_reference_point(
+        self,
+        *,
+        x_mm: float,
+        y_mm: float,
+        tool_change_profile: str = "standard",
+    ) -> dict[str, Any]:
+        return self.runtime.move_from_tool_change_to_reference_point(
+            reference_x=x_mm,
+            reference_y=y_mm,
+            tool_change_profile=tool_change_profile,
         )
 
     def probe_tool_reference(self, *, x_mm: float, y_mm: float, probe_config: dict[str, Any] | None) -> dict[str, Any]:
@@ -408,6 +420,7 @@ class JobService:
             "TOOL_CHANGE_CONFIRMED",
             "MOVING_TO_REFERENCE",
             "CALIBRATING_TOOL",
+            "READY_TO_RESUME",
             "RECOVERY_REQUIRED",
         }
         transition_operation = next_operation if str(run.get("state")) in transition_states and next_operation is not None else operation
@@ -478,6 +491,11 @@ class JobService:
                 "required_tool": (next_operation or {}).get("tool_name"),
                 "tool": (transition_operation or {}).get("tool_name"),
                 "tool_reference_profile": (transition_operation or {}).get("tool_reference_profile", "standard"),
+                "tool_change_profile": (transition_operation or {}).get("tool_reference_profile", "standard"),
+                "tool_change_clearance_z_mm": (transition_operation or {}).get("tool_change_clearance_z_mm"),
+                "outgoing_tool": (operation or {}).get("tool_name"),
+                "outgoing_tool_change_profile": (operation or {}).get("tool_reference_profile", "standard"),
+                "outgoing_tool_change_clearance_z_mm": (operation or {}).get("tool_change_clearance_z_mm"),
                 "reference_prep_z_mm": (transition_operation or {}).get("reference_prep_z_mm"),
                 "last_error": run.get("last_transition_error") if str(run.get("state")) == "RECOVERY_REQUIRED" else None,
                 "operator_confirmation_required": str(run.get("state")) in {"SPINDLE_STOP_REQUIRED", "TOOL_CHANGE_REQUIRED", "READY_TO_RESUME"},
@@ -746,27 +764,40 @@ class JobService:
         active_map = plan["active_map"]
         if active_map is None:
             raise ApplicationError("No existe mapa físico activo para medir la referencia de herramienta.")
-        operation_index = int(run["current_operation_index"]) + 1 if run["state"] == "TOOL_CHANGE_CONFIRMED" else int(run.get("current_operation_index", 0) or 0)
+        returning_from_tool_change = run["state"] == "TOOL_CHANGE_CONFIRMED"
+        operation_index = int(run["current_operation_index"]) + 1 if returning_from_tool_change else int(run.get("current_operation_index", 0) or 0)
         operation_payload = run["operations"][operation_index]
         adapter = self.adapter_factory(self.runtime)
         reference_x = float(active_map["machine_origin_x"])
         reference_y = float(active_map["machine_origin_y"])
         tool_reference_profile = str(operation_payload.get("tool_reference_profile") or "standard")
-        reference_prep_z = self._reference_preparation_z(tool_reference_profile)
+        reference_prep_z = self._reference_preparation_z()
+        tool_change_clearance_z = self._tool_change_clearance_z(tool_reference_profile)
         run["state"] = "MOVING_TO_REFERENCE"
         run["available_actions"] = ["cancel"]
-        run["next_action"] = (
-            f"Moviendo primero Z a {reference_prep_z:.3f} mm y después al punto de referencia "
-            f"CNC X={reference_x:.3f}, Y={reference_y:.3f}"
-        )
+        if returning_from_tool_change:
+            run["next_action"] = (
+                f"Saliendo del cambio con perfil {tool_reference_profile}: despeje Z "
+                f"{tool_change_clearance_z:.3f} mm, X/Y de referencia y aproximación Z "
+                f"{reference_prep_z:.3f} mm"
+            )
+        else:
+            run["next_action"] = (
+                f"Moviendo primero Z a {reference_prep_z:.3f} mm y después al punto de referencia "
+                f"CNC X={reference_x:.3f}, Y={reference_y:.3f}"
+            )
         operation_payload["reference_prep_z_mm"] = reference_prep_z
+        operation_payload["tool_change_clearance_z_mm"] = tool_change_clearance_z
         self._append_event(run, "info", run["next_action"])
         self._save_run(context, run)
-        adapter.move_to_reference_point(
-            x_mm=reference_x,
-            y_mm=reference_y,
-            tool_reference_profile=tool_reference_profile,
-        )
+        if returning_from_tool_change:
+            adapter.move_from_tool_change_to_reference_point(
+                x_mm=reference_x,
+                y_mm=reference_y,
+                tool_change_profile=tool_reference_profile,
+            )
+        else:
+            adapter.move_to_reference_point(x_mm=reference_x, y_mm=reference_y)
         run["state"] = "CALIBRATING_TOOL"
         run["next_action"] = "Sondeando referencia Z de la nueva herramienta"
         self._append_event(run, "info", run["next_action"])
@@ -1093,14 +1124,24 @@ class JobService:
         next_index = current_index + 1
         if next_index >= len(run.get("operations") or []):
             raise ApplicationError("No existe una siguiente operación para completar el cambio de herramienta.")
+        current_operation = run["operations"][current_index]
         next_operation = run["operations"][next_index]
+        outgoing_profile = str(current_operation.get("tool_reference_profile") or "standard")
+        outgoing_clearance_z = self._tool_change_clearance_z(outgoing_profile)
         try:
             run["state"] = "RETRACTING"
             run["next_action"] = "Subiendo a Z segura para cambio de herramienta"
             run["available_actions"] = ["cancel"]
-            self._append_event(run, "info", "Spindle detenido confirmado. Subiendo a Z segura para cambio de herramienta.")
+            run["outgoing_tool_change_profile"] = outgoing_profile
+            run["outgoing_tool_change_clearance_z_mm"] = outgoing_clearance_z
+            self._append_event(
+                run,
+                "info",
+                "Spindle detenido confirmado. Subiendo la herramienta instalada "
+                f"con perfil {outgoing_profile} a despeje Z {outgoing_clearance_z:.3f} mm.",
+            )
             self._save_run(context, run)
-            adapter.move_to_tool_change_position()
+            adapter.move_to_tool_change_position(tool_change_profile=outgoing_profile)
             run["last_watcher_error"] = None
             run["last_transition_error"] = None
             run["state"] = "TOOL_CHANGE_REQUIRED"
@@ -1216,7 +1257,8 @@ class JobService:
                     "tool_name": operation.herramienta or operation.tool_id or "sin herramienta",
                     "tool_key": tool_key,
                     "tool_reference_profile": str(operation.tool_reference_profile),
-                    "reference_prep_z_mm": self._reference_preparation_z(str(operation.tool_reference_profile)),
+                    "tool_change_clearance_z_mm": self._tool_change_clearance_z(str(operation.tool_reference_profile)),
+                    "reference_prep_z_mm": self._reference_preparation_z(),
                     "tool_changed": tool_changed,
                     "map_status": "LISTO" if active_map is not None else "PENDIENTE",
                     "coverage_status": "VALIDA" if coverage is None or coverage["sufficient"] else "FUERA_DE_DOMINIO",
@@ -1289,6 +1331,7 @@ class JobService:
                     "tool_id": item["tool_id"],
                     "tool_name": item["tool_name"],
                     "tool_reference_profile": item["tool_reference_profile"],
+                    "tool_change_clearance_z_mm": item["tool_change_clearance_z_mm"],
                     "reference_prep_z_mm": item["reference_prep_z_mm"],
                     "file": item["generated_file"],
                     "metadata_path": item["generated_metadata_path"],
@@ -1334,6 +1377,7 @@ class JobService:
                     "tool_name": item["tool_name"],
                     "tool_key": item["tool_key"],
                     "tool_reference_profile": item["tool_reference_profile"],
+                    "tool_change_clearance_z_mm": item["tool_change_clearance_z_mm"],
                     "reference_prep_z_mm": item["reference_prep_z_mm"],
                     "tool_changed": item["tool_changed"],
                     "reference_status": item["reference_status"],
@@ -1669,14 +1713,27 @@ class JobService:
         normalized_face = BoardFace(face).value if face in {BoardFace.SUPERIOR.value, BoardFace.INFERIOR.value} else str(face)
         return JobContext(project_id=project_id, setup_id=setup_id, face=normalized_face)
 
-    def _reference_preparation_z(self, tool_reference_profile: str) -> float:
+    def _reference_preparation_z(self) -> float:
         resolver = getattr(self.runtime, "reference_preparation_z", None)
         if callable(resolver):
-            return float(resolver(tool_reference_profile))
+            return float(resolver())
         config = getattr(self.runtime, "config", None)
-        if tool_reference_profile == "long_tool":
-            return float(getattr(config, "long_tool_reference_prep_z_mm", getattr(config, "reference_prep_z_mm", 115.0)))
         return float(getattr(config, "reference_prep_z_mm", 115.0))
+
+    def _tool_change_clearance_z(self, tool_change_profile: str) -> float:
+        resolver = getattr(self.runtime, "tool_change_clearance_z", None)
+        if callable(resolver):
+            return float(resolver(tool_change_profile))
+        config = getattr(self.runtime, "config", None)
+        if tool_change_profile == "long_tool":
+            return float(
+                getattr(
+                    config,
+                    "long_tool_change_clearance_z_mm",
+                    getattr(config, "tool_change_clearance_z_mm", 115.0),
+                )
+            )
+        return float(getattr(config, "tool_change_clearance_z_mm", 115.0))
 
     def _setup_run_files(self, project_id: str, setup_id: str) -> list[tuple[JobContext, Path]]:
         base = self._project_dir(project_id) / "reports" / "jobs" / setup_id

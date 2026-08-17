@@ -407,6 +407,9 @@ describe("ExecutionConsole", () => {
             state: "READY_TO_RESUME",
             tool: "Broca 0.8 mm",
             tool_reference_profile: "long_tool",
+            tool_change_profile: "long_tool",
+            tool_change_clearance_z_mm: 130,
+            reference_prep_z_mm: 105,
             operator_confirmation_required: true,
           },
           job_run: { ...(baseSnapshot.job_run as NonNullable<typeof baseSnapshot.job_run>), state: "READY_TO_RESUME", available_actions: ["continue", "cancel"] },
@@ -422,6 +425,10 @@ describe("ExecutionConsole", () => {
 
     expect(screen.getByRole("region", { name: "Nueva referencia Z lista" })).toHaveTextContent("Broca 0.8 mm");
     expect(screen.getByRole("region", { name: "Nueva referencia Z lista" })).toHaveTextContent("Herramienta larga");
+    expect(screen.getAllByText("Perfil de cambio").length).toBeGreaterThan(0);
+    expect(screen.getByText("Z segura durante cambio").parentElement).toHaveTextContent("130.000 mm");
+    expect(screen.getByText("Z de aproximación a referencia").parentElement).toHaveTextContent("105.000 mm");
+    expect(screen.getByText(/La Z segura se usa solo durante el cambio de herramienta/i)).toBeInTheDocument();
     expect(screen.getByText("Nueva referencia Z lista")).toBeInTheDocument();
     expect(screen.getByText(/generará automáticamente una nueva compensación Legacy/i)).toBeInTheDocument();
     expect(screen.getByText(/No es necesario volver a la sección Compensación/i)).toBeInTheDocument();

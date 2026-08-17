@@ -71,7 +71,7 @@ type MachineSettingsValues = { [Key in keyof MachineSettingsInput]: number };
 
 const DEFAULT_MACHINE_SETTINGS: MachineSettingsValues = {
   reference_prep_z_mm: 115,
-  long_tool_reference_prep_z_mm: 115,
+  long_tool_change_clearance_z_mm: 115,
   reference_prep_z_feed_mm_min: 180,
   move_total_timeout_s: 180,
   no_progress_timeout_s: 60,
@@ -94,8 +94,8 @@ function normalizeMachineSettings(
     const value = settings[key];
     normalized[key] = typeof value === "number" && Number.isFinite(value) ? value : fallback[key];
   }
-  if (!(typeof settings.long_tool_reference_prep_z_mm === "number" && Number.isFinite(settings.long_tool_reference_prep_z_mm))) {
-    normalized.long_tool_reference_prep_z_mm = normalized.reference_prep_z_mm;
+  if (!(typeof settings.long_tool_change_clearance_z_mm === "number" && Number.isFinite(settings.long_tool_change_clearance_z_mm))) {
+    normalized.long_tool_change_clearance_z_mm = fallback.long_tool_change_clearance_z_mm;
   }
   return normalized;
 }
@@ -103,7 +103,7 @@ function normalizeMachineSettings(
 function machineSettingsToInput(settings: MachineSettingsValues): MachineSettingsInput {
   return {
     reference_prep_z_mm: String(settings.reference_prep_z_mm),
-    long_tool_reference_prep_z_mm: String(settings.long_tool_reference_prep_z_mm),
+    long_tool_change_clearance_z_mm: String(settings.long_tool_change_clearance_z_mm),
     reference_prep_z_feed_mm_min: String(settings.reference_prep_z_feed_mm_min),
     move_total_timeout_s: String(settings.move_total_timeout_s),
     no_progress_timeout_s: String(settings.no_progress_timeout_s),
@@ -125,16 +125,15 @@ function machineSettingsInputsDiffer(input: MachineSettingsInput, saved: Machine
 }
 
 function machineSettingsRuntimeSignature(settings: MachineSettingsValues) {
-  return `${settings.reference_prep_z_mm}:${settings.long_tool_reference_prep_z_mm}`;
+  return `${settings.reference_prep_z_mm}:${settings.long_tool_change_clearance_z_mm}`;
 }
 
 function runtimeSettingsStatus(settings: MachineSettingsValues, runtime: MachineRuntime | null): MachineSettingsRuntimeStatus {
   const standardZ = runtime?.preparation?.reference_prep_z_mm;
   if (typeof standardZ !== "number" || !Number.isFinite(standardZ)) return "unconfirmed";
-  const longToolZ = typeof runtime?.preparation?.long_tool_reference_prep_z_mm === "number"
-    ? runtime.preparation.long_tool_reference_prep_z_mm
-    : standardZ;
-  return standardZ === settings.reference_prep_z_mm && longToolZ === settings.long_tool_reference_prep_z_mm
+  const longToolClearanceZ = runtime?.tool_change?.long_tool_clearance_z_mm;
+  if (typeof longToolClearanceZ !== "number" || !Number.isFinite(longToolClearanceZ)) return "unconfirmed";
+  return standardZ === settings.reference_prep_z_mm && longToolClearanceZ === settings.long_tool_change_clearance_z_mm
     ? "coherent"
     : "inconsistent";
 }
@@ -1062,7 +1061,7 @@ export function ProjectWorkspace({
   const saveMachineSettings = async () => {
     const labels: Record<keyof typeof machineSettingsInput, string> = {
       reference_prep_z_mm: "Z de preparación",
-      long_tool_reference_prep_z_mm: "Z de aproximación para herramienta larga",
+      long_tool_change_clearance_z_mm: "Z segura de cambio para herramienta larga",
       reference_prep_z_feed_mm_min: "Velocidad Z de preparación",
       move_total_timeout_s: "Timeout total",
       no_progress_timeout_s: "Timeout sin progreso",
@@ -1340,9 +1339,9 @@ export function ProjectWorkspace({
             <input value={newOperationTool} onChange={(event) => setNewOperationTool(event.target.value)} placeholder="Ej. Broca 0,8 mm" />
           </label>
           <label>
-            Perfil de altura
+            Perfil de cambio
             <select
-              aria-label="Perfil de altura de la nueva operación"
+              aria-label="Perfil de cambio de la nueva operación"
               value={newOperationToolReferenceProfile}
               onChange={(event) => setNewOperationToolReferenceProfile(event.target.value as ToolReferenceProfile)}
             >
@@ -1382,9 +1381,9 @@ export function ProjectWorkspace({
                       />
                     </label>
                     <label className="operation-tool-field">
-                      <span className="sr-only">Perfil de referencia de {operation.nombre}</span>
+                      <span className="sr-only">Perfil de cambio de {operation.nombre}</span>
                       <select
-                        aria-label={"Perfil de referencia de " + operation.nombre}
+                        aria-label={"Perfil de cambio de " + operation.nombre}
                         value={operation.tool_reference_profile ?? "standard"}
                         onChange={(event) => void onUpdateOperation(operation.id, {
                           nombre: operation.nombre,
@@ -1432,7 +1431,7 @@ export function ProjectWorkspace({
               <div><dt>Montaje</dt><dd>{project.montajes.find((setup) => setup.id === selectedOperation.setup_id)?.nombre ?? "-"}</dd></div>
               <div><dt>Tipo</dt><dd>{translateOperationType(selectedOperation.tipo)}</dd></div>
               <div><dt>Herramienta</dt><dd>{selectedOperation.herramienta ?? "Sin asignar"}</dd></div>
-              <div><dt>Perfil de referencia</dt><dd>{selectedOperation.tool_reference_profile === "long_tool" ? "Herramienta larga" : "Estándar"}</dd></div>
+              <div><dt>Perfil de cambio</dt><dd>{selectedOperation.tool_reference_profile === "long_tool" ? "Herramienta larga" : "Estándar"}</dd></div>
               <div><dt>Archivo</dt><dd>{selectedOperation.nombre_archivo_original ?? "Sin archivo"}</dd></div>
               <div><dt>Tamaño</dt><dd>{formatFileSize(selectedOperation.tamano_archivo_bytes)}</dd></div>
             </dl>

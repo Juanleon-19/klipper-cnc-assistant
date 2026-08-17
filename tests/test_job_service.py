@@ -21,7 +21,8 @@ class FakeRuntime:
             "moonraker_request_timeout_s": 2.0,
             "spindle_control_mode": "manual",
             "reference_prep_z_mm": 115.0,
-            "long_tool_reference_prep_z_mm": 130.0,
+            "tool_change_clearance_z_mm": 115.0,
+            "long_tool_change_clearance_z_mm": 130.0,
             "velocity_tolerance_mm_s": 0.02,
         })()
         self._last_probe = {"x_mm": 100.0, "y_mm": 100.0, "z_mm": 4.75}
@@ -40,13 +41,16 @@ class FakeRuntime:
         self.refresh_observed_state_calls += 1
         return self.snapshot()
 
-    def move_to_tool_change_position(self) -> dict:
+    def move_to_tool_change_position(self, *, tool_change_profile: str = "standard") -> dict:
         return self.snapshot()
 
-    def reference_preparation_z(self, tool_reference_profile: str) -> float:
-        if tool_reference_profile == "long_tool":
-            return self.config.long_tool_reference_prep_z_mm
+    def reference_preparation_z(self) -> float:
         return self.config.reference_prep_z_mm
+
+    def tool_change_clearance_z(self, tool_change_profile: str) -> float:
+        if tool_change_profile == "long_tool":
+            return self.config.long_tool_change_clearance_z_mm
+        return self.config.tool_change_clearance_z_mm
 
     def last_probe_position(self) -> dict[str, float]:
         return dict(self._last_probe)
@@ -63,6 +67,7 @@ class FakeAdapter:
         self.resume_calls = 0
         self.cancel_calls = 0
         self.tool_change_moves = 0
+        self.tool_change_profiles: list[str] = []
         self.reference_moves: list[tuple[float, float]] = []
         self.reference_profiles: list[str] = []
         self.spindle_stops = 0
@@ -149,8 +154,9 @@ class FakeAdapter:
         self.command_log.append("M5")
         return {"stopped": True}
 
-    def move_to_tool_change_position(self) -> dict:
+    def move_to_tool_change_position(self, *, tool_change_profile: str = "standard") -> dict:
         self.tool_change_moves += 1
+        self.tool_change_profiles.append(tool_change_profile)
         self.command_log.extend(["tool-change-z", "M400", "tool-change-xy", "M400"])
         return self.runtime.snapshot()
 
@@ -159,8 +165,25 @@ class FakeAdapter:
         self.reference_profiles.append(tool_reference_profile)
         return {"accepted": True}
 
+    def move_from_tool_change_to_reference_point(
+        self,
+        *,
+        x_mm: float,
+        y_mm: float,
+        tool_change_profile: str = "standard",
+    ) -> dict:
+        self.reference_moves.append((x_mm, y_mm))
+        self.reference_profiles.append(tool_change_profile)
+        self.command_log.extend([
+            f"incoming-{tool_change_profile}-clearance",
+            "incoming-reference-xy",
+            "incoming-reference-prep-z",
+        ])
+        return {"accepted": True}
+
     def probe_tool_reference(self, *, x_mm: float, y_mm: float, probe_config: dict | None) -> dict:
         self.probe_calls += 1
+        self.command_log.append("incoming-reference-probe")
         self.runtime._last_probe = {"x_mm": x_mm, "y_mm": y_mm, "z_mm": 4.5 - self.probe_calls * 0.1}
         return {"probe": dict(self.runtime._last_probe)}
 
@@ -490,6 +513,52 @@ class JobServiceTest(unittest.TestCase):
         self.assertIn("Z4.", output)
         self.assertNotIn("X20.00000 Y10.00000 Z-0.05000", output)
 
+    def test_long_tool_clearance_does_not_change_map_or_legacy_compensation(self) -> None:
+        self.runtime.config.long_tool_change_clearance_z_mm = 115.0
+        first_plan = self.job_service.generate_project_compensation(
+            project_id=self.project_id,
+            setup_id=self.setup_id,
+            face="superior",
+        )
+        operation = first_plan["operations"][2]
+        generated_path = self.repository.project_dir(self.project_id) / str(operation["generated_file"])
+        metadata_path = self.repository.project_dir(self.project_id) / str(operation["generated_metadata_path"])
+        first_gcode = generated_path.read_text(encoding="utf-8")
+        first_metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        active_map = first_plan["active_map"]
+        first_map_contract = {
+            "height_map": active_map["height_map"],
+            "reference_z": active_map["reference_z"],
+            "reference_frame": first_metadata["reference_frame"],
+            "delta_min": first_metadata["compensation_delta_min_mm"],
+            "delta_max": first_metadata["compensation_delta_max_mm"],
+            "fingerprint": first_metadata["audit_fingerprint"],
+        }
+
+        self.runtime.config.long_tool_change_clearance_z_mm = 130.0
+        second_plan = self.job_service.generate_project_compensation(
+            project_id=self.project_id,
+            setup_id=self.setup_id,
+            face="superior",
+        )
+        second_operation = second_plan["operations"][2]
+        second_metadata_path = self.repository.project_dir(self.project_id) / str(second_operation["generated_metadata_path"])
+        second_metadata = json.loads(second_metadata_path.read_text(encoding="utf-8"))
+        second_map = second_plan["active_map"]
+        second_map_contract = {
+            "height_map": second_map["height_map"],
+            "reference_z": second_map["reference_z"],
+            "reference_frame": second_metadata["reference_frame"],
+            "delta_min": second_metadata["compensation_delta_min_mm"],
+            "delta_max": second_metadata["compensation_delta_max_mm"],
+            "fingerprint": second_metadata["audit_fingerprint"],
+        }
+
+        self.assertEqual(operation["tool_change_clearance_z_mm"], 115.0)
+        self.assertEqual(second_operation["tool_change_clearance_z_mm"], 130.0)
+        self.assertEqual(second_map_contract, first_map_contract)
+        self.assertEqual(generated_path.read_text(encoding="utf-8"), first_gcode)
+
     def test_dry_run_uses_compensated_plan_without_adapter_calls(self) -> None:
         self.job_service.generate_project_compensation(project_id=self.project_id, setup_id=self.setup_id, face="superior")
         result = self.job_service.dry_run(project_id=self.project_id, setup_id=self.setup_id, face="superior")
@@ -523,6 +592,11 @@ class JobServiceTest(unittest.TestCase):
         self.job_service._threads[(self.project_id, self.setup_id, "superior")].join(timeout=5)  # type: ignore[attr-defined]
         run = self.job_service.get_run(project_id=self.project_id, setup_id=self.setup_id, face="superior")
         self.assertEqual(run["state"], "READY_TO_RESUME")
+        live = self.job_service.live_execution(project_id=self.project_id, setup_id=self.setup_id, face="superior")
+        self.assertEqual(live["transition"]["tool"], "Broca 0.8 mm")
+        self.assertEqual(live["transition"]["tool_change_profile"], "long_tool")
+        self.assertEqual(live["transition"]["tool_change_clearance_z_mm"], 130.0)
+        self.assertEqual(live["transition"]["reference_prep_z_mm"], 115.0)
         self.assertEqual(len(self.adapter.started), 0)
         self.assertIsNone(run["operations"][2]["generated_file"])
         self.assertIsNone(run["operations"][3]["generated_file"])
@@ -553,10 +627,32 @@ class JobServiceTest(unittest.TestCase):
         self.assertEqual(run["summary"]["operations_completed"], 4)
         self.assertEqual(self.adapter.probe_calls, 2)
         self.assertEqual(self.adapter.tool_change_moves, 2)
+        self.assertEqual(self.adapter.tool_change_profiles, ["standard", "long_tool"])
         self.assertEqual(self.adapter.spindle_stops, 0)
         self.assertEqual(self.adapter.reference_moves, [(100.0, 100.0), (100.0, 100.0)])
         self.assertEqual(self.adapter.reference_profiles, ["long_tool", "standard"])
-        self.assertEqual(run["operations"][2]["reference_prep_z_mm"], 130.0)
+        self.assertEqual(run["operations"][2]["reference_prep_z_mm"], 115.0)
+        self.assertEqual(run["operations"][2]["tool_change_clearance_z_mm"], 130.0)
+        long_tool_return = self.adapter.command_log.index("incoming-long_tool-clearance")
+        self.assertEqual(
+            self.adapter.command_log[long_tool_return:long_tool_return + 4],
+            [
+                "incoming-long_tool-clearance",
+                "incoming-reference-xy",
+                "incoming-reference-prep-z",
+                "incoming-reference-probe",
+            ],
+        )
+        standard_return = self.adapter.command_log.index("incoming-standard-clearance")
+        self.assertEqual(
+            self.adapter.command_log[standard_return:standard_return + 4],
+            [
+                "incoming-standard-clearance",
+                "incoming-reference-xy",
+                "incoming-reference-prep-z",
+                "incoming-reference-probe",
+            ],
+        )
         self.assertEqual(len(self.adapter.started), 0)
         self.assertEqual(run["operations"][3]["execution_status"], "COMPLETED")
         self.assertTrue({"M3", "M4", "M5"}.isdisjoint(self.adapter.command_log))
@@ -566,11 +662,11 @@ class JobServiceTest(unittest.TestCase):
         original_move = self.adapter.move_to_tool_change_position
         calls = {"count": 0}
 
-        def fail_once() -> dict:
+        def fail_once(*, tool_change_profile: str = "standard") -> dict:
             calls["count"] += 1
             if calls["count"] == 1:
                 raise RuntimeError("tool change blocked")
-            return original_move()
+            return original_move(tool_change_profile=tool_change_profile)
 
         self.adapter.move_to_tool_change_position = fail_once  # type: ignore[assignment]
         self.job_service.start_run(project_id=self.project_id, setup_id=self.setup_id, face="superior")
@@ -603,6 +699,52 @@ class JobServiceTest(unittest.TestCase):
         self.assertEqual(run["operations"][1]["execution_status"], "COMPLETED")
         self.assertEqual(self.adapter.uploads, uploads_before)
         self.assertEqual(calls["count"], 2)
+
+    def test_cancel_archives_run_and_next_preparation_restarts_every_operation(self) -> None:
+        original = self.job_service.prepare_run(
+            project_id=self.project_id,
+            setup_id=self.setup_id,
+            face="superior",
+        )
+        context = self.job_service._context(self.project_id, self.setup_id, "superior")
+        original["current_operation_index"] = 2
+        original["operations"][0]["execution_status"] = "COMPLETED"
+        original["operations"][1]["execution_status"] = "COMPLETED"
+        original["operations"][2]["execution_status"] = "RUNNING"
+        self.job_service._save_run(context, original)
+
+        cancelled = self.job_service.run_action(
+            project_id=self.project_id,
+            setup_id=self.setup_id,
+            face="superior",
+            action="cancel",
+        )
+
+        self.assertEqual(cancelled["state"], "JOB_CANCELLED")
+        self.assertEqual(self.adapter.cancel_calls, 1)
+        self.assertEqual(len(self.job_service.history(
+            project_id=self.project_id,
+            setup_id=self.setup_id,
+            face="superior",
+        )), 1)
+        self.assertEqual(
+            self.job_service.get_run(
+                project_id=self.project_id,
+                setup_id=self.setup_id,
+                face="superior",
+            )["run_id"],
+            original["run_id"],
+        )
+
+        prepared = self.job_service.prepare_run(
+            project_id=self.project_id,
+            setup_id=self.setup_id,
+            face="superior",
+        )
+
+        self.assertNotEqual(prepared["run_id"], original["run_id"])
+        self.assertEqual(prepared["current_operation_index"], 0)
+        self.assertTrue(all(item["execution_status"] == "PENDING" for item in prepared["operations"]))
 
     def test_preparation_reset_archives_current_run_once_and_preserves_project_artifacts(self) -> None:
         plan = self.job_service.generate_project_compensation(project_id=self.project_id, setup_id=self.setup_id, face="superior")

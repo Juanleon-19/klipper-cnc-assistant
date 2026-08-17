@@ -182,7 +182,8 @@ export function ExecutionConsole({ snapshot, error, busy, onPrepare, onStart, on
   const showReadyToResume = runStatus === "READY_TO_RESUME";
   const eta = snapshot?.eta;
   const etaIsCalculating = ACTIVE_EXECUTION_STATES.has(runStatus) && eta?.available === false;
-  const transitionProfileLabel = snapshot?.transition.tool_reference_profile === "long_tool" ? "Herramienta larga" : "Estándar";
+  const transitionProfile = snapshot?.transition.tool_change_profile ?? snapshot?.transition.tool_reference_profile ?? "standard";
+  const transitionProfileLabel = transitionProfile === "long_tool" ? "Herramienta larga" : "Estándar";
   const transitionTool = snapshot?.transition.tool ?? snapshot?.transition.required_tool ?? snapshot?.operation.tool ?? "pendiente";
   const automaticFlowDescription = AUTOMATIC_FLOW_DESCRIPTIONS[runStatus] ?? null;
   const automaticFlowStepIndex = AUTOMATIC_FLOW_STEPS.findIndex((step) => step.state === runStatus);
@@ -233,7 +234,7 @@ export function ExecutionConsole({ snapshot, error, busy, onPrepare, onStart, on
           <h4>Nueva referencia Z lista</h4>
           <div className="info-grid info-grid--double compact-grid">
             <div className="metric-box"><span>Herramienta</span><strong>{transitionTool}</strong></div>
-            <div className="metric-box"><span>Perfil</span><strong>{transitionProfileLabel}</strong></div>
+            <div className="metric-box"><span>Perfil de cambio</span><strong>{transitionProfileLabel}</strong></div>
             <div className="metric-box execution-console-v2__resume-next"><span>Siguiente paso</span><strong>Continuar trabajo</strong></div>
           </div>
           <p>Al continuar, el sistema generará automáticamente una nueva compensación Legacy para la siguiente operación usando la referencia Z recién medida, la subirá a Moonraker y comenzará la ejecución cuando Klipper la acepte.</p>
@@ -437,10 +438,12 @@ export function ExecutionConsole({ snapshot, error, busy, onPrepare, onStart, on
           <div className="metric-box"><span>State</span><strong>{snapshot?.transition.state ?? "-"}</strong></div>
           <div className="metric-box"><span>Herramienta requerida</span><strong>{snapshot?.transition.required_tool ?? "-"}</strong></div>
           <div className="metric-box"><span>Herramienta</span><strong>{snapshot?.transition.tool ?? "-"}</strong></div>
-          <div className="metric-box"><span>Perfil</span><strong>{transitionProfileLabel}</strong></div>
-          <div className="metric-box"><span>Z de aproximación</span><strong>{typeof snapshot?.transition.reference_prep_z_mm === "number" ? `${snapshot.transition.reference_prep_z_mm.toFixed(3)} mm` : "-"}</strong></div>
+          <div className="metric-box"><span>Perfil de cambio</span><strong>{transitionProfileLabel}</strong></div>
+          <div className="metric-box"><span>Z segura durante cambio</span><strong>{typeof snapshot?.transition.tool_change_clearance_z_mm === "number" ? `${snapshot.transition.tool_change_clearance_z_mm.toFixed(3)} mm` : "-"}</strong></div>
+          <div className="metric-box"><span>Z de aproximación a referencia</span><strong>{typeof snapshot?.transition.reference_prep_z_mm === "number" ? `${snapshot.transition.reference_prep_z_mm.toFixed(3)} mm` : "-"}</strong></div>
           <div className="metric-box"><span>Confirmación del operador</span><strong>{snapshot?.transition.operator_confirmation_required ? "requerida" : "no"}</strong></div>
         </div>
+        <p className="muted">La Z segura se usa solo durante el cambio de herramienta. No modifica el mapa ni la compensación Z.</p>
       </section>
 
       <section className="execution-panel">

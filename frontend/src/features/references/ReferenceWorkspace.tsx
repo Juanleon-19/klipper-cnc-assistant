@@ -11,7 +11,7 @@ type ZInputState = { x_mm: string; y_mm: string; z_mm: string };
 type ReferenceFieldErrors = Partial<Record<"x_mm" | "y_mm" | "z_mm", string>>;
 export type MachineSettingsInput = {
   reference_prep_z_mm: string;
-  long_tool_reference_prep_z_mm: string;
+  long_tool_change_clearance_z_mm: string;
   reference_prep_z_feed_mm_min: string;
   move_total_timeout_s: string;
   no_progress_timeout_s: string;
@@ -131,25 +131,22 @@ export function ReferenceWorkspace({
   const preparationStage = initializationSteps[initializationSteps.length - 1] ?? null;
   const movementTarget = (lastMovement?.target ?? null) as Record<string, unknown> | null;
   const referencePrepZ = typeof preparation.reference_prep_z_mm === "number" ? preparation.reference_prep_z_mm : 115;
-  const longToolReferencePrepZ = typeof preparation.long_tool_reference_prep_z_mm === "number" ? preparation.long_tool_reference_prep_z_mm : referencePrepZ;
+  const standardToolChangeClearanceZ = typeof toolChange.clearance_z_mm === "number" ? toolChange.clearance_z_mm : 115;
+  const longToolChangeClearanceZ = typeof toolChange.long_tool_clearance_z_mm === "number" ? toolChange.long_tool_clearance_z_mm : standardToolChangeClearanceZ;
   const selectedToolReferenceProfile = selectedOperation?.tool_reference_profile ?? "standard";
   const selectedToolReferenceProfileLabel = selectedToolReferenceProfile === "long_tool" ? "Herramienta larga" : "Estándar";
-  const selectedToolReferencePrepZ = selectedToolReferenceProfile === "long_tool" ? longToolReferencePrepZ : referencePrepZ;
-  const selectedEditedPrepZ = Number(selectedToolReferenceProfile === "long_tool"
-    ? machineSettingsInput.long_tool_reference_prep_z_mm
-    : machineSettingsInput.reference_prep_z_mm);
-  const selectedEditedPrepZDiffers = Number.isFinite(selectedEditedPrepZ) && selectedEditedPrepZ !== selectedToolReferencePrepZ;
+  const selectedToolChangeClearanceZ = selectedToolReferenceProfile === "long_tool" ? longToolChangeClearanceZ : standardToolChangeClearanceZ;
   const editedReferencePrepZ = Number(machineSettingsInput.reference_prep_z_mm);
-  const editedLongToolReferencePrepZ = Number(machineSettingsInput.long_tool_reference_prep_z_mm);
+  const editedLongToolChangeClearanceZ = Number(machineSettingsInput.long_tool_change_clearance_z_mm);
   const editedReferencePrepZDiffers = Number.isFinite(editedReferencePrepZ) && editedReferencePrepZ !== referencePrepZ;
-  const editedLongToolReferencePrepZDiffers = Number.isFinite(editedLongToolReferencePrepZ) && editedLongToolReferencePrepZ !== longToolReferencePrepZ;
+  const editedLongToolChangeClearanceZDiffers = Number.isFinite(editedLongToolChangeClearanceZ) && editedLongToolChangeClearanceZ !== longToolChangeClearanceZ;
   const referencePrepZFeed = typeof preparation.reference_prep_z_feed_mm_min === "number" ? preparation.reference_prep_z_feed_mm_min : 180;
   const referencePrepXyFeed = typeof preparation.reference_prep_xy_feed_mm_min === "number" ? preparation.reference_prep_xy_feed_mm_min : 1800;
   const centerX = typeof preparation.center_x_mm === "number" ? preparation.center_x_mm : null;
   const centerY = typeof preparation.center_y_mm === "number" ? preparation.center_y_mm : null;
   const toolChangeX = typeof toolChange.x_mm === "number" ? toolChange.x_mm : 0;
   const toolChangeY = typeof toolChange.y_mm === "number" ? toolChange.y_mm : 0;
-  const toolChangeZ = typeof toolChange.z_mm === "number" ? toolChange.z_mm : 115;
+  const toolChangeZ = typeof toolChange.work_z_mm === "number" ? toolChange.work_z_mm : typeof toolChange.z_mm === "number" ? toolChange.z_mm : 115;
   const toolChangeZFeed = typeof toolChange.z_feed_mm_min === "number" ? toolChange.z_feed_mm_min : 180;
   const toolChangeXyFeed = typeof toolChange.xy_feed_mm_min === "number" ? toolChange.xy_feed_mm_min : 1800;
   const referenceProbeFeed = Number(machineSettingsInput.reference_probe_feed_mm_min);
@@ -310,7 +307,8 @@ export function ReferenceWorkspace({
             <summary>Configuración avanzada de movimiento y telemetría</summary>
             <div className="info-grid info-grid--double compact-grid">
               <div className="metric-box"><span>Z de preparación</span><strong>{formatMillimeters(referencePrepZ, 3)}</strong></div>
-              <div className="metric-box"><span>Z herramienta larga</span><strong>{formatMillimeters(longToolReferencePrepZ, 3)}</strong></div>
+              <div className="metric-box"><span>Z segura de cambio estándar</span><strong>{formatMillimeters(standardToolChangeClearanceZ, 3)}</strong></div>
+              <div className="metric-box"><span>Z segura de cambio herramienta larga</span><strong>{formatMillimeters(longToolChangeClearanceZ, 3)}</strong></div>
               <div className="metric-box"><span>Velocidad Z</span><strong>{referencePrepZFeed.toFixed(0)} mm/min · {(referencePrepZFeed / 60).toFixed(3)} mm/s</strong></div>
               <div className="metric-box"><span>Centro calculado</span><strong>X {formatMillimeters(centerX, 3)} · Y {formatMillimeters(centerY, 3)}</strong></div>
               <div className="metric-box"><span>Velocidad centro X/Y</span><strong>{referencePrepXyFeed.toFixed(0)} mm/min · {(referencePrepXyFeed / 60).toFixed(3)} mm/s</strong></div>
@@ -329,7 +327,7 @@ export function ReferenceWorkspace({
             </div>
             <div className="form-grid form-grid--dense">
               <label>Z de preparación (mm)<input value={machineSettingsInput.reference_prep_z_mm} inputMode="decimal" onChange={(event) => onMachineSettingChange("reference_prep_z_mm", event.target.value)} /></label>
-              <label>Z de aproximación para herramienta larga (mm)<input value={machineSettingsInput.long_tool_reference_prep_z_mm} inputMode="decimal" onChange={(event) => onMachineSettingChange("long_tool_reference_prep_z_mm", event.target.value)} /></label>
+              <label>Z segura de cambio para herramienta larga (mm)<input value={machineSettingsInput.long_tool_change_clearance_z_mm} inputMode="decimal" onChange={(event) => onMachineSettingChange("long_tool_change_clearance_z_mm", event.target.value)} /></label>
               <label>Velocidad Z de preparación (mm/min)<input value={machineSettingsInput.reference_prep_z_feed_mm_min} inputMode="decimal" onChange={(event) => onMachineSettingChange("reference_prep_z_feed_mm_min", event.target.value)} /></label>
               <label>Timeout total de movimiento (s)<input value={machineSettingsInput.move_total_timeout_s} inputMode="decimal" onChange={(event) => onMachineSettingChange("move_total_timeout_s", event.target.value)} /></label>
               <label>Timeout sin progreso (s)<input value={machineSettingsInput.no_progress_timeout_s} inputMode="decimal" onChange={(event) => onMachineSettingChange("no_progress_timeout_s", event.target.value)} /></label>
@@ -342,12 +340,12 @@ export function ReferenceWorkspace({
             </div>
             {machineSettingsHasUnsavedChanges ? <div className="alert alert--warning">Hay cambios de configuración sin guardar.</div> : null}
             {machineSettingsRuntimeStatus === "refresh_failed" ? <div className="alert alert--warning">Configuración guardada, pero no se pudo confirmar el runtime.</div> : null}
-            {machineSettingsRuntimeStatus === "inconsistent" ? <div className="alert alert--error">La configuración guardada no coincide con la Z activa del runtime.</div> : null}
+            {machineSettingsRuntimeStatus === "inconsistent" ? <div className="alert alert--error">La configuración guardada no coincide con la configuración activa del runtime.</div> : null}
             {machineSettingsRuntimeStatus === "unconfirmed" && !machineSettingsHasUnsavedChanges ? <div className="alert alert--warning">La configuración guardada todavía no tiene una lectura coherente del runtime.</div> : null}
             {machineSettingsHasUnsavedChanges && editedReferencePrepZDiffers ? <p className="muted">Z estándar · Valor activo: {formatMillimeters(referencePrepZ, 3)} · Valor editado: {formatMillimeters(editedReferencePrepZ, 3)}</p> : null}
-            {machineSettingsHasUnsavedChanges && editedLongToolReferencePrepZDiffers ? <p className="muted">Herramienta larga · Valor activo: {formatMillimeters(longToolReferencePrepZ, 3)} · Valor editado: {formatMillimeters(editedLongToolReferencePrepZ, 3)}</p> : null}
+            {machineSettingsHasUnsavedChanges && editedLongToolChangeClearanceZDiffers ? <p className="muted">Despeje de herramienta larga · Valor activo: {formatMillimeters(longToolChangeClearanceZ, 3)} · Valor editado: {formatMillimeters(editedLongToolChangeClearanceZ, 3)}</p> : null}
             {!machineSettingsHasUnsavedChanges && machineSettingsRuntimeStatus === "inconsistent" && editedReferencePrepZDiffers ? <p className="muted">Z estándar · Valor activo: {formatMillimeters(referencePrepZ, 3)} · Valor confirmado por PUT: {formatMillimeters(editedReferencePrepZ, 3)}</p> : null}
-            {!machineSettingsHasUnsavedChanges && machineSettingsRuntimeStatus === "inconsistent" && editedLongToolReferencePrepZDiffers ? <p className="muted">Herramienta larga · Valor activo: {formatMillimeters(longToolReferencePrepZ, 3)} · Valor confirmado por PUT: {formatMillimeters(editedLongToolReferencePrepZ, 3)}</p> : null}
+            {!machineSettingsHasUnsavedChanges && machineSettingsRuntimeStatus === "inconsistent" && editedLongToolChangeClearanceZDiffers ? <p className="muted">Despeje de herramienta larga · Valor activo: {formatMillimeters(longToolChangeClearanceZ, 3)} · Valor confirmado por PUT: {formatMillimeters(editedLongToolChangeClearanceZ, 3)}</p> : null}
             <div className="action-grid action-grid--inline">
               <button className="button button--ghost" type="button" disabled={!canInitialize || referenceBusy || machine.refreshing || machineSettingsDirty} onClick={onInitialize}>Repetir preparación</button>
             </div>
@@ -379,9 +377,12 @@ export function ReferenceWorkspace({
           <div className="section-heading"><h3>4. Medir referencia Z</h3></div>
           <div className="alert alert--info">
             <strong>Herramienta: {selectedOperation?.herramienta ?? selectedOperation?.tool_id ?? "sin herramienta"}</strong>
-            <p>Perfil: {selectedToolReferenceProfileLabel}</p>
-            <p>Z de aproximación activa: {formatMillimeters(selectedToolReferencePrepZ, 3)}</p>
-            {machineSettingsHasUnsavedChanges && selectedEditedPrepZDiffers ? <p>Pendiente de guardar: {formatMillimeters(selectedEditedPrepZ, 3)}</p> : null}
+            <p>Perfil de cambio: {selectedToolReferenceProfileLabel}</p>
+            <p>Z de aproximación a referencia: {formatMillimeters(referencePrepZ, 3)}</p>
+            {machineSettingsHasUnsavedChanges && editedReferencePrepZDiffers ? <p>Pendiente de guardar para aproximación: {formatMillimeters(editedReferencePrepZ, 3)}</p> : null}
+            <p>Z segura durante cambio: {formatMillimeters(selectedToolChangeClearanceZ, 3)}</p>
+            {selectedToolReferenceProfile === "long_tool" && machineSettingsHasUnsavedChanges && editedLongToolChangeClearanceZDiffers ? <p>Pendiente de guardar para cambio: {formatMillimeters(editedLongToolChangeClearanceZ, 3)}</p> : null}
+            <p>Esta altura solo se usa durante el cambio de herramienta. No modifica el mapa ni la compensación Z.</p>
           </div>
           <div className="form-grid form-grid--dense">
             <label>Paso de sonda (mm)<input value={machineSettingsInput.reference_probe_step_mm} inputMode="decimal" disabled={referenceBusy || machine.runtimeState === "PROBING_REFERENCE"} onChange={(event) => onMachineSettingChange("reference_probe_step_mm", event.target.value)} /></label>
@@ -399,15 +400,16 @@ export function ReferenceWorkspace({
             <button className="button button--ghost" type="button" disabled={!canGoToReference || referenceBusy || machine.refreshing || machineSettingsDirty} onClick={onGoToReferencePoint}>{referenceBusy ? "Yendo al punto de referencia…" : "Ir al punto de referencia"}</button>
             <button className="button button--ghost" type="button" disabled={!machine.isPhysical || machine.refreshing} onClick={onCancelOperation}>Cancelar</button>
           </div>
-          {referenceMoveResult ? <div className="alert alert--success"><strong>{referenceMoveResult.message}</strong><br />CNC X: {formatMillimeters(referenceMoveResult.reference_x, 3)} · CNC Y: {formatMillimeters(referenceMoveResult.reference_y, 3)} · Perfil: {referenceMoveResult.tool_reference_profile === "long_tool" ? "Herramienta larga" : "Estándar"} · Z de aproximación: {formatMillimeters(referenceMoveResult.preparation_z, 3)} · {referenceMoveResult.final_state}</div> : null}
+          {referenceMoveResult ? <div className="alert alert--success"><strong>{referenceMoveResult.message}</strong><br />CNC X: {formatMillimeters(referenceMoveResult.reference_x, 3)} · CNC Y: {formatMillimeters(referenceMoveResult.reference_y, 3)} · Z de aproximación a referencia: {formatMillimeters(referenceMoveResult.preparation_z, 3)} · {referenceMoveResult.final_state}</div> : null}
           <div className="info-grid info-grid--double compact-grid">
             <div className="metric-box"><span>Origen X/Y</span><strong>{referenceSession?.origen_trabajo ? `${referenceSession.origen_trabajo.x_mm}, ${referenceSession.origen_trabajo.y_mm}` : "pendiente"}</strong></div>
             <div className="metric-box"><span>Captura origen</span><strong>{formatCapturedPosition(referenceSession?.origen_trabajo?.posicion_captura)}</strong></div>
             <div className="metric-box"><span>Referencia Z</span><strong>{referenceSession?.referencia_z?.z_mm ?? "pendiente"}</strong></div>
             <div className="metric-box"><span>Captura referencia</span><strong>{formatCapturedPosition(referenceSession?.referencia_z?.posicion_captura)}</strong></div>
             <div className="metric-box"><span>Herramienta</span><strong>{selectedOperation?.herramienta ?? selectedOperation?.tool_id ?? "sin herramienta"}</strong></div>
-            <div className="metric-box"><span>Perfil</span><strong>{selectedToolReferenceProfileLabel}</strong></div>
-            <div className="metric-box"><span>Z de aproximación activa</span><strong>{formatMillimeters(selectedToolReferencePrepZ, 3)}</strong></div>
+            <div className="metric-box"><span>Perfil de cambio</span><strong>{selectedToolReferenceProfileLabel}</strong></div>
+            <div className="metric-box"><span>Z de aproximación a referencia</span><strong>{formatMillimeters(referencePrepZ, 3)}</strong></div>
+            <div className="metric-box"><span>Z segura durante cambio</span><strong>{formatMillimeters(selectedToolChangeClearanceZ, 3)}</strong></div>
             <div className="metric-box"><span>Fuente</span><strong>{String(referenceSession?.referencia_z?.fuente ?? "-")}</strong></div>
           </div>
         </article>
@@ -419,6 +421,8 @@ export function ReferenceWorkspace({
             <div className="metric-box"><span>X cambio</span><strong>{formatMillimeters(toolChangeX, 3)}</strong></div>
             <div className="metric-box"><span>Y cambio</span><strong>{formatMillimeters(toolChangeY, 3)}</strong></div>
             <div className="metric-box"><span>Z cambio</span><strong>{formatMillimeters(toolChangeZ, 3)}</strong></div>
+            <div className="metric-box"><span>Despeje estándar</span><strong>{formatMillimeters(standardToolChangeClearanceZ, 3)}</strong></div>
+            <div className="metric-box"><span>Despeje herramienta larga</span><strong>{formatMillimeters(longToolChangeClearanceZ, 3)}</strong></div>
             <div className="metric-box"><span>Velocidades</span><strong>Z {toolChangeZFeed.toFixed(0)} mm/min · X/Y {toolChangeXyFeed.toFixed(0)} mm/min</strong></div>
             <div className="metric-box"><span>Secuencia</span><strong>Z segura → X/Y</strong></div>
           </div>

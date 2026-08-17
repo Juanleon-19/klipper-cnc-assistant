@@ -33,7 +33,11 @@ function runtime(connected: boolean, options?: {
     controller: {},
     preparation: {
       reference_prep_z_mm: options?.referencePrepZ ?? 115,
-      long_tool_reference_prep_z_mm: options?.longToolReferencePrepZ ?? 130,
+    },
+    tool_change: {
+      clearance_z_mm: 115,
+      long_tool_clearance_z_mm: options?.longToolReferencePrepZ ?? 130,
+      work_z_mm: 115,
     },
     initialization_steps: [],
     events: [],
@@ -100,7 +104,7 @@ function renderReference(options?: {
       heightMap={null}
       machineSettingsInput={{
         reference_prep_z_mm: options?.referencePrepZInput ?? "115",
-        long_tool_reference_prep_z_mm: options?.longToolReferencePrepZInput ?? "130",
+        long_tool_change_clearance_z_mm: options?.longToolReferencePrepZInput ?? "130",
         reference_prep_z_feed_mm_min: "180",
         move_total_timeout_s: "180",
         no_progress_timeout_s: "60",
@@ -224,9 +228,11 @@ describe("ReferenceWorkspace connection and workflow UI", () => {
     renderReference({ connected: true, toolReferenceProfile: "long_tool" });
 
     expect(screen.getByText("Herramienta: Broca 0.8 mm")).toBeInTheDocument();
-    expect(screen.getAllByText("Perfil: Herramienta larga").length).toBeGreaterThan(0);
-    expect(screen.getAllByText("Z de aproximación activa: 130.000 mm").length).toBeGreaterThan(0);
-    expect(screen.getByLabelText("Z de aproximación para herramienta larga (mm)")).toHaveValue("130");
+    expect(screen.getAllByText("Perfil de cambio: Herramienta larga").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Z de aproximación a referencia: 115.000 mm").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Z segura durante cambio: 130.000 mm").length).toBeGreaterThan(0);
+    expect(screen.getByText("Esta altura solo se usa durante el cambio de herramienta. No modifica el mapa ni la compensación Z.")).toBeInTheDocument();
+    expect(screen.getByLabelText("Z segura de cambio para herramienta larga (mm)")).toHaveValue("130");
   });
 
   it("distingue la Z larga editada de la activa y bloquea movimientos de referencia", () => {
@@ -245,8 +251,8 @@ describe("ReferenceWorkspace connection and workflow UI", () => {
 
     expect(screen.getByText("Cambios sin guardar")).toBeInTheDocument();
     expect(screen.getByText("Hay cambios de configuración sin guardar.")).toBeInTheDocument();
-    expect(screen.getByText("Z de aproximación activa: 105.000 mm")).toBeInTheDocument();
-    expect(screen.getByText("Pendiente de guardar: 130.000 mm")).toBeInTheDocument();
+    expect(screen.getByText("Z de aproximación a referencia: 105.000 mm")).toBeInTheDocument();
+    expect(screen.getByText("Pendiente de guardar para cambio: 130.000 mm")).toBeInTheDocument();
     expect(screen.getByText("Guarde la configuración antes de realizar movimientos de referencia.")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Sondear referencia ahora" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Volver a medir referencia" })).toBeDisabled();
@@ -270,7 +276,7 @@ describe("ReferenceWorkspace connection and workflow UI", () => {
     expect(screen.getByRole("button", { name: "Guardar configuración" })).toBeEnabled();
   });
 
-  it("usa reference_prep_z para standard y long_tool_reference_prep_z para herramienta larga", () => {
+  it("usa reference_prep_z para ambos perfiles y separa el clearance de cambio", () => {
     const standardRender = renderReference({
       connected: true,
       referencePrepZ: 105,
@@ -279,8 +285,9 @@ describe("ReferenceWorkspace connection and workflow UI", () => {
       longToolReferencePrepZInput: "130",
       toolReferenceProfile: "standard",
     });
-    expect(screen.getByText("Perfil: Estándar")).toBeInTheDocument();
-    expect(screen.getByText("Z de aproximación activa: 105.000 mm")).toBeInTheDocument();
+    expect(screen.getByText("Perfil de cambio: Estándar")).toBeInTheDocument();
+    expect(screen.getByText("Z de aproximación a referencia: 105.000 mm")).toBeInTheDocument();
+    expect(screen.getByText("Z segura durante cambio: 115.000 mm")).toBeInTheDocument();
 
     standardRender.unmount();
     renderReference({
@@ -291,8 +298,9 @@ describe("ReferenceWorkspace connection and workflow UI", () => {
       longToolReferencePrepZInput: "130",
       toolReferenceProfile: "long_tool",
     });
-    expect(screen.getByText("Perfil: Herramienta larga")).toBeInTheDocument();
-    expect(screen.getByText("Z de aproximación activa: 130.000 mm")).toBeInTheDocument();
+    expect(screen.getByText("Perfil de cambio: Herramienta larga")).toBeInTheDocument();
+    expect(screen.getByText("Z de aproximación a referencia: 105.000 mm")).toBeInTheDocument();
+    expect(screen.getByText("Z segura durante cambio: 130.000 mm")).toBeInTheDocument();
   });
 
   it("muestra verde cuando todos los enlaces del runtime están listos", () => {
