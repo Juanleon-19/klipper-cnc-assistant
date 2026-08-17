@@ -39,6 +39,32 @@ const navItems: NavItem[] = [
   { id: "sistema", label: "Sistema", shortLabel: "Sistema", icon: "⚙" },
 ];
 
+function replaceOperationInProjects(
+  projects: Project[],
+  projectId: string,
+  operationId: string,
+  replacement: Operation,
+) {
+  return projects.map((project) => project.id === projectId
+    ? {
+      ...project,
+      operaciones: project.operaciones.map((operation) => operation.id === operationId ? replacement : operation),
+    }
+    : project);
+}
+
+function applyOperationUpdate(operation: Operation, payload: OperationUpdateInput): Operation {
+  return {
+    ...operation,
+    nombre: payload.nombre,
+    tool_id: payload.tool_id === undefined ? operation.tool_id : payload.tool_id,
+    herramienta: payload.herramienta === undefined ? operation.herramienta : payload.herramienta,
+    tool_reference_profile: payload.tool_reference_profile ?? operation.tool_reference_profile ?? "standard",
+    compensation_mode: payload.compensation_mode ?? operation.compensation_mode,
+    max_z_error_mm: payload.max_z_error_mm ?? operation.max_z_error_mm,
+  };
+}
+
 
 function getQueryValue(name: string): string | null {
   return new URLSearchParams(window.location.search).get(name);
@@ -252,15 +278,28 @@ export default function App() {
   };
 
   const handleUpdateOperation = async (operationId: string, payload: OperationUpdateInput) => {
-    if (!selectedProjectId) {
+    if (!selectedProjectId || !selectedProject) {
       return;
     }
+    const projectId = selectedProjectId;
+    const previousOperation = selectedProject.operaciones.find((operation) => operation.id === operationId);
+    if (!previousOperation) {
+      return;
+    }
+    const optimisticOperation = applyOperationUpdate(previousOperation, payload);
     setBusyKey("operation:update:" + operationId);
     setError("");
+    setProjects((current) => replaceOperationInProjects(current, projectId, operationId, optimisticOperation));
+    let patchSucceeded = false;
     try {
-      await api.updateOperation(selectedProjectId, operationId, payload);
-      await syncProject(selectedProjectId);
+      const updatedOperation = await api.updateOperation(projectId, operationId, payload);
+      patchSucceeded = true;
+      setProjects((current) => replaceOperationInProjects(current, projectId, operationId, updatedOperation));
+      await syncProject(projectId);
     } catch (requestError) {
+      if (!patchSucceeded) {
+        setProjects((current) => replaceOperationInProjects(current, projectId, operationId, previousOperation));
+      }
       setError(requestError instanceof Error ? requestError.message : "No fue posible actualizar la operación.");
     } finally {
       setBusyKey(null);
