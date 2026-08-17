@@ -169,6 +169,7 @@ export default function App() {
   const refreshMachineRuntime = useCallback(async () => {
     const runtimePayload = await api.getMachineRuntime();
     setMachineRuntime(runtimePayload);
+    return runtimePayload;
   }, []);
 
   useEffect(() => {
@@ -778,7 +779,7 @@ Después deberá volver a conectar el Arduino, hacer homing, posicionar X0/Y0 y 
               machineRuntime={machineRuntime}
               refreshing={refreshingSystem}
               onRefresh={refreshSystem}
-              onRuntimeRefresh={refreshMachineRuntime}
+              onRuntimeRefresh={async () => { await refreshMachineRuntime(); }}
               onMachineAction={handleMachineAction}
             />
           ) : null}

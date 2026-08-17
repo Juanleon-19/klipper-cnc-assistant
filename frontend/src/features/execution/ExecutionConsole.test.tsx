@@ -396,6 +396,127 @@ describe("ExecutionConsole", () => {
     expect(screen.getByRole("button", { name: /Continuar trabajo/i })).toBeInTheDocument();
   });
 
+  it("explica en READY_TO_RESUME que Continuar genera Legacy JIT con la nueva referencia", () => {
+    render(
+      <ExecutionConsole
+        snapshot={{
+          ...baseSnapshot,
+          run: { ...baseSnapshot.run, status: "READY_TO_RESUME", available_actions: ["continue", "cancel"] },
+          transition: {
+            ...baseSnapshot.transition,
+            state: "READY_TO_RESUME",
+            tool: "Broca 0.8 mm",
+            tool_reference_profile: "long_tool",
+            operator_confirmation_required: true,
+          },
+          job_run: { ...(baseSnapshot.job_run as NonNullable<typeof baseSnapshot.job_run>), state: "READY_TO_RESUME", available_actions: ["continue", "cancel"] },
+        }}
+        error={null}
+        busy={false}
+        onPrepare={vi.fn()}
+        onStart={vi.fn()}
+        onAction={vi.fn()}
+        onArchiveStale={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByRole("region", { name: "Nueva referencia Z lista" })).toHaveTextContent("Broca 0.8 mm");
+    expect(screen.getByRole("region", { name: "Nueva referencia Z lista" })).toHaveTextContent("Herramienta larga");
+    expect(screen.getByText("Nueva referencia Z lista")).toBeInTheDocument();
+    expect(screen.getByText(/generará automáticamente una nueva compensación Legacy/i)).toBeInTheDocument();
+    expect(screen.getByText(/No es necesario volver a la sección Compensación/i)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Continuar trabajo" })).toBeInTheDocument();
+  });
+
+  it("describe OPERATION_PREFLIGHT como generación de compensación Legacy JIT", () => {
+    render(
+      <ExecutionConsole
+        snapshot={{
+          ...baseSnapshot,
+          run: { ...baseSnapshot.run, status: "OPERATION_PREFLIGHT", available_actions: ["cancel"] },
+          transition: { ...baseSnapshot.transition, state: "OPERATION_PREFLIGHT" },
+        }}
+        error={null}
+        busy={false}
+        onPrepare={vi.fn()}
+        onStart={vi.fn()}
+        onAction={vi.fn()}
+        onArchiveStale={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByRole("region", { name: "Flujo automático de la siguiente operación" })).toHaveTextContent("Generando compensación Legacy JIT");
+  });
+
+  it("describe OPERATION_UPLOADING como subida del archivo compensado a Moonraker", () => {
+    render(
+      <ExecutionConsole
+        snapshot={{
+          ...baseSnapshot,
+          run: { ...baseSnapshot.run, status: "OPERATION_UPLOADING", available_actions: ["cancel"] },
+          transition: { ...baseSnapshot.transition, state: "OPERATION_UPLOADING" },
+        }}
+        error={null}
+        busy={false}
+        onPrepare={vi.fn()}
+        onStart={vi.fn()}
+        onAction={vi.fn()}
+        onArchiveStale={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByRole("region", { name: "Flujo automático de la siguiente operación" })).toHaveTextContent("Subiendo archivo compensado a Moonraker");
+  });
+
+  it("describe WAITING_FOR_KLIPPER como espera de confirmación de Klipper", () => {
+    render(
+      <ExecutionConsole
+        snapshot={{
+          ...baseSnapshot,
+          run: { ...baseSnapshot.run, status: "WAITING_FOR_KLIPPER", available_actions: ["cancel"] },
+          transition: { ...baseSnapshot.transition, state: "WAITING_FOR_KLIPPER" },
+        }}
+        error={null}
+        busy={false}
+        onPrepare={vi.fn()}
+        onStart={vi.fn()}
+        onAction={vi.fn()}
+        onArchiveStale={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByRole("region", { name: "Flujo automático de la siguiente operación" })).toHaveTextContent("Esperando confirmación de Klipper");
+  });
+
+  it("mantiene el aviso de TOOL_CHANGE_REQUIRED y anticipa la nueva referencia", () => {
+    render(
+      <ExecutionConsole
+        snapshot={{
+          ...baseSnapshot,
+          run: { ...baseSnapshot.run, status: "TOOL_CHANGE_REQUIRED", available_actions: ["confirm-tool-change", "cancel"] },
+          transition: {
+            ...baseSnapshot.transition,
+            state: "TOOL_CHANGE_REQUIRED",
+            required_tool: "Broca 0.8 mm",
+            operator_confirmation_required: true,
+          },
+          job_run: { ...(baseSnapshot.job_run as NonNullable<typeof baseSnapshot.job_run>), state: "TOOL_CHANGE_REQUIRED", available_actions: ["confirm-tool-change", "cancel"] },
+        }}
+        error={null}
+        busy={false}
+        onPrepare={vi.fn()}
+        onStart={vi.fn()}
+        onAction={vi.fn()}
+        onArchiveStale={vi.fn()}
+      />,
+    );
+
+    expect(screen.getAllByText("Cambie la herramienta").length).toBeGreaterThan(0);
+    expect(screen.getByRole("button", { name: "Herramienta cambiada" })).toBeInTheDocument();
+    expect(screen.getByText(/la referencia anterior dejará de ser válida/i)).toBeInTheDocument();
+    expect(screen.getByText(/se medirá la nueva herramienta antes de generar su compensación/i)).toBeInTheDocument();
+  });
+
   it("no muestra cerrar ejecución obsoleta para un JOB_VALIDATING nuevo", () => {
     render(
       <ExecutionConsole
