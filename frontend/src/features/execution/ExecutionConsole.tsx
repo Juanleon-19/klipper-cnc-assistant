@@ -35,6 +35,7 @@ const CHECK_LABELS: Record<string, string> = {
   plan_generado: "Plan generado",
   operaciones_bloqueadas: "Operaciones compensables",
   archivos_compensados: "Archivos compensados",
+  compensacion_jit: "Compensación Legacy JIT",
   referencia_inicial: "Referencia inicial",
 };
 

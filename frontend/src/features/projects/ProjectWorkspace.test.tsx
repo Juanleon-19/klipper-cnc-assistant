@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { MachineContext, type MachineContextValue } from "../system/MachineContext";
 import { ApiError } from "../../lib/api";
-import type { HeightMap, JobPlan, JobRun, LiveExecutionSnapshot, Project, ReferenceSession } from "../../types";
+import type { CompensatedGCodeResult, HeightMap, JobPlan, JobRun, LiveExecutionSnapshot, Project, ReferenceSession } from "../../types";
 import { ProjectWorkspace } from "./ProjectWorkspace";
 
 function deferred<T>() {
@@ -235,6 +235,18 @@ const liveExecution: LiveExecutionSnapshot = {
   job_run: jobRun,
 };
 
+const generatedCompensation: CompensatedGCodeResult = {
+  relative_path: "generated/compensated/op_1_legacy_compensated.gcode",
+  metadata_path: "generated/compensated/op_1_legacy_compensated.json",
+  metadata: { compensation_mode: "legacy" },
+  preview: {},
+  selected_mode: "legacy",
+  effective_mode: "legacy",
+  executable: true,
+  artifact_kind: "production",
+  warning: null,
+};
+
 const referenceSession: ReferenceSession = {
   estado: "mapa_validado",
   machine_reference: { confirmada: true, fecha: new Date().toISOString() },
@@ -303,28 +315,6 @@ const heightMap: HeightMap = {
   },
   creado_en: new Date().toISOString(),
   actualizado_en: new Date().toISOString(),
-};
-
-const compensationAudit = {
-  selected_mode: "legacy" as const,
-  recommended_mode: "legacy" as const,
-  max_z_error_mm: 0.05,
-  original: { mode: "original", estimated_time_s: 10, estimation_method: "internal", estimation_confidence: "medium", estimation_detail: "Interno", movements_total: 2, unsupported_commands: [] },
-  legacy: { mode: "legacy", estimated_time_s: 10, estimation_method: "internal", estimation_confidence: "medium", estimation_detail: "Interno", movements_total: 2, unsupported_commands: [], executable: true },
-  adaptive_fast: {
-    mode: "adaptive_fast",
-    estimated_time_s: 10.2,
-    estimation_method: "internal",
-    estimation_confidence: "medium",
-    estimation_detail: "Interno",
-    movements_total: 4,
-    unsupported_commands: [],
-    eligible: false,
-    executable: false,
-    experimental_available: true,
-    error: "Adaptive_fast solo puede descargarse como experimental.",
-  },
-  warnings: [],
 };
 
 const project: Project = {
@@ -587,6 +577,7 @@ describe("ProjectWorkspace", () => {
     apiMock.getJobPlan.mockResolvedValue(jobPlan);
     apiMock.createJobPlan.mockResolvedValue(jobPlan);
     apiMock.generateProjectCompensation.mockResolvedValue(jobPlan);
+    apiMock.generateCompensatedGCode.mockResolvedValue(generatedCompensation);
     apiMock.getJobRun.mockResolvedValue(jobRun);
     apiMock.getLiveExecution.mockResolvedValue(liveExecution);
     apiMock.prepareJobRun.mockResolvedValue(jobRun);
@@ -600,7 +591,6 @@ describe("ProjectWorkspace", () => {
     apiMock.capturePhysicalZReferenceFromProbe.mockResolvedValue(referenceSession);
     apiMock.executionPreflight.mockResolvedValue({ state: "PREFLIGHT", ready: false, checks: [], generated_file: null, detail: "Preflight incompleto." });
     apiMock.executionAction.mockResolvedValue({ state: "PREFLIGHT", ready: false, checks: [], generated_file: null, detail: "Acción registrada." });
-    apiMock.getCompensationAudit.mockResolvedValue(compensationAudit);
     apiMock.getCompensationPreview.mockResolvedValue({
       session: referenceSession,
       preview: {
@@ -722,13 +712,11 @@ describe("ProjectWorkspace", () => {
     expect(await screen.findByText(/Home, Z de preparación y centro/i)).toBeInTheDocument();
     expect(screen.getAllByText(/Z de preparación/i).length).toBeGreaterThan(0);
     expect(screen.getAllByText(/X 110.000 mm · Y 110.000 mm/i).length).toBeGreaterThan(0);
-    expect(screen.getAllByText(/180 mm\/min · 3.000 mm\/s/i).length).toBeGreaterThan(0);
-    expect(screen.getAllByText(/1800 mm\/min · 30.000 mm\/s/i).length).toBeGreaterThan(0);
-    expect(screen.getAllByText(/180 mm\/min · 3.000 mm\/s/i).length).toBeGreaterThan(0);
-    expect(screen.getByText(/Posición segura de cambio de herramienta/i)).toBeInTheDocument();
-    expect(screen.getByText(/Z primero, luego X\/Y/i)).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: /Comprobación de posición de cambio de herramienta/i })).toBeInTheDocument();
+    expect(screen.getByText(/Z 180 mm\/min · X\/Y 1800 mm\/min/i)).toBeInTheDocument();
+    expect(screen.getByText(/Z segura → X\/Y/i)).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: /Ir a posición de cambio/i }));
+    fireEvent.click(screen.getByRole("button", { name: /Probar posición de cambio/i }));
 
     await waitFor(() => expect(physicalMachine.runMachineAction).toHaveBeenCalledWith("tool-change-position"));
   });
@@ -1581,7 +1569,7 @@ describe("ProjectWorkspace", () => {
 
     await waitFor(() => expect(screen.getAllByRole("button", { name: /^Archivo$/i }).length).toBeGreaterThan(0));
     fireEvent.click(screen.getByRole("button", { name: /^Ejecución$/i }));
-    expect(screen.getByRole("button", { name: /Generar compensación del proyecto/i })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Generar compensación de esta operación/i })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /Exportar/i })).toBeNull();
     expect(screen.queryByText(/Descargar G-code/i)).toBeNull();
   });
@@ -1669,150 +1657,97 @@ describe("ProjectWorkspace", () => {
     expect(screen.getByText(/Moonraker real/i)).toBeInTheDocument();
     expect(screen.getByText(/Orquestador JobRun/i)).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: /Generar compensación del proyecto/i }));
-    await waitFor(() => expect(apiMock.generateProjectCompensation).toHaveBeenCalledWith(project.id, project.montajes[0].id, "superior"));
+    fireEvent.click(screen.getByRole("button", { name: /Generar compensación de esta operación/i }));
+    await waitFor(() => expect(apiMock.generateCompensatedGCode).toHaveBeenCalledWith(project.id, project.operaciones[0].id, "legacy"));
+    expect(apiMock.generateProjectCompensation).not.toHaveBeenCalled();
 
     fireEvent.click(screen.getByRole("button", { name: /Revalidar plan/i }));
     await waitFor(() => expect(apiMock.prepareJobRun).toHaveBeenCalledWith(project.id, project.montajes[0].id, "superior"));
     expect(screen.getAllByRole("button", { name: "Iniciar trabajo" })).toHaveLength(1);
   });
 
-  it("deshabilita adaptive_fast ejecutable y diferencia la descarga experimental", async () => {
+  it("expone únicamente Legacy como método productivo y muestra el estado de la operación", async () => {
     renderWorkspace();
 
     fireEvent.click(screen.getByRole("button", { name: /^Ejecución$/i }));
 
-    expect(await screen.findByText(/Plan multioperación listo para ejecución/i)).toBeInTheDocument();
-    expect(await screen.findByRole("button", { name: /Adaptativa rápida/i })).toBeDisabled();
-    expect(screen.getByRole("button", { name: /Descargar adaptive experimental/i })).toBeInTheDocument();
-    expect(screen.getByText(/solo se permite descargar un artefacto experimental no ejecutable/i)).toBeInTheDocument();
+    expect(await screen.findByText(/Legacy · generación justo a tiempo/i)).toBeInTheDocument();
+    expect(screen.getByText("Método de producción").parentElement).toHaveTextContent("Legacy");
+    expect(screen.getByText("Archivo compensado").parentElement).toHaveTextContent("001_fresado_superior_compensado.nc");
+    expect(screen.queryByText(/Adaptativa rápida/i)).toBeNull();
+    expect(screen.queryByText(/auditoría comparativa/i)).toBeNull();
   });
 
-  it("solicita la auditoría una sola vez al abrir con una operación válida", async () => {
-    const pendingAudit = deferred<typeof compensationAudit>();
-    apiMock.getCompensationAudit.mockReturnValueOnce(pendingAudit.promise);
-
+  it("no solicita auditoría al abrir con una operación válida", async () => {
     renderWorkspace();
 
-    await waitFor(() => expect(apiMock.getCompensationAudit).toHaveBeenCalledTimes(1));
-    expect(apiMock.getCompensationAudit).toHaveBeenCalledWith(
-      project.id,
-      project.operaciones[0].id,
-      expect.objectContaining({ signal: expect.any(AbortSignal) }),
-    );
+    await act(async () => Promise.resolve());
+    expect(apiMock.getCompensationAudit).not.toHaveBeenCalled();
   });
 
-  it("no repite la auditoría por rerenders después de resolver la solicitud", async () => {
-    const pendingAudit = deferred<typeof compensationAudit>();
-    apiMock.getCompensationAudit.mockReturnValueOnce(pendingAudit.promise);
-
+  it("mantiene eliminada la auditoría tras navegar y rerenderizar", async () => {
     renderWorkspace();
-
-    await waitFor(() => expect(apiMock.getCompensationAudit).toHaveBeenCalledTimes(1));
-
-    await act(async () => {
-      pendingAudit.resolve(compensationAudit);
-      await pendingAudit.promise;
-    });
 
     fireEvent.click(screen.getByRole("button", { name: /^Ejecución$/i }));
+    await screen.findByText(/Legacy · generación justo a tiempo/i);
+    fireEvent.click(screen.getByRole("button", { name: /^Trayectoria$/i }));
+    fireEvent.click(screen.getByRole("button", { name: /^Ejecución$/i }));
 
-    expect(await screen.findByText(/Plan multioperación listo para ejecución/i)).toBeInTheDocument();
-    await waitFor(() => expect(apiMock.getCompensationAudit).toHaveBeenCalledTimes(1));
-    expect(screen.getByText(/^Disponible$/i)).toBeInTheDocument();
+    expect(apiMock.getCompensationAudit).not.toHaveBeenCalled();
   });
 
-  it("no entra en ciclo cuando la auditoría responde 404", async () => {
+  it("no consume ni muestra errores del endpoint de auditoría retirado", async () => {
     apiMock.getCompensationAudit.mockRejectedValueOnce(new ApiError("Auditoría no disponible.", 404));
-
     renderWorkspace();
 
-    await waitFor(() => expect(apiMock.getCompensationAudit).toHaveBeenCalledTimes(1));
-
     fireEvent.click(screen.getByRole("button", { name: /^Ejecución$/i }));
 
-    expect(await screen.findByText(/Auditoría no disponible\./i)).toBeInTheDocument();
-    await waitFor(() => expect(apiMock.getCompensationAudit).toHaveBeenCalledTimes(1));
-    expect(screen.getByText(/^No disponible$/i)).toBeInTheDocument();
+    await screen.findByText(/Legacy · generación justo a tiempo/i);
+    expect(apiMock.getCompensationAudit).not.toHaveBeenCalled();
+    expect(screen.queryByText(/Auditoría no disponible\./i)).toBeNull();
   });
 
-  it("cambiar de operación produce exactamente una solicitud adicional", async () => {
-    apiMock.getCompensationAudit.mockResolvedValue(compensationAudit);
-
+  it("cambiar de operación actualiza el estado de compensación sin solicitar auditoría", async () => {
     renderWorkspace(undefined, { project: projectWithSecondOperation });
-
-    await waitFor(() => expect(apiMock.getCompensationAudit).toHaveBeenCalledTimes(1));
     fireEvent.click(screen.getByRole("button", { name: /^Trayectoria$/i }));
-
     fireEvent.change(screen.getByLabelText(/Operación activa/i), { target: { value: "op_2" } });
+    fireEvent.click(screen.getByRole("button", { name: /^Ejecución$/i }));
 
-    await waitFor(() => expect(apiMock.getCompensationAudit).toHaveBeenCalledTimes(2));
-    expect(apiMock.getCompensationAudit).toHaveBeenLastCalledWith(
-      project.id,
-      "op_2",
-      expect.objectContaining({ signal: expect.any(AbortSignal) }),
-    );
+    await screen.findByText(/Legacy · generación justo a tiempo/i);
+    expect(screen.getByText("Operación seleccionada").parentElement).toHaveTextContent("Taladrado 1,0 mm");
+    expect(apiMock.getCompensationAudit).not.toHaveBeenCalled();
   });
 
-  it("Recalcular auditoría produce exactamente una solicitud adicional sin duplicados", async () => {
-    apiMock.getCompensationAudit.mockResolvedValue(compensationAudit);
+  it("genera Legacy únicamente para la operación seleccionada", async () => {
+    renderWorkspace(undefined, { project: projectWithSecondOperation });
+    fireEvent.click(screen.getByRole("button", { name: /^Trayectoria$/i }));
+    fireEvent.change(screen.getByLabelText(/Operación activa/i), { target: { value: "op_2" } });
+    fireEvent.click(screen.getByRole("button", { name: /^Ejecución$/i }));
+    fireEvent.click(await screen.findByRole("button", { name: /Generar compensación de esta operación/i }));
 
+    await waitFor(() => expect(apiMock.generateCompensatedGCode).toHaveBeenCalledWith(project.id, "op_2", "legacy"));
+    expect(apiMock.generateProjectCompensation).not.toHaveBeenCalled();
+  });
+
+  it("elimina los controles de auditoría y adaptive_fast de la vista productiva", async () => {
     renderWorkspace();
-
-    await waitFor(() => expect(apiMock.getCompensationAudit).toHaveBeenCalledTimes(1));
-
     fireEvent.click(screen.getByRole("button", { name: /^Ejecución$/i }));
-    const refreshButton = await screen.findByRole("button", { name: /Recalcular auditoría/i });
-    fireEvent.click(refreshButton);
 
-    await waitFor(() => expect(apiMock.getCompensationAudit).toHaveBeenCalledTimes(2));
-    expect(apiMock.getCompensationAudit).toHaveBeenNthCalledWith(
-      2,
-      project.id,
-      project.operaciones[0].id,
-      expect.objectContaining({ signal: expect.any(AbortSignal) }),
-    );
+    await screen.findByText(/Legacy · generación justo a tiempo/i);
+    expect(screen.queryByRole("button", { name: /Recalcular auditoría/i })).toBeNull();
+    expect(screen.queryByRole("button", { name: /Adaptativa rápida/i })).toBeNull();
+    expect(screen.queryByLabelText(/Tolerancia Z/i)).toBeNull();
   });
 
-  it("ignora respuestas obsoletas al cambiar de operación mientras la auditoría sigue pendiente", async () => {
-    const firstAudit = deferred<typeof compensationAudit>();
-    const secondAudit = deferred<typeof compensationAudit>();
-    const staleAudit = {
-      ...compensationAudit,
-      original: { ...compensationAudit.original, estimated_time_s: 11 },
-    };
-    const freshAudit = {
-      ...compensationAudit,
-      original: { ...compensationAudit.original, estimated_time_s: 42 },
-    };
-    apiMock.getCompensationAudit
-      .mockReturnValueOnce(firstAudit.promise)
-      .mockReturnValueOnce(secondAudit.promise);
-
+  it("muestra el archivo y la referencia de la operación seleccionada", async () => {
     renderWorkspace(undefined, { project: projectWithSecondOperation });
-
-    await waitFor(() => expect(apiMock.getCompensationAudit).toHaveBeenCalledTimes(1));
     fireEvent.click(screen.getByRole("button", { name: /^Trayectoria$/i }));
-
     fireEvent.change(screen.getByLabelText(/Operación activa/i), { target: { value: "op_2" } });
-    await waitFor(() => expect(apiMock.getCompensationAudit).toHaveBeenCalledTimes(2));
-
-    await act(async () => {
-      secondAudit.resolve(freshAudit);
-      await secondAudit.promise;
-    });
-
-    await act(async () => {
-      firstAudit.resolve(staleAudit);
-      await firstAudit.promise;
-    });
-
     fireEvent.click(screen.getByRole("button", { name: /^Ejecución$/i }));
 
-    await waitFor(() => expect(screen.getAllByText("Taladrado 1,0 mm").length).toBeGreaterThan(0));
-    expect(await screen.findByText(/42 s/i)).toBeInTheDocument();
-    expect(screen.queryByText(/^11 s$/i)).toBeNull();
-    await waitFor(() => expect(apiMock.getCompensationAudit).toHaveBeenCalledTimes(2));
+    await screen.findByText(/Legacy · generación justo a tiempo/i);
+    expect(screen.getByText("Referencia Z", { selector: "span" }).parentElement).toHaveTextContent("REQUIERE_REFERENCIA");
+    expect(screen.getByText("Archivo compensado", { selector: "span" }).parentElement).toHaveTextContent("002_taladrado_08_compensado.nc");
   });
 
 
@@ -1889,37 +1824,38 @@ describe("ProjectWorkspace", () => {
   });
 
   it("muestra Generando compensación y evita doble generación", async () => {
-    const pendingCompensation = deferred<JobPlan>();
-    apiMock.generateProjectCompensation.mockReturnValueOnce(pendingCompensation.promise);
+    const pendingCompensation = deferred<CompensatedGCodeResult>();
+    apiMock.generateCompensatedGCode.mockReturnValueOnce(pendingCompensation.promise);
     renderWorkspace(physicalMachine);
 
     fireEvent.click(screen.getByRole("button", { name: /^Ejecución$/i }));
-    const generateButton = await screen.findByRole("button", { name: /Generar compensación del proyecto/i });
+    const generateButton = await screen.findByRole("button", { name: /Generar compensación de esta operación/i });
     fireEvent.click(generateButton);
     fireEvent.click(generateButton);
 
     expect(await screen.findByRole("button", { name: /Generando compensación…/i })).toBeDisabled();
-    expect(apiMock.generateProjectCompensation).toHaveBeenCalledTimes(1);
+    expect(apiMock.generateCompensatedGCode).toHaveBeenCalledTimes(1);
+    expect(apiMock.generateCompensatedGCode).toHaveBeenCalledWith(project.id, project.operaciones[0].id, "legacy");
     expect(screen.getByRole("button", { name: /Revalidar plan/i })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Iniciar trabajo" })).toBeDisabled();
-    expect(screen.getByLabelText(/Tolerancia Z \(mm\)/i)).toBeDisabled();
+    expect(screen.queryByLabelText(/Tolerancia Z/i)).toBeNull();
 
     await act(async () => {
-      pendingCompensation.resolve(jobPlan);
+      pendingCompensation.resolve(generatedCompensation);
       await pendingCompensation.promise;
     });
 
-    await waitFor(() => expect(screen.getByRole("button", { name: /Generar compensación del proyecto/i })).toBeEnabled());
-    expect(apiMock.generateProjectCompensation).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(screen.getByRole("button", { name: /Generar compensación de esta operación/i })).toBeEnabled());
+    expect(apiMock.generateCompensatedGCode).toHaveBeenCalledTimes(1);
   });
 
   it("libera Generar compensación tras error sin retry automático", async () => {
-    const pendingCompensation = deferred<JobPlan>();
-    apiMock.generateProjectCompensation.mockReturnValueOnce(pendingCompensation.promise);
+    const pendingCompensation = deferred<CompensatedGCodeResult>();
+    apiMock.generateCompensatedGCode.mockReturnValueOnce(pendingCompensation.promise);
     renderWorkspace(physicalMachine);
 
     fireEvent.click(screen.getByRole("button", { name: /^Ejecución$/i }));
-    fireEvent.click(await screen.findByRole("button", { name: /Generar compensación del proyecto/i }));
+    fireEvent.click(await screen.findByRole("button", { name: /Generar compensación de esta operación/i }));
 
     await act(async () => {
       pendingCompensation.reject(new Error("Fallo controlado de compensación."));
@@ -1931,8 +1867,8 @@ describe("ProjectWorkspace", () => {
     });
 
     expect(await screen.findByText(/Fallo controlado de compensación/i)).toBeInTheDocument();
-    await waitFor(() => expect(screen.getByRole("button", { name: /Generar compensación del proyecto/i })).toBeEnabled());
-    expect(apiMock.generateProjectCompensation).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(screen.getByRole("button", { name: /Generar compensación de esta operación/i })).toBeEnabled());
+    expect(apiMock.generateCompensatedGCode).toHaveBeenCalledTimes(1);
   });
 
 });

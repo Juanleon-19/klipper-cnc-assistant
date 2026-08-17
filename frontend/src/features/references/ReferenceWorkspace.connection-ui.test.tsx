@@ -185,8 +185,9 @@ describe("ReferenceWorkspace connection and workflow UI", () => {
 
     expect(screen.getByText("Diagnóstico avanzado de conexión")).toBeInTheDocument();
     expect(screen.getByText(/Configuración avanzada de movimiento/i)).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "4. Posición segura de cambio de herramienta" })).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "5. Medir referencia Z" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "4. Medir referencia Z" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Comprobación de posición de cambio de herramienta" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Probar posición de cambio" })).toBeInTheDocument();
   });
 
   it("muestra verde cuando todos los enlaces del runtime están listos", () => {

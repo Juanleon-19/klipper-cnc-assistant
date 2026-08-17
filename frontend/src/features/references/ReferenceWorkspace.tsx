@@ -131,6 +131,7 @@ export function ReferenceWorkspace({
   const toolChangeY = typeof toolChange.y_mm === "number" ? toolChange.y_mm : 0;
   const toolChangeZ = typeof toolChange.z_mm === "number" ? toolChange.z_mm : 115;
   const toolChangeZFeed = typeof toolChange.z_feed_mm_min === "number" ? toolChange.z_feed_mm_min : 180;
+  const toolChangeXyFeed = typeof toolChange.xy_feed_mm_min === "number" ? toolChange.xy_feed_mm_min : 1800;
   const referenceProbeFeed = Number(machineSettingsInput.reference_probe_feed_mm_min);
   const probeStableMs = typeof probeLive.filtered_stable_ms === "number" ? probeLive.filtered_stable_ms : null;
   const probeRequiredStableMs = typeof probeLive.required_stable_ms === "number" ? probeLive.required_stable_ms : null;
@@ -328,37 +329,19 @@ export function ReferenceWorkspace({
 
         <article className="panel">
           <div className="section-heading"><h3>3. Posicionar X0/Y0 del G-code</h3></div>
-          <p className="muted">Habilite joystick X/Y y coloque la herramienta exactamente sobre el X0/Y0 generado por FlatCAM. El jog es cardinal discreto y no mueve Z.</p>
+          <p className="muted">Habilite el joystick X/Y, coloque la herramienta exactamente sobre el X0/Y0 generado por FlatCAM y confirme esa posición como origen de trabajo.</p>
           <div className="info-grid info-grid--double compact-grid">
             <div className="metric-box"><span>X máquina</span><strong>{formatMillimeters(typeof position?.x === "number" ? Number(position.x) : null, 3)}</strong></div>
             <div className="metric-box"><span>Y máquina</span><strong>{formatMillimeters(typeof position?.y === "number" ? Number(position.y) : null, 3)}</strong></div>
-            <div className="metric-box"><span>Z máquina</span><strong>{formatMillimeters(typeof position?.z === "number" ? Number(position.z) : null, 3)}</strong></div>
-            <div className="metric-box"><span>Modo jog</span><strong>{String(controller.jog_mode ?? "FINE")}</strong></div>
-          </div>
-          <div className="action-grid action-grid--inline"><button className="button button--ghost" type="button" disabled={!canEnableJog || referenceBusy || machine.refreshing} onClick={onEnableManual}>Reposicionar origen X/Y</button><button className="button" type="button" disabled={!machine.isPhysical || referenceBusy || machine.refreshing || !selectedOperation} onClick={onCapturePhysicalWorkOrigin}>Confirmar nuevo origen</button><button className="button button--ghost" type="button" disabled={!machine.isPhysical || machine.refreshing} onClick={onCancelOperation}>Cancelar reposicionamiento</button></div>
-          <button className="button" type="button" disabled={!canEnableJog || referenceBusy || machine.refreshing} onClick={onEnableManual}>Habilitar joystick X/Y</button>
-        </article>
-
-        <article className="panel">
-          <div className="section-heading"><h3>4. Posición segura de cambio de herramienta</h3></div>
-          <p className="muted">Estas son coordenadas de máquina, no el origen X0/Y0 de FlatCAM ni la referencia Z de la PCB.</p>
-          <div className="info-grid info-grid--double compact-grid">
-            <div className="metric-box"><span>X cambio</span><strong>{formatMillimeters(toolChangeX, 3)}</strong></div>
-            <div className="metric-box"><span>Y cambio</span><strong>{formatMillimeters(toolChangeY, 3)}</strong></div>
-            <div className="metric-box"><span>Z cambio</span><strong>{formatMillimeters(toolChangeZ, 3)}</strong></div>
-            <div className="metric-box"><span>Velocidad Z cambio</span><strong>{toolChangeZFeed.toFixed(0)} mm/min · {(toolChangeZFeed / 60).toFixed(3)} mm/s</strong></div>
-            <div className="metric-box"><span>Orden</span><strong>Z primero, luego X/Y</strong></div>
           </div>
           <div className="action-grid action-grid--inline">
-            <button className="button button--ghost" type="button" disabled={!machine.isPhysical || referenceBusy || machine.refreshing || !machine.homedAxes} onClick={onToolChangePosition}>Reintentar movimiento</button>
-            <button className="button button--ghost" type="button" disabled={!machine.isPhysical || machine.refreshing} onClick={onCancelOperation}>Cancelar intento</button>
-            <button className="button button--ghost" type="button" disabled={!machine.isPhysical || referenceBusy || machine.refreshing} onClick={() => window.alert("Modifique TOOL_CHANGE_X_MM, TOOL_CHANGE_Y_MM y TOOL_CHANGE_Z_MM en la configuración del servicio y reinicie la aplicación para persistir los cambios.")}>Modificar posición de cambio</button>
-            <button className="button" type="button" disabled={!machine.isPhysical || referenceBusy || machine.refreshing || !machine.homedAxes} onClick={onToolChangePosition}>Ir a posición de cambio</button>
+            <button className="button button--ghost" type="button" disabled={!canEnableJog || referenceBusy || machine.refreshing} onClick={onEnableManual}>Habilitar joystick X/Y</button>
+            <button className="button" type="button" disabled={!machine.isPhysical || referenceBusy || machine.refreshing || !selectedOperation} onClick={onCapturePhysicalWorkOrigin}>Confirmar X0/Y0</button>
           </div>
         </article>
 
         <article className="panel">
-          <div className="section-heading"><h3>5. Medir referencia Z</h3></div>
+          <div className="section-heading"><h3>4. Medir referencia Z</h3></div>
           <div className="form-grid form-grid--dense">
             <label>Paso de sonda (mm)<input value={machineSettingsInput.reference_probe_step_mm} inputMode="decimal" disabled={referenceBusy || machine.runtimeState === "PROBING_REFERENCE"} onChange={(event) => onMachineSettingChange("reference_probe_step_mm", event.target.value)} /></label>
             <label>Velocidad de sonda (mm/min)<input value={machineSettingsInput.reference_probe_feed_mm_min} inputMode="decimal" disabled={referenceBusy || machine.runtimeState === "PROBING_REFERENCE"} onChange={(event) => onMachineSettingChange("reference_probe_feed_mm_min", event.target.value)} /></label>
@@ -384,6 +367,19 @@ export function ReferenceWorkspace({
             <div className="metric-box"><span>Herramienta</span><strong>{selectedOperation?.herramienta ?? selectedOperation?.tool_id ?? "sin herramienta"}</strong></div>
             <div className="metric-box"><span>Fuente</span><strong>{String(referenceSession?.referencia_z?.fuente ?? "-")}</strong></div>
           </div>
+        </article>
+
+        <article className="panel">
+          <div className="section-heading"><h3>Comprobación de posición de cambio de herramienta</h3></div>
+          <p className="muted">Esta comprobación no forma parte del proceso de referencia. Solo verifica la posición que usará la CNC cuando el trabajo requiera un cambio de herramienta.</p>
+          <div className="info-grid info-grid--double compact-grid">
+            <div className="metric-box"><span>X cambio</span><strong>{formatMillimeters(toolChangeX, 3)}</strong></div>
+            <div className="metric-box"><span>Y cambio</span><strong>{formatMillimeters(toolChangeY, 3)}</strong></div>
+            <div className="metric-box"><span>Z cambio</span><strong>{formatMillimeters(toolChangeZ, 3)}</strong></div>
+            <div className="metric-box"><span>Velocidades</span><strong>Z {toolChangeZFeed.toFixed(0)} mm/min · X/Y {toolChangeXyFeed.toFixed(0)} mm/min</strong></div>
+            <div className="metric-box"><span>Secuencia</span><strong>Z segura → X/Y</strong></div>
+          </div>
+          <button className="button" type="button" disabled={!machine.isPhysical || referenceBusy || machine.refreshing || !machine.homedAxes} onClick={onToolChangePosition}>Probar posición de cambio</button>
         </article>
       </div>
     );

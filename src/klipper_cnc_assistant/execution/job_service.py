@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import math
 import threading
 import time
 import traceback
@@ -228,6 +229,7 @@ class JobService:
                 generated = self.compensated_gcode_service.generate(
                     project_id,
                     item["operation_id"],
+                    mode="legacy",
                     require_tool_reference=False,
                 )
                 if self.time_estimation_service is not None:
@@ -351,7 +353,32 @@ class JobService:
         total = int(run.get("summary", {}).get("operations_total", len(operations)) or 0)
         completed = int(run.get("summary", {}).get("operations_completed", 0) or 0)
         progress = self._clamp_progress((operation or {}).get("progress"))
-        overall_progress = 1.0 if str(run.get("state")) == "JOB_COMPLETE" else (min(1.0, (completed + progress) / total) if total else 0.0)
+        if str(run.get("state")) == "JOB_COMPLETE":
+            overall_progress = 1.0
+        else:
+            weighted_total = 0.0
+            weighted_done = 0.0
+            weighted_available = bool(operations)
+            for item in operations:
+                raw_estimate = item.get("estimated_time_s")
+                try:
+                    weight = float(raw_estimate)
+                except (TypeError, ValueError):
+                    weighted_available = False
+                    break
+                if not math.isfinite(weight) or weight <= 0:
+                    weighted_available = False
+                    break
+                execution_status = str(item.get("execution_status") or "")
+                fraction = 1.0 if execution_status == "COMPLETED" else self._clamp_progress(item.get("progress"))
+                weighted_total += weight
+                weighted_done += weight * fraction
+            if weighted_available and weighted_total > 0:
+                overall_progress = self._clamp_progress(weighted_done / weighted_total)
+            else:
+                current_is_completed = str((operation or {}).get("execution_status") or "") == "COMPLETED"
+                current_fraction = 0.0 if current_is_completed else progress
+                overall_progress = min(1.0, (completed + current_fraction) / total) if total else 0.0
         next_index = index + 1
         next_operation = operations[next_index] if 0 <= next_index < len(operations) else None
         sync_reason = None
@@ -672,22 +699,17 @@ class JobService:
             session_id=snapshot.get("started_at"),
             installation_id=operation_payload.get("installation_revision"),
         )
-        run["state"] = "REGENERATING_COMPENSATION"
-        run["next_action"] = "Regenerando compensación pendiente con la nueva referencia Z"
-        self._save_run(context, run)
-        self.generate_project_compensation(project_id=context.project_id, setup_id=context.setup_id, face=context.face)
-        run["state"] = "VALIDATING_REGENERATED_PLAN"
-        dry_run = self.dry_run(project_id=context.project_id, setup_id=context.setup_id, face=context.face)
-        if not dry_run.get("ok"):
-            raise ApplicationError("El dry-run del plan regenerado falló.")
-        run["dry_run"] = dry_run
         operation_payload["reference_status"] = "LISTA"
         run["current_tool_key"] = operation_payload["tool_key"]
         run["summary"]["tool_changes_completed"] = int(run["summary"].get("tool_changes_completed", 0)) + 1
         run["state"] = "READY_TO_RESUME"
-        run["next_action"] = "Revisar la nueva calibración y continuar trabajo"
+        run["next_action"] = "Referencia Z lista; continuar para generar Legacy y ejecutar la siguiente operación"
         run["available_actions"] = ["continue", "cancel"]
-        self._append_event(run, "info", f"Referencia Z medida para {operation_payload['tool_name']}; esperando confirmación explícita para continuar.")
+        self._append_event(
+            run,
+            "info",
+            f"Referencia Z medida para {operation_payload['tool_name']}; la compensación Legacy se generará al continuar.",
+        )
         self._save_run(context, run)
 
     def _start_worker(self, context: JobContext) -> None:
@@ -767,14 +789,25 @@ class JobService:
             self._save_run(context, run)
             return
         adapter = self.adapter_factory(self.runtime)
-        plan = self._load_or_build_plan(context)
-        generated = self._generated_payload_for_operation(plan, operation["operation_id"])
-        if generated is None:
-            raise ApplicationError(f"No existe archivo compensado para la operación {operation['name']}.")
         operation["execution_status"] = "PREFLIGHT"
         run["current_operation_index"] = index
         run["current_operation_id"] = operation["operation_id"]
         run["current_tool_key"] = operation["tool_key"]
+        run["state"] = "OPERATION_PREFLIGHT"
+        run["next_action"] = f"Generando compensación Legacy para {operation['name']}"
+        run["available_actions"] = ["pause", "cancel"]
+        self._append_event(run, "info", f"Generando compensación Legacy JIT para {operation['name']}.")
+        self._save_run(context, run)
+        generated = self.compensated_gcode_service.generate(
+            context.project_id,
+            operation["operation_id"],
+            mode="legacy",
+            require_tool_reference=True,
+        )
+        operation["generated_file"] = generated["relative_path"]
+        operation["generated_file_name"] = Path(str(generated["relative_path"])).name
+        operation["generated_metadata_path"] = generated.get("metadata_path")
+        operation["compensation_mode"] = "legacy"
         expected_remote_file = self._expected_remote_file(context, str(generated["relative_path"]))
         recovered = self._recover_active_print_if_possible(
             context,
@@ -922,9 +955,22 @@ class JobService:
             raise ApplicationError("No se puede continuar mientras Moonraker sigue imprimiendo.")
         if bool(status.get("is_active", status.get("active"))):
             raise ApplicationError("virtual_sdcard.is_active debe ser false antes de continuar con el cambio de herramienta.")
-        snapshot = self.runtime.snapshot()
+        refresh_observed_state = getattr(self.runtime, "refresh_observed_state", None)
+        if not callable(refresh_observed_state):
+            raise ApplicationError(
+                "El runtime no permite realizar la observación HTTP activa requerida antes de confirmar el spindle detenido."
+            )
+        try:
+            snapshot = refresh_observed_state()
+        except Exception as error:
+            raise ApplicationError(
+                f"No fue posible actualizar el estado de Moonraker antes de confirmar el spindle detenido: {error}"
+            ) from error
         if str(snapshot.get("moonraker", {}).get("telemetry_state") or "") != "LIVE":
-            raise ApplicationError("La telemetría Moonraker debe estar LIVE para confirmar el spindle detenido.")
+            raise ApplicationError(
+                "La telemetría Moonraker sigue sin estar fresca después de una observación HTTP activa; "
+                "no se autoriza el movimiento de cambio de herramienta."
+            )
         homed_axes = str(snapshot.get("klipper", {}).get("homed_axes") or "")
         if not set("xyz").issubset(set(homed_axes)):
             raise ApplicationError("Falta homing XYZ para continuar con el cambio de herramienta.")
@@ -990,8 +1036,11 @@ class JobService:
         add("plan_generado", len(plan.get("operations", [])) > 0, "Plan multioperación generado.")
         blocked_operations = [item for item in plan["operations"] if item["blocking"]]
         add("operaciones_bloqueadas", not blocked_operations, "Todas las operaciones activas están compensables y cubiertas por el mapa.")
-        missing_generated = [item for item in plan["operations"] if not item.get("generated_file") and not item["blocking"]]
-        add("archivos_compensados", not missing_generated, "Cada operación activa tiene archivo compensado generado.")
+        add(
+            "compensacion_jit",
+            True,
+            "La compensación Legacy se generará justo antes de cada operación usando la referencia Z vigente.",
+        )
         initial = plan["operations"][0] if plan["operations"] else None
         add(
             "referencia_inicial",
@@ -1397,7 +1446,7 @@ class JobService:
         if metadata.get("tool_id") != _tool_key(operation):
             return False
         metadata_mode = str(metadata.get("compensation_mode") or "legacy")
-        if metadata_mode != str(operation.compensation_mode):
+        if metadata_mode != "legacy":
             return False
         reference = (active_map.get("tool_references") or {}).get(_tool_key(operation))
         if isinstance(reference, dict) and reference.get("valid"):
