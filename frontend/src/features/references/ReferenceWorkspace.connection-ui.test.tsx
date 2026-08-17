@@ -1,15 +1,20 @@
 import { act, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { MachineRuntime, Operation } from "../../types";
+import type { MachineRuntime, Operation, ReferenceSession } from "../../types";
 import type { MachineContextValue } from "../system/MachineContext";
 import { ReferenceWorkspace } from "./ReferenceWorkspace";
 
-function runtime(connected: boolean): MachineRuntime {
+function runtime(connected: boolean, options?: {
+  state?: string;
+  referencePrepZ?: number;
+  longToolReferencePrepZ?: number;
+}): MachineRuntime {
+  const state = options?.state ?? (connected ? "DIAGNOSTIC" : "DISCONNECTED");
   return {
     mode: "PHYSICAL",
     mode_label: "FÍSICO",
-    state: connected ? "DIAGNOSTIC" : "DISCONNECTED",
+    state,
     health: connected ? "HEALTHY" : "DISCONNECTED",
     safety: {
       movement_authorized: false,
@@ -26,20 +31,23 @@ function runtime(connected: boolean): MachineRuntime {
       ? { open: true, connection_state: "CONNECTED" }
       : { open: false, connection_state: "DISCONNECTED" },
     controller: {},
-    preparation: { reference_prep_z_mm: 115, long_tool_reference_prep_z_mm: 130 },
+    preparation: {
+      reference_prep_z_mm: options?.referencePrepZ ?? 115,
+      long_tool_reference_prep_z_mm: options?.longToolReferencePrepZ ?? 130,
+    },
     initialization_steps: [],
     events: [],
   } as unknown as MachineRuntime;
 }
 
-function machine(connected: boolean, refreshRuntime = vi.fn().mockResolvedValue(undefined)): MachineContextValue {
-  const currentRuntime = runtime(connected);
+function machine(currentRuntime: MachineRuntime, refreshRuntime = vi.fn().mockResolvedValue(currentRuntime)): MachineContextValue {
+  const connected = currentRuntime.state !== "DISCONNECTED";
   return {
     runtime: currentRuntime,
     refreshing: false,
     isPhysical: true,
     modeLabel: "FÍSICO",
-    runtimeState: connected ? "DIAGNOSTIC" : "DISCONNECTED",
+    runtimeState: currentRuntime.state,
     connected,
     homedAxes: "",
     klipperReady: connected,
@@ -57,23 +65,42 @@ function renderReference(options?: {
   onConnectRuntime?: ReturnType<typeof vi.fn>;
   refreshRuntime?: ReturnType<typeof vi.fn>;
   toolReferenceProfile?: "standard" | "long_tool";
+  runtimeState?: string;
+  referencePrepZ?: number;
+  longToolReferencePrepZ?: number;
+  referencePrepZInput?: string;
+  longToolReferencePrepZInput?: string;
+  machineSettingsDirty?: boolean;
+  machineSettingsHasUnsavedChanges?: boolean;
+  machineSettingsRuntimeStatus?: "coherent" | "unconfirmed" | "refresh_failed" | "inconsistent";
+  hasReference?: boolean;
 }) {
   const connected = options?.connected ?? false;
   const onConnectRuntime = options?.onConnectRuntime ?? vi.fn();
-  const refreshRuntime = options?.refreshRuntime ?? vi.fn().mockResolvedValue(undefined);
-  const currentRuntime = runtime(connected);
+  const currentRuntime = runtime(connected, {
+    state: options?.runtimeState,
+    referencePrepZ: options?.referencePrepZ,
+    longToolReferencePrepZ: options?.longToolReferencePrepZ,
+  });
+  const refreshRuntime = options?.refreshRuntime ?? vi.fn().mockResolvedValue(currentRuntime);
+  const consistencyProps = {
+    machineSettingsDirty: options?.machineSettingsDirty ?? false,
+    machineSettingsHasUnsavedChanges: options?.machineSettingsHasUnsavedChanges ?? false,
+    machineSettingsRuntimeStatus: options?.machineSettingsRuntimeStatus ?? "coherent",
+  };
 
-  render(
+  const renderResult = render(
     <ReferenceWorkspace
-      machine={machine(connected, refreshRuntime)}
+      {...consistencyProps}
+      machine={machine(currentRuntime, refreshRuntime)}
       runtime={currentRuntime}
-      referenceSession={null}
+      referenceSession={(options?.hasReference ? { referencia_z: { z_mm: 0 } } : null) as ReferenceSession | null}
       referenceBusy={false}
       selectedOperation={{ id: "op-1", herramienta: "Broca 0.8 mm", tool_reference_profile: options?.toolReferenceProfile ?? "standard" } as unknown as Operation}
       heightMap={null}
       machineSettingsInput={{
-        reference_prep_z_mm: "115",
-        long_tool_reference_prep_z_mm: "130",
+        reference_prep_z_mm: options?.referencePrepZInput ?? "115",
+        long_tool_reference_prep_z_mm: options?.longToolReferencePrepZInput ?? "130",
         reference_prep_z_feed_mm_min: "180",
         move_total_timeout_s: "180",
         no_progress_timeout_s: "60",
@@ -118,7 +145,7 @@ function renderReference(options?: {
     />
   );
 
-  return { onConnectRuntime, refreshRuntime };
+  return { ...renderResult, onConnectRuntime, refreshRuntime };
 }
 
 describe("ReferenceWorkspace connection and workflow UI", () => {
@@ -198,8 +225,74 @@ describe("ReferenceWorkspace connection and workflow UI", () => {
 
     expect(screen.getByText("Herramienta: Broca 0.8 mm")).toBeInTheDocument();
     expect(screen.getAllByText("Perfil: Herramienta larga").length).toBeGreaterThan(0);
-    expect(screen.getAllByText("Z de aproximación: 130.000 mm").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Z de aproximación activa: 130.000 mm").length).toBeGreaterThan(0);
     expect(screen.getByLabelText("Z de aproximación para herramienta larga (mm)")).toHaveValue("130");
+  });
+
+  it("distingue la Z larga editada de la activa y bloquea movimientos de referencia", () => {
+    renderReference({
+      connected: true,
+      runtimeState: "REFERENCE_CAPTURED",
+      referencePrepZ: 105,
+      longToolReferencePrepZ: 105,
+      referencePrepZInput: "105.0",
+      longToolReferencePrepZInput: "130",
+      toolReferenceProfile: "long_tool",
+      machineSettingsDirty: true,
+      machineSettingsHasUnsavedChanges: true,
+      hasReference: true,
+    });
+
+    expect(screen.getByText("Cambios sin guardar")).toBeInTheDocument();
+    expect(screen.getByText("Hay cambios de configuración sin guardar.")).toBeInTheDocument();
+    expect(screen.getByText("Z de aproximación activa: 105.000 mm")).toBeInTheDocument();
+    expect(screen.getByText("Pendiente de guardar: 130.000 mm")).toBeInTheDocument();
+    expect(screen.getByText("Guarde la configuración antes de realizar movimientos de referencia.")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Sondear referencia ahora" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Volver a medir referencia" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Ir al punto de referencia" })).toBeDisabled();
+  });
+
+  it("bloquea preparación inicial y repetición mientras la configuración está dirty", () => {
+    renderReference({
+      connected: true,
+      runtimeState: "DIAGNOSTIC",
+      referencePrepZ: 105,
+      longToolReferencePrepZ: 105,
+      referencePrepZInput: "115",
+      longToolReferencePrepZInput: "130",
+      machineSettingsDirty: true,
+      machineSettingsHasUnsavedChanges: true,
+    });
+
+    expect(screen.getByRole("button", { name: "Realizar homing, subir Z e ir al centro" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Repetir preparación" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Guardar configuración" })).toBeEnabled();
+  });
+
+  it("usa reference_prep_z para standard y long_tool_reference_prep_z para herramienta larga", () => {
+    const standardRender = renderReference({
+      connected: true,
+      referencePrepZ: 105,
+      longToolReferencePrepZ: 130,
+      referencePrepZInput: "105",
+      longToolReferencePrepZInput: "130",
+      toolReferenceProfile: "standard",
+    });
+    expect(screen.getByText("Perfil: Estándar")).toBeInTheDocument();
+    expect(screen.getByText("Z de aproximación activa: 105.000 mm")).toBeInTheDocument();
+
+    standardRender.unmount();
+    renderReference({
+      connected: true,
+      referencePrepZ: 105,
+      longToolReferencePrepZ: 130,
+      referencePrepZInput: "105",
+      longToolReferencePrepZInput: "130",
+      toolReferenceProfile: "long_tool",
+    });
+    expect(screen.getByText("Perfil: Herramienta larga")).toBeInTheDocument();
+    expect(screen.getByText("Z de aproximación activa: 130.000 mm")).toBeInTheDocument();
   });
 
   it("muestra verde cuando todos los enlaces del runtime están listos", () => {

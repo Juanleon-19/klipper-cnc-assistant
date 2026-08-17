@@ -2387,3 +2387,58 @@ button {
 .execution-console-v2__error {
   grid-column: 1 / -1;
 }
+
+.execution-console-v2__resume-card {
+  display: grid;
+  gap: var(--space-3);
+  border-color: rgba(94, 211, 153, 0.4);
+}
+
+.execution-console-v2__resume-card h4,
+.execution-console-v2__resume-card p {
+  margin: 0;
+}
+
+.execution-console-v2__resume-next {
+  grid-column: 1 / -1;
+}
+
+.execution-console-v2__automatic-flow {
+  border-color: rgba(105, 199, 255, 0.32);
+  background: rgba(21, 50, 65, 0.48);
+}
+
+.execution-console-v2__automatic-status {
+  margin: 0;
+  color: var(--text);
+}
+
+.execution-console-v2__automatic-steps {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: var(--space-2);
+  padding: 0;
+  margin: 0;
+  list-style: none;
+}
+
+.execution-console-v2__automatic-steps li {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 0.75rem;
+  border: 1px solid rgba(151, 177, 194, 0.14);
+  border-radius: var(--radius-sm);
+  color: var(--text-muted);
+  background: rgba(9, 15, 20, 0.48);
+}
+
+.execution-console-v2__automatic-steps li.is-complete {
+  color: var(--success);
+}
+
+.execution-console-v2__automatic-steps li.is-current {
+  border-color: rgba(105, 199, 255, 0.52);
+  color: var(--text);
+  background: rgba(42, 105, 135, 0.38);
+}

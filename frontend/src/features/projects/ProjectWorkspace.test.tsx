@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { MachineContext, type MachineContextValue } from "../system/MachineContext";
 import { ApiError } from "../../lib/api";
-import type { CompensatedGCodeResult, HeightMap, JobPlan, JobRun, LiveExecutionSnapshot, Project, ReferenceSession } from "../../types";
+import type { CompensatedGCodeResult, HeightMap, JobPlan, JobRun, LiveExecutionSnapshot, MachineRuntime, Project, ReferenceSession } from "../../types";
 import { ProjectWorkspace } from "./ProjectWorkspace";
 
 function deferred<T>() {
@@ -451,9 +451,54 @@ function requireRuntime(machine: MachineContextValue) {
 
 const physicalRuntime = requireRuntime(physicalMachine);
 
+function referenceSettings(standardZ: number, longToolZ: number) {
+  return {
+    reference_prep_z_mm: standardZ,
+    long_tool_reference_prep_z_mm: longToolZ,
+    reference_prep_z_feed_mm_min: 180,
+    move_total_timeout_s: 180,
+    no_progress_timeout_s: 60,
+    position_tolerance_mm: 0.05,
+    velocity_tolerance_mm_s: 0.02,
+    reference_probe_step_mm: 0.05,
+    reference_probe_feed_mm_min: 60,
+    reference_probe_retract_mm: 1,
+    reference_probe_retract_feed_mm_min: 60,
+  };
+}
+
+function runtimeWithReferenceSettings(standardZ: number, longToolZ: number, state = "REFERENCE_CAPTURED"): MachineRuntime {
+  return {
+    ...physicalRuntime,
+    state,
+    preparation: {
+      ...physicalRuntime.preparation,
+      reference_prep_z_mm: standardZ,
+      long_tool_reference_prep_z_mm: longToolZ,
+    },
+  };
+}
+
+function machineWithRuntime(currentRuntime: MachineRuntime, refreshRuntime = vi.fn().mockResolvedValue(currentRuntime)): MachineContextValue {
+  return {
+    ...physicalMachine,
+    runtime: currentRuntime,
+    runtimeState: currentRuntime.state,
+    refreshRuntime,
+  };
+}
+
+const longToolProject: Project = {
+  ...project,
+  operaciones: project.operaciones.map((operation) => ({
+    ...operation,
+    tool_reference_profile: "long_tool",
+  })),
+};
+
 function renderWorkspace(machine?: MachineContextValue, options?: { onRefreshProject?: () => Promise<void>; onProjectStateChange?: (project: Project) => void; project?: Project }) {
   const workspaceProject = options?.project ?? project;
-  const workspace = (
+  const buildWorkspace = () => (
     <ProjectWorkspace
       project={workspaceProject}
       busyKey={null}
@@ -472,7 +517,14 @@ function renderWorkspace(machine?: MachineContextValue, options?: { onRefreshPro
       onProjectStateChange={options?.onProjectStateChange}
     />
   );
-  return render(machine ? <MachineContext.Provider value={machine}>{workspace}</MachineContext.Provider> : workspace);
+  const buildTree = (currentMachine?: MachineContextValue) => currentMachine
+    ? <MachineContext.Provider value={currentMachine}>{buildWorkspace()}</MachineContext.Provider>
+    : buildWorkspace();
+  const renderResult = render(buildTree(machine));
+  return {
+    ...renderResult,
+    rerenderWorkspace: (nextMachine?: MachineContextValue) => renderResult.rerender(buildTree(nextMachine)),
+  };
 }
 
 describe("ProjectWorkspace", () => {
@@ -826,6 +878,115 @@ describe("ProjectWorkspace", () => {
       velocity_tolerance_mm_s: 0.02,
     })));
     expect(physicalMachine.refreshRuntime).toHaveBeenCalled();
+  });
+
+  it("separa numéricamente la configuración guardada de la Z larga editada", async () => {
+    apiMock.getMachineSettings.mockResolvedValue(referenceSettings(105, 105));
+    const machine105 = machineWithRuntime(runtimeWithReferenceSettings(105, 105));
+    renderWorkspace(machine105, { project: longToolProject });
+
+    fireEvent.click(screen.getByRole("button", { name: /^Referencia$/i }));
+    const longToolInput = await screen.findByLabelText("Z de aproximación para herramienta larga (mm)");
+
+    await waitFor(() => expect(longToolInput).toHaveValue("105"));
+    expect(screen.getByText("Configuración guardada")).toBeInTheDocument();
+    expect(screen.getByText("Z de aproximación activa: 105.000 mm")).toBeInTheDocument();
+
+    fireEvent.change(longToolInput, { target: { value: "105.000" } });
+    expect(screen.getByText("Configuración guardada")).toBeInTheDocument();
+    expect(screen.queryByText("Hay cambios de configuración sin guardar.")).toBeNull();
+
+    fireEvent.change(longToolInput, { target: { value: "130" } });
+    expect(screen.getByText("Cambios sin guardar")).toBeInTheDocument();
+    expect(screen.getByText("Hay cambios de configuración sin guardar.")).toBeInTheDocument();
+    expect(screen.getByText("Z de aproximación activa: 105.000 mm")).toBeInTheDocument();
+    expect(screen.getByText("Pendiente de guardar: 130.000 mm")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Sondear referencia ahora" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Ir al punto de referencia" })).toBeDisabled();
+  });
+
+  it("confirma el guardado cuando PUT y runtime devuelven la nueva Z larga", async () => {
+    const runtime105 = runtimeWithReferenceSettings(105, 105);
+    const runtime130 = runtimeWithReferenceSettings(105, 130);
+    const refreshRuntime = vi.fn().mockResolvedValue(runtime130);
+    apiMock.getMachineSettings.mockResolvedValue(referenceSettings(105, 105));
+    apiMock.updateMachineSettings.mockResolvedValue(referenceSettings(105, 130));
+    const view = renderWorkspace(machineWithRuntime(runtime105, refreshRuntime), { project: longToolProject });
+
+    fireEvent.click(screen.getByRole("button", { name: /^Referencia$/i }));
+    const longToolInput = await screen.findByLabelText("Z de aproximación para herramienta larga (mm)");
+    await waitFor(() => expect(longToolInput).toHaveValue("105"));
+    fireEvent.change(longToolInput, { target: { value: "130" } });
+    fireEvent.click(screen.getByRole("button", { name: "Guardar configuración" }));
+
+    await waitFor(() => expect(apiMock.updateMachineSettings).toHaveBeenCalled());
+    await waitFor(() => expect(refreshRuntime).toHaveBeenCalledTimes(1));
+    view.rerenderWorkspace(machineWithRuntime(runtime130, refreshRuntime));
+
+    await waitFor(() => expect(screen.getByText("Configuración guardada")).toBeInTheDocument());
+    expect(longToolInput).toHaveValue("130");
+    expect(screen.getByText("Z de aproximación activa: 130.000 mm")).toBeInTheDocument();
+    expect(screen.queryByText(/Pendiente de guardar:/i)).toBeNull();
+    expect(screen.getByRole("button", { name: "Sondear referencia ahora" })).toBeEnabled();
+  });
+
+  it("conserva la edición y el bloqueo cuando falla el PUT", async () => {
+    const runtime105 = runtimeWithReferenceSettings(105, 105);
+    const refreshRuntime = vi.fn().mockResolvedValue(runtime105);
+    apiMock.getMachineSettings.mockResolvedValue(referenceSettings(105, 105));
+    apiMock.updateMachineSettings.mockRejectedValue(new Error("No se pudo persistir la configuración."));
+    renderWorkspace(machineWithRuntime(runtime105, refreshRuntime), { project: longToolProject });
+
+    fireEvent.click(screen.getByRole("button", { name: /^Referencia$/i }));
+    const longToolInput = await screen.findByLabelText("Z de aproximación para herramienta larga (mm)");
+    await waitFor(() => expect(longToolInput).toHaveValue("105"));
+    fireEvent.change(longToolInput, { target: { value: "130" } });
+    fireEvent.click(screen.getByRole("button", { name: "Guardar configuración" }));
+
+    expect(await screen.findByText("No se pudo persistir la configuración.")).toBeInTheDocument();
+    expect(longToolInput).toHaveValue("130");
+    expect(screen.getByText("Z de aproximación activa: 105.000 mm")).toBeInTheDocument();
+    expect(screen.getByText("Cambios sin guardar")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Sondear referencia ahora" })).toBeDisabled();
+    expect(refreshRuntime).not.toHaveBeenCalled();
+  });
+
+  it("bloquea si PUT guarda 130 pero el runtime continúa activo en 105", async () => {
+    const runtime105 = runtimeWithReferenceSettings(105, 105);
+    const refreshRuntime = vi.fn().mockResolvedValue(runtime105);
+    apiMock.getMachineSettings.mockResolvedValue(referenceSettings(105, 105));
+    apiMock.updateMachineSettings.mockResolvedValue(referenceSettings(105, 130));
+    renderWorkspace(machineWithRuntime(runtime105, refreshRuntime), { project: longToolProject });
+
+    fireEvent.click(screen.getByRole("button", { name: /^Referencia$/i }));
+    const longToolInput = await screen.findByLabelText("Z de aproximación para herramienta larga (mm)");
+    await waitFor(() => expect(longToolInput).toHaveValue("105"));
+    fireEvent.change(longToolInput, { target: { value: "130" } });
+    fireEvent.click(screen.getByRole("button", { name: "Guardar configuración" }));
+
+    expect(await screen.findByText("La configuración guardada no coincide con la Z activa del runtime.")).toBeInTheDocument();
+    expect(longToolInput).toHaveValue("130");
+    expect(screen.getByText("Z de aproximación activa: 105.000 mm")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Sondear referencia ahora" })).toBeDisabled();
+  });
+
+  it("mantiene bloqueado si PUT funciona pero no se puede refrescar el runtime", async () => {
+    const runtime105 = runtimeWithReferenceSettings(105, 105);
+    const refreshRuntime = vi.fn().mockRejectedValue(new Error("Runtime no disponible."));
+    apiMock.getMachineSettings.mockResolvedValue(referenceSettings(105, 105));
+    apiMock.updateMachineSettings.mockResolvedValue(referenceSettings(105, 130));
+    renderWorkspace(machineWithRuntime(runtime105, refreshRuntime), { project: longToolProject });
+
+    fireEvent.click(screen.getByRole("button", { name: /^Referencia$/i }));
+    const longToolInput = await screen.findByLabelText("Z de aproximación para herramienta larga (mm)");
+    await waitFor(() => expect(longToolInput).toHaveValue("105"));
+    fireEvent.change(longToolInput, { target: { value: "130" } });
+    fireEvent.click(screen.getByRole("button", { name: "Guardar configuración" }));
+
+    expect(await screen.findByText("Configuración guardada, pero no se pudo confirmar el runtime.")).toBeInTheDocument();
+    expect(longToolInput).toHaveValue("130");
+    expect(screen.getByText("Z de aproximación activa: 105.000 mm")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Sondear referencia ahora" })).toBeDisabled();
   });
 
   it("muestra mapa físico como flujo principal sin botón operativo SIMULADO", async () => {

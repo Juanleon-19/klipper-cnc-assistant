@@ -18,7 +18,7 @@ export type MachineContextValue = {
   movementAuthorized: boolean;
   lastError: string | null;
   runMachineAction: (action: MachineAction, targetZ?: number) => Promise<void>;
-  refreshRuntime: () => Promise<void>;
+  refreshRuntime: () => Promise<MachineRuntime | null>;
 };
 
 const defaultValue: MachineContextValue = {
@@ -35,7 +35,7 @@ const defaultValue: MachineContextValue = {
   movementAuthorized: false,
   lastError: null,
   runMachineAction: async () => {},
-  refreshRuntime: async () => {},
+  refreshRuntime: async () => null,
 };
 
 export const MachineContext = createContext<MachineContextValue>(defaultValue);

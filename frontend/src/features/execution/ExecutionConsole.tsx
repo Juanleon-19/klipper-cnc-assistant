@@ -43,6 +43,22 @@ const STARTABLE_STATES = new Set(["JOB_READY"]);
 const ARCHIVE_CANDIDATE_STATES = new Set(["JOB_VALIDATING", "JOB_STARTING", "OPERATION_PREFLIGHT", "OPERATION_UPLOADING", "WAITING_FOR_KLIPPER", "PRINT_QUEUED", "OPERATION_RUNNING", "RECOVERY_REQUIRED", "SPINDLE_STOP_REQUIRED", "TOOL_CHANGE_REQUIRED", "READY_TO_RESUME", "OPERATION_PAUSED", "JOB_PAUSED", "NEXT_OPERATION_READY"]);
 const TOOL_WAIT_STATES = new Set(["SPINDLE_STOP_REQUIRED", "TOOL_CHANGE_REQUIRED", "TOOL_CHANGE_CONFIRMED", "MOVING_TO_REFERENCE", "CALIBRATING_TOOL", "REGENERATING_COMPENSATION", "VALIDATING_REGENERATED_PLAN", "READY_TO_RESUME"]);
 const ACTIVE_EXECUTION_STATES = new Set(["JOB_STARTING", "OPERATION_PREFLIGHT", "OPERATION_UPLOADING", "WAITING_FOR_KLIPPER", "PRINT_QUEUED", "OPERATION_RUNNING", "OPERATION_PAUSED", "JOB_PAUSED"]);
+const AUTOMATIC_FLOW_STEPS = [
+  { state: "READY_TO_RESUME", label: "Referencia Z medida" },
+  { state: "OPERATION_PREFLIGHT", label: "Generar Legacy JIT" },
+  { state: "OPERATION_UPLOADING", label: "Subir a Moonraker" },
+  { state: "WAITING_FOR_KLIPPER", label: "Esperar confirmación de Klipper" },
+  { state: "PRINT_QUEUED", label: "Archivo en cola de Moonraker" },
+  { state: "OPERATION_RUNNING", label: "Ejecutar operación" },
+] as const;
+const AUTOMATIC_FLOW_DESCRIPTIONS: Record<string, string> = {
+  READY_TO_RESUME: "Nueva referencia lista; esperando confirmación para continuar",
+  OPERATION_PREFLIGHT: "Generando compensación Legacy JIT",
+  OPERATION_UPLOADING: "Subiendo archivo compensado a Moonraker",
+  WAITING_FOR_KLIPPER: "Esperando confirmación de Klipper",
+  PRINT_QUEUED: "Archivo en cola de Moonraker",
+  OPERATION_RUNNING: "Ejecutando operación",
+};
 
 function clamp(value: number | null | undefined): number {
   if (typeof value !== "number" || Number.isNaN(value)) {
@@ -163,9 +179,13 @@ export function ExecutionConsole({ snapshot, error, busy, onPrepare, onStart, on
   const showSpindleStopRequired = runStatus === "SPINDLE_STOP_REQUIRED";
   const showToolChangeRequired = runStatus === "TOOL_CHANGE_REQUIRED";
   const showRecoveryRequired = runStatus === "RECOVERY_REQUIRED";
+  const showReadyToResume = runStatus === "READY_TO_RESUME";
   const eta = snapshot?.eta;
   const etaIsCalculating = ACTIVE_EXECUTION_STATES.has(runStatus) && eta?.available === false;
   const transitionProfileLabel = snapshot?.transition.tool_reference_profile === "long_tool" ? "Herramienta larga" : "Estándar";
+  const transitionTool = snapshot?.transition.tool ?? snapshot?.transition.required_tool ?? snapshot?.operation.tool ?? "pendiente";
+  const automaticFlowDescription = AUTOMATIC_FLOW_DESCRIPTIONS[runStatus] ?? null;
+  const automaticFlowStepIndex = AUTOMATIC_FLOW_STEPS.findIndex((step) => step.state === runStatus);
   const checks = jobRun?.checks ?? [];
   const failedChecks = checks.filter((check) => !check.ok);
   const showPreflightSummary = runStatus === "JOB_READY" || runStatus === "JOB_VALIDATING" || checks.length > 0;
@@ -198,6 +218,7 @@ export function ExecutionConsole({ snapshot, error, busy, onPrepare, onStart, on
         <div className="alert alert--warning">
           <strong>Cambie la herramienta</strong>
           <p>Instale la herramienta requerida y pulse Herramienta cambiada.</p>
+          <p>Después de confirmar el cambio, la referencia anterior dejará de ser válida y se medirá la nueva herramienta antes de generar su compensación.</p>
         </div>
       ) : null}
       {showRecoveryRequired ? (
@@ -205,6 +226,47 @@ export function ExecutionConsole({ snapshot, error, busy, onPrepare, onStart, on
           <strong>Transición de herramienta detenida</strong>
           <p>Causa: {snapshot?.transition.last_error?.message ?? "La transición segura no pudo completarse."}</p>
         </div>
+      ) : null}
+
+      {showReadyToResume ? (
+        <section className="alert alert--success execution-console-v2__resume-card" aria-label="Nueva referencia Z lista">
+          <h4>Nueva referencia Z lista</h4>
+          <div className="info-grid info-grid--double compact-grid">
+            <div className="metric-box"><span>Herramienta</span><strong>{transitionTool}</strong></div>
+            <div className="metric-box"><span>Perfil</span><strong>{transitionProfileLabel}</strong></div>
+            <div className="metric-box execution-console-v2__resume-next"><span>Siguiente paso</span><strong>Continuar trabajo</strong></div>
+          </div>
+          <p>Al continuar, el sistema generará automáticamente una nueva compensación Legacy para la siguiente operación usando la referencia Z recién medida, la subirá a Moonraker y comenzará la ejecución cuando Klipper la acepte.</p>
+          <p><strong>No es necesario volver a la sección Compensación.</strong></p>
+        </section>
+      ) : null}
+
+      {automaticFlowDescription ? (
+        <section className="execution-panel execution-console-v2__automatic-flow" aria-label="Flujo automático de la siguiente operación">
+          <div className="section-heading section-heading--stacked">
+            <div>
+              <h4>Flujo automático de la siguiente operación</h4>
+              <p className="muted">El plan de operaciones se conserva. La compensación se genera por operación justo antes de ejecutarla.</p>
+            </div>
+          </div>
+          <p className="execution-console-v2__automatic-status"><strong>{automaticFlowDescription}</strong></p>
+          <ol className="execution-console-v2__automatic-steps">
+            {AUTOMATIC_FLOW_STEPS.map((step, index) => {
+              const isCurrent = index === automaticFlowStepIndex;
+              const isComplete = index < automaticFlowStepIndex || (runStatus === "READY_TO_RESUME" && index === 0);
+              return (
+                <li
+                  className={isCurrent ? "is-current" : isComplete ? "is-complete" : undefined}
+                  aria-current={isCurrent ? "step" : undefined}
+                  key={step.state}
+                >
+                  <span aria-hidden="true">{isComplete ? "✓" : isCurrent ? "→" : "·"}</span>
+                  {step.label}
+                </li>
+              );
+            })}
+          </ol>
+        </section>
       ) : null}
 
       {showPreflightSummary ? (

@@ -27,13 +27,18 @@ import type {
   OperationAnalysis,
   JobPlan,
   LiveExecutionSnapshot,
+  MachineRuntime,
   ReferenceMoveResult,
   ToolReferenceProfile,
 } from "../../types";
 import { ProjectForm } from "./ProjectForm";
 import { StatusBadge } from "../../components/StatusBadge";
 import { ExecutionConsole } from "../execution/ExecutionConsole";
-import { ReferenceWorkspace } from "../references/ReferenceWorkspace";
+import {
+  ReferenceWorkspace,
+  type MachineSettingsInput,
+  type MachineSettingsRuntimeStatus,
+} from "../references/ReferenceWorkspace";
 
 type ProjectWorkspaceProps = {
   project: Project | null;
@@ -62,6 +67,77 @@ type HeightMapSource = "SIMULATED" | "MEASURED";
 type ReferenceFieldErrors = Partial<Record<"x_mm" | "y_mm" | "z_mm", string>>;
 type InputState = { x_mm: string; y_mm: string };
 type ZInputState = { x_mm: string; y_mm: string; z_mm: string };
+type MachineSettingsValues = { [Key in keyof MachineSettingsInput]: number };
+
+const DEFAULT_MACHINE_SETTINGS: MachineSettingsValues = {
+  reference_prep_z_mm: 115,
+  long_tool_reference_prep_z_mm: 115,
+  reference_prep_z_feed_mm_min: 180,
+  move_total_timeout_s: 180,
+  no_progress_timeout_s: 60,
+  position_tolerance_mm: 0.05,
+  velocity_tolerance_mm_s: 0.02,
+  reference_probe_step_mm: 0.05,
+  reference_probe_feed_mm_min: 60,
+  reference_probe_retract_mm: 1,
+  reference_probe_retract_feed_mm_min: 60,
+};
+
+const MACHINE_SETTING_KEYS = Object.keys(DEFAULT_MACHINE_SETTINGS) as Array<keyof MachineSettingsValues>;
+
+function normalizeMachineSettings(
+  settings: Record<string, number>,
+  fallback: MachineSettingsValues = DEFAULT_MACHINE_SETTINGS,
+): MachineSettingsValues {
+  const normalized = { ...fallback };
+  for (const key of MACHINE_SETTING_KEYS) {
+    const value = settings[key];
+    normalized[key] = typeof value === "number" && Number.isFinite(value) ? value : fallback[key];
+  }
+  if (!(typeof settings.long_tool_reference_prep_z_mm === "number" && Number.isFinite(settings.long_tool_reference_prep_z_mm))) {
+    normalized.long_tool_reference_prep_z_mm = normalized.reference_prep_z_mm;
+  }
+  return normalized;
+}
+
+function machineSettingsToInput(settings: MachineSettingsValues): MachineSettingsInput {
+  return {
+    reference_prep_z_mm: String(settings.reference_prep_z_mm),
+    long_tool_reference_prep_z_mm: String(settings.long_tool_reference_prep_z_mm),
+    reference_prep_z_feed_mm_min: String(settings.reference_prep_z_feed_mm_min),
+    move_total_timeout_s: String(settings.move_total_timeout_s),
+    no_progress_timeout_s: String(settings.no_progress_timeout_s),
+    position_tolerance_mm: String(settings.position_tolerance_mm),
+    velocity_tolerance_mm_s: String(settings.velocity_tolerance_mm_s),
+    reference_probe_step_mm: String(settings.reference_probe_step_mm),
+    reference_probe_feed_mm_min: String(settings.reference_probe_feed_mm_min),
+    reference_probe_retract_mm: String(settings.reference_probe_retract_mm),
+    reference_probe_retract_feed_mm_min: String(settings.reference_probe_retract_feed_mm_min),
+  };
+}
+
+function machineSettingsInputsDiffer(input: MachineSettingsInput, saved: MachineSettingsValues | null) {
+  if (!saved) return true;
+  return MACHINE_SETTING_KEYS.some((key) => {
+    const edited = Number(input[key].trim());
+    return !Number.isFinite(edited) || edited !== saved[key];
+  });
+}
+
+function machineSettingsRuntimeSignature(settings: MachineSettingsValues) {
+  return `${settings.reference_prep_z_mm}:${settings.long_tool_reference_prep_z_mm}`;
+}
+
+function runtimeSettingsStatus(settings: MachineSettingsValues, runtime: MachineRuntime | null): MachineSettingsRuntimeStatus {
+  const standardZ = runtime?.preparation?.reference_prep_z_mm;
+  if (typeof standardZ !== "number" || !Number.isFinite(standardZ)) return "unconfirmed";
+  const longToolZ = typeof runtime?.preparation?.long_tool_reference_prep_z_mm === "number"
+    ? runtime.preparation.long_tool_reference_prep_z_mm
+    : standardZ;
+  return standardZ === settings.reference_prep_z_mm && longToolZ === settings.long_tool_reference_prep_z_mm
+    ? "coherent"
+    : "inconsistent";
+}
 
 
 const operationTypeOptions = [
@@ -500,20 +576,11 @@ export function ProjectWorkspace({
   const [meshPreviewFingerprint, setMeshPreviewFingerprint] = useState<string | null>(null);
   const [jobPlan, setJobPlan] = useState<JobPlan | null>(null);
   const [liveExecution, setLiveExecution] = useState<LiveExecutionSnapshot | null>(null);
-  const [machineSettingsInput, setMachineSettingsInput] = useState({
-    reference_prep_z_mm: "115",
-    long_tool_reference_prep_z_mm: "115",
-    reference_prep_z_feed_mm_min: "180",
-    move_total_timeout_s: "180",
-    no_progress_timeout_s: "60",
-    position_tolerance_mm: "0.05",
-    velocity_tolerance_mm_s: "0.02",
-    reference_probe_step_mm: "0.05",
-    reference_probe_feed_mm_min: "60",
-    reference_probe_retract_mm: "1.0",
-    reference_probe_retract_feed_mm_min: "60",
-  });
+  const [machineSettingsInput, setMachineSettingsInput] = useState<MachineSettingsInput>(() => machineSettingsToInput(DEFAULT_MACHINE_SETTINGS));
+  const [savedMachineSettings, setSavedMachineSettings] = useState<MachineSettingsValues | null>(null);
+  const [machineSettingsRuntimeStatus, setMachineSettingsRuntimeStatus] = useState<MachineSettingsRuntimeStatus>("unconfirmed");
   const [machineSettingsMessage, setMachineSettingsMessage] = useState("");
+  const lastRuntimeSettingsCheck = useRef<{ runtime: MachineRuntime | null; signature: string } | null>(null);
   const physicalMapPollInFlight = useRef(false);
   const meshPreviewAbortRef = useRef<AbortController | null>(null);
   const meshPreviewRequestIdRef = useRef(0);
@@ -521,32 +588,35 @@ export function ProjectWorkspace({
   const physicalMapWorkerActive = physicalMap?.execution?.worker_active === true;
   const physicalMapWorkerGeneration = physicalMap?.execution?.worker_generation ?? null;
   const physicalMapReadyId = machine.isPhysical && isPhysicalMapReady(physicalMap) ? physicalMap.map_id : null;
+  const machineSettingsHasUnsavedChanges = useMemo(
+    () => machineSettingsInputsDiffer(machineSettingsInput, savedMachineSettings),
+    [machineSettingsInput, savedMachineSettings],
+  );
+  const machineSettingsDirty = machineSettingsHasUnsavedChanges || machineSettingsRuntimeStatus !== "coherent";
 
   useEffect(() => {
     if (!machine.isPhysical) {
       return;
     }
     void api.getMachineSettings().then((settings) => {
-      const nextReferenceProbeStep = String(settings.reference_probe_step_mm ?? 0.05);
-      const nextReferenceProbeFeed = String(settings.reference_probe_feed_mm_min ?? 60);
-      const nextReferenceProbeRetract = String(settings.reference_probe_retract_mm ?? 1.0);
-      setMachineSettingsInput({
-        reference_prep_z_mm: String(settings.reference_prep_z_mm ?? 115),
-        long_tool_reference_prep_z_mm: String(settings.long_tool_reference_prep_z_mm ?? settings.reference_prep_z_mm ?? 115),
-        reference_prep_z_feed_mm_min: String(settings.reference_prep_z_feed_mm_min ?? 180),
-        move_total_timeout_s: String(settings.move_total_timeout_s ?? 180),
-        no_progress_timeout_s: String(settings.no_progress_timeout_s ?? 60),
-        position_tolerance_mm: String(settings.position_tolerance_mm ?? 0.05),
-        velocity_tolerance_mm_s: String(settings.velocity_tolerance_mm_s ?? 0.02),
-        reference_probe_step_mm: nextReferenceProbeStep,
-        reference_probe_feed_mm_min: nextReferenceProbeFeed,
-        reference_probe_retract_mm: nextReferenceProbeRetract,
-        reference_probe_retract_feed_mm_min: String(settings.reference_probe_retract_feed_mm_min ?? 60),
-      });
+      const normalized = normalizeMachineSettings(settings);
+      setSavedMachineSettings(normalized);
+      setMachineSettingsInput(machineSettingsToInput(normalized));
+      setMachineSettingsRuntimeStatus("unconfirmed");
     }).catch(() => {
       setMachineSettingsMessage("No se pudo leer la configuración avanzada de máquina.");
+      setMachineSettingsRuntimeStatus("unconfirmed");
     });
   }, [machine.isPhysical]);
+
+  useEffect(() => {
+    if (!savedMachineSettings) return;
+    const signature = machineSettingsRuntimeSignature(savedMachineSettings);
+    const previous = lastRuntimeSettingsCheck.current;
+    if (previous?.runtime === runtime && previous.signature === signature) return;
+    lastRuntimeSettingsCheck.current = { runtime, signature };
+    setMachineSettingsRuntimeStatus(runtimeSettingsStatus(savedMachineSettings, runtime));
+  }, [runtime, savedMachineSettings]);
 
   useEffect(() => {
     setSelectedOperationId((current) => {
@@ -983,6 +1053,12 @@ export function ProjectWorkspace({
     }
   };
 
+  const referenceSettingsAllowMovement = () => {
+    if (!machineSettingsDirty) return true;
+    setMachineSettingsMessage("Guarde la configuración antes de realizar movimientos de referencia.");
+    return false;
+  };
+
   const saveMachineSettings = async () => {
     const labels: Record<keyof typeof machineSettingsInput, string> = {
       reference_prep_z_mm: "Z de preparación",
@@ -997,34 +1073,42 @@ export function ProjectWorkspace({
       reference_probe_retract_mm: "Retracto de sonda de referencia",
       reference_probe_retract_feed_mm_min: "Velocidad de retracto de sonda",
     };
-    const payload: Record<string, number> = {};
+    const payload = {} as MachineSettingsValues;
     for (const [key, label] of Object.entries(labels)) {
       const parsed = parseFiniteNumber(machineSettingsInput[key as keyof typeof machineSettingsInput]);
       if (parsed.value === null || parsed.value <= 0) {
         setMachineSettingsMessage(`${label} debe ser un número mayor que cero.`);
         return;
       }
-      payload[key] = parsed.value;
+      payload[key as keyof MachineSettingsValues] = parsed.value;
     }
     setReferenceBusy(true);
     setMachineSettingsMessage("");
     try {
       const settings = await api.updateMachineSettings(payload);
-      setMachineSettingsInput({
-        reference_prep_z_mm: String(settings.reference_prep_z_mm ?? payload.reference_prep_z_mm),
-        long_tool_reference_prep_z_mm: String(settings.long_tool_reference_prep_z_mm ?? payload.long_tool_reference_prep_z_mm),
-        reference_prep_z_feed_mm_min: String(settings.reference_prep_z_feed_mm_min ?? payload.reference_prep_z_feed_mm_min),
-        move_total_timeout_s: String(settings.move_total_timeout_s ?? payload.move_total_timeout_s),
-        no_progress_timeout_s: String(settings.no_progress_timeout_s ?? payload.no_progress_timeout_s),
-        position_tolerance_mm: String(settings.position_tolerance_mm ?? payload.position_tolerance_mm),
-        velocity_tolerance_mm_s: String(settings.velocity_tolerance_mm_s ?? payload.velocity_tolerance_mm_s),
-        reference_probe_step_mm: String(settings.reference_probe_step_mm ?? payload.reference_probe_step_mm),
-        reference_probe_feed_mm_min: String(settings.reference_probe_feed_mm_min ?? payload.reference_probe_feed_mm_min),
-        reference_probe_retract_mm: String(settings.reference_probe_retract_mm ?? payload.reference_probe_retract_mm),
-        reference_probe_retract_feed_mm_min: String(settings.reference_probe_retract_feed_mm_min ?? payload.reference_probe_retract_feed_mm_min),
-      });
-      setMachineSettingsMessage("Configuración avanzada de máquina guardada.");
-      await machine.refreshRuntime();
+      const normalized = normalizeMachineSettings(settings, payload);
+      setSavedMachineSettings(normalized);
+      setMachineSettingsInput(machineSettingsToInput(normalized));
+      setMachineSettingsRuntimeStatus("unconfirmed");
+      setMachineSettingsMessage("Configuración guardada. Confirmando runtime…");
+      try {
+        const refreshedRuntime = await machine.refreshRuntime();
+        if (!refreshedRuntime) {
+          setMachineSettingsRuntimeStatus("refresh_failed");
+          setMachineSettingsMessage("");
+          return;
+        }
+        lastRuntimeSettingsCheck.current = {
+          runtime: refreshedRuntime,
+          signature: machineSettingsRuntimeSignature(normalized),
+        };
+        const status = runtimeSettingsStatus(normalized, refreshedRuntime);
+        setMachineSettingsRuntimeStatus(status);
+        setMachineSettingsMessage(status === "coherent" ? "Configuración avanzada de máquina guardada y confirmada." : "");
+      } catch {
+        setMachineSettingsRuntimeStatus("refresh_failed");
+        setMachineSettingsMessage("");
+      }
     } catch (error) {
       setMachineSettingsMessage(error instanceof Error ? error.message : "No se pudo guardar la configuración avanzada de máquina.");
     } finally {
@@ -1474,7 +1558,7 @@ export function ProjectWorkspace({
   );
 
   const remeasurePhysicalReference = async () => {
-    if (!project || !selectedOperation) return;
+    if (!project || !selectedOperation || !referenceSettingsAllowMovement()) return;
     await withPhysicalReferenceAction(async () => {
       await api.confirmProbe();
       await machine.refreshRuntime();
@@ -1484,7 +1568,7 @@ export function ProjectWorkspace({
   };
 
   const goToReferencePoint = async () => {
-    if (!project || !selectedOperation || referenceMoveInFlight.current) return;
+    if (!project || !selectedOperation || referenceMoveInFlight.current || !referenceSettingsAllowMovement()) return;
     referenceMoveInFlight.current = true;
     setReferenceBusy(true);
     setWorkspaceError("");
@@ -1511,6 +1595,9 @@ export function ProjectWorkspace({
       heightMap={heightMap}
       machineSettingsInput={machineSettingsInput}
       machineSettingsMessage={machineSettingsMessage}
+      machineSettingsDirty={machineSettingsDirty}
+      machineSettingsHasUnsavedChanges={machineSettingsHasUnsavedChanges}
+      machineSettingsRuntimeStatus={machineSettingsRuntimeStatus}
       referenceMoveResult={referenceMoveResult}
       workOrigin={workOrigin}
       zReference={zReference}
@@ -1525,12 +1612,20 @@ export function ProjectWorkspace({
       onDiagnosticMode={() => void machine.runMachineAction("diagnostic")}
       onReconnectArduino={() => void machine.runMachineAction("reconnect-arduino")}
       onSaveMachineSettings={() => void saveMachineSettings()}
-      onInitialize={() => void withPhysicalReferenceAction(async () => { await machine.runMachineAction("initialize", Number(machineSettingsInput.reference_prep_z_mm)); })}
+      onInitialize={() => {
+        if (!referenceSettingsAllowMovement()) return;
+        const activeReferencePrepZ = runtime?.preparation?.reference_prep_z_mm;
+        if (typeof activeReferencePrepZ !== "number" || !Number.isFinite(activeReferencePrepZ)) {
+          setMachineSettingsMessage("No se pudo confirmar la Z de preparación activa del runtime.");
+          return;
+        }
+        void withPhysicalReferenceAction(async () => { await machine.runMachineAction("initialize", activeReferencePrepZ); });
+      }}
       onEnableManual={() => void machine.runMachineAction("manual-on")}
       onCapturePhysicalWorkOrigin={() => void withPhysicalReferenceAction(() => api.capturePhysicalWorkOrigin(project.id, selectedOperation!.id))}
       onCancelOperation={() => void machine.runMachineAction("cancel")}
       onToolChangePosition={() => void withPhysicalReferenceAction(async () => { await machine.runMachineAction("tool-change-position"); })}
-      onProbeRequest={() => void machine.runMachineAction("probe-request")}
+      onProbeRequest={() => { if (referenceSettingsAllowMovement()) void machine.runMachineAction("probe-request"); }}
       onRemeasurePhysicalReference={() => void remeasurePhysicalReference()}
       onGoToReferencePoint={() => void goToReferencePoint()}
       onConfirmMachineReference={() => void withReferenceAction(() => api.confirmMachineReference(project.id, selectedOperation!.id))}
