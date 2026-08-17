@@ -2353,6 +2353,32 @@ button {
   align-items: center;
 }
 
+.execution-console-v2__eta {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: var(--space-3);
+  padding: var(--space-4);
+  border: 1px solid rgba(105, 199, 255, 0.32);
+  border-radius: var(--radius-md);
+  background: rgba(21, 50, 65, 0.72);
+}
+
+.execution-console-v2__eta div {
+  display: grid;
+  gap: var(--space-1);
+}
+
+.execution-console-v2__eta span {
+  color: var(--text-muted);
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.execution-console-v2__eta strong {
+  font-size: clamp(1.2rem, 2.5vw, 1.65rem);
+}
+
 .execution-console-v2__events {
   max-height: 360px;
   overflow: auto;

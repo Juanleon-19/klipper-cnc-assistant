@@ -818,6 +818,7 @@ describe("ProjectWorkspace", () => {
 
     await waitFor(() => expect(apiMock.updateMachineSettings).toHaveBeenCalledWith(expect.objectContaining({
       reference_prep_z_mm: 115,
+      long_tool_reference_prep_z_mm: 115,
       reference_prep_z_feed_mm_min: 90,
       move_total_timeout_s: 180,
       no_progress_timeout_s: 60,
@@ -1597,6 +1598,7 @@ describe("ProjectWorkspace", () => {
     fireEvent.change(screen.getByLabelText(/Tipo de operación/i), { target: { value: "taladrado" } });
     fireEvent.change(screen.getByLabelText("Nombre"), { target: { value: "Taladrado 0,8 mm" } });
     fireEvent.change(screen.getByLabelText("Herramienta"), { target: { value: "Broca 0,8 mm" } });
+    fireEvent.change(screen.getByLabelText("Perfil de altura de la nueva operación"), { target: { value: "long_tool" } });
     fireEvent.click(screen.getByRole("button", { name: /Agregar operación/i }));
 
     await waitFor(() => expect(onAddOperation).toHaveBeenCalledWith({
@@ -1604,7 +1606,36 @@ describe("ProjectWorkspace", () => {
       nombre: "Taladrado 0,8 mm",
       tipo: "taladrado",
       herramienta: "Broca 0,8 mm",
+      tool_reference_profile: "long_tool",
     }));
+  });
+
+  it("actualiza el perfil de referencia persistente de una operación", async () => {
+    const onUpdateOperation = vi.fn().mockResolvedValue(undefined);
+    render(
+      <ProjectWorkspace
+        project={project}
+        busyKey={null}
+        savingProject={false}
+        onSaveProject={vi.fn()}
+        onAddSetup={vi.fn()}
+        onAddOperation={vi.fn()}
+        onUpdateOperation={onUpdateOperation}
+        onDuplicateOperation={vi.fn()}
+        onMoveOperation={vi.fn()}
+        onDeleteOperation={vi.fn()}
+        onRemoveFile={vi.fn()}
+        onAnalyze={vi.fn()}
+        onUploadFile={vi.fn()}
+      />
+    );
+
+    fireEvent.change(screen.getByLabelText("Perfil de referencia de Fresado superior"), { target: { value: "long_tool" } });
+
+    await waitFor(() => expect(onUpdateOperation).toHaveBeenCalledWith("op_1", expect.objectContaining({
+      herramienta: "V-bit 30",
+      tool_reference_profile: "long_tool",
+    })));
   });
 
   it("selecciona una trayectoria independiente por operation_id", async () => {

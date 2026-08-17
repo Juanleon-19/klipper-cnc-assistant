@@ -42,6 +42,7 @@ const CHECK_LABELS: Record<string, string> = {
 const STARTABLE_STATES = new Set(["JOB_READY"]);
 const ARCHIVE_CANDIDATE_STATES = new Set(["JOB_VALIDATING", "JOB_STARTING", "OPERATION_PREFLIGHT", "OPERATION_UPLOADING", "WAITING_FOR_KLIPPER", "PRINT_QUEUED", "OPERATION_RUNNING", "RECOVERY_REQUIRED", "SPINDLE_STOP_REQUIRED", "TOOL_CHANGE_REQUIRED", "READY_TO_RESUME", "OPERATION_PAUSED", "JOB_PAUSED", "NEXT_OPERATION_READY"]);
 const TOOL_WAIT_STATES = new Set(["SPINDLE_STOP_REQUIRED", "TOOL_CHANGE_REQUIRED", "TOOL_CHANGE_CONFIRMED", "MOVING_TO_REFERENCE", "CALIBRATING_TOOL", "REGENERATING_COMPENSATION", "VALIDATING_REGENERATED_PLAN", "READY_TO_RESUME"]);
+const ACTIVE_EXECUTION_STATES = new Set(["JOB_STARTING", "OPERATION_PREFLIGHT", "OPERATION_UPLOADING", "WAITING_FOR_KLIPPER", "PRINT_QUEUED", "OPERATION_RUNNING", "OPERATION_PAUSED", "JOB_PAUSED"]);
 
 function clamp(value: number | null | undefined): number {
   if (typeof value !== "number" || Number.isNaN(value)) {
@@ -161,7 +162,10 @@ export function ExecutionConsole({ snapshot, error, busy, onPrepare, onStart, on
   const runStatus = snapshot?.run.status ?? snapshot?.operation.execution_status ?? "JOB_DRAFT";
   const showSpindleStopRequired = runStatus === "SPINDLE_STOP_REQUIRED";
   const showToolChangeRequired = runStatus === "TOOL_CHANGE_REQUIRED";
+  const showRecoveryRequired = runStatus === "RECOVERY_REQUIRED";
   const eta = snapshot?.eta;
+  const etaIsCalculating = ACTIVE_EXECUTION_STATES.has(runStatus) && eta?.available === false;
+  const transitionProfileLabel = snapshot?.transition.tool_reference_profile === "long_tool" ? "Herramienta larga" : "Estándar";
   const checks = jobRun?.checks ?? [];
   const failedChecks = checks.filter((check) => !check.ok);
   const showPreflightSummary = runStatus === "JOB_READY" || runStatus === "JOB_VALIDATING" || checks.length > 0;
@@ -194,6 +198,12 @@ export function ExecutionConsole({ snapshot, error, busy, onPrepare, onStart, on
         <div className="alert alert--warning">
           <strong>Cambie la herramienta</strong>
           <p>Instale la herramienta requerida y pulse Herramienta cambiada.</p>
+        </div>
+      ) : null}
+      {showRecoveryRequired ? (
+        <div className="alert alert--danger">
+          <strong>Transición de herramienta detenida</strong>
+          <p>Causa: {snapshot?.transition.last_error?.message ?? "La transición segura no pudo completarse."}</p>
         </div>
       ) : null}
 
@@ -261,8 +271,6 @@ export function ExecutionConsole({ snapshot, error, busy, onPrepare, onStart, on
         <div className="metric-box"><span>Próxima acción</span><strong>{snapshot?.run.next_action ?? "Prepare el trabajo"}</strong></div>
         <div className="metric-box"><span>Operaciones</span><strong>{`${snapshot?.run.completed_operations ?? 0} de ${snapshot?.run.total_operations ?? 0} operaciones terminadas`}</strong></div>
         <div className="metric-box"><span>Tiempo transcurrido</span><strong>{formatDurationSeconds(eta?.available ? eta.elapsed_s : snapshot?.moonraker.print_duration ?? 0)}</strong></div>
-        <div className="metric-box"><span>Tiempo restante</span><strong>{eta?.available ? formatDurationSeconds(eta.remaining_s) : "ETA no disponible"}</strong></div>
-        <div className="metric-box"><span>Finalización estimada</span><strong>{eta?.available && eta.completion_at ? formatDate(eta.completion_at) : "-"}</strong></div>
         <div className="metric-box"><span>Método ETA</span><strong>{estimateMethodLabel(eta?.method)}</strong></div>
         <div className="metric-box"><span>Confianza</span><strong>{eta?.available ? (eta.confidence ?? "-") : "-"}</strong></div>
       </div>
@@ -284,6 +292,10 @@ export function ExecutionConsole({ snapshot, error, busy, onPrepare, onStart, on
           <progress max="1" value={clamp(snapshot?.run.overall_progress ?? 0)} aria-label="Progreso total" />
         </section>
       </div>
+      <section className="execution-console-v2__eta" aria-label="Estimación de tiempo">
+        <div><span>Tiempo restante:</span><strong>{eta?.available ? formatDurationSeconds(eta.remaining_s) : etaIsCalculating ? "calculando..." : "no disponible"}</strong></div>
+        <div><span>Fin estimado:</span><strong>{eta?.available && eta.completion_at ? formatDate(eta.completion_at) : etaIsCalculating ? "calculando..." : "-"}</strong></div>
+      </section>
 
       <div className="action-grid execution-console-v2__actions">
         <button className="button button--ghost" type="button" disabled={busy} onClick={() => void onPrepare()}>Preparar trabajo</button>
@@ -352,7 +364,7 @@ export function ExecutionConsole({ snapshot, error, busy, onPrepare, onStart, on
             <div className="metric-box"><span>Watcher</span><strong>{snapshot?.run.watcher_alive ? "activo" : "inactivo"}</strong></div>
             <div className="metric-box"><span>Recuperación</span><strong>{snapshot?.run.recovery_state ?? "normal"}</strong></div>
             <div className="metric-box"><span>Última persistencia</span><strong>{snapshot?.run.updated_at ? formatDate(snapshot.run.updated_at) : "-"}</strong></div>
-            <div className="metric-box execution-console-v2__error"><span>Último error</span><strong>{snapshot?.run.last_watcher_error ?? "ninguno"}</strong></div>
+            <div className="metric-box execution-console-v2__error"><span>Error de transición activo</span><strong>{snapshot?.transition.last_error?.message ?? "ninguno"}</strong></div>
           </div>
         </section>
       </div>
@@ -362,6 +374,9 @@ export function ExecutionConsole({ snapshot, error, busy, onPrepare, onStart, on
         <div className="info-grid info-grid--double compact-grid">
           <div className="metric-box"><span>State</span><strong>{snapshot?.transition.state ?? "-"}</strong></div>
           <div className="metric-box"><span>Herramienta requerida</span><strong>{snapshot?.transition.required_tool ?? "-"}</strong></div>
+          <div className="metric-box"><span>Herramienta</span><strong>{snapshot?.transition.tool ?? "-"}</strong></div>
+          <div className="metric-box"><span>Perfil</span><strong>{transitionProfileLabel}</strong></div>
+          <div className="metric-box"><span>Z de aproximación</span><strong>{typeof snapshot?.transition.reference_prep_z_mm === "number" ? `${snapshot.transition.reference_prep_z_mm.toFixed(3)} mm` : "-"}</strong></div>
           <div className="metric-box"><span>Confirmación del operador</span><strong>{snapshot?.transition.operator_confirmation_required ? "requerida" : "no"}</strong></div>
         </div>
       </section>

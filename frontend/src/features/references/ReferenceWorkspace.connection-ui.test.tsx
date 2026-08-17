@@ -26,6 +26,7 @@ function runtime(connected: boolean): MachineRuntime {
       ? { open: true, connection_state: "CONNECTED" }
       : { open: false, connection_state: "DISCONNECTED" },
     controller: {},
+    preparation: { reference_prep_z_mm: 115, long_tool_reference_prep_z_mm: 130 },
     initialization_steps: [],
     events: [],
   } as unknown as MachineRuntime;
@@ -55,6 +56,7 @@ function renderReference(options?: {
   connected?: boolean;
   onConnectRuntime?: ReturnType<typeof vi.fn>;
   refreshRuntime?: ReturnType<typeof vi.fn>;
+  toolReferenceProfile?: "standard" | "long_tool";
 }) {
   const connected = options?.connected ?? false;
   const onConnectRuntime = options?.onConnectRuntime ?? vi.fn();
@@ -67,10 +69,11 @@ function renderReference(options?: {
       runtime={currentRuntime}
       referenceSession={null}
       referenceBusy={false}
-      selectedOperation={{ id: "op-1", herramienta: "V-bit" } as unknown as Operation}
+      selectedOperation={{ id: "op-1", herramienta: "Broca 0.8 mm", tool_reference_profile: options?.toolReferenceProfile ?? "standard" } as unknown as Operation}
       heightMap={null}
       machineSettingsInput={{
         reference_prep_z_mm: "115",
+        long_tool_reference_prep_z_mm: "130",
         reference_prep_z_feed_mm_min: "180",
         move_total_timeout_s: "180",
         no_progress_timeout_s: "60",
@@ -188,6 +191,15 @@ describe("ReferenceWorkspace connection and workflow UI", () => {
     expect(screen.getByRole("heading", { name: "4. Medir referencia Z" })).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "Comprobación de posición de cambio de herramienta" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Probar posición de cambio" })).toBeInTheDocument();
+  });
+
+  it("muestra la herramienta, el perfil largo y su Z antes de referenciar", () => {
+    renderReference({ connected: true, toolReferenceProfile: "long_tool" });
+
+    expect(screen.getByText("Herramienta: Broca 0.8 mm")).toBeInTheDocument();
+    expect(screen.getAllByText("Perfil: Herramienta larga").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Z de aproximación: 130.000 mm").length).toBeGreaterThan(0);
+    expect(screen.getByLabelText("Z de aproximación para herramienta larga (mm)")).toHaveValue("130");
   });
 
   it("muestra verde cuando todos los enlaces del runtime están listos", () => {

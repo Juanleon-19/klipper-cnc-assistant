@@ -16,7 +16,14 @@ from klipper_cnc_assistant.storage import JsonProjectRepository
 
 class FakeRuntime:
     def __init__(self) -> None:
-        self.config = type("Config", (), {"moonraker_url": "http://moonraker.local", "moonraker_request_timeout_s": 2.0, "spindle_control_mode": "manual"})()
+        self.config = type("Config", (), {
+            "moonraker_url": "http://moonraker.local",
+            "moonraker_request_timeout_s": 2.0,
+            "spindle_control_mode": "manual",
+            "reference_prep_z_mm": 115.0,
+            "long_tool_reference_prep_z_mm": 130.0,
+            "velocity_tolerance_mm_s": 0.02,
+        })()
         self._last_probe = {"x_mm": 100.0, "y_mm": 100.0, "z_mm": 4.75}
         self.snapshot_payload = {
             "mode": "PHYSICAL",
@@ -36,6 +43,11 @@ class FakeRuntime:
     def move_to_tool_change_position(self) -> dict:
         return self.snapshot()
 
+    def reference_preparation_z(self, tool_reference_profile: str) -> float:
+        if tool_reference_profile == "long_tool":
+            return self.config.long_tool_reference_prep_z_mm
+        return self.config.reference_prep_z_mm
+
     def last_probe_position(self) -> dict[str, float]:
         return dict(self._last_probe)
 
@@ -52,6 +64,7 @@ class FakeAdapter:
         self.cancel_calls = 0
         self.tool_change_moves = 0
         self.reference_moves: list[tuple[float, float]] = []
+        self.reference_profiles: list[str] = []
         self.spindle_stops = 0
         self.probe_calls = 0
         self._printing_seen = False
@@ -108,6 +121,7 @@ class FakeAdapter:
                 "file_position": payload.get("file_position", 49386),
                 "file_size": payload.get("file_size", 119710),
                 "print_duration": payload.get("print_duration", 0.0),
+                "live_velocity": payload.get("live_velocity", [0.0, 0.0, 0.0]),
                 "message": payload.get("message"),
                 "updated_at": "2026-07-22T00:00:00+00:00",
             }
@@ -125,6 +139,7 @@ class FakeAdapter:
             "file_position": 49386,
             "file_size": 119710,
             "print_duration": 0.0,
+            "live_velocity": [0.0, 0.0, 0.0],
             "message": None,
             "updated_at": "2026-07-22T00:00:00+00:00",
         }
@@ -139,8 +154,9 @@ class FakeAdapter:
         self.command_log.extend(["tool-change-z", "M400", "tool-change-xy", "M400"])
         return self.runtime.snapshot()
 
-    def move_to_reference_point(self, *, x_mm: float, y_mm: float) -> dict:
+    def move_to_reference_point(self, *, x_mm: float, y_mm: float, tool_reference_profile: str = "standard") -> dict:
         self.reference_moves.append((x_mm, y_mm))
+        self.reference_profiles.append(tool_reference_profile)
         return {"accepted": True}
 
     def probe_tool_reference(self, *, x_mm: float, y_mm: float, probe_config: dict | None) -> dict:
@@ -207,11 +223,21 @@ class JobServiceTest(unittest.TestCase):
         self.setup_id = self.project.montajes[0].id
         self._create_operation("Fresado superior", "aislamiento", 0, "vbit-30", "V-bit 30°", "G21\nG90\nG0 X10 Y10\nG1 X20 Y10 Z-0.050 F120\n")
         self._create_operation("Fresado acabado", "aislamiento", 1, "vbit-30", "V-bit 30°", "G21\nG90\nG0 X10 Y20\nG1 X20 Y20 Z-0.050 F120\n")
-        self._create_operation("Taladrado 0.8", "taladrado", 2, "drill-08", "Broca 0.8 mm", "G21\nG90\nG0 X15 Y15\nG1 X15 Y15 Z-0.100 F120\n")
+        self._create_operation("Taladrado 0.8", "taladrado", 2, "drill-08", "Broca 0.8 mm", "G21\nG90\nG0 X15 Y15\nG1 X15 Y15 Z-0.100 F120\n", tool_reference_profile="long_tool")
         self._create_operation("Corte", "corte exterior", 3, "mill-10", "Fresa 1.0 mm", "G21\nG90\nG0 X12 Y12\nG1 X18 Y18 Z-0.120 F120\n")
         self._create_measured_map()
 
-    def _create_operation(self, nombre: str, tipo: str, orden: int, tool_id: str, herramienta: str, gcode: str) -> None:
+    def _create_operation(
+        self,
+        nombre: str,
+        tipo: str,
+        orden: int,
+        tool_id: str,
+        herramienta: str,
+        gcode: str,
+        *,
+        tool_reference_profile: str = "standard",
+    ) -> None:
         op = self.project_service.add_operation(
             project_id=self.project_id,
             nombre=nombre,
@@ -221,6 +247,7 @@ class JobServiceTest(unittest.TestCase):
             setup_id=self.setup_id,
             tool_id=tool_id,
             herramienta=herramienta,
+            tool_reference_profile=tool_reference_profile,
         )
         self.project_service.upload_operation_gcode(project_id=self.project_id, operation_id=op.id, filename=f"{op.id}.gcode", content=gcode)
         self.project_service.analyze_operation(project_id=self.project_id, operation_id=op.id)
@@ -528,6 +555,8 @@ class JobServiceTest(unittest.TestCase):
         self.assertEqual(self.adapter.tool_change_moves, 2)
         self.assertEqual(self.adapter.spindle_stops, 0)
         self.assertEqual(self.adapter.reference_moves, [(100.0, 100.0), (100.0, 100.0)])
+        self.assertEqual(self.adapter.reference_profiles, ["long_tool", "standard"])
+        self.assertEqual(run["operations"][2]["reference_prep_z_mm"], 130.0)
         self.assertEqual(len(self.adapter.started), 0)
         self.assertEqual(run["operations"][3]["execution_status"], "COMPLETED")
         self.assertTrue({"M3", "M4", "M5"}.isdisjoint(self.adapter.command_log))
@@ -550,12 +579,19 @@ class JobServiceTest(unittest.TestCase):
         self.job_service._threads[(self.project_id, self.setup_id, "superior")].join(timeout=5)  # type: ignore[attr-defined]
         run = self.job_service.get_run(project_id=self.project_id, setup_id=self.setup_id, face="superior")
         self.assertEqual(run["state"], "RECOVERY_REQUIRED")
+        self.assertEqual(run["last_transition_error"]["code"], "TOOL_CHANGE_TRANSITION_FAILED")
+        self.assertEqual(run["last_transition_error"]["message"], "tool change blocked")
+        self.assertIn("Traceback", run["last_watcher_error"])
+        live = self.job_service.live_execution(project_id=self.project_id, setup_id=self.setup_id, face="superior")
+        self.assertEqual(live["transition"]["last_error"]["message"], "tool change blocked")
         self.assertEqual(run["operations"][1]["execution_status"], "COMPLETED")
         uploads_before = list(self.adapter.uploads)
 
         self.job_service.run_action(project_id=self.project_id, setup_id=self.setup_id, face="superior", action="retry-tool-change-transition")
         run = self.job_service.get_run(project_id=self.project_id, setup_id=self.setup_id, face="superior")
         self.assertEqual(run["state"], "SPINDLE_STOP_REQUIRED")
+        self.assertIsNone(run["last_transition_error"])
+        self.assertIsNone(run["last_watcher_error"])
         self.assertEqual(run["operations"][1]["execution_status"], "COMPLETED")
         self.assertEqual(self.adapter.uploads, uploads_before)
 
@@ -567,6 +603,103 @@ class JobServiceTest(unittest.TestCase):
         self.assertEqual(run["operations"][1]["execution_status"], "COMPLETED")
         self.assertEqual(self.adapter.uploads, uploads_before)
         self.assertEqual(calls["count"], 2)
+
+    def test_preparation_reset_archives_current_run_once_and_preserves_project_artifacts(self) -> None:
+        plan = self.job_service.generate_project_compensation(project_id=self.project_id, setup_id=self.setup_id, face="superior")
+        run = self.job_service.prepare_run(project_id=self.project_id, setup_id=self.setup_id, face="superior")
+        context = self.job_service._context(self.project_id, self.setup_id, "superior")
+        project_before = self.project_service.get_project(self.project_id)
+        map_before = self.physical_map_service.get_by_id(self.project_id, str(plan["active_map_id"]))
+        generated_files = [
+            self.repository.project_dir(self.project_id) / str(item["generated_file"])
+            for item in plan["operations"]
+            if item.get("generated_file")
+        ]
+        self.adapter.status_sequence = [{"state": "standby", "filename": "", "progress": 0.0, "is_active": False}]
+
+        result = self.job_service.reset_runs_for_preparation(project_id=self.project_id, setup_id=self.setup_id)
+
+        self.assertEqual(result["reason"], "preparation_reset")
+        self.assertEqual(result["current_runs_cleared"], 1)
+        self.assertTrue(result["can_start_new_run"])
+        self.assertFalse(self.job_service._run_file(context).exists())
+        history = self.job_service.history(project_id=self.project_id, setup_id=self.setup_id, face="superior")
+        self.assertEqual(len(history), 1)
+        archive_path = self.repository.project_dir(self.project_id) / str(result["archived_runs"][0]["archive_path"])
+        archived = json.loads(archive_path.read_text(encoding="utf-8"))
+        self.assertEqual(archived["run_id"], run["run_id"])
+        self.assertEqual(archived["state"], "PREPARATION_RESET_ARCHIVED")
+        self.assertEqual(archived["previous_status"], "JOB_READY")
+        self.assertEqual(archived["archive_reason"], "preparation_reset")
+        self.assertTrue(any("reinició la preparación" in event["message"] for event in archived["events"]))
+        project_after = self.project_service.get_project(self.project_id)
+        self.assertEqual(len(project_after.operaciones), len(project_before.operaciones))
+        self.assertEqual([item.archivo_gcode for item in project_after.operaciones], [item.archivo_gcode for item in project_before.operaciones])
+        self.assertEqual(self.physical_map_service.get_by_id(self.project_id, str(plan["active_map_id"]))["mesh_config"], map_before["mesh_config"])
+        self.assertTrue(all(path.exists() for path in generated_files))
+
+        second = self.job_service.reset_runs_for_preparation(project_id=self.project_id, setup_id=self.setup_id)
+        self.assertEqual(second["current_runs_cleared"], 0)
+        self.assertEqual(len(self.job_service.history(project_id=self.project_id, setup_id=self.setup_id, face="superior")), 1)
+        new_run = self.job_service.get_run(project_id=self.project_id, setup_id=self.setup_id, face="superior")
+        self.assertEqual(new_run["state"], "JOB_READY")
+        self.assertNotEqual(new_run["run_id"], run["run_id"])
+
+    def test_preparation_reset_rejects_printing_before_mutating_current_run(self) -> None:
+        self.job_service.generate_project_compensation(project_id=self.project_id, setup_id=self.setup_id, face="superior")
+        run = self.job_service.prepare_run(project_id=self.project_id, setup_id=self.setup_id, face="superior")
+        context = self.job_service._context(self.project_id, self.setup_id, "superior")
+        before = self.job_service._run_file(context).read_text(encoding="utf-8")
+        self.adapter.status_sequence = [{"state": "printing", "filename": "active.gcode", "progress": 0.2, "is_active": True}]
+
+        with self.assertRaisesRegex(Exception, "Moonraker mantiene una impresión activa"):
+            self.job_service.reset_runs_for_preparation(project_id=self.project_id, setup_id=self.setup_id)
+
+        self.assertEqual(self.job_service._run_file(context).read_text(encoding="utf-8"), before)
+        self.assertEqual(self.adapter.cancel_calls, 0)
+        self.assertEqual(self.job_service.get_run(project_id=self.project_id, setup_id=self.setup_id, face="superior")["run_id"], run["run_id"])
+
+    def test_preparation_reset_rejects_active_virtual_sdcard_even_if_print_state_is_standby(self) -> None:
+        self.job_service.generate_project_compensation(project_id=self.project_id, setup_id=self.setup_id, face="superior")
+        self.job_service.prepare_run(project_id=self.project_id, setup_id=self.setup_id, face="superior")
+        context = self.job_service._context(self.project_id, self.setup_id, "superior")
+        before = self.job_service._run_file(context).read_text(encoding="utf-8")
+        self.adapter.status_sequence = [{"state": "standby", "filename": "active.gcode", "progress": 0.2, "is_active": True}]
+
+        with self.assertRaisesRegex(Exception, "virtual_sdcard.is_active"):
+            self.job_service.reset_runs_for_preparation(project_id=self.project_id, setup_id=self.setup_id)
+
+        self.assertEqual(self.job_service._run_file(context).read_text(encoding="utf-8"), before)
+        self.assertEqual(self.adapter.cancel_calls, 0)
+
+    def test_preparation_reset_fails_closed_without_a_velocity_observation(self) -> None:
+        self.job_service.generate_project_compensation(project_id=self.project_id, setup_id=self.setup_id, face="superior")
+        self.job_service.prepare_run(project_id=self.project_id, setup_id=self.setup_id, face="superior")
+        context = self.job_service._context(self.project_id, self.setup_id, "superior")
+        before = self.job_service._run_file(context).read_text(encoding="utf-8")
+        self.adapter.status_sequence = [{"state": "standby", "filename": "", "is_active": False, "live_velocity": None}]
+
+        with self.assertRaisesRegex(Exception, "falta una observación válida de velocidad"):
+            self.job_service.reset_runs_for_preparation(project_id=self.project_id, setup_id=self.setup_id)
+
+        self.assertEqual(self.job_service._run_file(context).read_text(encoding="utf-8"), before)
+
+    def test_preparation_reset_rejects_observed_motion_and_active_runtime_operation(self) -> None:
+        self.job_service.generate_project_compensation(project_id=self.project_id, setup_id=self.setup_id, face="superior")
+        self.job_service.prepare_run(project_id=self.project_id, setup_id=self.setup_id, face="superior")
+        context = self.job_service._context(self.project_id, self.setup_id, "superior")
+        before = self.job_service._run_file(context).read_text(encoding="utf-8")
+        self.adapter.status_sequence = [{"state": "standby", "filename": "", "is_active": False, "live_velocity": [0.0, 0.0, 0.5]}]
+
+        with self.assertRaisesRegex(Exception, "movimiento físico"):
+            self.job_service.reset_runs_for_preparation(project_id=self.project_id, setup_id=self.setup_id)
+
+        self.assertEqual(self.job_service._run_file(context).read_text(encoding="utf-8"), before)
+        self.runtime.snapshot_payload["active_operation"] = {"operation_type": "probe"}
+        self.adapter.status_sequence = [{"state": "standby", "filename": "", "is_active": False, "live_velocity": [0.0, 0.0, 0.0]}]
+        with self.assertRaisesRegex(Exception, "operación física"):
+            self.job_service.reset_runs_for_preparation(project_id=self.project_id, setup_id=self.setup_id)
+        self.assertEqual(self.job_service._run_file(context).read_text(encoding="utf-8"), before)
 
     def test_live_execution_reports_running_progress_from_current_run(self) -> None:
         self.job_service.generate_project_compensation(project_id=self.project_id, setup_id=self.setup_id, face="superior")

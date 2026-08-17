@@ -94,6 +94,96 @@ const baseSnapshot: LiveExecutionSnapshot = {
 };
 
 describe("ExecutionConsole", () => {
+  it("destaca tiempo restante y fin estimado junto al progreso", () => {
+    render(
+      <ExecutionConsole
+        snapshot={{
+          ...baseSnapshot,
+          eta: {
+            available: true,
+            elapsed_s: 75,
+            remaining_s: 245,
+            completion_at: "2026-08-17T20:30:00-05:00",
+            method: "calibrated",
+            confidence: "high",
+          },
+        }}
+        error={null}
+        busy={false}
+        onPrepare={vi.fn()}
+        onStart={vi.fn()}
+        onAction={vi.fn()}
+        onArchiveStale={vi.fn()}
+      />,
+    );
+
+    const etaRegion = screen.getByRole("region", { name: "Estimación de tiempo" });
+    expect(etaRegion).toHaveTextContent("Tiempo restante:");
+    expect(etaRegion).toHaveTextContent("4 min 05 s");
+    expect(etaRegion).toHaveTextContent("Fin estimado:");
+    expect(screen.getAllByText("Tiempo restante:")).toHaveLength(1);
+  });
+
+  it("indica que calcula el ETA durante una ejecución activa sin estimación disponible", () => {
+    render(
+      <ExecutionConsole
+        snapshot={{ ...baseSnapshot, eta: { available: false, reason: "warming_up" } }}
+        error={null}
+        busy={false}
+        onPrepare={vi.fn()}
+        onStart={vi.fn()}
+        onAction={vi.fn()}
+        onArchiveStale={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByRole("region", { name: "Estimación de tiempo" })).toHaveTextContent(/Tiempo restante:\s*calculando\.\.\./i);
+  });
+
+  it("muestra una causa segura en RECOVERY_REQUIRED y oculta el traceback interno", () => {
+    const onAction = vi.fn();
+    render(
+      <ExecutionConsole
+        snapshot={{
+          ...baseSnapshot,
+          run: {
+            ...baseSnapshot.run,
+            status: "RECOVERY_REQUIRED",
+            available_actions: ["retry-tool-change-transition", "cancel"],
+            last_watcher_error: "Traceback (most recent call last): /private/runtime.py:99",
+          },
+          transition: {
+            state: "RECOVERY_REQUIRED",
+            required_tool: "Broca 0.8 mm",
+            tool: "Broca 0.8 mm",
+            tool_reference_profile: "long_tool",
+            reference_prep_z_mm: 130,
+            last_error: {
+              code: "TOOL_CHANGE_TRANSITION_FAILED",
+              message: "No se confirmó la posición segura.",
+              occurred_at: "2026-08-17T20:00:00-05:00",
+            },
+            operator_confirmation_required: false,
+          },
+        }}
+        error={null}
+        busy={false}
+        onPrepare={vi.fn()}
+        onStart={vi.fn()}
+        onAction={onAction}
+        onArchiveStale={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("Transición de herramienta detenida")).toBeInTheDocument();
+    expect(screen.getAllByText(/Causa: No se confirmó la posición segura\./i).length).toBeGreaterThan(0);
+    expect(screen.queryByText(/Traceback \(most recent call last\)/i)).toBeNull();
+    expect(screen.getByText("Herramienta larga")).toBeInTheDocument();
+    expect(screen.getByText("130.000 mm")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Reintentar transición de herramienta" }));
+    expect(onAction).toHaveBeenCalledWith("retry-tool-change-transition");
+  });
+
   it("renderiza la consola v2 con progreso real de operación y proyecto", () => {
     render(<ExecutionConsole snapshot={baseSnapshot} error={null} busy={false} onPrepare={vi.fn()} onStart={vi.fn()} onAction={vi.fn()} onArchiveStale={vi.fn()} />);
 

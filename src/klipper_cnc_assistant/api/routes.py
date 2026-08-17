@@ -247,8 +247,12 @@ def build_router() -> APIRouter:
 
     @router.post("/projects/{project_id}/setups/{setup_id}/reset-preparation", response_model=dict[str, object])
     def reset_setup_preparation(project_id: str, setup_id: str, payload: SetupResetRequest, request: Request) -> dict[str, object]:
-        _reject_active_motion(request)
+        execution_reset = request.app.state.job_service.reset_runs_for_preparation(
+            project_id=project_id,
+            setup_id=setup_id,
+        )
         result = request.app.state.physical_map_service.reset_preparation(project_id=project_id, setup_id=setup_id, reason=payload.motivo, user_session=payload.session)
+        result["execution_reset"] = execution_reset
         machine_session_service = getattr(request.app.state, "machine_session_service", None)
         if machine_session_service is not None:
             result["machine_session"] = machine_session_to_response(machine_session_service.reset_session()).model_dump()
@@ -269,6 +273,7 @@ def build_router() -> APIRouter:
             setup_id=payload.setup_id,
             tool_id=payload.tool_id,
             herramienta=payload.herramienta,
+            tool_reference_profile=payload.tool_reference_profile,
             compensation_mode=payload.compensation_mode,
             max_z_error_mm=payload.max_z_error_mm,
         )
@@ -283,6 +288,7 @@ def build_router() -> APIRouter:
             nombre=payload.nombre,
             tool_id=payload.tool_id,
             herramienta=payload.herramienta,
+            tool_reference_profile=payload.tool_reference_profile,
             compensation_mode=payload.compensation_mode,
             max_z_error_mm=payload.max_z_error_mm,
         )
