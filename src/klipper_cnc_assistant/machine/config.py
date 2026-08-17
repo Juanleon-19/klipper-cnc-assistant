@@ -52,6 +52,7 @@ class MachineRuntimeConfig:
     probe_lower_speed_mm_s: float
     probe_retract_mm: float
     probe_retract_speed_mm_s: float
+    long_tool_reference_prep_z_mm: float = 115.0
     spindle_control_mode: SpindleControlMode = SpindleControlMode.MANUAL
     safe_z_is_configured: bool = False
 
@@ -95,6 +96,10 @@ def load_machine_runtime_config() -> MachineRuntimeConfig:
         serial_baudrate=_env_int("SERIAL_BAUDRATE", 115200),
         safe_z_mm=_env_float("MACHINE_SAFE_Z", 10.0),
         reference_prep_z_mm=_env_float("REFERENCE_PREP_Z_MM", 115.0),
+        long_tool_reference_prep_z_mm=_env_float(
+            "LONG_TOOL_REFERENCE_PREP_Z_MM",
+            _env_float("REFERENCE_PREP_Z_MM", 115.0),
+        ),
         reference_prep_z_feed_mm_min=_env_float("REFERENCE_PREP_Z_FEED_MM_MIN", 180.0),
         tool_change_z_mm=_env_float("TOOL_CHANGE_Z_MM", 115.0),
         tool_change_clearance_z_mm=_env_float("TOOL_CHANGE_CLEARANCE_Z_MM", _env_float("TOOL_CHANGE_Z_MM", 115.0)),

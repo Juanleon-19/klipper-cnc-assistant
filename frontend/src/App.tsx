@@ -29,7 +29,7 @@ type NavItem = {
   icon: string;
 };
 
-const FRONTEND_SCHEMA_VERSION = "1.6";
+const FRONTEND_SCHEMA_VERSION = "1.7";
 const FRONTEND_BUILD = "0.1.0";
 
 const navItems: NavItem[] = [

@@ -75,6 +75,13 @@ def _safe_face(face: str) -> str:
     return str(face).strip().lower().replace(" ", "-")
 
 
+def _safe_operator_error(error: Exception) -> str:
+    message = " ".join(str(error).strip().split())
+    if not message or "traceback (most recent call last)" in message.lower():
+        return "La transición segura no pudo completarse. Revise el estado de la máquina antes de reintentar."
+    return message[:300]
+
+
 @dataclass(frozen=True)
 class JobContext:
     project_id: str
@@ -176,8 +183,18 @@ class MoonrakerJobAdapter:
     def move_to_tool_change_position(self) -> dict[str, Any]:
         return self.runtime.move_to_tool_change_position()
 
-    def move_to_reference_point(self, *, x_mm: float, y_mm: float) -> dict[str, Any]:
-        return self.runtime.go_to_reference_point(reference_x=x_mm, reference_y=y_mm)
+    def move_to_reference_point(
+        self,
+        *,
+        x_mm: float,
+        y_mm: float,
+        tool_reference_profile: str = "standard",
+    ) -> dict[str, Any]:
+        return self.runtime.go_to_reference_point(
+            reference_x=x_mm,
+            reference_y=y_mm,
+            tool_reference_profile=tool_reference_profile,
+        )
 
     def probe_tool_reference(self, *, x_mm: float, y_mm: float, probe_config: dict[str, Any] | None) -> dict[str, Any]:
         point = {
@@ -200,6 +217,7 @@ class JobService:
         *,
         time_estimation_service: TimeEstimationService | None = None,
         adapter_factory: Callable[[Any], MoonrakerJobAdapter] = MoonrakerJobAdapter,
+        mesh_execution_service: Any | None = None,
     ) -> None:
         self.repository = repository
         self.physical_map_service = physical_map_service
@@ -208,6 +226,7 @@ class JobService:
         self.runtime = runtime
         self.time_estimation_service = time_estimation_service
         self.adapter_factory = adapter_factory
+        self.mesh_execution_service = mesh_execution_service
         self._lock = threading.RLock()
         self._threads: dict[tuple[str, str, str], threading.Thread] = {}
 
@@ -381,6 +400,17 @@ class JobService:
                 overall_progress = min(1.0, (completed + current_fraction) / total) if total else 0.0
         next_index = index + 1
         next_operation = operations[next_index] if 0 <= next_index < len(operations) else None
+        transition_states = {
+            "SPINDLE_STOP_REQUIRED",
+            "SPINDLE_STOP_CONFIRMED",
+            "RETRACTING",
+            "TOOL_CHANGE_REQUIRED",
+            "TOOL_CHANGE_CONFIRMED",
+            "MOVING_TO_REFERENCE",
+            "CALIBRATING_TOOL",
+            "RECOVERY_REQUIRED",
+        }
+        transition_operation = next_operation if str(run.get("state")) in transition_states and next_operation is not None else operation
         sync_reason = None
         print_state = str(status.get("print_state") or "").lower()
         if print_state == "printing":
@@ -446,6 +476,10 @@ class JobService:
             "transition": {
                 "state": run.get("state") or "JOB_DRAFT",
                 "required_tool": (next_operation or {}).get("tool_name"),
+                "tool": (transition_operation or {}).get("tool_name"),
+                "tool_reference_profile": (transition_operation or {}).get("tool_reference_profile", "standard"),
+                "reference_prep_z_mm": (transition_operation or {}).get("reference_prep_z_mm"),
+                "last_error": run.get("last_transition_error") if str(run.get("state")) == "RECOVERY_REQUIRED" else None,
                 "operator_confirmation_required": str(run.get("state")) in {"SPINDLE_STOP_REQUIRED", "TOOL_CHANGE_REQUIRED", "READY_TO_RESUME"},
             },
             "synchronization": {
@@ -516,6 +550,59 @@ class JobService:
             "archive_path": self._relative_to_project(context.project_id, archive_path),
             "locks_released": released,
             "can_start_new_run": not self._run_file(context).exists(),
+        }
+
+    def reset_runs_for_preparation(self, *, project_id: str, setup_id: str) -> dict[str, Any]:
+        """Archive current runs after proving that no physical owner is active."""
+        if not setup_id or setup_id in {".", ".."} or "/" in setup_id or "\\" in setup_id:
+            raise ApplicationError("Identificador de montaje inválido.")
+        self._assert_preparation_reset_safe()
+        self.repository.load_project(project_id).get_setup(setup_id)
+
+        archived_runs: list[dict[str, Any]] = []
+        with self._lock:
+            if any(thread.is_alive() for thread in self._threads.values()):
+                raise ApplicationError("No se puede reiniciar mientras el supervisor de una ejecución sigue activo.")
+            for context, run_file, run in self._current_runs_for_setup(project_id, setup_id):
+                previous_status = str(run.get("state") or "JOB_DRAFT")
+                archived = json.loads(json.dumps(run))
+                already_in_history = self._history_contains_run(context, str(run.get("run_id") or ""))
+                archive_path: Path | None = None
+                if not already_in_history:
+                    archived["previous_status"] = previous_status
+                    archived["archive_reason"] = "preparation_reset"
+                    archived["completed_at"] = archived.get("completed_at") or _iso_now()
+                    archived["updated_at"] = _iso_now()
+                    archived["available_actions"] = []
+                    archived["next_action"] = "Ejecución archivada por reinicio de preparación"
+                    if previous_status not in RUN_TERMINAL_STATES:
+                        archived["state"] = "PREPARATION_RESET_ARCHIVED"
+                        archived["recovery_state"] = "PREPARATION_RESET_ARCHIVED"
+                    self._append_event(
+                        archived,
+                        "warning",
+                        "Ejecución archivada porque el operador reinició la preparación con la máquina inactiva.",
+                    )
+                    self._prepare_history_snapshot(archived)
+                    archive_path = self._write_archived_run(context, archived, suffix="preparation-reset")
+                run_file.unlink()
+                archived_runs.append(
+                    {
+                        "run_id": run.get("run_id"),
+                        "previous_status": previous_status,
+                        "archive_reason": "preparation_reset",
+                        "history_already_present": already_in_history,
+                        "archive_path": None if archive_path is None else self._relative_to_project(project_id, archive_path),
+                    }
+                )
+        return {
+            "reason": "preparation_reset",
+            "archived_runs": archived_runs,
+            "current_runs_cleared": len(archived_runs),
+            "can_start_new_run": not any(
+                run_file.exists()
+                for _context, run_file in self._setup_run_files(project_id, setup_id)
+            ),
         }
 
     def history(self, *, project_id: str, setup_id: str, face: str) -> list[dict[str, Any]]:
@@ -664,12 +751,22 @@ class JobService:
         adapter = self.adapter_factory(self.runtime)
         reference_x = float(active_map["machine_origin_x"])
         reference_y = float(active_map["machine_origin_y"])
+        tool_reference_profile = str(operation_payload.get("tool_reference_profile") or "standard")
+        reference_prep_z = self._reference_preparation_z(tool_reference_profile)
         run["state"] = "MOVING_TO_REFERENCE"
         run["available_actions"] = ["cancel"]
-        run["next_action"] = f"Moviendo al punto de referencia CNC X={reference_x:.3f}, Y={reference_y:.3f}"
+        run["next_action"] = (
+            f"Moviendo primero Z a {reference_prep_z:.3f} mm y después al punto de referencia "
+            f"CNC X={reference_x:.3f}, Y={reference_y:.3f}"
+        )
+        operation_payload["reference_prep_z_mm"] = reference_prep_z
         self._append_event(run, "info", run["next_action"])
         self._save_run(context, run)
-        adapter.move_to_reference_point(x_mm=reference_x, y_mm=reference_y)
+        adapter.move_to_reference_point(
+            x_mm=reference_x,
+            y_mm=reference_y,
+            tool_reference_profile=tool_reference_profile,
+        )
         run["state"] = "CALIBRATING_TOOL"
         run["next_action"] = "Sondeando referencia Z de la nueva herramienta"
         self._append_event(run, "info", run["next_action"])
@@ -984,6 +1081,7 @@ class JobService:
         run["recovery_state"] = None
         if retry:
             run["last_watcher_error"] = None
+            run["last_transition_error"] = None
             self._append_event(run, "warning", "Reintento de transición listo; apague manualmente el spindle antes de continuar.")
         else:
             self._append_event(run, "warning", f"Apague manualmente el spindle antes de continuar con {next_operation['name']}.")
@@ -1004,19 +1102,26 @@ class JobService:
             self._save_run(context, run)
             adapter.move_to_tool_change_position()
             run["last_watcher_error"] = None
+            run["last_transition_error"] = None
             run["state"] = "TOOL_CHANGE_REQUIRED"
             run["next_action"] = "Cambie la herramienta y pulse Herramienta cambiada"
             run["available_actions"] = ["confirm-tool-change", "cancel"]
             self._append_event(run, "warning", f"Cambie a {next_operation['tool_name']} y confirme cuando esté instalada.")
             self._save_run(context, run)
         except Exception as error:
+            safe_error = _safe_operator_error(error)
             run["state"] = "RECOVERY_REQUIRED"
             run["next_action"] = "Revise la transición y pulse Reintentar transición de herramienta"
             run["available_actions"] = ["retry-tool-change-transition", "cancel"]
             run["updated_at"] = _iso_now()
             run["last_watcher_error"] = traceback.format_exc()
+            run["last_transition_error"] = {
+                "code": "TOOL_CHANGE_TRANSITION_FAILED",
+                "message": safe_error,
+                "occurred_at": _iso_now(),
+            }
             run["recovery_state"] = "RECOVERY_REQUIRED"
-            self._append_event(run, "error", f"Fallo la transición segura de herramienta: {error}")
+            self._append_event(run, "error", f"Falló la transición segura de herramienta: {safe_error}")
             self._save_run(context, run)
 
     def _build_run_checks(self, context: JobContext, plan: dict[str, Any]) -> list[dict[str, Any]]:
@@ -1110,6 +1215,8 @@ class JobService:
                     "tool_id": operation.tool_id,
                     "tool_name": operation.herramienta or operation.tool_id or "sin herramienta",
                     "tool_key": tool_key,
+                    "tool_reference_profile": str(operation.tool_reference_profile),
+                    "reference_prep_z_mm": self._reference_preparation_z(str(operation.tool_reference_profile)),
                     "tool_changed": tool_changed,
                     "map_status": "LISTO" if active_map is not None else "PENDIENTE",
                     "coverage_status": "VALIDA" if coverage is None or coverage["sufficient"] else "FUERA_DE_DOMINIO",
@@ -1181,6 +1288,8 @@ class JobService:
                     "name": item["name"],
                     "tool_id": item["tool_id"],
                     "tool_name": item["tool_name"],
+                    "tool_reference_profile": item["tool_reference_profile"],
+                    "reference_prep_z_mm": item["reference_prep_z_mm"],
                     "file": item["generated_file"],
                     "metadata_path": item["generated_metadata_path"],
                     "coverage_status": item["coverage_status"],
@@ -1193,7 +1302,7 @@ class JobService:
         }
 
     def _base_run(self, context: JobContext, plan: dict[str, Any]) -> dict[str, Any]:
-        run_id = f"job-run/{context.setup_id}/{_safe_face(context.face)}/{_utc_now().strftime('%Y%m%d-%H%M%S')}"
+        run_id = f"job-run/{context.setup_id}/{_safe_face(context.face)}/{_utc_now().strftime('%Y%m%d-%H%M%S-%f')}"
         return {
             "schema_version": JOB_RUN_SCHEMA,
             "run_id": run_id,
@@ -1224,6 +1333,8 @@ class JobService:
                     "tool_id": item["tool_id"],
                     "tool_name": item["tool_name"],
                     "tool_key": item["tool_key"],
+                    "tool_reference_profile": item["tool_reference_profile"],
+                    "reference_prep_z_mm": item["reference_prep_z_mm"],
                     "tool_changed": item["tool_changed"],
                     "reference_status": item["reference_status"],
                     "generated_file": item["generated_file"],
@@ -1269,6 +1380,7 @@ class JobService:
             "events": [],
             "manifest_path": plan.get("manifest_path"),
             "last_watcher_error": None,
+            "last_transition_error": None,
             "recovery_state": None,
         }
 
@@ -1556,6 +1668,121 @@ class JobService:
     def _context(self, project_id: str, setup_id: str, face: str) -> JobContext:
         normalized_face = BoardFace(face).value if face in {BoardFace.SUPERIOR.value, BoardFace.INFERIOR.value} else str(face)
         return JobContext(project_id=project_id, setup_id=setup_id, face=normalized_face)
+
+    def _reference_preparation_z(self, tool_reference_profile: str) -> float:
+        resolver = getattr(self.runtime, "reference_preparation_z", None)
+        if callable(resolver):
+            return float(resolver(tool_reference_profile))
+        config = getattr(self.runtime, "config", None)
+        if tool_reference_profile == "long_tool":
+            return float(getattr(config, "long_tool_reference_prep_z_mm", getattr(config, "reference_prep_z_mm", 115.0)))
+        return float(getattr(config, "reference_prep_z_mm", 115.0))
+
+    def _setup_run_files(self, project_id: str, setup_id: str) -> list[tuple[JobContext, Path]]:
+        base = self._project_dir(project_id) / "reports" / "jobs" / setup_id
+        faces = {BoardFace.SUPERIOR.value, BoardFace.INFERIOR.value}
+        if base.exists():
+            faces.update(path.name for path in base.iterdir() if path.is_dir())
+        return [
+            (self._context(project_id, setup_id, face), base / _safe_face(face) / "current_run.json")
+            for face in sorted(faces)
+        ]
+
+    def _current_runs_for_setup(self, project_id: str, setup_id: str) -> list[tuple[JobContext, Path, dict[str, Any]]]:
+        current: list[tuple[JobContext, Path, dict[str, Any]]] = []
+        for context, run_file in self._setup_run_files(project_id, setup_id):
+            if not run_file.exists():
+                continue
+            current.append((context, run_file, json.loads(run_file.read_text(encoding="utf-8"))))
+        return current
+
+    def _history_contains_run(self, context: JobContext, run_id: str) -> bool:
+        if not run_id:
+            return False
+        history_dir = self._project_dir(context.project_id) / "reports" / "jobs" / context.setup_id / _safe_face(context.face) / "history"
+        if not history_dir.exists():
+            return False
+        for history_file in history_dir.glob("*.json"):
+            try:
+                payload = json.loads(history_file.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            if str(payload.get("run_id") or "") == run_id:
+                return True
+        return False
+
+    def _assert_preparation_reset_safe(self) -> None:
+        snapshot = self.runtime.snapshot()
+        mode = str(snapshot.get("mode") or getattr(getattr(self.runtime, "config", None), "mode", "")).upper()
+        try:
+            moonraker = self.adapter_factory(self.runtime).print_status()
+        except Exception as error:
+            if mode == "PHYSICAL":
+                raise ApplicationError(
+                    f"No se pudo comprobar que Moonraker está inactivo; el reinicio fue rechazado: {error}"
+                ) from error
+            moonraker = {"connected": False, "state": None, "is_active": False, "live_velocity": None}
+
+        print_state = str(moonraker.get("state") or "").lower()
+        if print_state in {"printing", "paused"}:
+            raise ApplicationError("No se puede reiniciar el proceso mientras Moonraker mantiene una impresión activa o pausada.")
+        if bool(moonraker.get("is_active", moonraker.get("active"))):
+            raise ApplicationError("No se puede reiniciar el proceso mientras virtual_sdcard.is_active sea true.")
+        if mode == "PHYSICAL" and moonraker.get("connected") is False:
+            raise ApplicationError("No se pudo comprobar que Moonraker está inactivo; el reinicio fue rechazado.")
+
+        active_operation = snapshot.get("active_operation")
+        movement_lock = self._movement_lock_state()
+        if active_operation is not None or movement_lock is True or bool(snapshot.get("recovery_pending")):
+            raise ApplicationError("No se puede reiniciar el proceso mientras una operación física conserva el control de la máquina.")
+        runtime_state = str(snapshot.get("state") or "").upper()
+        if runtime_state in {"HOMING", "WAITING_SAFE_Z", "MOVING_TO_SAFE_Z", "MOVING_TO_CENTER", "PROBING_REFERENCE", "MESH_PROBING", "STOPPING"}:
+            raise ApplicationError(f"No se puede reiniciar el proceso durante el estado físico {runtime_state}.")
+
+        position = snapshot.get("klipper", {}).get("position") if isinstance(snapshot.get("klipper"), dict) else None
+        snapshot_velocity = position.get("velocity") if isinstance(position, dict) else None
+        observed_speeds = [
+            speed
+            for speed in (
+                self._observed_speed(moonraker.get("live_velocity")),
+                self._observed_speed(snapshot_velocity),
+            )
+            if speed is not None
+        ]
+        if mode == "PHYSICAL" and not observed_speeds:
+            raise ApplicationError("No se pudo comprobar que la máquina está detenida; falta una observación válida de velocidad.")
+        speed = max(observed_speeds, default=0.0)
+        tolerance = float(getattr(getattr(self.runtime, "config", None), "velocity_tolerance_mm_s", 0.02))
+        if speed > tolerance:
+            raise ApplicationError(f"No se puede reiniciar el proceso: se observa movimiento físico ({speed:.3f} mm/s).")
+
+        mesh_snapshot = None
+        mesh_snapshot_fn = getattr(self.mesh_execution_service, "active_execution_snapshot", None)
+        if callable(mesh_snapshot_fn):
+            mesh_snapshot = mesh_snapshot_fn()
+        if isinstance(mesh_snapshot, dict) and mesh_snapshot.get("active"):
+            raise ApplicationError("No se puede reiniciar el proceso mientras una operación física de malla sigue activa.")
+
+        with self._lock:
+            if any(thread.is_alive() for thread in self._threads.values()):
+                raise ApplicationError("No se puede reiniciar el proceso mientras el supervisor de una ejecución controla la máquina.")
+
+    def _observed_speed(self, value: Any) -> float | None:
+        if isinstance(value, dict):
+            components = value.values()
+        elif isinstance(value, (list, tuple)):
+            components = value
+        else:
+            components = (value,)
+        numeric: list[float] = []
+        for component in components:
+            try:
+                parsed = float(component)
+            except (TypeError, ValueError):
+                continue
+            if math.isfinite(parsed):
+                numeric.append(parsed)
+        return math.sqrt(sum(component * component for component in numeric)) if numeric else None
 
     def _load_or_build_plan(self, context: JobContext) -> dict[str, Any]:
         plan = self._load_plan(context)

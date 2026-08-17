@@ -176,6 +176,8 @@ Antes de persistir una referencia fisica:
 
 La persistencia de referencias sigue viviendo en `ReferenceSessionService` y conserva la politica actual de invalidacion de mapa y compensacion.
 
+Cada `OperacionPCB` persiste `tool_reference_profile` (`standard` o `long_tool`). `MachineRuntime` resuelve ese perfil contra `reference_prep_z_mm` o `long_tool_reference_prep_z_mm`, valida ambos valores contra los limites Z descubiertos y respeta `tool_change_z_positive_up` para definir que direccion se aleja de la superficie. La aproximacion al punto de referencia conserva la secuencia Z segura -> X/Y -> sondeo; el contacto de sonda sigue siendo la unica autoridad de `tool_reference_z`.
+
 ## 6. Persistencia
 
 Persistencia actual verificada:
@@ -184,6 +186,8 @@ Persistencia actual verificada:
 - referencias bajo `MontajePCB.preparacion`;
 - artefactos de ejecucion y reportes bajo `data/projects/.../reports/`;
 - G-code compensado bajo `generated/compensated/` dentro de datos del proyecto.
+
+`JobService.reset_runs_for_preparation()` es la autoridad para retirar un `current_run.json` durante un reinicio completo de preparacion. Primero comprueba Moonraker, `virtual_sdcard`, velocidad observada y propietarios vivos de movimiento; solo con inactividad comprobada archiva un run no terminal con motivo `preparation_reset`. El historial, los G-codes, las operaciones y las recetas conservadas en mapas archivados no se eliminan.
 
 Restricciones activas:
 

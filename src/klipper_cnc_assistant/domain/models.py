@@ -7,7 +7,7 @@ from enum import StrEnum
 from .errors import ProjectValidationError
 
 
-PROJECT_SCHEMA_VERSION = "1.6"
+PROJECT_SCHEMA_VERSION = "1.7"
 
 
 def utc_now() -> datetime:
@@ -68,6 +68,11 @@ class PreparationState(StrEnum):
 class CompensationMode(StrEnum):
     LEGACY = "legacy"
     ADAPTIVE_FAST = "adaptive_fast"
+
+
+class ToolReferenceProfile(StrEnum):
+    STANDARD = "standard"
+    LONG_TOOL = "long_tool"
 
 
 @dataclass(frozen=True)
@@ -327,6 +332,7 @@ class OperacionPCB:
     sha256: str | None = None
     tool_id: str | None = None
     herramienta: str | None = None
+    tool_reference_profile: ToolReferenceProfile = ToolReferenceProfile.STANDARD
     compensation_mode: CompensationMode = CompensationMode.LEGACY
     max_z_error_mm: float = 0.05
     analisis: OperationAnalysis | None = None

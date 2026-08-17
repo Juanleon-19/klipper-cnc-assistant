@@ -245,6 +245,7 @@ class MachineRuntime:
 
     _MACHINE_SETTINGS_FIELDS = {
         "reference_prep_z_mm",
+        "long_tool_reference_prep_z_mm",
         "reference_prep_z_feed_mm_min",
         "move_timeout_s",
         "no_progress_timeout_s",
@@ -267,6 +268,7 @@ class MachineRuntime:
             return config
         external_mapping = {
             "reference_prep_z_mm": "reference_prep_z_mm",
+            "long_tool_reference_prep_z_mm": "long_tool_reference_prep_z_mm",
             "reference_prep_z_feed_mm_min": "reference_prep_z_feed_mm_min",
             "move_total_timeout_s": "move_timeout_s",
             "no_progress_timeout_s": "no_progress_timeout_s",
@@ -282,6 +284,8 @@ class MachineRuntime:
             if external in payload:
                 value = payload[external]
                 overrides[field] = float(value) / 60.0 if external in {"reference_probe_feed_mm_min", "reference_probe_retract_feed_mm_min"} else value
+        if "reference_prep_z_mm" in overrides and "long_tool_reference_prep_z_mm" not in payload:
+            overrides["long_tool_reference_prep_z_mm"] = overrides["reference_prep_z_mm"]
         if "move_timeout_s" in overrides:
             overrides.setdefault("move_minimum_timeout_s", overrides["move_timeout_s"])
         return replace(config, **overrides) if overrides else config
@@ -289,6 +293,7 @@ class MachineRuntime:
     def machine_settings(self) -> dict[str, float]:
         return {
             "reference_prep_z_mm": self.config.reference_prep_z_mm,
+            "long_tool_reference_prep_z_mm": self.config.long_tool_reference_prep_z_mm,
             "reference_prep_z_feed_mm_min": self.config.reference_prep_z_feed_mm_min,
             "move_total_timeout_s": self.config.move_timeout_s,
             "no_progress_timeout_s": self.config.no_progress_timeout_s,
@@ -308,6 +313,7 @@ class MachineRuntime:
     def update_machine_settings(self, payload: dict[str, Any]) -> dict[str, float]:
         mapping = {
             "reference_prep_z_mm": "reference_prep_z_mm",
+            "long_tool_reference_prep_z_mm": "long_tool_reference_prep_z_mm",
             "reference_prep_z_feed_mm_min": "reference_prep_z_feed_mm_min",
             "move_total_timeout_s": "move_timeout_s",
             "no_progress_timeout_s": "no_progress_timeout_s",
@@ -328,17 +334,58 @@ class MachineRuntime:
             if value <= 0:
                 raise MachineRuntimeError(f"{external} debe ser mayor que cero.")
             overrides[field] = value
-        if "reference_prep_z_mm" in overrides and self._machine is not None:
-            z = overrides["reference_prep_z_mm"]
-            if z < self._machine.z_limits.minimum or z > self._machine.z_limits.maximum:
-                raise MachineRuntimeError(f"reference_prep_z_mm fuera de límites Klipper {self._machine.z_limits.minimum:.3f}..{self._machine.z_limits.maximum:.3f} mm.")
+        if (
+            "reference_prep_z_mm" in overrides
+            and "long_tool_reference_prep_z_mm" not in overrides
+            and self.config.long_tool_reference_prep_z_mm == self.config.reference_prep_z_mm
+        ):
+            overrides["long_tool_reference_prep_z_mm"] = overrides["reference_prep_z_mm"]
         if "move_timeout_s" in overrides:
             overrides["move_minimum_timeout_s"] = overrides["move_timeout_s"]
-        self.config = replace(self.config, **overrides)
+        candidate = replace(self.config, **overrides)
+        self._validate_reference_preparation_settings(candidate)
+        self.config = candidate
         if self._settings_path is not None:
             self._settings_path.parent.mkdir(parents=True, exist_ok=True)
             self._settings_path.write_text(json.dumps(self.machine_settings(), indent=2, sort_keys=True))
         return self.machine_settings()
+
+    def reference_preparation_z(self, tool_reference_profile: str | None = None) -> float:
+        profile = str(tool_reference_profile or "standard")
+        if profile == "standard":
+            target = float(self.config.reference_prep_z_mm)
+        elif profile == "long_tool":
+            target = float(self.config.long_tool_reference_prep_z_mm)
+        else:
+            raise MachineRuntimeError(f"Perfil de referencia de herramienta no soportado: {profile}.")
+        self._validate_reference_preparation_settings(self.config)
+        if self._machine is not None:
+            self._validate_machine_target(z=target, label=f"Z de aproximación del perfil {profile}")
+        return target
+
+    def _validate_reference_preparation_settings(self, config: MachineRuntimeConfig) -> None:
+        standard = float(config.reference_prep_z_mm)
+        long_tool = float(config.long_tool_reference_prep_z_mm)
+        if self._machine is not None:
+            for field, value in (
+                ("reference_prep_z_mm", standard),
+                ("long_tool_reference_prep_z_mm", long_tool),
+            ):
+                if value < self._machine.z_limits.minimum or value > self._machine.z_limits.maximum:
+                    raise MachineRuntimeError(
+                        f"{field} fuera de límites Klipper "
+                        f"{self._machine.z_limits.minimum:.3f}..{self._machine.z_limits.maximum:.3f} mm."
+                    )
+        if config.tool_change_z_positive_up and long_tool < standard:
+            raise MachineRuntimeError(
+                "long_tool_reference_prep_z_mm debe ser igual o mayor que reference_prep_z_mm "
+                "porque aumentar Z aleja la herramienta de la superficie."
+            )
+        if not config.tool_change_z_positive_up and long_tool > standard:
+            raise MachineRuntimeError(
+                "long_tool_reference_prep_z_mm debe ser igual o menor que reference_prep_z_mm "
+                "porque disminuir Z aleja la herramienta de la superficie en esta máquina."
+            )
 
     def _reference_probe_profile(self) -> ProbeMotionProfile:
         return ProbeMotionProfile(
@@ -626,11 +673,15 @@ class MachineRuntime:
         return self.snapshot()
 
     def reset_physical_session(self) -> dict[str, Any]:
-        self.cancel_operation()
-        # A cancelled context owns its Event forever; never clear it for a new operation.
-        lock_acquired = self._movement_lock.acquire(timeout=2.0)
+        with self._lock:
+            active_operation = self._active_operation
+        if active_operation is not None or self._movement_lock.locked():
+            raise MachineRuntimeError(
+                "No se puede reiniciar la sesión física mientras una operación o movimiento conserva el control de la máquina."
+            )
+        lock_acquired = self._movement_lock.acquire(blocking=False)
         if not lock_acquired:
-            raise MachineRuntimeError("No se pudo reiniciar: la operación física anterior no liberó movement_lock a tiempo.")
+            raise MachineRuntimeError("No se pudo reiniciar: movement_lock sigue ocupado.")
         try:
             self.stop()
         finally:
@@ -846,7 +897,13 @@ class MachineRuntime:
             self._finish_operation_context(context)
             self._movement_lock.release()
 
-    def go_to_reference_point(self, *, reference_x: float, reference_y: float) -> dict[str, Any]:
+    def go_to_reference_point(
+        self,
+        *,
+        reference_x: float,
+        reference_y: float,
+        tool_reference_profile: str = "standard",
+    ) -> dict[str, Any]:
         """Move to a saved CNC reference point without probing or changing it."""
         self._require_physical_ready()
         if not self._movement_lock.acquire(blocking=False):
@@ -854,7 +911,7 @@ class MachineRuntime:
         with self._lock:
             preserve_reference_captured = self._state is MachineRuntimeState.REFERENCE_CAPTURED
         context = self._begin_operation_context("reference_move")
-        preparation_z = float(self.config.reference_prep_z_mm)
+        preparation_z = self.reference_preparation_z(tool_reference_profile)
         try:
             with self._lock:
                 self._manual_enabled = False
@@ -888,7 +945,15 @@ class MachineRuntime:
                     else MachineRuntimeState.WAITING_FOR_XY_REFERENCE
                 )
                 self._event("info", "REFERENCE_MOVE_COMPLETE: máquina ubicada en el punto de referencia.")
-            return {"accepted": True, "reference_x": float(reference_x), "reference_y": float(reference_y), "preparation_z": preparation_z, "final_state": "REFERENCE_MOVE_COMPLETE", "message": "Máquina ubicada en el punto de referencia."}
+            return {
+                "accepted": True,
+                "reference_x": float(reference_x),
+                "reference_y": float(reference_y),
+                "preparation_z": preparation_z,
+                "tool_reference_profile": tool_reference_profile,
+                "final_state": "REFERENCE_MOVE_COMPLETE",
+                "message": "Máquina ubicada en el punto de referencia.",
+            }
         except Exception as error:
             with self._lock:
                 cancelled = "cancelada por el operador" in str(error).lower()
@@ -1310,6 +1375,7 @@ class MachineRuntime:
                 },
                 "preparation": {
                     "reference_prep_z_mm": self.config.reference_prep_z_mm,
+                    "long_tool_reference_prep_z_mm": self.config.long_tool_reference_prep_z_mm,
                     "reference_prep_z_feed_mm_min": self.config.reference_prep_z_feed_mm_min,
                     "reference_prep_z_speed_mm_s": self.config.reference_prep_z_feed_mm_min / 60.0,
                     "reference_prep_xy_feed_mm_min": REFERENCE_PREP_XY_FEED_MM_MIN,
@@ -1321,6 +1387,11 @@ class MachineRuntime:
                         "y_mm": (self._machine.y_limits.minimum + self._machine.y_limits.maximum) / 2.0,
                         "z_mm": self.config.reference_prep_z_mm,
                     },
+                    "profiles": {
+                        "standard": {"label": "Estándar", "z_mm": self.config.reference_prep_z_mm},
+                        "long_tool": {"label": "Herramienta larga", "z_mm": self.config.long_tool_reference_prep_z_mm},
+                    },
+                    "z_positive_up": self.config.tool_change_z_positive_up,
                     "sequence": ["HOME", "MOVE_Z_PREP", "MOVE_XY_CENTER", "WAITING_FOR_REFERENCE"],
                 },
                 "tool_change": {

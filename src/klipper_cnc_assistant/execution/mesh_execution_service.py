@@ -280,6 +280,23 @@ class MeshExecutionService:
             for thread in live:
                 thread.join(min(0.05, remaining))
 
+    def active_execution_snapshot(self) -> dict[str, Any]:
+        """Report live mesh ownership without changing persisted or runtime state."""
+        with self._lock:
+            workers = [key for key, thread in self._threads.items() if thread.is_alive()]
+            probes = [key for key, ownership in self._probe_threads.items() if ownership.thread.is_alive()]
+            cleanup_pending = [
+                key
+                for key, ownership in self._probe_threads.items()
+                if ownership.cleanup_pending or ownership.timed_out
+            ]
+        return {
+            "active": bool(workers or probes or cleanup_pending),
+            "workers": workers,
+            "probes": probes,
+            "cleanup_pending": cleanup_pending,
+        }
+
     def motion_ownership_snapshot(
         self,
         *,

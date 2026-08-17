@@ -27,6 +27,8 @@ import type {
   OperationAnalysis,
   JobPlan,
   LiveExecutionSnapshot,
+  ReferenceMoveResult,
+  ToolReferenceProfile,
 } from "../../types";
 import { ProjectForm } from "./ProjectForm";
 import { StatusBadge } from "../../components/StatusBadge";
@@ -440,6 +442,7 @@ export function ProjectWorkspace({
   const [newOperationName, setNewOperationName] = useState("Fresado superior");
   const [newOperationType, setNewOperationType] = useState("fresado_superior");
   const [newOperationTool, setNewOperationTool] = useState("");
+  const [newOperationToolReferenceProfile, setNewOperationToolReferenceProfile] = useState<ToolReferenceProfile>("standard");
   const [activeView, setActiveView] = useState<WorkspaceView>(initialView ?? "archivo");
   const [activeMapTab, setActiveMapTab] = useState<MapTab>("mapa2d");
   const [heightMode, setHeightMode] = useState<HeightMode>("bruto");
@@ -457,7 +460,7 @@ export function ProjectWorkspace({
   const [suggestionBusy, setSuggestionBusy] = useState(false);
   const [referenceBusy, setReferenceBusy] = useState(false);
   const [compensationBusy, setCompensationBusy] = useState(false);
-  const [referenceMoveResult, setReferenceMoveResult] = useState<{ reference_x: number; reference_y: number; preparation_z: number; final_state: string; message: string } | null>(null);
+  const [referenceMoveResult, setReferenceMoveResult] = useState<ReferenceMoveResult | null>(null);
   const referenceMoveInFlight = useRef(false);
   const armMeshInFlight = useRef(false);
   const compensationInFlight = useRef(false);
@@ -499,6 +502,7 @@ export function ProjectWorkspace({
   const [liveExecution, setLiveExecution] = useState<LiveExecutionSnapshot | null>(null);
   const [machineSettingsInput, setMachineSettingsInput] = useState({
     reference_prep_z_mm: "115",
+    long_tool_reference_prep_z_mm: "115",
     reference_prep_z_feed_mm_min: "180",
     move_total_timeout_s: "180",
     no_progress_timeout_s: "60",
@@ -528,6 +532,7 @@ export function ProjectWorkspace({
       const nextReferenceProbeRetract = String(settings.reference_probe_retract_mm ?? 1.0);
       setMachineSettingsInput({
         reference_prep_z_mm: String(settings.reference_prep_z_mm ?? 115),
+        long_tool_reference_prep_z_mm: String(settings.long_tool_reference_prep_z_mm ?? settings.reference_prep_z_mm ?? 115),
         reference_prep_z_feed_mm_min: String(settings.reference_prep_z_feed_mm_min ?? 180),
         move_total_timeout_s: String(settings.move_total_timeout_s ?? 180),
         no_progress_timeout_s: String(settings.no_progress_timeout_s ?? 60),
@@ -981,6 +986,7 @@ export function ProjectWorkspace({
   const saveMachineSettings = async () => {
     const labels: Record<keyof typeof machineSettingsInput, string> = {
       reference_prep_z_mm: "Z de preparación",
+      long_tool_reference_prep_z_mm: "Z de aproximación para herramienta larga",
       reference_prep_z_feed_mm_min: "Velocidad Z de preparación",
       move_total_timeout_s: "Timeout total",
       no_progress_timeout_s: "Timeout sin progreso",
@@ -1006,6 +1012,7 @@ export function ProjectWorkspace({
       const settings = await api.updateMachineSettings(payload);
       setMachineSettingsInput({
         reference_prep_z_mm: String(settings.reference_prep_z_mm ?? payload.reference_prep_z_mm),
+        long_tool_reference_prep_z_mm: String(settings.long_tool_reference_prep_z_mm ?? payload.long_tool_reference_prep_z_mm),
         reference_prep_z_feed_mm_min: String(settings.reference_prep_z_feed_mm_min ?? payload.reference_prep_z_feed_mm_min),
         move_total_timeout_s: String(settings.move_total_timeout_s ?? payload.move_total_timeout_s),
         no_progress_timeout_s: String(settings.no_progress_timeout_s ?? payload.no_progress_timeout_s),
@@ -1223,6 +1230,7 @@ export function ProjectWorkspace({
               nombre: newOperationName.trim(),
               tipo: newOperationType,
               herramienta: newOperationTool.trim() || null,
+              tool_reference_profile: newOperationToolReferenceProfile,
             });
           }}
         >
@@ -1246,6 +1254,17 @@ export function ProjectWorkspace({
           <label>
             Herramienta
             <input value={newOperationTool} onChange={(event) => setNewOperationTool(event.target.value)} placeholder="Ej. Broca 0,8 mm" />
+          </label>
+          <label>
+            Perfil de altura
+            <select
+              aria-label="Perfil de altura de la nueva operación"
+              value={newOperationToolReferenceProfile}
+              onChange={(event) => setNewOperationToolReferenceProfile(event.target.value as ToolReferenceProfile)}
+            >
+              <option value="standard">Estándar</option>
+              <option value="long_tool">Herramienta larga</option>
+            </select>
           </label>
           <button className="button" type="submit" disabled={!selectedSetup || !newOperationName.trim() || busyKey === "operation:add"}>Agregar operación</button>
         </form>
@@ -1275,8 +1294,24 @@ export function ProjectWorkspace({
                         aria-label={"Herramienta de " + operation.nombre}
                         defaultValue={operation.herramienta ?? ""}
                         placeholder="Herramienta"
-                        onBlur={(event) => void onUpdateOperation(operation.id, { nombre: operation.nombre, tool_id: operation.tool_id, herramienta: event.target.value || null })}
+                        onBlur={(event) => void onUpdateOperation(operation.id, { nombre: operation.nombre, tool_id: operation.tool_id, herramienta: event.target.value || null, tool_reference_profile: operation.tool_reference_profile ?? "standard" })}
                       />
+                    </label>
+                    <label className="operation-tool-field">
+                      <span className="sr-only">Perfil de referencia de {operation.nombre}</span>
+                      <select
+                        aria-label={"Perfil de referencia de " + operation.nombre}
+                        value={operation.tool_reference_profile ?? "standard"}
+                        onChange={(event) => void onUpdateOperation(operation.id, {
+                          nombre: operation.nombre,
+                          tool_id: operation.tool_id,
+                          herramienta: operation.herramienta,
+                          tool_reference_profile: event.target.value as ToolReferenceProfile,
+                        })}
+                      >
+                        <option value="standard">Estándar</option>
+                        <option value="long_tool">Herramienta larga</option>
+                      </select>
                     </label>
                     <div className="operation-row__actions">
                       <button type="button" className="icon-button" aria-label={"Mover arriba " + operation.nombre} disabled={index === 0} onClick={() => void onMoveOperation(operation.id, "up")}>↑</button>
@@ -1284,7 +1319,7 @@ export function ProjectWorkspace({
                       <button type="button" className="button button--ghost" onClick={async () => {
                         const name = window.prompt("Nuevo nombre de la operación", operation.nombre)?.trim();
                         if (name) {
-                          await onUpdateOperation(operation.id, { nombre: name, tool_id: operation.tool_id, herramienta: operation.herramienta });
+                          await onUpdateOperation(operation.id, { nombre: name, tool_id: operation.tool_id, herramienta: operation.herramienta, tool_reference_profile: operation.tool_reference_profile ?? "standard" });
                         }
                       }}>Renombrar</button>
                       <button type="button" className="button button--ghost" onClick={() => void onDuplicateOperation(operation.id)}>Duplicar</button>
@@ -1313,6 +1348,7 @@ export function ProjectWorkspace({
               <div><dt>Montaje</dt><dd>{project.montajes.find((setup) => setup.id === selectedOperation.setup_id)?.nombre ?? "-"}</dd></div>
               <div><dt>Tipo</dt><dd>{translateOperationType(selectedOperation.tipo)}</dd></div>
               <div><dt>Herramienta</dt><dd>{selectedOperation.herramienta ?? "Sin asignar"}</dd></div>
+              <div><dt>Perfil de referencia</dt><dd>{selectedOperation.tool_reference_profile === "long_tool" ? "Herramienta larga" : "Estándar"}</dd></div>
               <div><dt>Archivo</dt><dd>{selectedOperation.nombre_archivo_original ?? "Sin archivo"}</dd></div>
               <div><dt>Tamaño</dt><dd>{formatFileSize(selectedOperation.tamano_archivo_bytes)}</dd></div>
             </dl>
@@ -2041,6 +2077,9 @@ export function ProjectWorkspace({
       setPhysicalMap(null);
       setHeightMap(null);
       setMeshSuggestion(null);
+      setJobPlan(null);
+      setLiveExecution(null);
+      setExecutionError(null);
       setWorkspaceError("");
       setMeshValidationMessage("");
       await machine.refreshRuntime();

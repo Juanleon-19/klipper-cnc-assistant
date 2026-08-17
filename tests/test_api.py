@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 
 from klipper_cnc_assistant.api import create_app
 from klipper_cnc_assistant.application.errors import ApplicationError
+from klipper_cnc_assistant.application.physical_map_service import PhysicalMeshConfig
 
 
 class ApiTest(unittest.TestCase):
@@ -152,6 +153,40 @@ class ApiTest(unittest.TestCase):
         self.assertEqual(response.status_code, 400)
         self.assertEqual(response.json()["detalle"], "No hay un punto de referencia guardado.")
 
+    def test_go_to_reference_uses_operation_tool_reference_profile(self) -> None:
+        project_id = self._create_project()
+        operation_id = self._create_operation(project_id)
+        operation = self.client.patch(
+            f"/api/projects/{project_id}/operations/{operation_id}",
+            json={"nombre": "Aislamiento", "herramienta": "Broca 0.8 mm", "tool_reference_profile": "long_tool"},
+        ).json()
+        self._write_setup_preparation(project_id, {
+            "referencia_z": {
+                "x_mm": 60.0,
+                "y_mm": 88.75,
+                "z_mm": 0.015,
+                "fuente": "MEASURED",
+                "fecha": "2026-08-17T00:00:00+00:00",
+                "maquina": "klipper",
+                "homed_axes": "xyz",
+                "sesion": "physical-session",
+                "posicion_captura": {"x_mm": 60.0, "y_mm": 88.75, "z_mm": 0.015},
+            },
+        })
+        calls: list[dict[str, object]] = []
+
+        def record_reference_move(**payload: object) -> dict[str, object]:
+            calls.append(payload)
+            return {"accepted": True, **payload}
+
+        self.app.state.machine_runtime.go_to_reference_point = record_reference_move
+
+        response = self.client.post(f"/api/projects/{project_id}/operations/{operation_id}/reference/go-to")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(operation["tool_reference_profile"], "long_tool")
+        self.assertEqual(calls, [{"reference_x": 60.0, "reference_y": 88.75, "tool_reference_profile": "long_tool"}])
+
     def test_health_endpoint(self) -> None:
         response = self.client.get("/api/health")
         self.assertEqual(response.status_code, 200)
@@ -166,6 +201,20 @@ class ApiTest(unittest.TestCase):
     def test_operations_and_analysis_endpoints(self) -> None:
         project_id = self._create_project()
         operation_id = self._create_operation(project_id)
+
+        operation = self.client.get(f"/api/projects/{project_id}").json()["operaciones"][0]
+        self.assertEqual(operation["tool_reference_profile"], "standard")
+        updated = self.client.patch(
+            f"/api/projects/{project_id}/operations/{operation_id}",
+            json={
+                "nombre": operation["nombre"],
+                "tool_id": operation["tool_id"],
+                "herramienta": operation["herramienta"],
+                "tool_reference_profile": "long_tool",
+            },
+        )
+        self.assertEqual(updated.status_code, 200)
+        self.assertEqual(updated.json()["tool_reference_profile"], "long_tool")
 
         upload_response = self.client.post(
             f"/api/projects/{project_id}/operations/{operation_id}/gcode",
@@ -777,8 +826,37 @@ class ApiTest(unittest.TestCase):
 
     def test_reset_setup_preparation_serializes_machine_session_without_crash(self) -> None:
         project_id = self._create_project()
+        operation_id = self._create_operation(project_id)
+        self._upload_and_analyze_operation(project_id, operation_id)
         project = self.client.get(f"/api/projects/{project_id}").json()
         setup_id = project["montajes"][0]["id"]
+        physical_map = self.app.state.physical_map_service.capture_reference_and_plan(
+            project_id=project_id,
+            operation_id=operation_id,
+            machine_origin_x=60.0,
+            machine_origin_y=88.75,
+            reference_z=0.015,
+            machine_position={"x_mm": 60.0, "y_mm": 88.75, "z_mm": 0.015},
+            homed_axes="xyz",
+            machine_label="test",
+            session_id="test-session",
+            config=PhysicalMeshConfig(
+                rows=3,
+                columns=4,
+                edge_margin_left_mm=1.5,
+                edge_margin_right_mm=2.5,
+                edge_margin_bottom_mm=3.5,
+                edge_margin_top_mm=4.5,
+                safe_z_mm=11.0,
+                probe_step_mm=0.04,
+                probe_feed_mm_min=45.0,
+                retract_mm=0.9,
+            ),
+        )
+        recipe_before = {
+            "mesh_config": physical_map["mesh_config"],
+            "probe_config": physical_map["probe_config"],
+        }
 
         response = self.client.post(
             f"/api/projects/{project_id}/setups/{setup_id}/reset-preparation",
@@ -787,13 +865,46 @@ class ApiTest(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         payload = response.json()
+        self.assertEqual(payload["execution_reset"]["reason"], "preparation_reset")
+        self.assertEqual(payload["execution_reset"]["current_runs_cleared"], 0)
         self.assertIn("machine_session", payload)
         self.assertIn("estado", payload["machine_session"])
         self.assertIn("runtime", payload)
+        project_after = self.client.get(f"/api/projects/{project_id}").json()
+        self.assertEqual(len(project_after["operaciones"]), 1)
+        self.assertEqual(project_after["operaciones"][0]["archivo_gcode"], project["operaciones"][0]["archivo_gcode"])
+        self.assertIsNone(project_after["montajes"][0]["active_reference_id"])
+        self.assertIsNone(project_after["montajes"][0]["active_map_id"])
+        archived_map = self.app.state.physical_map_service.get_by_id(project_id, physical_map["map_id"])
+        self.assertEqual(archived_map["mesh_config"], recipe_before["mesh_config"])
+        self.assertEqual(archived_map["probe_config"], recipe_before["probe_config"])
+
+    def test_reset_setup_preparation_rejects_before_any_setup_or_runtime_mutation(self) -> None:
+        project_id = self._create_project()
+        project = self.client.get(f"/api/projects/{project_id}").json()
+        setup_id = project["montajes"][0]["id"]
+        reset_runtime_calls = {"count": 0}
+
+        def reject_reset(**_kwargs: object) -> dict[str, object]:
+            raise ApplicationError("Movimiento físico activo.")
+
+        def record_runtime_reset() -> dict[str, object]:
+            reset_runtime_calls["count"] += 1
+            return {}
+
+        self.app.state.job_service.reset_runs_for_preparation = reject_reset
+        self.app.state.machine_runtime.reset_physical_session = record_runtime_reset
+
+        response = self.client.post(f"/api/projects/{project_id}/setups/{setup_id}/reset-preparation", json={})
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(reset_runtime_calls["count"], 0)
+        project_after = self.client.get(f"/api/projects/{project_id}").json()
+        self.assertEqual(project_after["montajes"][0], project["montajes"][0])
 
     def test_system_info_exposes_build_compatibility(self) -> None:
         payload = self.client.get("/api/system/info").json()
         self.assertIn("backend_version", payload)
         self.assertIn("frontend_build", payload)
         self.assertIn("git_commit", payload)
-        self.assertEqual(payload["schema_version"], "1.6")
+        self.assertEqual(payload["schema_version"], "1.7")

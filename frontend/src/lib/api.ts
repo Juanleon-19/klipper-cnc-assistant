@@ -35,6 +35,7 @@ export type OperationInput = {
   setup_id?: string;
   tool_id?: string | null;
   herramienta?: string | null;
+  tool_reference_profile?: "standard" | "long_tool" | null;
   compensation_mode?: "legacy" | "adaptive_fast" | null;
   max_z_error_mm?: number | null;
 };
@@ -43,6 +44,7 @@ export type OperationUpdateInput = {
   nombre: string;
   tool_id?: string | null;
   herramienta?: string | null;
+  tool_reference_profile?: "standard" | "long_tool" | null;
   compensation_mode?: "legacy" | "adaptive_fast" | null;
   max_z_error_mm?: number | null;
 };

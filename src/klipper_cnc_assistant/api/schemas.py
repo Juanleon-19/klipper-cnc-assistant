@@ -12,6 +12,7 @@ from klipper_cnc_assistant.domain import (
     PreviewPoint,
     PreviewSegment,
     ProyectoPCB,
+    ToolReferenceProfile,
 )
 
 
@@ -80,6 +81,7 @@ class OperationCreateRequest(BaseModel):
     setup_id: str | None = None
     tool_id: str | None = None
     herramienta: str | None = None
+    tool_reference_profile: ToolReferenceProfile | None = None
     compensation_mode: str | None = None
     max_z_error_mm: float | None = Field(default=None, gt=0)
 
@@ -88,6 +90,7 @@ class OperationUpdateRequest(BaseModel):
     nombre: str = Field(min_length=1)
     tool_id: str | None = None
     herramienta: str | None = None
+    tool_reference_profile: ToolReferenceProfile | None = None
     compensation_mode: str | None = None
     max_z_error_mm: float | None = Field(default=None, gt=0)
 
@@ -223,6 +226,7 @@ class OperationResponse(BaseModel):
     sha256: str | None
     tool_id: str | None
     herramienta: str | None
+    tool_reference_profile: str
     compensation_mode: str
     max_z_error_mm: float
     estado: str
@@ -386,6 +390,7 @@ def operation_to_response(operation: OperacionPCB) -> OperationResponse:
         sha256=operation.sha256,
         tool_id=operation.tool_id,
         herramienta=operation.herramienta,
+        tool_reference_profile=str(operation.tool_reference_profile),
         compensation_mode=str(operation.compensation_mode),
         max_z_error_mm=operation.max_z_error_mm,
         estado=operation.estado,

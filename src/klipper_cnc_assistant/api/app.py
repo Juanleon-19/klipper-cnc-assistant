@@ -68,6 +68,7 @@ def create_app(
         compensated_gcode_service,
         machine_runtime,
         time_estimation_service=time_estimation_service,
+        mesh_execution_service=mesh_execution_service,
     )
     system_status_service = SystemStatusService(
         repository,

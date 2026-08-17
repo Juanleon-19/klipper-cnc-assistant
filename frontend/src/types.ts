@@ -274,6 +274,7 @@ export type ReferenceMoveResult = {
   reference_x: number;
   reference_y: number;
   preparation_z: number;
+  tool_reference_profile?: ToolReferenceProfile;
   final_state: string;
   message: string;
 };
@@ -392,11 +393,14 @@ export type Operation = {
   sha256: string | null;
   tool_id: string | null;
   herramienta: string | null;
+  tool_reference_profile?: ToolReferenceProfile;
   compensation_mode?: "legacy" | "adaptive_fast";
   max_z_error_mm?: number;
   estado: string;
   analisis: OperationAnalysis | null;
 };
+
+export type ToolReferenceProfile = "standard" | "long_tool";
 
 export type Project = {
   id: string;
@@ -453,6 +457,7 @@ export type MachineRuntime = {
   klipper: Record<string, unknown>;
   preparation?: {
     reference_prep_z_mm?: number;
+    long_tool_reference_prep_z_mm?: number;
     reference_prep_z_feed_mm_min?: number;
     reference_prep_z_speed_mm_s?: number;
     reference_prep_xy_feed_mm_min?: number;
@@ -667,6 +672,8 @@ export type JobOperationPlan = {
   tool_id: string | null;
   tool_name: string;
   tool_key: string;
+  tool_reference_profile?: ToolReferenceProfile;
+  reference_prep_z_mm?: number;
   tool_changed: boolean;
   map_status: string;
   coverage_status: string;
@@ -722,6 +729,8 @@ export type JobRunOperation = {
   tool_id: string | null;
   tool_name: string;
   tool_key: string;
+  tool_reference_profile?: ToolReferenceProfile;
+  reference_prep_z_mm?: number;
   tool_changed: boolean;
   reference_status: string;
   generated_file: string | null;
@@ -909,6 +918,14 @@ export type LiveExecutionSnapshot = {
   transition: {
     state: string;
     required_tool: string | null;
+    tool?: string | null;
+    tool_reference_profile?: ToolReferenceProfile;
+    reference_prep_z_mm?: number | null;
+    last_error?: {
+      code: string;
+      message: string;
+      occurred_at: string;
+    } | null;
     operator_confirmation_required: boolean;
   };
   synchronization: {
