@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 import tempfile
 from pathlib import Path
@@ -1008,7 +1009,7 @@ class MachineRuntimeTest(unittest.TestCase):
 
             saved = runtime.update_machine_settings({
                 "reference_prep_z_mm": 110,
-                "long_tool_reference_prep_z_mm": 130,
+                "long_tool_change_clearance_z_mm": 130,
                 "reference_prep_z_feed_mm_min": 90,
                 "move_total_timeout_s": 240,
                 "no_progress_timeout_s": 70,
@@ -1023,11 +1024,11 @@ class MachineRuntimeTest(unittest.TestCase):
             self.assertEqual(saved["reference_probe_retract_mm"], 1.25)
 
             self.assertEqual(saved["reference_prep_z_mm"], 110)
-            self.assertEqual(saved["long_tool_reference_prep_z_mm"], 130)
+            self.assertEqual(saved["long_tool_change_clearance_z_mm"], 130)
             self.assertEqual(saved["reference_prep_z_feed_mm_min"], 90)
             reloaded = MachineRuntime(config(MachineMode.PHYSICAL), settings_path=runtime_module.Path(settings_path))
             self.assertEqual(reloaded.config.reference_prep_z_mm, 110)
-            self.assertEqual(reloaded.config.long_tool_reference_prep_z_mm, 130)
+            self.assertEqual(reloaded.config.long_tool_change_clearance_z_mm, 130)
             self.assertEqual(reloaded.config.reference_prep_z_feed_mm_min, 90)
             self.assertEqual(reloaded.config.move_timeout_s, 240)
             self.assertEqual(reloaded.config.probe_step_mm, 0.10)
@@ -1038,7 +1039,25 @@ class MachineRuntimeTest(unittest.TestCase):
             self.assertEqual(reloaded.config.settle_tolerance_mm, 0.04)
             self.assertEqual(reloaded.config.velocity_tolerance_mm_s, 0.015)
 
-    def test_tool_reference_profiles_follow_z_orientation_and_klipper_limits(self) -> None:
+    def test_legacy_long_tool_reference_setting_migrates_to_canonical_clearance(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            settings_path = Path(directory) / "machine_runtime_settings.json"
+            settings_path.write_text(json.dumps({
+                "reference_prep_z_mm": 105,
+                "long_tool_reference_prep_z_mm": 130,
+            }))
+
+            runtime = MachineRuntime(config(MachineMode.PHYSICAL), settings_path=settings_path)
+
+            self.assertEqual(runtime.config.reference_prep_z_mm, 105)
+            self.assertEqual(runtime.config.long_tool_change_clearance_z_mm, 130)
+            self.assertNotIn("long_tool_reference_prep_z_mm", runtime.machine_settings())
+            runtime.update_machine_settings({"long_tool_change_clearance_z_mm": 130})
+            persisted = json.loads(settings_path.read_text())
+            self.assertEqual(persisted["long_tool_change_clearance_z_mm"], 130)
+            self.assertNotIn("long_tool_reference_prep_z_mm", persisted)
+
+    def test_tool_change_profiles_follow_z_orientation_and_klipper_limits(self) -> None:
         machine = MachineState(
             position=MachinePosition(0, 0, 30),
             x_limits=AxisLimits(0, 100),
@@ -1051,26 +1070,38 @@ class MachineRuntimeTest(unittest.TestCase):
         )
         runtime, _client = physical_runtime_with_machine(
             machine,
-            cfg=config(MachineMode.PHYSICAL, reference_prep_z_mm=115.0, long_tool_reference_prep_z_mm=130.0),
+            cfg=config(
+                MachineMode.PHYSICAL,
+                reference_prep_z_mm=105.0,
+                tool_change_clearance_z_mm=115.0,
+                long_tool_change_clearance_z_mm=130.0,
+            ),
         )
 
-        self.assertEqual(runtime.reference_preparation_z("standard"), 115.0)
-        self.assertEqual(runtime.reference_preparation_z("long_tool"), 130.0)
+        self.assertEqual(runtime.reference_preparation_z("standard"), 105.0)
+        self.assertEqual(runtime.reference_preparation_z("long_tool"), 105.0)
+        self.assertEqual(runtime.tool_change_clearance_z("standard"), 115.0)
+        self.assertEqual(runtime.tool_change_clearance_z("long_tool"), 130.0)
         with self.assertRaisesRegex(MachineRuntimeError, "fuera de límites Klipper"):
-            runtime.update_machine_settings({"long_tool_reference_prep_z_mm": 145.0})
+            runtime.update_machine_settings({"long_tool_change_clearance_z_mm": 145.0})
+        with self.assertRaisesRegex(MachineRuntimeError, "aumentar Z aleja"):
+            runtime.update_machine_settings({"long_tool_change_clearance_z_mm": 110.0})
 
         inverted, _client = physical_runtime_with_machine(
             machine,
             cfg=config(
                 MachineMode.PHYSICAL,
-                reference_prep_z_mm=100.0,
-                long_tool_reference_prep_z_mm=90.0,
+                reference_prep_z_mm=105.0,
+                tool_change_clearance_z_mm=100.0,
+                long_tool_change_clearance_z_mm=90.0,
                 tool_change_z_positive_up=False,
             ),
         )
-        self.assertEqual(inverted.reference_preparation_z("long_tool"), 90.0)
+        self.assertEqual(inverted.reference_preparation_z("long_tool"), 105.0)
+        self.assertEqual(inverted.tool_change_clearance_z("standard"), 100.0)
+        self.assertEqual(inverted.tool_change_clearance_z("long_tool"), 90.0)
         with self.assertRaisesRegex(MachineRuntimeError, "disminuir Z aleja"):
-            inverted.update_machine_settings({"long_tool_reference_prep_z_mm": 110.0})
+            inverted.update_machine_settings({"long_tool_change_clearance_z_mm": 110.0})
 
     def test_reset_physical_session_rejects_active_operation_without_cancelling_it(self) -> None:
         runtime = MachineRuntime(config(MachineMode.SIMULATED))
@@ -1712,6 +1743,35 @@ class MachineRuntimeTest(unittest.TestCase):
         self.assertIn("X0.000000", client.scripts[1])
         self.assertIn("Y0.000000", client.scripts[1])
 
+    def test_tool_change_uses_installed_long_tool_clearance_before_xy(self) -> None:
+        machine = MachineState(
+            position=MachinePosition(40, 30, 110),
+            x_limits=AxisLimits(0, 200),
+            y_limits=AxisLimits(0, 200),
+            z_limits=AxisLimits(0, 200),
+            homed_axes="xyz",
+            max_velocity=100,
+            max_accel=500,
+            live_velocity=0,
+        )
+        runtime, client = physical_runtime_with_machine(
+            machine,
+            cfg=config(
+                MachineMode.PHYSICAL,
+                tool_change_clearance_z_mm=115.0,
+                long_tool_change_clearance_z_mm=130.0,
+                tool_change_work_z_mm=115.0,
+            ),
+        )
+
+        snapshot = runtime.move_to_tool_change_position(tool_change_profile="long_tool")
+
+        self.assertEqual(snapshot["tool_change_move"]["profile"], "long_tool")
+        self.assertEqual(snapshot["tool_change_move"]["configured_clearance_z_mm"], 130.0)
+        self.assertIn("Z130.000000", client.scripts[0])
+        self.assertIn("X0.000000", client.scripts[1])
+        self.assertIn("Y0.000000", client.scripts[1])
+
     def test_move_absolute_confirms_g1_targets_in_gcode_frame(self) -> None:
         machine = MachineState(
             position=MachinePosition(40, 30, 110),
@@ -1764,7 +1824,12 @@ class MachineRuntimeTest(unittest.TestCase):
         )
         runtime, client = physical_runtime_with_machine(
             machine,
-            cfg=config(MachineMode.PHYSICAL, tool_change_clearance_z_mm=130.0, tool_change_work_z_mm=115.0),
+            cfg=config(
+                MachineMode.PHYSICAL,
+                tool_change_clearance_z_mm=130.0,
+                long_tool_change_clearance_z_mm=130.0,
+                tool_change_work_z_mm=115.0,
+            ),
         )
 
         runtime.move_to_tool_change_position()
@@ -1863,12 +1928,12 @@ class ReferencePointMoveTest(unittest.TestCase):
         self.assertIsNone(runtime._active_operation)
         self.assertFalse(runtime._movement_lock.locked())
 
-    def test_long_tool_profile_moves_its_safe_z_before_saved_cnc_xy(self) -> None:
+    def test_generic_reference_move_uses_normal_prep_z_for_long_tool_profile(self) -> None:
         runtime, client = self._runtime(
             runtime_config=config(
                 MachineMode.PHYSICAL,
                 reference_prep_z_mm=115.0,
-                long_tool_reference_prep_z_mm=135.0,
+                long_tool_change_clearance_z_mm=135.0,
             )
         )
 
@@ -1879,12 +1944,62 @@ class ReferencePointMoveTest(unittest.TestCase):
         )
 
         self.assertEqual(result["tool_reference_profile"], "long_tool")
-        self.assertEqual(result["preparation_z"], 135.0)
-        self.assertIn("Z135.000000", client.scripts[0])
+        self.assertEqual(result["preparation_z"], 115.0)
+        self.assertIn("Z115.000000", client.scripts[0])
         self.assertNotIn("X42.500000", client.scripts[0])
         self.assertIn("X42.500000", client.scripts[1])
         self.assertIn("Y67.250000", client.scripts[1])
         self.assertNotIn("PROBE", "\n".join(client.scripts).upper())
+
+    def test_long_tool_leaves_change_station_at_long_clearance_before_xy_and_normal_prep(self) -> None:
+        runtime, client = self._runtime(
+            runtime_config=config(
+                MachineMode.PHYSICAL,
+                reference_prep_z_mm=105.0,
+                tool_change_clearance_z_mm=115.0,
+                long_tool_change_clearance_z_mm=130.0,
+                tool_change_work_z_mm=100.0,
+            )
+        )
+
+        result = runtime.move_from_tool_change_to_reference_point(
+            reference_x=42.5,
+            reference_y=67.25,
+            tool_change_profile="long_tool",
+        )
+
+        self.assertEqual(result["tool_change_clearance_z_mm"], 130.0)
+        self.assertEqual(result["preparation_z"], 105.0)
+        self.assertEqual(len(client.scripts), 3)
+        self.assertIn("Z130.000000", client.scripts[0])
+        self.assertIn("X42.500000", client.scripts[1])
+        self.assertIn("Y67.250000", client.scripts[1])
+        self.assertIn("Z105.000000", client.scripts[2])
+        self.assertNotIn("PROBE", "\n".join(client.scripts).upper())
+
+    def test_standard_tool_leaves_change_station_at_standard_clearance_before_xy_and_normal_prep(self) -> None:
+        runtime, client = self._runtime(
+            runtime_config=config(
+                MachineMode.PHYSICAL,
+                reference_prep_z_mm=105.0,
+                tool_change_clearance_z_mm=115.0,
+                long_tool_change_clearance_z_mm=130.0,
+                tool_change_work_z_mm=100.0,
+            )
+        )
+
+        result = runtime.move_from_tool_change_to_reference_point(
+            reference_x=42.5,
+            reference_y=67.25,
+            tool_change_profile="standard",
+        )
+
+        self.assertEqual(result["tool_change_clearance_z_mm"], 115.0)
+        self.assertEqual(len(client.scripts), 3)
+        self.assertIn("Z115.000000", client.scripts[0])
+        self.assertIn("X42.500000", client.scripts[1])
+        self.assertIn("Y67.250000", client.scripts[1])
+        self.assertIn("Z105.000000", client.scripts[2])
 
     def test_rejects_stale_telemetry_before_any_move(self) -> None:
         runtime, client = self._runtime()

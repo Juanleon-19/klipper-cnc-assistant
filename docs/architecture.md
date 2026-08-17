@@ -176,7 +176,7 @@ Antes de persistir una referencia fisica:
 
 La persistencia de referencias sigue viviendo en `ReferenceSessionService` y conserva la politica actual de invalidacion de mapa y compensacion.
 
-Cada `OperacionPCB` persiste `tool_reference_profile` (`standard` o `long_tool`). `MachineRuntime` resuelve ese perfil contra `reference_prep_z_mm` o `long_tool_reference_prep_z_mm`, valida ambos valores contra los limites Z descubiertos y respeta `tool_change_z_positive_up` para definir que direccion se aleja de la superficie. La aproximacion al punto de referencia conserva la secuencia Z segura -> X/Y -> sondeo; el contacto de sonda sigue siendo la unica autoridad de `tool_reference_z`.
+Cada `OperacionPCB` conserva por compatibilidad el campo `tool_reference_profile` (`standard` o `long_tool`), cuya semantica es exclusivamente el perfil fisico de cambio. `MachineRuntime` lo resuelve contra `tool_change_clearance_z_mm` o `long_tool_change_clearance_z_mm`, valida ambos valores contra los limites Z descubiertos y respeta `tool_change_z_positive_up` para definir que direccion se aleja de la superficie. La aproximacion al punto de referencia usa siempre `reference_prep_z_mm`; al salir de la estacion de cambio la secuencia es despeje de la herramienta entrante -> X/Y de referencia -> Z de preparacion normal -> sondeo. El contacto de sonda sigue siendo la unica autoridad de `tool_reference_z`, y ninguna Z de traslado participa en el mapa ni en la compensacion.
 
 ## 6. Persistencia
 

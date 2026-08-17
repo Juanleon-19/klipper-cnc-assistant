@@ -153,7 +153,7 @@ class ApiTest(unittest.TestCase):
         self.assertEqual(response.status_code, 400)
         self.assertEqual(response.json()["detalle"], "No hay un punto de referencia guardado.")
 
-    def test_go_to_reference_uses_operation_tool_reference_profile(self) -> None:
+    def test_go_to_reference_does_not_use_operation_tool_change_profile(self) -> None:
         project_id = self._create_project()
         operation_id = self._create_operation(project_id)
         operation = self.client.patch(
@@ -185,7 +185,7 @@ class ApiTest(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(operation["tool_reference_profile"], "long_tool")
-        self.assertEqual(calls, [{"reference_x": 60.0, "reference_y": 88.75, "tool_reference_profile": "long_tool"}])
+        self.assertEqual(calls, [{"reference_x": 60.0, "reference_y": 88.75}])
 
     def test_health_endpoint(self) -> None:
         response = self.client.get("/api/health")

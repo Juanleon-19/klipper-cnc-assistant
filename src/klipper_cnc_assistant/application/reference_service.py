@@ -196,7 +196,7 @@ class ReferenceSessionService:
         self.repository.save_project(project.replace_setup(updated))
         return self.get_session(project_id, operation_id)
 
-    def get_saved_reference_point(self, project_id: str, operation_id: str) -> dict[str, float | str]:
+    def get_saved_reference_point(self, project_id: str, operation_id: str) -> dict[str, float]:
         """Return only the persisted CNC coordinates for the active reference."""
         project = self._load_project(project_id)
         operation = project.get_operation(operation_id)
@@ -207,7 +207,6 @@ class ReferenceSessionService:
         return {
             "reference_x": float(reference.x_mm),
             "reference_y": float(reference.y_mm),
-            "tool_reference_profile": str(operation.tool_reference_profile),
         }
 
     def mark_map_validated(self, project_id: str, operation_id: str) -> dict[str, object]:

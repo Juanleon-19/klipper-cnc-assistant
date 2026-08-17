@@ -308,7 +308,7 @@ describe("App", () => {
     const scenario = seedOperationProfileApi(operationProfileProject);
 
     const firstRender = render(<App />);
-    const selector = await screen.findByLabelText("Perfil de referencia de Taladrado 0.8 mm");
+    const selector = await screen.findByLabelText("Perfil de cambio de Taladrado 0.8 mm");
     expect(selector).toHaveValue("standard");
 
     fireEvent.change(selector, { target: { value: "long_tool" } });
@@ -330,7 +330,7 @@ describe("App", () => {
     firstRender.unmount();
     render(<App />);
 
-    expect(await screen.findByLabelText("Perfil de referencia de Taladrado 0.8 mm")).toHaveValue("long_tool");
+    expect(await screen.findByLabelText("Perfil de cambio de Taladrado 0.8 mm")).toHaveValue("long_tool");
   });
 
   it("revierte el perfil optimista y muestra el error cuando falla el PATCH", async () => {
@@ -339,7 +339,7 @@ describe("App", () => {
     const scenario = seedOperationProfileApi(operationProfileProject, { persistPatch: false });
 
     render(<App />);
-    const selector = await screen.findByLabelText("Perfil de referencia de Taladrado 0.8 mm");
+    const selector = await screen.findByLabelText("Perfil de cambio de Taladrado 0.8 mm");
 
     fireEvent.change(selector, { target: { value: "long_tool" } });
 
@@ -367,7 +367,7 @@ describe("App", () => {
     const scenario = seedOperationProfileApi(longToolProject);
 
     const { container } = render(<App />);
-    const selector = await screen.findByLabelText("Perfil de referencia de Taladrado 0.8 mm");
+    const selector = await screen.findByLabelText("Perfil de cambio de Taladrado 0.8 mm");
 
     fireEvent.change(selector, { target: { value: "standard" } });
 
