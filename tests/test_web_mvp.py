@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -78,6 +79,57 @@ class WebMvpApiTest(unittest.TestCase):
         self.assertIn("hora_servidor", payload)
         self.assertNotIn("token", payload)
         self.assertNotIn("env", payload)
+
+    def test_machine_settings_endpoint_blocks_started_run_until_terminal(self) -> None:
+        no_run_response = self.client.put(
+            "/api/machine/settings",
+            json={"reference_approach_z_feed_mm_min": 30.0},
+        )
+        self.assertEqual(no_run_response.status_code, 200)
+
+        run_path = (
+            self.app.state.job_service.repository.projects_dir
+            / "project-settings-barrier"
+            / "reports"
+            / "jobs"
+            / "setup-main"
+            / "superior"
+            / "current_run.json"
+        )
+        run_path.parent.mkdir(parents=True, exist_ok=True)
+        run_path.write_text(json.dumps({"state": "JOB_READY", "started_at": None}), encoding="utf-8")
+
+        prepared_response = self.client.put(
+            "/api/machine/settings",
+            json={"reference_approach_z_feed_mm_min": 31.0},
+        )
+        self.assertEqual(prepared_response.status_code, 200)
+
+        run_path.write_text(
+            json.dumps({"state": "OPERATION_RUNNING", "started_at": "2026-08-17T12:00:00+00:00"}),
+            encoding="utf-8",
+        )
+        active_response = self.client.put(
+            "/api/machine/settings",
+            json={"reference_approach_z_feed_mm_min": 32.0},
+        )
+        self.assertEqual(active_response.status_code, 400)
+        self.assertIn("No se puede modificar la configuración física", active_response.json()["detalle"])
+        self.assertEqual(
+            self.client.get("/api/machine/settings").json()["reference_approach_z_feed_mm_min"],
+            31.0,
+        )
+
+        run_path.write_text(
+            json.dumps({"state": "JOB_CANCELLED", "started_at": "2026-08-17T12:00:00+00:00"}),
+            encoding="utf-8",
+        )
+        terminal_response = self.client.put(
+            "/api/machine/settings",
+            json={"reference_approach_z_feed_mm_min": 33.0},
+        )
+        self.assertEqual(terminal_response.status_code, 200)
+        self.assertEqual(terminal_response.json()["reference_approach_z_feed_mm_min"], 33.0)
 
     def test_multipart_upload_and_analysis_return_preview_segments(self) -> None:
         project_id = self._create_project()

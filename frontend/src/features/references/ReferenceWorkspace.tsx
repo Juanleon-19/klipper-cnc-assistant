@@ -12,7 +12,8 @@ type ReferenceFieldErrors = Partial<Record<"x_mm" | "y_mm" | "z_mm", string>>;
 export type MachineSettingsInput = {
   reference_prep_z_mm: string;
   long_tool_change_clearance_z_mm: string;
-  reference_prep_z_feed_mm_min: string;
+  z_clearance_feed_mm_min: string;
+  reference_approach_z_feed_mm_min: string;
   move_total_timeout_s: string;
   no_progress_timeout_s: string;
   position_tolerance_mm: string;
@@ -37,6 +38,7 @@ type ReferenceWorkspaceProps = {
   machineSettingsDirty: boolean;
   machineSettingsHasUnsavedChanges: boolean;
   machineSettingsRuntimeStatus: MachineSettingsRuntimeStatus;
+  machineSettingsLockedByJobRun: boolean;
   referenceMoveResult: ReferenceMoveResult | null;
   workOrigin: InputState;
   zReference: ZInputState;
@@ -83,6 +85,7 @@ export function ReferenceWorkspace({
   machineSettingsDirty,
   machineSettingsHasUnsavedChanges,
   machineSettingsRuntimeStatus,
+  machineSettingsLockedByJobRun,
   referenceMoveResult,
   workOrigin,
   zReference,
@@ -140,7 +143,8 @@ export function ReferenceWorkspace({
   const editedLongToolChangeClearanceZ = Number(machineSettingsInput.long_tool_change_clearance_z_mm);
   const editedReferencePrepZDiffers = Number.isFinite(editedReferencePrepZ) && editedReferencePrepZ !== referencePrepZ;
   const editedLongToolChangeClearanceZDiffers = Number.isFinite(editedLongToolChangeClearanceZ) && editedLongToolChangeClearanceZ !== longToolChangeClearanceZ;
-  const referencePrepZFeed = typeof preparation.reference_prep_z_feed_mm_min === "number" ? preparation.reference_prep_z_feed_mm_min : 180;
+  const zClearanceFeed = typeof preparation.z_clearance_feed_mm_min === "number" ? preparation.z_clearance_feed_mm_min : 180;
+  const referenceApproachZFeed = typeof preparation.reference_approach_z_feed_mm_min === "number" ? preparation.reference_approach_z_feed_mm_min : 180;
   const referencePrepXyFeed = typeof preparation.reference_prep_xy_feed_mm_min === "number" ? preparation.reference_prep_xy_feed_mm_min : 1800;
   const centerX = typeof preparation.center_x_mm === "number" ? preparation.center_x_mm : null;
   const centerY = typeof preparation.center_y_mm === "number" ? preparation.center_y_mm : null;
@@ -148,8 +152,9 @@ export function ReferenceWorkspace({
   const toolChangeY = typeof toolChange.y_mm === "number" ? toolChange.y_mm : 0;
   const toolChangeZ = typeof toolChange.work_z_mm === "number" ? toolChange.work_z_mm : typeof toolChange.z_mm === "number" ? toolChange.z_mm : 115;
   const toolChangeZFeed = typeof toolChange.z_feed_mm_min === "number" ? toolChange.z_feed_mm_min : 180;
-  const toolChangeXyFeed = typeof toolChange.xy_feed_mm_min === "number" ? toolChange.xy_feed_mm_min : 1800;
+  const toolChangeXyFeed = typeof toolChange.xy_feed_mm_min === "number" ? toolChange.xy_feed_mm_min : 600;
   const referenceProbeFeed = Number(machineSettingsInput.reference_probe_feed_mm_min);
+  const settingsInputsDisabled = machineSettingsLockedByJobRun || referenceBusy;
   const probeStableMs = typeof probeLive.filtered_stable_ms === "number" ? probeLive.filtered_stable_ms : null;
   const probeRequiredStableMs = typeof probeLive.required_stable_ms === "number" ? probeLive.required_stable_ms : null;
   const probeOpenOk = probeLive.open_ok === true;
@@ -300,7 +305,6 @@ export function ReferenceWorkspace({
           </div>
           <div className="action-grid action-grid--inline">
             <button className="button" type="button" disabled={!canInitialize || referenceBusy || machine.refreshing || machineSettingsDirty} onClick={onInitialize}>Realizar homing, subir Z e ir al centro</button>
-            <button className="button button--ghost" type="button" disabled={!machine.isPhysical || referenceBusy || machine.refreshing} onClick={onSaveMachineSettings}>Guardar configuración</button>
           </div>
           {machineSettingsDirty ? <div className="alert alert--warning">Guarde la configuración antes de realizar movimientos de referencia.</div> : null}
           <details className="advanced-settings">
@@ -309,7 +313,8 @@ export function ReferenceWorkspace({
               <div className="metric-box"><span>Z de preparación</span><strong>{formatMillimeters(referencePrepZ, 3)}</strong></div>
               <div className="metric-box"><span>Z segura de cambio estándar</span><strong>{formatMillimeters(standardToolChangeClearanceZ, 3)}</strong></div>
               <div className="metric-box"><span>Z segura de cambio herramienta larga</span><strong>{formatMillimeters(longToolChangeClearanceZ, 3)}</strong></div>
-              <div className="metric-box"><span>Velocidad Z</span><strong>{referencePrepZFeed.toFixed(0)} mm/min · {(referencePrepZFeed / 60).toFixed(3)} mm/s</strong></div>
+              <div className="metric-box"><span>Velocidad Z de despeje</span><strong>{zClearanceFeed.toFixed(0)} mm/min · {(zClearanceFeed / 60).toFixed(3)} mm/s</strong></div>
+              <div className="metric-box"><span>Velocidad Z de aproximación</span><strong>{referenceApproachZFeed.toFixed(0)} mm/min · {(referenceApproachZFeed / 60).toFixed(3)} mm/s</strong></div>
               <div className="metric-box"><span>Centro calculado</span><strong>X {formatMillimeters(centerX, 3)} · Y {formatMillimeters(centerY, 3)}</strong></div>
               <div className="metric-box"><span>Velocidad centro X/Y</span><strong>{referencePrepXyFeed.toFixed(0)} mm/min · {(referencePrepXyFeed / 60).toFixed(3)} mm/s</strong></div>
               <div className="metric-box"><span>Z en vivo</span><strong>{formatMillimeters(typeof livePosition?.z === "number" ? Number(livePosition.z) : null, 3)}</strong></div>
@@ -325,15 +330,18 @@ export function ReferenceWorkspace({
               <div className="metric-box"><span>Fuente viva</span><strong>{String(lastMovement?.live_position_source ?? "-")}</strong></div>
               <div className="metric-box"><span>Muestras alejándose</span><strong>{typeof lastMovement?.consecutive_away_samples === "number" ? String(lastMovement.consecutive_away_samples) : "-"}</strong></div>
             </div>
+            <p className="muted">Las velocidades X/Y de mecanizado se toman del G-code/FlatCAM. Aquí solo se muestran velocidades internas de viajes auxiliares.</p>
             <div className="form-grid form-grid--dense">
-              <label>Z de preparación (mm)<input value={machineSettingsInput.reference_prep_z_mm} inputMode="decimal" onChange={(event) => onMachineSettingChange("reference_prep_z_mm", event.target.value)} /></label>
-              <label>Z segura de cambio para herramienta larga (mm)<input value={machineSettingsInput.long_tool_change_clearance_z_mm} inputMode="decimal" onChange={(event) => onMachineSettingChange("long_tool_change_clearance_z_mm", event.target.value)} /></label>
-              <label>Velocidad Z de preparación (mm/min)<input value={machineSettingsInput.reference_prep_z_feed_mm_min} inputMode="decimal" onChange={(event) => onMachineSettingChange("reference_prep_z_feed_mm_min", event.target.value)} /></label>
-              <label>Timeout total de movimiento (s)<input value={machineSettingsInput.move_total_timeout_s} inputMode="decimal" onChange={(event) => onMachineSettingChange("move_total_timeout_s", event.target.value)} /></label>
-              <label>Timeout sin progreso (s)<input value={machineSettingsInput.no_progress_timeout_s} inputMode="decimal" onChange={(event) => onMachineSettingChange("no_progress_timeout_s", event.target.value)} /></label>
-              <label>Tolerancia de posición (mm)<input value={machineSettingsInput.position_tolerance_mm} inputMode="decimal" onChange={(event) => onMachineSettingChange("position_tolerance_mm", event.target.value)} /></label>
-              <label>Tolerancia de velocidad (mm/s)<input value={machineSettingsInput.velocity_tolerance_mm_s} inputMode="decimal" onChange={(event) => onMachineSettingChange("velocity_tolerance_mm_s", event.target.value)} /></label>
+              <label>Z de aproximación a referencia (mm)<input value={machineSettingsInput.reference_prep_z_mm} inputMode="decimal" disabled={settingsInputsDisabled} onChange={(event) => onMachineSettingChange("reference_prep_z_mm", event.target.value)} /></label>
+              <label>Z segura de cambio para herramienta larga (mm)<input value={machineSettingsInput.long_tool_change_clearance_z_mm} inputMode="decimal" disabled={settingsInputsDisabled} onChange={(event) => onMachineSettingChange("long_tool_change_clearance_z_mm", event.target.value)} /></label>
+              <label>Velocidad Z de despeje (mm/min)<input value={machineSettingsInput.z_clearance_feed_mm_min} inputMode="decimal" disabled={settingsInputsDisabled} onChange={(event) => onMachineSettingChange("z_clearance_feed_mm_min", event.target.value)} /><small>{(Number(machineSettingsInput.z_clearance_feed_mm_min) / 60).toFixed(3)} mm/s</small></label>
+              <label>Velocidad Z de aproximación (mm/min)<input value={machineSettingsInput.reference_approach_z_feed_mm_min} inputMode="decimal" disabled={settingsInputsDisabled} onChange={(event) => onMachineSettingChange("reference_approach_z_feed_mm_min", event.target.value)} /><small>{(Number(machineSettingsInput.reference_approach_z_feed_mm_min) / 60).toFixed(3)} mm/s</small></label>
+              <label>Timeout total de movimiento (s)<input value={machineSettingsInput.move_total_timeout_s} inputMode="decimal" disabled={settingsInputsDisabled} onChange={(event) => onMachineSettingChange("move_total_timeout_s", event.target.value)} /></label>
+              <label>Timeout sin progreso (s)<input value={machineSettingsInput.no_progress_timeout_s} inputMode="decimal" disabled={settingsInputsDisabled} onChange={(event) => onMachineSettingChange("no_progress_timeout_s", event.target.value)} /></label>
+              <label>Tolerancia de posición (mm)<input value={machineSettingsInput.position_tolerance_mm} inputMode="decimal" disabled={settingsInputsDisabled} onChange={(event) => onMachineSettingChange("position_tolerance_mm", event.target.value)} /></label>
+              <label>Tolerancia de velocidad (mm/s)<input value={machineSettingsInput.velocity_tolerance_mm_s} inputMode="decimal" disabled={settingsInputsDisabled} onChange={(event) => onMachineSettingChange("velocity_tolerance_mm_s", event.target.value)} /></label>
             </div>
+            {machineSettingsLockedByJobRun ? <div className="alert alert--warning">La configuración física está bloqueada mientras el JobRun permanece activo.</div> : null}
             <div className="settings-status" aria-live="polite">
               <span>Estado:</span>{" "}
               <strong>{machineSettingsHasUnsavedChanges ? "Cambios sin guardar" : machineSettingsRuntimeStatus === "coherent" ? "Configuración guardada" : machineSettingsRuntimeStatus === "inconsistent" ? "Configuración guardada · runtime inconsistente" : "Configuración guardada · runtime sin confirmar"}</strong>
@@ -347,6 +355,7 @@ export function ReferenceWorkspace({
             {!machineSettingsHasUnsavedChanges && machineSettingsRuntimeStatus === "inconsistent" && editedReferencePrepZDiffers ? <p className="muted">Z estándar · Valor activo: {formatMillimeters(referencePrepZ, 3)} · Valor confirmado por PUT: {formatMillimeters(editedReferencePrepZ, 3)}</p> : null}
             {!machineSettingsHasUnsavedChanges && machineSettingsRuntimeStatus === "inconsistent" && editedLongToolChangeClearanceZDiffers ? <p className="muted">Despeje de herramienta larga · Valor activo: {formatMillimeters(longToolChangeClearanceZ, 3)} · Valor confirmado por PUT: {formatMillimeters(editedLongToolChangeClearanceZ, 3)}</p> : null}
             <div className="action-grid action-grid--inline">
+              <button className="button" type="button" disabled={!machine.isPhysical || settingsInputsDisabled || machine.refreshing || !machineSettingsHasUnsavedChanges} onClick={onSaveMachineSettings}>Guardar configuración</button>
               <button className="button button--ghost" type="button" disabled={!canInitialize || referenceBusy || machine.refreshing || machineSettingsDirty} onClick={onInitialize}>Repetir preparación</button>
             </div>
             {machineSettingsMessage ? <p className="muted">{machineSettingsMessage}</p> : null}
@@ -385,13 +394,13 @@ export function ReferenceWorkspace({
             <p>Esta altura solo se usa durante el cambio de herramienta. No modifica el mapa ni la compensación Z.</p>
           </div>
           <div className="form-grid form-grid--dense">
-            <label>Paso de sonda (mm)<input value={machineSettingsInput.reference_probe_step_mm} inputMode="decimal" disabled={referenceBusy || machine.runtimeState === "PROBING_REFERENCE"} onChange={(event) => onMachineSettingChange("reference_probe_step_mm", event.target.value)} /></label>
-            <label>Velocidad de sonda (mm/min)<input value={machineSettingsInput.reference_probe_feed_mm_min} inputMode="decimal" disabled={referenceBusy || machine.runtimeState === "PROBING_REFERENCE"} onChange={(event) => onMachineSettingChange("reference_probe_feed_mm_min", event.target.value)} /></label>
-            <label>Retracto tras contacto (mm)<input value={machineSettingsInput.reference_probe_retract_mm} inputMode="decimal" disabled={referenceBusy || machine.runtimeState === "PROBING_REFERENCE"} onChange={(event) => onMachineSettingChange("reference_probe_retract_mm", event.target.value)} /></label>
-            <label>Velocidad de retracto (mm/min)<input value={machineSettingsInput.reference_probe_retract_feed_mm_min} inputMode="decimal" disabled={referenceBusy || machine.runtimeState === "PROBING_REFERENCE"} onChange={(event) => onMachineSettingChange("reference_probe_retract_feed_mm_min", event.target.value)} /></label>
+            <label>Paso de sonda (mm)<input value={machineSettingsInput.reference_probe_step_mm} inputMode="decimal" disabled={settingsInputsDisabled || machine.runtimeState === "PROBING_REFERENCE"} onChange={(event) => onMachineSettingChange("reference_probe_step_mm", event.target.value)} /></label>
+            <label>Velocidad de sonda (mm/min)<input value={machineSettingsInput.reference_probe_feed_mm_min} inputMode="decimal" disabled={settingsInputsDisabled || machine.runtimeState === "PROBING_REFERENCE"} onChange={(event) => onMachineSettingChange("reference_probe_feed_mm_min", event.target.value)} /></label>
+            <label>Retracto tras contacto (mm)<input value={machineSettingsInput.reference_probe_retract_mm} inputMode="decimal" disabled={settingsInputsDisabled || machine.runtimeState === "PROBING_REFERENCE"} onChange={(event) => onMachineSettingChange("reference_probe_retract_mm", event.target.value)} /></label>
+            <label>Velocidad de retracto (mm/min)<input value={machineSettingsInput.reference_probe_retract_feed_mm_min} inputMode="decimal" disabled={settingsInputsDisabled || machine.runtimeState === "PROBING_REFERENCE"} onChange={(event) => onMachineSettingChange("reference_probe_retract_feed_mm_min", event.target.value)} /></label>
           </div>
           <p className="muted">Velocidad efectiva: {Number.isFinite(referenceProbeFeed) ? `${referenceProbeFeed.toFixed(2)} mm/min · ${(referenceProbeFeed / 60).toFixed(3)} mm/s` : "valor inválido"}</p>
-          <button className="button button--ghost" type="button" disabled={!machine.isPhysical || referenceBusy || machine.refreshing || machine.runtimeState === "PROBING_REFERENCE"} onClick={onSaveMachineSettings}>Guardar parámetros de sonda</button>
+          <button className="button button--ghost" type="button" disabled={!machine.isPhysical || settingsInputsDisabled || machine.refreshing || machine.runtimeState === "PROBING_REFERENCE"} onClick={onSaveMachineSettings}>Guardar parámetros de sonda</button>
           <p className="muted">Puede armar la referencia para usar el botón externo o lanzar el sondeo directamente desde pantalla. Si la primera toma quedó mal, use "Volver a medir referencia" para repetir el mismo flujo seguro y sobrescribir la referencia Z activa con una nueva captura física.</p>
           <div className="action-grid action-grid--inline">
             <button className="button button--ghost" type="button" disabled={!canArm || referenceBusy || machine.refreshing || machineSettingsDirty} onClick={onProbeRequest}>Armar referencia</button>
@@ -426,7 +435,7 @@ export function ReferenceWorkspace({
             <div className="metric-box"><span>Velocidades</span><strong>Z {toolChangeZFeed.toFixed(0)} mm/min · X/Y {toolChangeXyFeed.toFixed(0)} mm/min</strong></div>
             <div className="metric-box"><span>Secuencia</span><strong>Z segura → X/Y</strong></div>
           </div>
-          <button className="button" type="button" disabled={!machine.isPhysical || referenceBusy || machine.refreshing || !machine.homedAxes} onClick={onToolChangePosition}>Probar posición de cambio</button>
+          <button className="button" type="button" disabled={!machine.isPhysical || referenceBusy || machine.refreshing || !machine.homedAxes || machineSettingsDirty || machineSettingsLockedByJobRun} onClick={onToolChangePosition}>Probar posición de cambio</button>
         </article>
       </div>
     );

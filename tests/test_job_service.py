@@ -23,6 +23,9 @@ class FakeRuntime:
             "reference_prep_z_mm": 115.0,
             "tool_change_clearance_z_mm": 115.0,
             "long_tool_change_clearance_z_mm": 130.0,
+            "z_clearance_feed_mm_min": 180.0,
+            "reference_approach_z_feed_mm_min": 180.0,
+            "probe_lower_speed_mm_s": 1.0,
             "velocity_tolerance_mm_s": 0.02,
         })()
         self._last_probe = {"x_mm": 100.0, "y_mm": 100.0, "z_mm": 4.75}
@@ -51,6 +54,14 @@ class FakeRuntime:
         if tool_change_profile == "long_tool":
             return self.config.long_tool_change_clearance_z_mm
         return self.config.tool_change_clearance_z_mm
+
+    def effective_probe_profile_payload(self, probe_config: dict | None = None) -> dict:
+        configured = (probe_config or {}).get("probe_feed_mm_min")
+        return {
+            "effective_probe_feed_mm_min": float(configured)
+            if configured is not None
+            else self.config.probe_lower_speed_mm_s * 60.0
+        }
 
     def last_probe_position(self) -> dict[str, float]:
         return dict(self._last_probe)
@@ -171,14 +182,21 @@ class FakeAdapter:
         x_mm: float,
         y_mm: float,
         tool_change_profile: str = "standard",
+        progress_callback=None,
     ) -> dict:
         self.reference_moves.append((x_mm, y_mm))
         self.reference_profiles.append(tool_change_profile)
-        self.command_log.extend([
-            f"incoming-{tool_change_profile}-clearance",
-            "incoming-reference-xy",
-            "incoming-reference-prep-z",
-        ])
+        if progress_callback:
+            progress_callback("RETURNING_TO_REFERENCE_SAFE_Z", {"feed_mm_min": self.runtime.config.z_clearance_feed_mm_min})
+        self.command_log.append(f"incoming-{tool_change_profile}-clearance")
+        if progress_callback:
+            progress_callback("RETURNING_TO_REFERENCE_XY", {"feed_mm_min": 1800.0})
+        self.command_log.append("incoming-reference-xy")
+        if progress_callback:
+            progress_callback("MOVING_TO_REFERENCE", {"feed_mm_min": self.runtime.config.reference_approach_z_feed_mm_min})
+        self.command_log.append("incoming-reference-prep-z")
+        if progress_callback:
+            progress_callback("REFERENCE_APPROACH_CONFIRMED", {"feed_mm_min": self.runtime.config.reference_approach_z_feed_mm_min})
         return {"accepted": True}
 
     def probe_tool_reference(self, *, x_mm: float, y_mm: float, probe_config: dict | None) -> dict:
@@ -515,6 +533,8 @@ class JobServiceTest(unittest.TestCase):
 
     def test_long_tool_clearance_does_not_change_map_or_legacy_compensation(self) -> None:
         self.runtime.config.long_tool_change_clearance_z_mm = 115.0
+        self.runtime.config.z_clearance_feed_mm_min = 180.0
+        self.runtime.config.reference_approach_z_feed_mm_min = 180.0
         first_plan = self.job_service.generate_project_compensation(
             project_id=self.project_id,
             setup_id=self.setup_id,
@@ -536,6 +556,8 @@ class JobServiceTest(unittest.TestCase):
         }
 
         self.runtime.config.long_tool_change_clearance_z_mm = 130.0
+        self.runtime.config.z_clearance_feed_mm_min = 240.0
+        self.runtime.config.reference_approach_z_feed_mm_min = 30.0
         second_plan = self.job_service.generate_project_compensation(
             project_id=self.project_id,
             setup_id=self.setup_id,
@@ -571,6 +593,9 @@ class JobServiceTest(unittest.TestCase):
         self.assertIsNotNone(result["operations"][0]["plan_hash"])
 
     def test_job_run_executes_all_operations_with_two_manual_spindle_confirmations(self) -> None:
+        self.runtime.config.z_clearance_feed_mm_min = 240.0
+        self.runtime.config.reference_approach_z_feed_mm_min = 45.0
+        self.runtime.config.probe_lower_speed_mm_s = 0.5
         initial_plan = self.job_service.get_plan(project_id=self.project_id, setup_id=self.setup_id, face="superior")
         self.assertTrue(all(item["generated_file"] is None for item in initial_plan["operations"]))
 
@@ -597,6 +622,9 @@ class JobServiceTest(unittest.TestCase):
         self.assertEqual(live["transition"]["tool_change_profile"], "long_tool")
         self.assertEqual(live["transition"]["tool_change_clearance_z_mm"], 130.0)
         self.assertEqual(live["transition"]["reference_prep_z_mm"], 115.0)
+        self.assertEqual(live["transition"]["z_clearance_feed_mm_min"], 240.0)
+        self.assertEqual(live["transition"]["reference_approach_z_feed_mm_min"], 45.0)
+        self.assertEqual(live["transition"]["reference_probe_feed_mm_min"], 30.0)
         self.assertEqual(len(self.adapter.started), 0)
         self.assertIsNone(run["operations"][2]["generated_file"])
         self.assertIsNone(run["operations"][3]["generated_file"])
@@ -633,6 +661,9 @@ class JobServiceTest(unittest.TestCase):
         self.assertEqual(self.adapter.reference_profiles, ["long_tool", "standard"])
         self.assertEqual(run["operations"][2]["reference_prep_z_mm"], 115.0)
         self.assertEqual(run["operations"][2]["tool_change_clearance_z_mm"], 130.0)
+        self.assertEqual(run["operations"][2]["z_clearance_feed_mm_min"], 240.0)
+        self.assertEqual(run["operations"][2]["reference_approach_z_feed_mm_min"], 45.0)
+        self.assertEqual(run["operations"][2]["reference_probe_feed_mm_min"], 30.0)
         long_tool_return = self.adapter.command_log.index("incoming-long_tool-clearance")
         self.assertEqual(
             self.adapter.command_log[long_tool_return:long_tool_return + 4],
@@ -656,6 +687,25 @@ class JobServiceTest(unittest.TestCase):
         self.assertEqual(len(self.adapter.started), 0)
         self.assertEqual(run["operations"][3]["execution_status"], "COMPLETED")
         self.assertTrue({"M3", "M4", "M5"}.isdisjoint(self.adapter.command_log))
+
+    def test_active_job_run_blocks_machine_settings_until_terminal(self) -> None:
+        run = self.job_service.prepare_run(
+            project_id=self.project_id,
+            setup_id=self.setup_id,
+            face="superior",
+        )
+        self.job_service.assert_machine_settings_update_allowed()
+        run["started_at"] = "2026-08-17T12:00:00+00:00"
+        run["state"] = "OPERATION_RUNNING"
+        context = self.job_service._context(self.project_id, self.setup_id, "superior")
+        self.job_service._save_run(context, run)
+
+        with self.assertRaisesRegex(Exception, "ejecución activa"):
+            self.job_service.assert_machine_settings_update_allowed()
+
+        run["state"] = "JOB_CANCELLED"
+        self.job_service._save_run(context, run)
+        self.job_service.assert_machine_settings_update_allowed()
 
     def test_retry_tool_change_transition_does_not_repeat_completed_operation(self) -> None:
         self.job_service.generate_project_compensation(project_id=self.project_id, setup_id=self.setup_id, face="superior")

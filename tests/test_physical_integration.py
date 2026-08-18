@@ -628,6 +628,83 @@ class PhysicalIntegrationTest(unittest.TestCase):
             with self.assertRaises(ApplicationError):
                 generator.generate(project.id, operation.id)
 
+    def test_legacy_compensation_preserves_flatcam_modal_feeds_when_subdividing(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            repository = JsonProjectRepository(Path(temp))
+            project_service = ProjectService(repository)
+            project = project_service.create_project(
+                nombre="Feeds FlatCAM",
+                ancho_mm=40,
+                alto_mm=20,
+                espesor_mm=1.6,
+            )
+            operation = project_service.add_operation(
+                project_id=project.id,
+                nombre="Aislamiento",
+                tipo="aislamiento",
+                cara="superior",
+                orden=0,
+                herramienta="V-bit",
+            )
+            original = (
+                "G21\nG90\n"
+                "G1 X10 Y0 Z-0.100 F120\n"
+                "G1 X20 Y0 Z-0.100 F300\n"
+                "G1 X30 Y0 Z-0.100\n"
+            )
+            project_service.upload_operation_gcode(
+                project_id=project.id,
+                operation_id=operation.id,
+                filename="flatcam-feeds.nc",
+                content=original,
+            )
+            project_service.analyze_operation(project.id, operation.id)
+            map_service = PhysicalMapService(repository)
+            plan = map_service.capture_reference_and_plan(
+                project_id=project.id,
+                operation_id=operation.id,
+                machine_origin_x=100.0,
+                machine_origin_y=200.0,
+                reference_z=1.0,
+                machine_position={"x_mm": 100.0, "y_mm": 200.0, "z_mm": 1.0},
+                homed_axes="xyz",
+                machine_label="test",
+                session_id="session",
+                config=PhysicalMeshConfig(
+                    grid_mode="manual",
+                    rows=2,
+                    columns=2,
+                    edge_margin_left_mm=0.0,
+                    edge_margin_right_mm=0.0,
+                    edge_margin_bottom_mm=0.0,
+                    edge_margin_top_mm=0.0,
+                ),
+            )
+            for point in plan["points"]:
+                plan = map_service.record_point(
+                    project_id=project.id,
+                    map_id=plan["map_id"],
+                    point_index=int(point["index"]),
+                    z_measured=1.0,
+                )
+
+            result = CompensatedGCodeService(repository, map_service).generate(
+                project.id,
+                operation.id,
+                max_segment_mm=2.0,
+            )
+            generated = repository.read_project_file(project.id, result["relative_path"])
+            feeds_by_line: dict[int, set[float]] = {}
+            for entry in result["metadata"]["movement_trace"]:
+                feeds_by_line.setdefault(int(entry["line_number"]), set()).add(float(entry["feed_mm_min"]))
+
+            self.assertEqual(feeds_by_line[3], {120.0})
+            self.assertEqual(feeds_by_line[4], {300.0})
+            self.assertEqual(feeds_by_line[5], {300.0})
+            self.assertGreater(generated.count("F300.000"), 2)
+            self.assertNotIn("F600", generated)
+            self.assertNotIn("F1800", generated)
+
     def test_completed_existing_physical_map_is_finalized_on_read_without_reprobing(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             repository, project_service, project, operation = self._physical_project(temp)

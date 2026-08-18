@@ -72,7 +72,8 @@ type MachineSettingsValues = { [Key in keyof MachineSettingsInput]: number };
 const DEFAULT_MACHINE_SETTINGS: MachineSettingsValues = {
   reference_prep_z_mm: 115,
   long_tool_change_clearance_z_mm: 115,
-  reference_prep_z_feed_mm_min: 180,
+  z_clearance_feed_mm_min: 180,
+  reference_approach_z_feed_mm_min: 180,
   move_total_timeout_s: 180,
   no_progress_timeout_s: 60,
   position_tolerance_mm: 0.05,
@@ -94,6 +95,15 @@ function normalizeMachineSettings(
     const value = settings[key];
     normalized[key] = typeof value === "number" && Number.isFinite(value) ? value : fallback[key];
   }
+  const legacyReferenceZFeed = settings.reference_prep_z_feed_mm_min;
+  if (typeof legacyReferenceZFeed === "number" && Number.isFinite(legacyReferenceZFeed)) {
+    if (!(typeof settings.z_clearance_feed_mm_min === "number" && Number.isFinite(settings.z_clearance_feed_mm_min))) {
+      normalized.z_clearance_feed_mm_min = legacyReferenceZFeed;
+    }
+    if (!(typeof settings.reference_approach_z_feed_mm_min === "number" && Number.isFinite(settings.reference_approach_z_feed_mm_min))) {
+      normalized.reference_approach_z_feed_mm_min = legacyReferenceZFeed;
+    }
+  }
   if (!(typeof settings.long_tool_change_clearance_z_mm === "number" && Number.isFinite(settings.long_tool_change_clearance_z_mm))) {
     normalized.long_tool_change_clearance_z_mm = fallback.long_tool_change_clearance_z_mm;
   }
@@ -104,7 +114,8 @@ function machineSettingsToInput(settings: MachineSettingsValues): MachineSetting
   return {
     reference_prep_z_mm: String(settings.reference_prep_z_mm),
     long_tool_change_clearance_z_mm: String(settings.long_tool_change_clearance_z_mm),
-    reference_prep_z_feed_mm_min: String(settings.reference_prep_z_feed_mm_min),
+    z_clearance_feed_mm_min: String(settings.z_clearance_feed_mm_min),
+    reference_approach_z_feed_mm_min: String(settings.reference_approach_z_feed_mm_min),
     move_total_timeout_s: String(settings.move_total_timeout_s),
     no_progress_timeout_s: String(settings.no_progress_timeout_s),
     position_tolerance_mm: String(settings.position_tolerance_mm),
@@ -125,10 +136,18 @@ function machineSettingsInputsDiffer(input: MachineSettingsInput, saved: Machine
 }
 
 function machineSettingsRuntimeSignature(settings: MachineSettingsValues) {
-  return `${settings.reference_prep_z_mm}:${settings.long_tool_change_clearance_z_mm}`;
+  return MACHINE_SETTING_KEYS.map((key) => `${key}:${settings[key]}`).join("|");
 }
 
 function runtimeSettingsStatus(settings: MachineSettingsValues, runtime: MachineRuntime | null): MachineSettingsRuntimeStatus {
+  const runtimeSettings = runtime?.settings;
+  if (runtimeSettings && typeof runtimeSettings === "object") {
+    const confirmed = MACHINE_SETTING_KEYS.every((key) => {
+      const value = runtimeSettings[key];
+      return typeof value === "number" && Number.isFinite(value) && value === settings[key];
+    });
+    return confirmed ? "coherent" : "inconsistent";
+  }
   const standardZ = runtime?.preparation?.reference_prep_z_mm;
   if (typeof standardZ !== "number" || !Number.isFinite(standardZ)) return "unconfirmed";
   const longToolClearanceZ = runtime?.tool_change?.long_tool_clearance_z_mm;
@@ -137,6 +156,8 @@ function runtimeSettingsStatus(settings: MachineSettingsValues, runtime: Machine
     ? "coherent"
     : "inconsistent";
 }
+
+const TERMINAL_JOB_STATES = new Set(["JOB_COMPLETE", "JOB_CANCELLED", "JOB_ERROR"]);
 
 
 const operationTypeOptions = [
@@ -592,6 +613,14 @@ export function ProjectWorkspace({
     [machineSettingsInput, savedMachineSettings],
   );
   const machineSettingsDirty = machineSettingsHasUnsavedChanges || machineSettingsRuntimeStatus !== "coherent";
+  const liveJobState = liveExecution?.run.status ?? liveExecution?.job_run?.state ?? "JOB_DRAFT";
+  const machineSettingsLockedByJobRun = Boolean(
+    liveExecution?.job_run?.started_at && !TERMINAL_JOB_STATES.has(liveJobState),
+  );
+  const executionSettingsBlocked = machine.isPhysical && machineSettingsDirty;
+  const executionSettingsBlockReason = machineSettingsHasUnsavedChanges
+    ? "Hay cambios de configuración de máquina sin guardar. Guárdelos y confirme el runtime antes de preparar la ejecución."
+    : "La configuración guardada no está confirmada de forma coherente en runtime. Confirme el runtime antes de preparar la ejecución.";
 
   useEffect(() => {
     if (!machine.isPhysical) {
@@ -619,7 +648,7 @@ export function ProjectWorkspace({
 
   useEffect(() => {
     setSelectedOperationId((current) => {
-  if (!project) {
+      if (!project) {
         return null;
       }
       if (current && project.operaciones.some((operation) => operation.id === current)) {
@@ -1059,10 +1088,15 @@ export function ProjectWorkspace({
   };
 
   const saveMachineSettings = async () => {
+    if (machineSettingsLockedByJobRun) {
+      setMachineSettingsMessage("La configuración física no puede editarse mientras existe un JobRun activo.");
+      return;
+    }
     const labels: Record<keyof typeof machineSettingsInput, string> = {
       reference_prep_z_mm: "Z de preparación",
       long_tool_change_clearance_z_mm: "Z segura de cambio para herramienta larga",
-      reference_prep_z_feed_mm_min: "Velocidad Z de preparación",
+      z_clearance_feed_mm_min: "Velocidad Z de despeje",
+      reference_approach_z_feed_mm_min: "Velocidad Z de aproximación",
       move_total_timeout_s: "Timeout total",
       no_progress_timeout_s: "Timeout sin progreso",
       position_tolerance_mm: "Tolerancia de posición",
@@ -1103,7 +1137,7 @@ export function ProjectWorkspace({
         };
         const status = runtimeSettingsStatus(normalized, refreshedRuntime);
         setMachineSettingsRuntimeStatus(status);
-        setMachineSettingsMessage(status === "coherent" ? "Configuración avanzada de máquina guardada y confirmada." : "");
+        setMachineSettingsMessage(status === "coherent" ? "Configuración guardada y activa en runtime." : "");
       } catch {
         setMachineSettingsRuntimeStatus("refresh_failed");
         setMachineSettingsMessage("");
@@ -1597,6 +1631,7 @@ export function ProjectWorkspace({
       machineSettingsDirty={machineSettingsDirty}
       machineSettingsHasUnsavedChanges={machineSettingsHasUnsavedChanges}
       machineSettingsRuntimeStatus={machineSettingsRuntimeStatus}
+      machineSettingsLockedByJobRun={machineSettingsLockedByJobRun}
       referenceMoveResult={referenceMoveResult}
       workOrigin={workOrigin}
       zReference={zReference}
@@ -1631,7 +1666,10 @@ export function ProjectWorkspace({
       onSubmitWorkOrigin={() => void submitWorkOrigin()}
       onSubmitZReference={() => void submitZReference()}
       onValidateHeightMap={() => void withReferenceAction(() => api.validateHeightMap(project.id, selectedOperation!.id))}
-      onMachineSettingChange={(field, value) => setMachineSettingsInput((current) => ({ ...current, [field]: value }))}
+      onMachineSettingChange={(field, value) => {
+        if (machineSettingsLockedByJobRun) return;
+        setMachineSettingsInput((current) => ({ ...current, [field]: value }));
+      }}
       onToggleUseWorkOriginXYForZ={(checked) => setUseWorkOriginXYForZ(checked)}
       onWorkOriginChange={(field, value) => {
         setWorkOrigin((current) => ({ ...current, [field]: value }));
@@ -2231,6 +2269,10 @@ export function ProjectWorkspace({
     if (!project || !selectedSetup || !activeJobFace) {
       return;
     }
+    if (executionSettingsBlocked) {
+      setMachineSettingsMessage(executionSettingsBlockReason);
+      return;
+    }
     setReferenceBusy(true);
     setWorkspaceError("");
     try {
@@ -2246,6 +2288,10 @@ export function ProjectWorkspace({
 
   const startJobRun = async () => {
     if (startJobInFlight.current || !project || !selectedSetup || !activeJobFace) {
+      return;
+    }
+    if (executionSettingsBlocked) {
+      setMachineSettingsMessage(executionSettingsBlockReason);
       return;
     }
     startJobInFlight.current = true;
@@ -2313,16 +2359,17 @@ export function ProjectWorkspace({
       ? jobPlan?.operations.find((item) => item.operation_id === selectedOperation.id) ?? null
       : null;
     return (
-      <article className="panel">
+      <details className="panel advanced-settings">
+        <summary>Avanzado / Diagnóstico / Inspección de compensación</summary>
         <div className="section-heading section-heading--stacked">
           <div>
-            <p className="eyebrow">1. Compensación por operación</p>
-            <h3>Legacy · generación justo a tiempo — {translateFace(activeJobFace)}</h3>
+            <p className="eyebrow">Inspección técnica</p>
+            <h3>Artefacto Legacy de diagnóstico — {translateFace(activeJobFace)}</h3>
           </div>
           <div className="toolbar-inline">
-            <button className="button button--ghost" type="button" disabled={compensationControlsBusy} onClick={() => void prepareJobRun()}>Revalidar plan</button>
+            <button className="button button--ghost" type="button" disabled={compensationControlsBusy || executionSettingsBlocked} onClick={() => void prepareJobRun()}>Actualizar inspección</button>
             <button className="button" type="button" disabled={compensationControlsBusy || !selectedOperation} onClick={() => void generateSelectedLegacyCompensation()}>
-              {compensationBusy ? "Generando compensación…" : "Generar compensación de esta operación"}
+              {compensationBusy ? "Generando artefacto…" : "Generar artefacto Legacy de inspección"}
             </button>
           </div>
         </div>
@@ -2366,8 +2413,8 @@ export function ProjectWorkspace({
               </table>
             </div>
           </>
-        ) : <p className="muted">Revalide el plan para ver el estado de las operaciones.</p>}
-      </article>
+        ) : <p className="muted">Actualice la inspección para ver el estado de las operaciones.</p>}
+      </details>
     );
   };
 
@@ -2380,6 +2427,8 @@ export function ProjectWorkspace({
         snapshot={liveExecution}
         error={executionError}
         busy={referenceBusy || compensationBusy}
+        settingsBlocked={executionSettingsBlocked}
+        settingsBlockReason={executionSettingsBlockReason}
         onPrepare={prepareJobRun}
         onStart={startJobRun}
         onAction={runJobAction}
@@ -2390,8 +2439,8 @@ export function ProjectWorkspace({
 
   const renderEjecucion = () => (
     <div className="stack gap-md">
-      {renderJobCompensationPanel()}
       {renderJobExecutionPanel()}
+      {renderJobCompensationPanel()}
     </div>
   );
 

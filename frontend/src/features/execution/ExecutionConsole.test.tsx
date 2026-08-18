@@ -267,6 +267,40 @@ describe("ExecutionConsole", () => {
     expect(screen.queryByText(/Bloqueos que debes resolver/i)).toBeNull();
   });
 
+  it("bloquea preparar e iniciar cuando la configuración física no está confirmada", () => {
+    const onPrepare = vi.fn();
+    const onStart = vi.fn();
+    render(
+      <ExecutionConsole
+        snapshot={{
+          ...baseSnapshot,
+          run: { ...baseSnapshot.run, status: "JOB_READY", available_actions: ["start"] },
+          job_run: {
+            ...(baseSnapshot.job_run as NonNullable<typeof baseSnapshot.job_run>),
+            state: "JOB_READY",
+            available_actions: ["start"],
+          },
+        }}
+        error={null}
+        busy={false}
+        settingsBlocked
+        settingsBlockReason="Hay cambios de configuración de máquina sin guardar. Guárdelos y confirme el runtime antes de preparar la ejecución."
+        onPrepare={onPrepare}
+        onStart={onStart}
+        onAction={vi.fn()}
+        onArchiveStale={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText(/Hay cambios de configuración de máquina sin guardar/i)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Preparar trabajo" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Iniciar trabajo" })).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "Preparar trabajo" }));
+    fireEvent.click(screen.getByRole("button", { name: "Iniciar trabajo" }));
+    expect(onPrepare).not.toHaveBeenCalled();
+    expect(onStart).not.toHaveBeenCalled();
+  });
+
   it("muestra banner de desincronización y no duplica el botón de inicio", () => {
     render(
       <ExecutionConsole
@@ -373,7 +407,7 @@ describe("ExecutionConsole", () => {
       />,
     );
 
-    expect(screen.getAllByText(/Cambie la herramienta/i).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/Cambie físicamente la herramienta/i).length).toBeGreaterThan(0);
     expect(screen.getByRole("button", { name: /Herramienta cambiada/i })).toBeInTheDocument();
 
     rerender(
@@ -393,7 +427,7 @@ describe("ExecutionConsole", () => {
       />,
     );
 
-    expect(screen.getByRole("button", { name: /Continuar trabajo/i })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Spindle preparado — continuar/i })).toBeInTheDocument();
   });
 
   it("explica en READY_TO_RESUME que Continuar genera Legacy JIT con la nueva referencia", () => {
@@ -432,7 +466,7 @@ describe("ExecutionConsole", () => {
     expect(screen.getByText("Nueva referencia Z lista")).toBeInTheDocument();
     expect(screen.getByText(/generará automáticamente una nueva compensación Legacy/i)).toBeInTheDocument();
     expect(screen.getByText(/No es necesario volver a la sección Compensación/i)).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Continuar trabajo" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Spindle preparado — continuar" })).toBeInTheDocument();
   });
 
   it("describe OPERATION_PREFLIGHT como generación de compensación Legacy JIT", () => {
@@ -495,6 +529,39 @@ describe("ExecutionConsole", () => {
     expect(screen.getByRole("region", { name: "Flujo automático de la siguiente operación" })).toHaveTextContent("Esperando confirmación de Klipper");
   });
 
+  it("muestra la etapa y las velocidades independientes de la transición automática", () => {
+    render(
+      <ExecutionConsole
+        snapshot={{
+          ...baseSnapshot,
+          run: { ...baseSnapshot.run, status: "MOVING_TO_REFERENCE", available_actions: ["cancel"] },
+          transition: {
+            ...baseSnapshot.transition,
+            state: "MOVING_TO_REFERENCE",
+            stage: "MOVING_TO_REFERENCE",
+            tool_change_clearance_z_mm: 130,
+            reference_prep_z_mm: 105,
+            z_clearance_feed_mm_min: 240,
+            reference_approach_z_feed_mm_min: 45,
+            reference_probe_feed_mm_min: 30,
+          },
+        }}
+        error={null}
+        busy={false}
+        onPrepare={vi.fn()}
+        onStart={vi.fn()}
+        onAction={vi.fn()}
+        onArchiveStale={vi.fn()}
+      />,
+    );
+
+    const transition = screen.getByRole("region", { name: "Medición automática de la nueva referencia" });
+    expect(transition).toHaveTextContent("Subiendo a clearance 130.000 mm · 240 mm/min");
+    expect(transition).toHaveTextContent("Moviendo a referencia");
+    expect(transition).toHaveTextContent("Aproximando Z a 105.000 mm · 45 mm/min");
+    expect(transition).toHaveTextContent("Midiendo referencia Z · 30 mm/min");
+  });
+
   it("mantiene el aviso de TOOL_CHANGE_REQUIRED y anticipa la nueva referencia", () => {
     render(
       <ExecutionConsole
@@ -518,7 +585,7 @@ describe("ExecutionConsole", () => {
       />,
     );
 
-    expect(screen.getAllByText("Cambie la herramienta").length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/Cambie físicamente la herramienta/i).length).toBeGreaterThan(0);
     expect(screen.getByRole("button", { name: "Herramienta cambiada" })).toBeInTheDocument();
     expect(screen.getByText(/la referencia anterior dejará de ser válida/i)).toBeInTheDocument();
     expect(screen.getByText(/se medirá la nueva herramienta antes de generar su compensación/i)).toBeInTheDocument();

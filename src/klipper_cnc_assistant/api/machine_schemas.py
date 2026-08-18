@@ -14,6 +14,7 @@ class MachineRuntimeResponse(BaseModel):
     klipper: dict
     preparation: dict = Field(default_factory=dict)
     tool_change: dict = Field(default_factory=dict)
+    settings: dict[str, float] = Field(default_factory=dict)
     arduino: dict
     probe_live: dict = Field(default_factory=dict)
     last_probe_failure: dict | None = None
@@ -49,6 +50,9 @@ class MachineSettingsRequest(BaseModel):
     long_tool_change_clearance_z_mm: float | None = None
     # Alias transitorio de lectura/escritura para clientes anteriores al hotfix.
     long_tool_reference_prep_z_mm: float | None = None
+    z_clearance_feed_mm_min: float | None = None
+    reference_approach_z_feed_mm_min: float | None = None
+    # Alias transitorio: al leerlo se aplica a ambos feeds Z canónicos.
     reference_prep_z_feed_mm_min: float | None = None
     move_total_timeout_s: float | None = None
     no_progress_timeout_s: float | None = None
