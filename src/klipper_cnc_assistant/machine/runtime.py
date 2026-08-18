@@ -156,7 +156,8 @@ def _is_cardinal(command: ControllerCommand) -> bool:
     return (command.jog_x != 0 and command.jog_y == 0) or (command.jog_y != 0 and command.jog_x == 0)
 
 
-REFERENCE_PREP_XY_FEED_MM_MIN = 1800.0
+AUXILIARY_REFERENCE_XY_FEED_MM_MIN = 1800.0
+AUXILIARY_DEFAULT_TRAVEL_FEED_MM_MIN = 600.0
 
 def calculate_safe_probe_z(reference_z: float, clearance_mm: float, axis_direction: int, z_limits: Any) -> float:
     """Return an absolute Z that is clearance away from the measured surface.
@@ -246,7 +247,8 @@ class MachineRuntime:
     _MACHINE_SETTINGS_FIELDS = {
         "reference_prep_z_mm",
         "long_tool_change_clearance_z_mm",
-        "reference_prep_z_feed_mm_min",
+        "z_clearance_feed_mm_min",
+        "reference_approach_z_feed_mm_min",
         "move_timeout_s",
         "no_progress_timeout_s",
         "settle_tolerance_mm",
@@ -254,7 +256,7 @@ class MachineRuntime:
         "probe_step_mm",
         "probe_lower_speed_mm_s",
         "probe_retract_mm",
-            "probe_retract_speed_mm_s",
+        "probe_retract_speed_mm_s",
     }
 
     def _load_persisted_config(self, config: MachineRuntimeConfig) -> MachineRuntimeConfig:
@@ -269,7 +271,8 @@ class MachineRuntime:
         external_mapping = {
             "reference_prep_z_mm": "reference_prep_z_mm",
             "long_tool_change_clearance_z_mm": "long_tool_change_clearance_z_mm",
-            "reference_prep_z_feed_mm_min": "reference_prep_z_feed_mm_min",
+            "z_clearance_feed_mm_min": "z_clearance_feed_mm_min",
+            "reference_approach_z_feed_mm_min": "reference_approach_z_feed_mm_min",
             "move_total_timeout_s": "move_timeout_s",
             "no_progress_timeout_s": "no_progress_timeout_s",
             "position_tolerance_mm": "settle_tolerance_mm",
@@ -289,6 +292,12 @@ class MachineRuntime:
             and "long_tool_reference_prep_z_mm" in payload
         ):
             overrides["long_tool_change_clearance_z_mm"] = payload["long_tool_reference_prep_z_mm"]
+        legacy_reference_z_feed = payload.get("reference_prep_z_feed_mm_min")
+        if legacy_reference_z_feed is not None:
+            if "z_clearance_feed_mm_min" not in payload:
+                overrides["z_clearance_feed_mm_min"] = legacy_reference_z_feed
+            if "reference_approach_z_feed_mm_min" not in payload:
+                overrides["reference_approach_z_feed_mm_min"] = legacy_reference_z_feed
         if "move_timeout_s" in overrides:
             overrides.setdefault("move_minimum_timeout_s", overrides["move_timeout_s"])
         return replace(config, **overrides) if overrides else config
@@ -297,7 +306,8 @@ class MachineRuntime:
         return {
             "reference_prep_z_mm": self.config.reference_prep_z_mm,
             "long_tool_change_clearance_z_mm": self.config.long_tool_change_clearance_z_mm,
-            "reference_prep_z_feed_mm_min": self.config.reference_prep_z_feed_mm_min,
+            "z_clearance_feed_mm_min": self.config.z_clearance_feed_mm_min,
+            "reference_approach_z_feed_mm_min": self.config.reference_approach_z_feed_mm_min,
             "move_total_timeout_s": self.config.move_timeout_s,
             "no_progress_timeout_s": self.config.no_progress_timeout_s,
             "position_tolerance_mm": self.config.settle_tolerance_mm,
@@ -322,10 +332,17 @@ class MachineRuntime:
             normalized_payload["long_tool_change_clearance_z_mm"] = normalized_payload[
                 "long_tool_reference_prep_z_mm"
             ]
+        legacy_reference_z_feed = normalized_payload.get("reference_prep_z_feed_mm_min")
+        if legacy_reference_z_feed is not None:
+            if normalized_payload.get("z_clearance_feed_mm_min") is None:
+                normalized_payload["z_clearance_feed_mm_min"] = legacy_reference_z_feed
+            if normalized_payload.get("reference_approach_z_feed_mm_min") is None:
+                normalized_payload["reference_approach_z_feed_mm_min"] = legacy_reference_z_feed
         mapping = {
             "reference_prep_z_mm": "reference_prep_z_mm",
             "long_tool_change_clearance_z_mm": "long_tool_change_clearance_z_mm",
-            "reference_prep_z_feed_mm_min": "reference_prep_z_feed_mm_min",
+            "z_clearance_feed_mm_min": "z_clearance_feed_mm_min",
+            "reference_approach_z_feed_mm_min": "reference_approach_z_feed_mm_min",
             "move_total_timeout_s": "move_timeout_s",
             "no_progress_timeout_s": "no_progress_timeout_s",
             "position_tolerance_mm": "settle_tolerance_mm",
@@ -824,7 +841,14 @@ class MachineRuntime:
                 self._state = MachineRuntimeState.MOVING_TO_SAFE_Z
             self._step("PREPARATION_Z_START", "ok", f"Moviendo únicamente Z a la coordenada absoluta configurada {configured_z:.3f} mm.")
             self._log_preparation_transition("PREPARATION_Z_START", target_z=configured_z, center_x=center_x, center_y=center_y, observed=homed_snapshot, started=started)
-            self._move_absolute(z=configured_z, label="z_preparacion_referencia", feed_mm_min=self.config.reference_prep_z_feed_mm_min)
+            self._move_absolute(
+                z=configured_z,
+                label="z_preparacion_referencia",
+                feed_mm_min=self._reference_target_z_feed(
+                    current_z=float(homed_snapshot["z"]),
+                    target_z=configured_z,
+                ),
+            )
             self._refresh_machine()
             z_snapshot = machine.get_motion_snapshot()
             if abs(float(z_snapshot["z"]) - configured_z) > self.config.settle_tolerance_mm:
@@ -837,7 +861,12 @@ class MachineRuntime:
                 self._state = MachineRuntimeState.MOVING_TO_CENTER
             self._step("PREPARATION_CENTER_START", "ok", f"Moviendo X/Y al centro X={center_x:.3f} Y={center_y:.3f}.")
             self._log_preparation_transition("PREPARATION_CENTER_START", target_z=configured_z, center_x=center_x, center_y=center_y, observed=z_snapshot, started=started)
-            self._move_absolute(x=center_x, y=center_y, label="xy_centro", feed_mm_min=REFERENCE_PREP_XY_FEED_MM_MIN)
+            self._move_absolute(
+                x=center_x,
+                y=center_y,
+                label="xy_centro",
+                feed_mm_min=AUXILIARY_REFERENCE_XY_FEED_MM_MIN,
+            )
             self._refresh_machine()
             center_snapshot = machine.get_motion_snapshot()
             if abs(float(center_snapshot["x"]) - center_x) > self.config.settle_tolerance_mm or abs(float(center_snapshot["y"]) - center_y) > self.config.settle_tolerance_mm:
@@ -898,12 +927,18 @@ class MachineRuntime:
                 self._move_absolute(
                     z=clearance_target,
                     label="tool_change_clearance_z",
-                    feed_mm_min=self.config.tool_change_z_feed_mm_min,
+                    feed_mm_min=self.config.z_clearance_feed_mm_min,
                     coordinate_frame="gcode_position",
                 )
             with self._lock:
                 self._state = MachineRuntimeState.MOVING_TO_CENTER
-            self._move_absolute(x=target_x, y=target_y, label="tool_change_xy", coordinate_frame="gcode_position")
+            self._move_absolute(
+                x=target_x,
+                y=target_y,
+                label="tool_change_xy",
+                feed_mm_min=AUXILIARY_DEFAULT_TRAVEL_FEED_MM_MIN,
+                coordinate_frame="gcode_position",
+            )
             self._refresh_machine_best_effort()
             xy_snapshot = self._machine.get_motion_snapshot() if self._machine is not None else frame_snapshot
             current_after_xy, _age_after_xy = self._frame_position(xy_snapshot, "gcode_position", label="tool_change_work_z")
@@ -973,12 +1008,25 @@ class MachineRuntime:
                 raise MachineRuntimeError("No se puede mover al punto de referencia: la sonda está TRIGGERED.")
             self._validate_machine_target(z=preparation_z, label="Z de preparación de referencia")
             self._validate_machine_target(x=float(reference_x), y=float(reference_y), label="punto de referencia CNC")
+            current_snapshot = machine.get_motion_snapshot()
             self._event("info", f"REFERENCE_MOVE_SAFE_Z: moviendo Z a preparación {preparation_z:.3f} mm.")
-            self._move_absolute(z=preparation_z, label="reference_move_safe_z", feed_mm_min=self.config.reference_prep_z_feed_mm_min)
+            self._move_absolute(
+                z=preparation_z,
+                label="reference_move_safe_z",
+                feed_mm_min=self._reference_target_z_feed(
+                    current_z=float(current_snapshot["z"]),
+                    target_z=preparation_z,
+                ),
+            )
             with self._lock:
                 self._state = MachineRuntimeState.MOVING_TO_CENTER
             self._event("info", f"REFERENCE_MOVE_XY: moviendo a X={float(reference_x):.3f} Y={float(reference_y):.3f} mm.")
-            self._move_absolute(x=float(reference_x), y=float(reference_y), label="reference_move_xy", feed_mm_min=REFERENCE_PREP_XY_FEED_MM_MIN)
+            self._move_absolute(
+                x=float(reference_x),
+                y=float(reference_y),
+                label="reference_move_xy",
+                feed_mm_min=AUXILIARY_REFERENCE_XY_FEED_MM_MIN,
+            )
             with self._lock:
                 self._state = (
                     MachineRuntimeState.REFERENCE_CAPTURED
@@ -1012,6 +1060,7 @@ class MachineRuntime:
         reference_x: float,
         reference_y: float,
         tool_change_profile: str = "standard",
+        progress_callback: Callable[[str, dict[str, Any]], None] | None = None,
     ) -> dict[str, Any]:
         """Leave the tool-change station safely, then approach the reference.
 
@@ -1070,6 +1119,12 @@ class MachineRuntime:
                 z=clearance_target,
                 label="Z de despeje para salir del cambio de herramienta",
             )
+            self._notify_transition_progress(
+                progress_callback,
+                "RETURNING_TO_REFERENCE_SAFE_Z",
+                target_z_mm=clearance_target,
+                feed_mm_min=self.config.z_clearance_feed_mm_min,
+            )
             if abs(clearance_target - current_gcode_z) > self.config.settle_tolerance_mm:
                 self._event(
                     "info",
@@ -1078,9 +1133,17 @@ class MachineRuntime:
                 self._move_absolute(
                     z=clearance_target,
                     label="tool_change_exit_clearance_z",
-                    feed_mm_min=self.config.tool_change_z_feed_mm_min,
+                    feed_mm_min=self.config.z_clearance_feed_mm_min,
                     coordinate_frame="gcode_position",
                 )
+            self._notify_transition_progress(
+                progress_callback,
+                "RETURNING_TO_REFERENCE_XY",
+                target_x_mm=float(reference_x),
+                target_y_mm=float(reference_y),
+                clearance_z_mm=clearance_target,
+                feed_mm_min=AUXILIARY_REFERENCE_XY_FEED_MM_MIN,
+            )
             with self._lock:
                 self._state = MachineRuntimeState.MOVING_TO_CENTER
             self._event(
@@ -1092,7 +1155,13 @@ class MachineRuntime:
                 x=float(reference_x),
                 y=float(reference_y),
                 label="tool_change_to_reference_xy",
-                feed_mm_min=REFERENCE_PREP_XY_FEED_MM_MIN,
+                feed_mm_min=AUXILIARY_REFERENCE_XY_FEED_MM_MIN,
+            )
+            self._notify_transition_progress(
+                progress_callback,
+                "MOVING_TO_REFERENCE",
+                target_z_mm=preparation_z,
+                feed_mm_min=self.config.reference_approach_z_feed_mm_min,
             )
             self._event(
                 "info",
@@ -1101,7 +1170,13 @@ class MachineRuntime:
             self._move_absolute(
                 z=preparation_z,
                 label="reference_move_prep_z",
-                feed_mm_min=self.config.reference_prep_z_feed_mm_min,
+                feed_mm_min=self.config.reference_approach_z_feed_mm_min,
+            )
+            self._notify_transition_progress(
+                progress_callback,
+                "REFERENCE_APPROACH_CONFIRMED",
+                target_z_mm=preparation_z,
+                feed_mm_min=self.config.reference_approach_z_feed_mm_min,
             )
             with self._lock:
                 self._state = MachineRuntimeState.WAITING_FOR_XY_REFERENCE
@@ -1117,6 +1192,8 @@ class MachineRuntime:
                 "tool_change_clearance_z_mm": configured_clearance,
                 "effective_clearance_z_mm": clearance_target,
                 "preparation_z": preparation_z,
+                "z_clearance_feed_mm_min": self.config.z_clearance_feed_mm_min,
+                "reference_approach_z_feed_mm_min": self.config.reference_approach_z_feed_mm_min,
                 "final_state": "TOOL_CHANGE_REFERENCE_READY",
                 "message": "Herramienta ubicada en el punto de referencia y lista para sondeo.",
             }
@@ -1200,13 +1277,22 @@ class MachineRuntime:
             start_snapshot = machine.get_motion_snapshot()
             safe_z = self._mesh_safe_z(machine, probe_config=probe_config)
             self._notify_probe_progress(progress_callback, "POINT_MOVE_SAFE_Z", safe_z_mm=safe_z, initial_z_mm=float(start_snapshot["z"]))
-            self._move_absolute(z=safe_z, label="mesh_z_segura")
+            self._move_absolute(
+                z=safe_z,
+                label="mesh_z_segura",
+                feed_mm_min=AUXILIARY_DEFAULT_TRAVEL_FEED_MM_MIN,
+            )
             safe_observed = machine.get_motion_snapshot()
             self._notify_probe_progress(progress_callback, "POINT_CONFIRM_SAFE_Z", safe_z_mm=safe_z, observed_z_mm=float(safe_observed["z"]))
             with self._lock:
                 xy_sequence = self._packet_sequence
             self._notify_probe_progress(progress_callback, "POINT_MOVE_XY", x_mm=float(point["x_machine"]), y_mm=float(point["y_machine"]), safe_z_mm=safe_z, observed_z_mm=float(safe_observed["z"]))
-            self._move_absolute(x=float(point["x_machine"]), y=float(point["y_machine"]), label=f"mesh_xy_{point['index']}")
+            self._move_absolute(
+                x=float(point["x_machine"]),
+                y=float(point["y_machine"]),
+                label=f"mesh_xy_{point['index']}",
+                feed_mm_min=AUXILIARY_DEFAULT_TRAVEL_FEED_MM_MIN,
+            )
             xy_observed = machine.get_motion_snapshot()
             self._notify_probe_progress(progress_callback, "POINT_CONFIRM_XY", x_mm=float(xy_observed["x"]), y_mm=float(xy_observed["y"]), observed_z_mm=float(xy_observed["z"]))
             probe = self._perform_probe_descent(
@@ -1544,10 +1630,12 @@ class MachineRuntime:
                 },
                 "preparation": {
                     "reference_prep_z_mm": self.config.reference_prep_z_mm,
-                    "reference_prep_z_feed_mm_min": self.config.reference_prep_z_feed_mm_min,
-                    "reference_prep_z_speed_mm_s": self.config.reference_prep_z_feed_mm_min / 60.0,
-                    "reference_prep_xy_feed_mm_min": REFERENCE_PREP_XY_FEED_MM_MIN,
-                    "reference_prep_xy_speed_mm_s": REFERENCE_PREP_XY_FEED_MM_MIN / 60.0,
+                    "z_clearance_feed_mm_min": self.config.z_clearance_feed_mm_min,
+                    "z_clearance_speed_mm_s": self.config.z_clearance_feed_mm_min / 60.0,
+                    "reference_approach_z_feed_mm_min": self.config.reference_approach_z_feed_mm_min,
+                    "reference_approach_z_speed_mm_s": self.config.reference_approach_z_feed_mm_min / 60.0,
+                    "reference_prep_xy_feed_mm_min": AUXILIARY_REFERENCE_XY_FEED_MM_MIN,
+                    "reference_prep_xy_speed_mm_s": AUXILIARY_REFERENCE_XY_FEED_MM_MIN / 60.0,
                     "center_x_mm": None if self._machine is None else (self._machine.x_limits.minimum + self._machine.x_limits.maximum) / 2.0,
                     "center_y_mm": None if self._machine is None else (self._machine.y_limits.minimum + self._machine.y_limits.maximum) / 2.0,
                     "target": None if self._machine is None else {
@@ -1572,7 +1660,12 @@ class MachineRuntime:
                     "z_positive_up": self.config.tool_change_z_positive_up,
                     "z_feed_mm_min": self.config.tool_change_z_feed_mm_min,
                     "z_speed_mm_s": self.config.tool_change_z_feed_mm_min / 60.0,
+                    "clearance_z_feed_mm_min": self.config.z_clearance_feed_mm_min,
+                    "clearance_z_speed_mm_s": self.config.z_clearance_feed_mm_min / 60.0,
+                    "xy_feed_mm_min": AUXILIARY_DEFAULT_TRAVEL_FEED_MM_MIN,
+                    "xy_speed_mm_s": AUXILIARY_DEFAULT_TRAVEL_FEED_MM_MIN / 60.0,
                 },
+                "settings": self.machine_settings(),
                 "arduino": self._arduino_snapshot(now=now, serial_age=serial_age),
                 "probe_live": self.get_live_probe_state(),
                 "last_probe_failure": self._last_probe_failure,
@@ -1919,7 +2012,16 @@ class MachineRuntime:
             if value < minimum or value > maximum:
                 raise MachineRuntimeError(f"{label}: {axis}={value:.3f} mm fuera de límites Klipper {minimum:.3f}..{maximum:.3f} mm.")
 
-    def _move_absolute(self, *, x: float | None = None, y: float | None = None, z: float | None = None, label: str, feed_mm_min: float = 600.0, coordinate_frame: str = "live_position") -> None:
+    def _move_absolute(
+        self,
+        *,
+        x: float | None = None,
+        y: float | None = None,
+        z: float | None = None,
+        label: str,
+        feed_mm_min: float = AUXILIARY_DEFAULT_TRAVEL_FEED_MM_MIN,
+        coordinate_frame: str = "live_position",
+    ) -> None:
         self._raise_if_cancelled()
         self._validate_machine_target(x=x, y=y, z=z, label=label)
         if self._machine is None:
@@ -2005,6 +2107,25 @@ class MachineRuntime:
         if abs(delta) <= self.config.settle_tolerance_mm:
             return 0
         return 1 if delta > 0 else -1
+
+    def _reference_target_z_feed(self, *, current_z: float, target_z: float) -> float:
+        """Select the auxiliary feed from physical direction, not coordinate sign."""
+        direction_away = 1.0 if self.config.tool_change_z_positive_up else -1.0
+        moving_away = (float(target_z) - float(current_z)) * direction_away >= 0
+        return float(
+            self.config.z_clearance_feed_mm_min
+            if moving_away
+            else self.config.reference_approach_z_feed_mm_min
+        )
+
+    def _notify_transition_progress(
+        self,
+        callback: Callable[[str, dict[str, Any]], None] | None,
+        stage: str,
+        **payload: Any,
+    ) -> None:
+        if callback is not None:
+            callback(stage, payload)
 
     def _operation_timeout_s(self, *, distance_mm: float, effective_feed_mm_min: float) -> float:
         effective_speed_mm_s = effective_feed_mm_min / 60.0

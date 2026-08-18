@@ -406,8 +406,10 @@ const physicalMachine: MachineContextValue = {
     klipper: { ready: true, homed_axes: "xyz", position: { x: 60, y: 88.75, z: 10.05 } },
     preparation: {
       reference_prep_z_mm: 115,
-      reference_prep_z_feed_mm_min: 120,
-      reference_prep_z_speed_mm_s: 2,
+      z_clearance_feed_mm_min: 120,
+      z_clearance_speed_mm_s: 2,
+      reference_approach_z_feed_mm_min: 120,
+      reference_approach_z_speed_mm_s: 2,
       center_x_mm: 110,
       center_y_mm: 110,
       target: { x_mm: 110, y_mm: 110, z_mm: 115 },
@@ -464,7 +466,8 @@ function referenceSettings(standardZ: number, longToolZ: number) {
   return {
     reference_prep_z_mm: standardZ,
     long_tool_change_clearance_z_mm: longToolZ,
-    reference_prep_z_feed_mm_min: 180,
+    z_clearance_feed_mm_min: 180,
+    reference_approach_z_feed_mm_min: 180,
     move_total_timeout_s: 180,
     no_progress_timeout_s: 60,
     position_tolerance_mm: 0.05,
@@ -778,7 +781,7 @@ describe("ProjectWorkspace", () => {
     expect(screen.getAllByText(/Z de preparación/i).length).toBeGreaterThan(0);
     expect(screen.getAllByText(/X 110.000 mm · Y 110.000 mm/i).length).toBeGreaterThan(0);
     expect(screen.getByRole("heading", { name: /Comprobación de posición de cambio de herramienta/i })).toBeInTheDocument();
-    expect(screen.getByText(/Z 180 mm\/min · X\/Y 1800 mm\/min/i)).toBeInTheDocument();
+    expect(screen.getByText(/Z 180 mm\/min · X\/Y 600 mm\/min/i)).toBeInTheDocument();
     expect(screen.getByText(/Z segura → X\/Y/i)).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: /Probar posición de cambio/i }));
@@ -877,14 +880,18 @@ describe("ProjectWorkspace", () => {
 
     fireEvent.click(screen.getByRole("button", { name: /^Referencia$/i }));
     expect(await screen.findByText(/Configuración avanzada de movimiento/i)).toBeInTheDocument();
+    expect(screen.getByLabelText(/Velocidad Z de despeje/i)).toHaveValue("180");
+    expect(screen.getByLabelText(/Velocidad Z de aproximación/i)).toHaveValue("180");
+    expect(screen.getByLabelText(/Velocidad de sonda/i)).toHaveValue("60");
+    expect(screen.getByText(/Las velocidades X\/Y de mecanizado se toman del G-code\/FlatCAM/i)).toBeInTheDocument();
 
-    fireEvent.change(screen.getByLabelText(/Velocidad Z de preparación/i), { target: { value: "90" } });
+    fireEvent.change(screen.getByLabelText(/Velocidad Z de aproximación/i), { target: { value: "90" } });
     fireEvent.click(screen.getByRole("button", { name: /Guardar configuración/i }));
 
     await waitFor(() => expect(apiMock.updateMachineSettings).toHaveBeenCalledWith(expect.objectContaining({
       reference_prep_z_mm: 115,
       long_tool_change_clearance_z_mm: 115,
-      reference_prep_z_feed_mm_min: 90,
+      reference_approach_z_feed_mm_min: 90,
       move_total_timeout_s: 180,
       no_progress_timeout_s: 60,
       position_tolerance_mm: 0.05,
@@ -916,6 +923,62 @@ describe("ProjectWorkspace", () => {
     expect(screen.getByText("Pendiente de guardar para cambio: 130.000 mm")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Sondear referencia ahora" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Ir al punto de referencia" })).toBeDisabled();
+  });
+
+  it("bloquea Preparar e Iniciar trabajo mientras hay cambios físicos sin guardar", async () => {
+    apiMock.getMachineSettings.mockResolvedValue(referenceSettings(105, 105));
+    renderWorkspace(machineWithRuntime(runtimeWithReferenceSettings(105, 105)), { project: longToolProject });
+
+    fireEvent.click(screen.getByRole("button", { name: /^Referencia$/i }));
+    const longToolInput = await screen.findByLabelText("Z segura de cambio para herramienta larga (mm)");
+    await waitFor(() => expect(longToolInput).toHaveValue("105"));
+    fireEvent.change(longToolInput, { target: { value: "130" } });
+    fireEvent.click(screen.getByRole("button", { name: /^Ejecución$/i }));
+
+    expect(screen.getByText(/Hay cambios de configuración de máquina sin guardar/i)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Preparar trabajo" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Iniciar trabajo" })).toBeDisabled();
+    expect(apiMock.prepareJobRun).not.toHaveBeenCalled();
+    expect(apiMock.startJobRun).not.toHaveBeenCalled();
+  });
+
+  it("bloquea ejecución cuando la configuración guardada y el runtime son inconsistentes", async () => {
+    apiMock.getMachineSettings.mockResolvedValue(referenceSettings(105, 130));
+    renderWorkspace(machineWithRuntime(runtimeWithReferenceSettings(105, 105)), { project: longToolProject });
+
+    fireEvent.click(screen.getByRole("button", { name: /^Ejecución$/i }));
+
+    expect(await screen.findByText(/La configuración guardada no está confirmada de forma coherente en runtime/i)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Preparar trabajo" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Iniciar trabajo" })).toBeDisabled();
+  });
+
+  it("bloquea la edición de parámetros físicos durante un JobRun iniciado", async () => {
+    const startedAt = new Date().toISOString();
+    const activeJobRun: JobRun = {
+      ...jobRun,
+      state: "OPERATION_RUNNING",
+      started_at: startedAt,
+      available_actions: ["pause", "cancel"],
+    };
+    apiMock.getMachineSettings.mockResolvedValue(referenceSettings(115, 115));
+    apiMock.getLiveExecution.mockResolvedValue({
+      ...liveExecution,
+      run: {
+        ...liveExecution.run,
+        status: "OPERATION_RUNNING",
+        available_actions: ["pause", "cancel"],
+      },
+      job_run: activeJobRun,
+    });
+    renderWorkspace(machineWithRuntime(runtimeWithReferenceSettings(115, 115)));
+
+    fireEvent.click(screen.getByRole("button", { name: /^Referencia$/i }));
+    const longToolInput = await screen.findByLabelText("Z segura de cambio para herramienta larga (mm)");
+
+    await waitFor(() => expect(longToolInput).toBeDisabled());
+    expect(screen.getByText(/La configuración física está bloqueada mientras el JobRun permanece activo/i)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Guardar configuración" })).toBeDisabled();
   });
 
   it("confirma y recarga el nuevo clearance largo cuando PUT y runtime coinciden", async () => {
@@ -1753,7 +1816,8 @@ describe("ProjectWorkspace", () => {
 
     await waitFor(() => expect(screen.getAllByRole("button", { name: /^Archivo$/i }).length).toBeGreaterThan(0));
     fireEvent.click(screen.getByRole("button", { name: /^Ejecución$/i }));
-    expect(screen.getByRole("button", { name: /Generar compensación de esta operación/i })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Generar compensación de esta operación/i })).toBeNull();
+    expect(screen.getByText(/Avanzado \/ Diagnóstico \/ Inspección de compensación/i)).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /Exportar/i })).toBeNull();
     expect(screen.queryByText(/Descargar G-code/i)).toBeNull();
   });
@@ -1871,11 +1935,11 @@ describe("ProjectWorkspace", () => {
     expect(screen.getByText(/Moonraker real/i)).toBeInTheDocument();
     expect(screen.getByText(/Orquestador JobRun/i)).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: /Generar compensación de esta operación/i }));
+    fireEvent.click(screen.getByRole("button", { name: /Generar artefacto Legacy de inspección/i }));
     await waitFor(() => expect(apiMock.generateCompensatedGCode).toHaveBeenCalledWith(project.id, project.operaciones[0].id, "legacy"));
     expect(apiMock.generateProjectCompensation).not.toHaveBeenCalled();
 
-    fireEvent.click(screen.getByRole("button", { name: /Revalidar plan/i }));
+    fireEvent.click(screen.getByRole("button", { name: /Actualizar inspección/i }));
     await waitFor(() => expect(apiMock.prepareJobRun).toHaveBeenCalledWith(project.id, project.montajes[0].id, "superior"));
     expect(screen.getAllByRole("button", { name: "Iniciar trabajo" })).toHaveLength(1);
   });
@@ -1885,7 +1949,7 @@ describe("ProjectWorkspace", () => {
 
     fireEvent.click(screen.getByRole("button", { name: /^Ejecución$/i }));
 
-    expect(await screen.findByText(/Legacy · generación justo a tiempo/i)).toBeInTheDocument();
+    expect(await screen.findByText(/Artefacto Legacy de diagnóstico/i)).toBeInTheDocument();
     expect(screen.getByText("Método de producción").parentElement).toHaveTextContent("Legacy");
     expect(screen.getByText("Archivo compensado").parentElement).toHaveTextContent("001_fresado_superior_compensado.nc");
     expect(screen.queryByText(/Adaptativa rápida/i)).toBeNull();
@@ -1903,7 +1967,7 @@ describe("ProjectWorkspace", () => {
     renderWorkspace();
 
     fireEvent.click(screen.getByRole("button", { name: /^Ejecución$/i }));
-    await screen.findByText(/Legacy · generación justo a tiempo/i);
+    await screen.findByText(/Artefacto Legacy de diagnóstico/i);
     fireEvent.click(screen.getByRole("button", { name: /^Trayectoria$/i }));
     fireEvent.click(screen.getByRole("button", { name: /^Ejecución$/i }));
 
@@ -1916,7 +1980,7 @@ describe("ProjectWorkspace", () => {
 
     fireEvent.click(screen.getByRole("button", { name: /^Ejecución$/i }));
 
-    await screen.findByText(/Legacy · generación justo a tiempo/i);
+    await screen.findByText(/Artefacto Legacy de diagnóstico/i);
     expect(apiMock.getCompensationAudit).not.toHaveBeenCalled();
     expect(screen.queryByText(/Auditoría no disponible\./i)).toBeNull();
   });
@@ -1927,7 +1991,7 @@ describe("ProjectWorkspace", () => {
     fireEvent.change(screen.getByLabelText(/Operación activa/i), { target: { value: "op_2" } });
     fireEvent.click(screen.getByRole("button", { name: /^Ejecución$/i }));
 
-    await screen.findByText(/Legacy · generación justo a tiempo/i);
+    await screen.findByText(/Artefacto Legacy de diagnóstico/i);
     expect(screen.getByText("Operación seleccionada").parentElement).toHaveTextContent("Taladrado 1,0 mm");
     expect(apiMock.getCompensationAudit).not.toHaveBeenCalled();
   });
@@ -1937,7 +2001,7 @@ describe("ProjectWorkspace", () => {
     fireEvent.click(screen.getByRole("button", { name: /^Trayectoria$/i }));
     fireEvent.change(screen.getByLabelText(/Operación activa/i), { target: { value: "op_2" } });
     fireEvent.click(screen.getByRole("button", { name: /^Ejecución$/i }));
-    fireEvent.click(await screen.findByRole("button", { name: /Generar compensación de esta operación/i }));
+    fireEvent.click(await screen.findByRole("button", { name: /Generar artefacto Legacy de inspección/i }));
 
     await waitFor(() => expect(apiMock.generateCompensatedGCode).toHaveBeenCalledWith(project.id, "op_2", "legacy"));
     expect(apiMock.generateProjectCompensation).not.toHaveBeenCalled();
@@ -1947,7 +2011,7 @@ describe("ProjectWorkspace", () => {
     renderWorkspace();
     fireEvent.click(screen.getByRole("button", { name: /^Ejecución$/i }));
 
-    await screen.findByText(/Legacy · generación justo a tiempo/i);
+    await screen.findByText(/Artefacto Legacy de diagnóstico/i);
     expect(screen.queryByRole("button", { name: /Recalcular auditoría/i })).toBeNull();
     expect(screen.queryByRole("button", { name: /Adaptativa rápida/i })).toBeNull();
     expect(screen.queryByLabelText(/Tolerancia Z/i)).toBeNull();
@@ -1959,7 +2023,7 @@ describe("ProjectWorkspace", () => {
     fireEvent.change(screen.getByLabelText(/Operación activa/i), { target: { value: "op_2" } });
     fireEvent.click(screen.getByRole("button", { name: /^Ejecución$/i }));
 
-    await screen.findByText(/Legacy · generación justo a tiempo/i);
+    await screen.findByText(/Artefacto Legacy de diagnóstico/i);
     expect(screen.getByText("Referencia Z", { selector: "span" }).parentElement).toHaveTextContent("REQUIERE_REFERENCIA");
     expect(screen.getByText("Archivo compensado", { selector: "span" }).parentElement).toHaveTextContent("002_taladrado_08_compensado.nc");
   });
@@ -2037,20 +2101,20 @@ describe("ProjectWorkspace", () => {
     expect(apiMock.executeAllPhysicalMapPoints).not.toHaveBeenCalled();
   });
 
-  it("muestra Generando compensación y evita doble generación", async () => {
+  it("muestra Generando artefacto y evita doble generación de diagnóstico", async () => {
     const pendingCompensation = deferred<CompensatedGCodeResult>();
     apiMock.generateCompensatedGCode.mockReturnValueOnce(pendingCompensation.promise);
     renderWorkspace(physicalMachine);
 
     fireEvent.click(screen.getByRole("button", { name: /^Ejecución$/i }));
-    const generateButton = await screen.findByRole("button", { name: /Generar compensación de esta operación/i });
+    const generateButton = await screen.findByRole("button", { name: /Generar artefacto Legacy de inspección/i });
     fireEvent.click(generateButton);
     fireEvent.click(generateButton);
 
-    expect(await screen.findByRole("button", { name: /Generando compensación…/i })).toBeDisabled();
+    expect(await screen.findByRole("button", { name: /Generando artefacto…/i })).toBeDisabled();
     expect(apiMock.generateCompensatedGCode).toHaveBeenCalledTimes(1);
     expect(apiMock.generateCompensatedGCode).toHaveBeenCalledWith(project.id, project.operaciones[0].id, "legacy");
-    expect(screen.getByRole("button", { name: /Revalidar plan/i })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /Actualizar inspección/i })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Iniciar trabajo" })).toBeDisabled();
     expect(screen.queryByLabelText(/Tolerancia Z/i)).toBeNull();
 
@@ -2059,17 +2123,17 @@ describe("ProjectWorkspace", () => {
       await pendingCompensation.promise;
     });
 
-    await waitFor(() => expect(screen.getByRole("button", { name: /Generar compensación de esta operación/i })).toBeEnabled());
+    await waitFor(() => expect(screen.getByRole("button", { name: /Generar artefacto Legacy de inspección/i })).toBeEnabled());
     expect(apiMock.generateCompensatedGCode).toHaveBeenCalledTimes(1);
   });
 
-  it("libera Generar compensación tras error sin retry automático", async () => {
+  it("libera la generación diagnóstica tras error sin retry automático", async () => {
     const pendingCompensation = deferred<CompensatedGCodeResult>();
     apiMock.generateCompensatedGCode.mockReturnValueOnce(pendingCompensation.promise);
     renderWorkspace(physicalMachine);
 
     fireEvent.click(screen.getByRole("button", { name: /^Ejecución$/i }));
-    fireEvent.click(await screen.findByRole("button", { name: /Generar compensación de esta operación/i }));
+    fireEvent.click(await screen.findByRole("button", { name: /Generar artefacto Legacy de inspección/i }));
 
     await act(async () => {
       pendingCompensation.reject(new Error("Fallo controlado de compensación."));
@@ -2081,7 +2145,7 @@ describe("ProjectWorkspace", () => {
     });
 
     expect(await screen.findByText(/Fallo controlado de compensación/i)).toBeInTheDocument();
-    await waitFor(() => expect(screen.getByRole("button", { name: /Generar compensación de esta operación/i })).toBeEnabled());
+    await waitFor(() => expect(screen.getByRole("button", { name: /Generar artefacto Legacy de inspección/i })).toBeEnabled());
     expect(apiMock.generateCompensatedGCode).toHaveBeenCalledTimes(1);
   });
 

@@ -35,6 +35,7 @@ def build_machine_router() -> APIRouter:
 
     @router.put("/settings", response_model=dict[str, float])
     def update_settings(payload: MachineSettingsRequest, request: Request) -> dict[str, float]:
+        request.app.state.job_service.assert_machine_settings_update_allowed()
         return runtime(request).update_machine_settings(payload.model_dump(exclude_unset=True))
 
     @router.post("/connect", response_model=MachineRuntimeResponse)

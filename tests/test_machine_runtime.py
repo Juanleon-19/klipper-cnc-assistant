@@ -34,7 +34,8 @@ def config(mode: MachineMode = MachineMode.SIMULATED, **overrides) -> MachineRun
         serial_baudrate=115200,
         safe_z_mm=10.0,
         reference_prep_z_mm=115.0,
-        reference_prep_z_feed_mm_min=180.0,
+        z_clearance_feed_mm_min=180.0,
+        reference_approach_z_feed_mm_min=180.0,
         tool_change_z_mm=115.0,
         tool_change_clearance_z_mm=115.0,
         tool_change_work_z_mm=115.0,
@@ -1010,7 +1011,8 @@ class MachineRuntimeTest(unittest.TestCase):
             saved = runtime.update_machine_settings({
                 "reference_prep_z_mm": 110,
                 "long_tool_change_clearance_z_mm": 130,
-                "reference_prep_z_feed_mm_min": 90,
+                "z_clearance_feed_mm_min": 90,
+                "reference_approach_z_feed_mm_min": 45,
                 "move_total_timeout_s": 240,
                 "no_progress_timeout_s": 70,
                 "position_tolerance_mm": 0.04,
@@ -1025,11 +1027,13 @@ class MachineRuntimeTest(unittest.TestCase):
 
             self.assertEqual(saved["reference_prep_z_mm"], 110)
             self.assertEqual(saved["long_tool_change_clearance_z_mm"], 130)
-            self.assertEqual(saved["reference_prep_z_feed_mm_min"], 90)
+            self.assertEqual(saved["z_clearance_feed_mm_min"], 90)
+            self.assertEqual(saved["reference_approach_z_feed_mm_min"], 45)
             reloaded = MachineRuntime(config(MachineMode.PHYSICAL), settings_path=runtime_module.Path(settings_path))
             self.assertEqual(reloaded.config.reference_prep_z_mm, 110)
             self.assertEqual(reloaded.config.long_tool_change_clearance_z_mm, 130)
-            self.assertEqual(reloaded.config.reference_prep_z_feed_mm_min, 90)
+            self.assertEqual(reloaded.config.z_clearance_feed_mm_min, 90)
+            self.assertEqual(reloaded.config.reference_approach_z_feed_mm_min, 45)
             self.assertEqual(reloaded.config.move_timeout_s, 240)
             self.assertEqual(reloaded.config.probe_step_mm, 0.10)
             self.assertEqual(reloaded.config.probe_lower_speed_mm_s, 2.0)
@@ -1056,6 +1060,38 @@ class MachineRuntimeTest(unittest.TestCase):
             persisted = json.loads(settings_path.read_text())
             self.assertEqual(persisted["long_tool_change_clearance_z_mm"], 130)
             self.assertNotIn("long_tool_reference_prep_z_mm", persisted)
+
+    def test_legacy_reference_z_feed_migrates_to_both_canonical_feeds(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            settings_path = Path(directory) / "machine_runtime_settings.json"
+            settings_path.write_text(json.dumps({"reference_prep_z_feed_mm_min": 72.0}))
+
+            runtime = MachineRuntime(config(MachineMode.PHYSICAL), settings_path=settings_path)
+
+            self.assertEqual(runtime.config.z_clearance_feed_mm_min, 72.0)
+            self.assertEqual(runtime.config.reference_approach_z_feed_mm_min, 72.0)
+            runtime.update_machine_settings({"reference_approach_z_feed_mm_min": 36.0})
+            persisted = json.loads(settings_path.read_text())
+            self.assertEqual(persisted["z_clearance_feed_mm_min"], 72.0)
+            self.assertEqual(persisted["reference_approach_z_feed_mm_min"], 36.0)
+            self.assertNotIn("reference_prep_z_feed_mm_min", persisted)
+
+    def test_canonical_reference_approach_feed_load_update_and_reload_use_exact_mapping(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            settings_path = Path(directory) / "machine_runtime_settings.json"
+            settings_path.write_text(json.dumps({"reference_approach_z_feed_mm_min": 45.0}))
+
+            runtime = MachineRuntime(config(MachineMode.PHYSICAL), settings_path=settings_path)
+
+            self.assertEqual(runtime.config.reference_approach_z_feed_mm_min, 45.0)
+            updated = runtime.update_machine_settings({"reference_approach_z_feed_mm_min": 36.0})
+            self.assertEqual(updated["reference_approach_z_feed_mm_min"], 36.0)
+            self.assertEqual(runtime.config.reference_approach_z_feed_mm_min, 36.0)
+            persisted = json.loads(settings_path.read_text())
+            self.assertEqual(persisted["reference_approach_z_feed_mm_min"], 36.0)
+
+            reloaded = MachineRuntime(config(MachineMode.PHYSICAL), settings_path=settings_path)
+            self.assertEqual(reloaded.config.reference_approach_z_feed_mm_min, 36.0)
 
     def test_tool_change_profiles_follow_z_orientation_and_klipper_limits(self) -> None:
         machine = MachineState(
@@ -1102,6 +1138,25 @@ class MachineRuntimeTest(unittest.TestCase):
         self.assertEqual(inverted.tool_change_clearance_z("long_tool"), 90.0)
         with self.assertRaisesRegex(MachineRuntimeError, "disminuir Z aleja"):
             inverted.update_machine_settings({"long_tool_change_clearance_z_mm": 110.0})
+
+    def test_reference_z_feed_direction_respects_positive_and_inverted_orientation(self) -> None:
+        positive = MachineRuntime(config(
+            MachineMode.SIMULATED,
+            tool_change_z_positive_up=True,
+            z_clearance_feed_mm_min=240.0,
+            reference_approach_z_feed_mm_min=30.0,
+        ))
+        inverted = MachineRuntime(config(
+            MachineMode.SIMULATED,
+            tool_change_z_positive_up=False,
+            z_clearance_feed_mm_min=240.0,
+            reference_approach_z_feed_mm_min=30.0,
+        ))
+
+        self.assertEqual(positive._reference_target_z_feed(current_z=105.0, target_z=130.0), 240.0)
+        self.assertEqual(positive._reference_target_z_feed(current_z=130.0, target_z=105.0), 30.0)
+        self.assertEqual(inverted._reference_target_z_feed(current_z=105.0, target_z=90.0), 240.0)
+        self.assertEqual(inverted._reference_target_z_feed(current_z=90.0, target_z=105.0), 30.0)
 
     def test_reset_physical_session_rejects_active_operation_without_cancelling_it(self) -> None:
         runtime = MachineRuntime(config(MachineMode.SIMULATED))
@@ -1761,6 +1816,8 @@ class MachineRuntimeTest(unittest.TestCase):
                 tool_change_clearance_z_mm=115.0,
                 long_tool_change_clearance_z_mm=130.0,
                 tool_change_work_z_mm=115.0,
+                z_clearance_feed_mm_min=240.0,
+                tool_change_z_feed_mm_min=75.0,
             ),
         )
 
@@ -1769,6 +1826,7 @@ class MachineRuntimeTest(unittest.TestCase):
         self.assertEqual(snapshot["tool_change_move"]["profile"], "long_tool")
         self.assertEqual(snapshot["tool_change_move"]["configured_clearance_z_mm"], 130.0)
         self.assertIn("Z130.000000", client.scripts[0])
+        self.assertIn("F240.000", client.scripts[0])
         self.assertIn("X0.000000", client.scripts[1])
         self.assertIn("Y0.000000", client.scripts[1])
 
@@ -1952,6 +2010,7 @@ class ReferencePointMoveTest(unittest.TestCase):
         self.assertNotIn("PROBE", "\n".join(client.scripts).upper())
 
     def test_long_tool_leaves_change_station_at_long_clearance_before_xy_and_normal_prep(self) -> None:
+        stages: list[str] = []
         runtime, client = self._runtime(
             runtime_config=config(
                 MachineMode.PHYSICAL,
@@ -1959,6 +2018,8 @@ class ReferencePointMoveTest(unittest.TestCase):
                 tool_change_clearance_z_mm=115.0,
                 long_tool_change_clearance_z_mm=130.0,
                 tool_change_work_z_mm=100.0,
+                z_clearance_feed_mm_min=240.0,
+                reference_approach_z_feed_mm_min=30.0,
             )
         )
 
@@ -1966,15 +2027,27 @@ class ReferencePointMoveTest(unittest.TestCase):
             reference_x=42.5,
             reference_y=67.25,
             tool_change_profile="long_tool",
+            progress_callback=lambda stage, _payload: stages.append(stage),
         )
 
         self.assertEqual(result["tool_change_clearance_z_mm"], 130.0)
         self.assertEqual(result["preparation_z"], 105.0)
         self.assertEqual(len(client.scripts), 3)
         self.assertIn("Z130.000000", client.scripts[0])
+        self.assertIn("F240.000", client.scripts[0])
         self.assertIn("X42.500000", client.scripts[1])
         self.assertIn("Y67.250000", client.scripts[1])
         self.assertIn("Z105.000000", client.scripts[2])
+        self.assertIn("F30.000", client.scripts[2])
+        self.assertEqual(
+            stages,
+            [
+                "RETURNING_TO_REFERENCE_SAFE_Z",
+                "RETURNING_TO_REFERENCE_XY",
+                "MOVING_TO_REFERENCE",
+                "REFERENCE_APPROACH_CONFIRMED",
+            ],
+        )
         self.assertNotIn("PROBE", "\n".join(client.scripts).upper())
 
     def test_standard_tool_leaves_change_station_at_standard_clearance_before_xy_and_normal_prep(self) -> None:

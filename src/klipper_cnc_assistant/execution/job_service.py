@@ -41,6 +41,8 @@ RUN_ACTIVE_STATES = {
     "MOVING_TO_TOOL_CHANGE",
     "RETURNING_TO_REFERENCE_SAFE_Z",
     "RETURNING_TO_REFERENCE_XY",
+    "MOVING_TO_REFERENCE",
+    "CALIBRATING_TOOL",
     "PROBING_TOOL_REFERENCE",
     "COMPENSATING_NEXT_OPERATIONS",
     "NEXT_OPERATION_READY",
@@ -201,11 +203,13 @@ class MoonrakerJobAdapter:
         x_mm: float,
         y_mm: float,
         tool_change_profile: str = "standard",
+        progress_callback: Callable[[str, dict[str, Any]], None] | None = None,
     ) -> dict[str, Any]:
         return self.runtime.move_from_tool_change_to_reference_point(
             reference_x=x_mm,
             reference_y=y_mm,
             tool_change_profile=tool_change_profile,
+            progress_callback=progress_callback,
         )
 
     def probe_tool_reference(self, *, x_mm: float, y_mm: float, probe_config: dict[str, Any] | None) -> dict[str, Any]:
@@ -418,6 +422,8 @@ class JobService:
             "RETRACTING",
             "TOOL_CHANGE_REQUIRED",
             "TOOL_CHANGE_CONFIRMED",
+            "RETURNING_TO_REFERENCE_SAFE_Z",
+            "RETURNING_TO_REFERENCE_XY",
             "MOVING_TO_REFERENCE",
             "CALIBRATING_TOOL",
             "READY_TO_RESUME",
@@ -493,6 +499,10 @@ class JobService:
                 "tool_reference_profile": (transition_operation or {}).get("tool_reference_profile", "standard"),
                 "tool_change_profile": (transition_operation or {}).get("tool_reference_profile", "standard"),
                 "tool_change_clearance_z_mm": (transition_operation or {}).get("tool_change_clearance_z_mm"),
+                "z_clearance_feed_mm_min": (transition_operation or {}).get("z_clearance_feed_mm_min"),
+                "reference_approach_z_feed_mm_min": (transition_operation or {}).get("reference_approach_z_feed_mm_min"),
+                "reference_probe_feed_mm_min": (transition_operation or {}).get("reference_probe_feed_mm_min"),
+                "stage": run.get("transition_stage"),
                 "outgoing_tool": (operation or {}).get("tool_name"),
                 "outgoing_tool_change_profile": (operation or {}).get("tool_reference_profile", "standard"),
                 "outgoing_tool_change_clearance_z_mm": (operation or {}).get("tool_change_clearance_z_mm"),
@@ -759,6 +769,24 @@ class JobService:
             self._start_worker(context)
         return run
 
+    def assert_machine_settings_update_allowed(self) -> None:
+        """Reject global physical-setting edits while a started JobRun is active."""
+        for run_file in self.repository.projects_dir.glob(
+            "*/reports/jobs/*/*/current_run.json"
+        ):
+            try:
+                run = json.loads(run_file.read_text(encoding="utf-8"))
+            except Exception as error:
+                raise ApplicationError(
+                    "No se pudo comprobar si existe un JobRun activo; la configuración física permanece bloqueada."
+                ) from error
+            state = str(run.get("state") or "JOB_DRAFT")
+            if run.get("started_at") and state not in RUN_TERMINAL_STATES:
+                raise ApplicationError(
+                    "No se puede modificar la configuración física mientras existe una ejecución activa. "
+                    f"Cancele o finalice el trabajo antes de cambiarla. Estado actual: {state}."
+                )
+
     def _measure_tool_reference(self, context: JobContext, run: dict[str, Any]) -> None:
         plan = self._load_or_build_plan(context)
         active_map = plan["active_map"]
@@ -773,6 +801,10 @@ class JobService:
         tool_reference_profile = str(operation_payload.get("tool_reference_profile") or "standard")
         reference_prep_z = self._reference_preparation_z()
         tool_change_clearance_z = self._tool_change_clearance_z(tool_reference_profile)
+        z_clearance_feed = self._z_clearance_feed()
+        reference_approach_feed = self._reference_approach_z_feed()
+        probe_config = active_map.get("probe_config")
+        reference_probe_feed = self._reference_probe_feed(probe_config)
         run["state"] = "MOVING_TO_REFERENCE"
         run["available_actions"] = ["cancel"]
         if returning_from_tool_change:
@@ -788,24 +820,44 @@ class JobService:
             )
         operation_payload["reference_prep_z_mm"] = reference_prep_z
         operation_payload["tool_change_clearance_z_mm"] = tool_change_clearance_z
+        operation_payload["z_clearance_feed_mm_min"] = z_clearance_feed
+        operation_payload["reference_approach_z_feed_mm_min"] = reference_approach_feed
+        operation_payload["reference_probe_feed_mm_min"] = reference_probe_feed
         self._append_event(run, "info", run["next_action"])
         self._save_run(context, run)
         if returning_from_tool_change:
+            stage_messages = {
+                "RETURNING_TO_REFERENCE_SAFE_Z": "Subiendo a clearance de la herramienta nueva",
+                "RETURNING_TO_REFERENCE_XY": "Moviendo X/Y al punto de referencia",
+                "MOVING_TO_REFERENCE": "Aproximando Z a la altura previa al sondeo",
+                "REFERENCE_APPROACH_CONFIRMED": "Z de aproximación confirmada; preparando sondeo",
+            }
+
+            def transition_progress(stage: str, payload: dict[str, Any]) -> None:
+                run["transition_stage"] = stage
+                run["state"] = stage if stage in RUN_ACTIVE_STATES else "MOVING_TO_REFERENCE"
+                run["next_action"] = stage_messages.get(stage, "Moviendo a la referencia de herramienta")
+                run["transition_motion"] = payload
+                run["updated_at"] = _iso_now()
+                self._save_run(context, run)
+
             adapter.move_from_tool_change_to_reference_point(
                 x_mm=reference_x,
                 y_mm=reference_y,
                 tool_change_profile=tool_reference_profile,
+                progress_callback=transition_progress,
             )
         else:
             adapter.move_to_reference_point(x_mm=reference_x, y_mm=reference_y)
         run["state"] = "CALIBRATING_TOOL"
+        run["transition_stage"] = "CALIBRATING_TOOL"
         run["next_action"] = "Sondeando referencia Z de la nueva herramienta"
         self._append_event(run, "info", run["next_action"])
         self._save_run(context, run)
         probe = adapter.probe_tool_reference(
             x_mm=reference_x,
             y_mm=reference_y,
-            probe_config=active_map.get("probe_config"),
+            probe_config=probe_config,
         )
         snapshot = adapter.runtime_snapshot()
         position = probe.get("probe") or self.runtime.last_probe_position()
@@ -1259,6 +1311,11 @@ class JobService:
                     "tool_reference_profile": str(operation.tool_reference_profile),
                     "tool_change_clearance_z_mm": self._tool_change_clearance_z(str(operation.tool_reference_profile)),
                     "reference_prep_z_mm": self._reference_preparation_z(),
+                    "z_clearance_feed_mm_min": self._z_clearance_feed(),
+                    "reference_approach_z_feed_mm_min": self._reference_approach_z_feed(),
+                    "reference_probe_feed_mm_min": self._reference_probe_feed(
+                        None if active_map is None else active_map.get("probe_config")
+                    ),
                     "tool_changed": tool_changed,
                     "map_status": "LISTO" if active_map is not None else "PENDIENTE",
                     "coverage_status": "VALIDA" if coverage is None or coverage["sufficient"] else "FUERA_DE_DOMINIO",
@@ -1333,6 +1390,9 @@ class JobService:
                     "tool_reference_profile": item["tool_reference_profile"],
                     "tool_change_clearance_z_mm": item["tool_change_clearance_z_mm"],
                     "reference_prep_z_mm": item["reference_prep_z_mm"],
+                    "z_clearance_feed_mm_min": item["z_clearance_feed_mm_min"],
+                    "reference_approach_z_feed_mm_min": item["reference_approach_z_feed_mm_min"],
+                    "reference_probe_feed_mm_min": item["reference_probe_feed_mm_min"],
                     "file": item["generated_file"],
                     "metadata_path": item["generated_metadata_path"],
                     "coverage_status": item["coverage_status"],
@@ -1379,6 +1439,9 @@ class JobService:
                     "tool_reference_profile": item["tool_reference_profile"],
                     "tool_change_clearance_z_mm": item["tool_change_clearance_z_mm"],
                     "reference_prep_z_mm": item["reference_prep_z_mm"],
+                    "z_clearance_feed_mm_min": item["z_clearance_feed_mm_min"],
+                    "reference_approach_z_feed_mm_min": item["reference_approach_z_feed_mm_min"],
+                    "reference_probe_feed_mm_min": item["reference_probe_feed_mm_min"],
                     "tool_changed": item["tool_changed"],
                     "reference_status": item["reference_status"],
                     "generated_file": item["generated_file"],
@@ -1734,6 +1797,24 @@ class JobService:
                 )
             )
         return float(getattr(config, "tool_change_clearance_z_mm", 115.0))
+
+    def _z_clearance_feed(self) -> float:
+        config = getattr(self.runtime, "config", None)
+        return float(getattr(config, "z_clearance_feed_mm_min", 180.0))
+
+    def _reference_approach_z_feed(self) -> float:
+        config = getattr(self.runtime, "config", None)
+        return float(getattr(config, "reference_approach_z_feed_mm_min", 180.0))
+
+    def _reference_probe_feed(self, probe_config: dict[str, Any] | None) -> float:
+        resolver = getattr(self.runtime, "effective_probe_profile_payload", None)
+        if callable(resolver):
+            profile = resolver(probe_config)
+            value = profile.get("effective_probe_feed_mm_min")
+            if value is not None:
+                return float(value)
+        config = getattr(self.runtime, "config", None)
+        return float(getattr(config, "probe_lower_speed_mm_s", 1.0)) * 60.0
 
     def _setup_run_files(self, project_id: str, setup_id: str) -> list[tuple[JobContext, Path]]:
         base = self._project_dir(project_id) / "reports" / "jobs" / setup_id

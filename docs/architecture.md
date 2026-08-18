@@ -1,6 +1,6 @@
 # Arquitectura verificada
 
-Fecha de referencia: Thursday, July 30, 2026.
+Fecha de referencia: Monday, August 17, 2026.
 
 ## 1. Arquitectura actual comprobada
 
@@ -178,6 +178,19 @@ La persistencia de referencias sigue viviendo en `ReferenceSessionService` y con
 
 Cada `OperacionPCB` conserva por compatibilidad el campo `tool_reference_profile` (`standard` o `long_tool`), cuya semantica es exclusivamente el perfil fisico de cambio. `MachineRuntime` lo resuelve contra `tool_change_clearance_z_mm` o `long_tool_change_clearance_z_mm`, valida ambos valores contra los limites Z descubiertos y respeta `tool_change_z_positive_up` para definir que direccion se aleja de la superficie. La aproximacion al punto de referencia usa siempre `reference_prep_z_mm`; al salir de la estacion de cambio la secuencia es despeje de la herramienta entrante -> X/Y de referencia -> Z de preparacion normal -> sondeo. El contacto de sonda sigue siendo la unica autoridad de `tool_reference_z`, y ninguna Z de traslado participa en el mapa ni en la compensacion.
 
+Las velocidades Z auxiliares tienen responsabilidades separadas:
+
+- `z_clearance_feed_mm_min` se usa para alejar la herramienta hacia el despeje de cambio;
+- `reference_approach_z_feed_mm_min` se usa para acercarla desde el despeje hasta `reference_prep_z_mm`;
+- `reference_probe_feed_mm_min` gobierna solo el descenso de sondeo;
+- `reference_probe_retract_feed_mm_min` gobierna solo el retracto posterior al contacto.
+
+Los settings antiguos con `reference_prep_z_feed_mm_min` se leen como valor inicial de los dos primeros feeds. El siguiente guardado escribe solo los nombres canonicos. La seleccion entre alejamiento y aproximacion usa `tool_change_z_positive_up`, no asume que aumentar la coordenada Z siempre aleja de la superficie.
+
+Los feeds X/Y internos son viajes auxiliares, no velocidades de mecanizado: referencia y centro usan 1800 mm/min; X/Y de cambio y movimientos del mapa que conservan el default interno usan 600 mm/min. El G-code productivo conserva los feeds modales `F` generados por FlatCAM. Si Legacy subdivide un movimiento, cada subsegmento conserva el feed efectivo del movimiento original; `MachineRuntime` no inyecta sus feeds auxiliares en el artefacto compensado.
+
+El flujo normal de ejecucion no requiere una generacion manual previa: `JobService` genera Legacy JIT para la operacion inmediata, sube el archivo a Moonraker y espera la confirmacion de Klipper. La generacion manual permanece solo como inspeccion tecnica avanzada. Despues de medir una herramienta nueva, `READY_TO_RESUME` mantiene la barrera humana antes de generar y arrancar la siguiente operacion.
+
 ## 6. Persistencia
 
 Persistencia actual verificada:
@@ -188,6 +201,8 @@ Persistencia actual verificada:
 - G-code compensado bajo `generated/compensated/` dentro de datos del proyecto.
 
 `JobService.reset_runs_for_preparation()` es la autoridad para retirar un `current_run.json` durante un reinicio completo de preparacion. Primero comprueba Moonraker, `virtual_sdcard`, velocidad observada y propietarios vivos de movimiento; solo con inactividad comprobada archiva un run no terminal con motivo `preparation_reset`. El historial, los G-codes, las operaciones y las recetas conservadas en mapas archivados no se eliminan.
+
+La UI mantiene por separado los settings editados, los confirmados por PUT y la lectura activa del runtime. Una diferencia o una lectura no confirmada bloquea preparar/iniciar el `JobRun` y cualquier movimiento de referencia dependiente. Una vez iniciado un `JobRun`, la API y la UI bloquean la edicion de settings fisicos hasta que el run alcance un estado terminal.
 
 Restricciones activas:
 

@@ -25,7 +25,8 @@ class MachineRuntimeConfig:
     serial_baudrate: int
     safe_z_mm: float
     reference_prep_z_mm: float
-    reference_prep_z_feed_mm_min: float
+    z_clearance_feed_mm_min: float
+    reference_approach_z_feed_mm_min: float
     tool_change_z_mm: float
     tool_change_clearance_z_mm: float
     tool_change_work_z_mm: float
@@ -86,6 +87,7 @@ def load_machine_runtime_config() -> MachineRuntimeConfig:
     raw_mode = os.getenv("MACHINE_MODE", "simulated").strip().lower()
     mode = MachineMode.PHYSICAL if raw_mode == "physical" else MachineMode.SIMULATED
     safe_z_env = os.getenv("MACHINE_SAFE_Z")
+    legacy_reference_z_feed = _env_float("REFERENCE_PREP_Z_FEED_MM_MIN", 180.0)
     return MachineRuntimeConfig(
         mode=mode,
         spindle_control_mode=SpindleControlMode(os.getenv("SPINDLE_CONTROL_MODE", "manual").strip().lower() or "manual"),
@@ -103,7 +105,11 @@ def load_machine_runtime_config() -> MachineRuntimeConfig:
                 _env_float("TOOL_CHANGE_CLEARANCE_Z_MM", _env_float("TOOL_CHANGE_Z_MM", 115.0)),
             ),
         ),
-        reference_prep_z_feed_mm_min=_env_float("REFERENCE_PREP_Z_FEED_MM_MIN", 180.0),
+        z_clearance_feed_mm_min=_env_float("Z_CLEARANCE_FEED_MM_MIN", legacy_reference_z_feed),
+        reference_approach_z_feed_mm_min=_env_float(
+            "REFERENCE_APPROACH_Z_FEED_MM_MIN",
+            legacy_reference_z_feed,
+        ),
         tool_change_z_mm=_env_float("TOOL_CHANGE_Z_MM", 115.0),
         tool_change_clearance_z_mm=_env_float("TOOL_CHANGE_CLEARANCE_Z_MM", _env_float("TOOL_CHANGE_Z_MM", 115.0)),
         tool_change_work_z_mm=_env_float("TOOL_CHANGE_WORK_Z_MM", _env_float("TOOL_CHANGE_Z_MM", 115.0)),
