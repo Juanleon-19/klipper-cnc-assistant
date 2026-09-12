@@ -22,6 +22,8 @@ from klipper_cnc_assistant.moonraker.client import MoonrakerClient, MoonrakerErr
 from klipper_cnc_assistant.storage import JsonProjectRepository
 from klipper_cnc_assistant.machine.physical_ownership import OwnerKind, OwnershipError
 from klipper_cnc_assistant.machine.motion_authorization import MotionRequirements
+from klipper_cnc_assistant.storage.job_run_store import JobRunStore, JobRunConflict
+from .print_identity import PrintIdentity, PrintIdentityError
 
 
 JOB_PLAN_SCHEMA = "job-plan-v1"
@@ -122,26 +124,33 @@ class MoonrakerJobAdapter:
             raise ApplicationError('Runtime físico desconectado.')
         return client
 
-    def _dispatch(self, action, send):
+    def _dispatch(self, action, send, *, before_send):
+        self.runtime._refresh_machine()
         authorizer = self.runtime._motion_authorizer()
         context = authorizer.require_context(self.permit, action, MotionRequirements())
-        return authorizer.dispatch(context, send)
+        def authorized_send():
+            before_send()
+            authorizer.revalidate(context)
+            return send()
+        return authorizer.dispatch(context, authorized_send)
 
     def upload_file(self, *, local_path: Path, project_id: str, setup_id: str, face: str) -> dict[str, Any]:
         remote_dir = f"klipper-cnc-assistant/{project_id}/{setup_id}/{_safe_face(face)}"
         checksum = hashlib.sha256(local_path.read_bytes()).hexdigest()
-        return self._dispatch("job_upload_and_start", lambda: self._client().upload_file(local_path=local_path, remote_dir=remote_dir, checksum=checksum, print_file=True))
+        return self._client().upload_file(local_path=local_path, remote_dir=remote_dir, checksum=checksum, print_file=False)
 
-    def start_file(self, remote_path: str) -> dict[str, Any]:
-        return self._dispatch("job_start", lambda: self._client().start_print(remote_path))
+    def start_file(self, remote_path: str, *, before_send) -> dict[str, Any]:
+        return self._dispatch("job_start", lambda: self._client().start_print(remote_path), before_send=before_send)
 
-    def pause(self) -> dict[str, Any]:
+    def pause(self, *, before_send) -> dict[str, Any]:
+        before_send()
         return self._client().pause_print()
 
-    def resume(self) -> dict[str, Any]:
-        return self._dispatch("job_resume", lambda: self._client().resume_print())
+    def resume(self, *, before_send) -> dict[str, Any]:
+        return self._dispatch("job_resume", lambda: self._client().resume_print(), before_send=before_send)
 
-    def cancel(self) -> dict[str, Any]:
+    def cancel(self, *, before_send) -> dict[str, Any]:
+        before_send()
         return self._client().cancel_print()
 
     def print_status(self) -> dict[str, Any]:
@@ -253,6 +262,7 @@ class JobService:
         self._lock = threading.RLock()
         self._threads: dict[tuple[str, str, str], threading.Thread] = {}
         self._physical_leases = {}
+        self.run_store = JobRunStore()
 
     def _job_permit(self, context):
         key = (context.project_id, context.setup_id, context.face)
@@ -311,10 +321,10 @@ class JobService:
 
     def prepare_run(self, *, project_id: str, setup_id: str, face: str) -> dict[str, Any]:
         context = self._context(project_id, setup_id, face)
+        current = self._load_run(context)
         plan = self._load_or_build_plan(context)
         checks = self._build_run_checks(context, plan)
         ready = all(check["ok"] for check in checks)
-        current = self._load_run(context)
         run = self._base_run(context, plan) if current is None or current.get("state") in (RUN_TERMINAL_STATES | RUN_REFRESHABLE_IDLE_STATES) else current
         run["checks"] = checks
         run["state"] = "JOB_READY" if ready else "JOB_VALIDATING"
@@ -322,7 +332,11 @@ class JobService:
         run["next_action"] = "Iniciar trabajo" if ready else "Resolver bloqueos"
         run["available_actions"] = ["start"] if ready else []
         run["updated_at"] = _iso_now()
-        self._save_run(context, run)
+        if run is not current:
+            saved = self.run_store.create(self._run_file(context), run, previous=current)
+            run.update(revision=saved['revision'], cancellation_epoch=saved['cancellation_epoch'])
+        else:
+            self._save_run(context, run)
         return run
 
     def start_run(self, *, project_id: str, setup_id: str, face: str) -> dict[str, Any]:
@@ -471,7 +485,14 @@ class JobService:
             sync_reason = "watcher_inactive"
         eta = self._build_eta_snapshot(run, operation, status, expected, observed)
         if eta.get("available") and "eta_ratio_ema" in run:
-            self._save_run(context, run)
+            try:
+                self.run_store.observe(self._run_file(context), run, {'eta_ratio_ema': run['eta_ratio_ema']})
+            except JobRunConflict:
+                latest = self._load_run(context)
+                if latest is None:
+                    return self._no_active_execution_snapshot()
+                # Return current domain state; never a stale RUNNING after cancel.
+                run = latest
         return {
             "has_active_run": True,
             "moonraker": {
@@ -664,7 +685,7 @@ class JobService:
         archive_path = self._write_archived_run(context, archived, suffix="stale")
         run_file = self._run_file(context)
         if run_file.exists():
-            run_file.unlink()
+            self.run_store.remove(run_file, run)
             released.append("job_run.current_run")
         return {
             "archived_run_id": archived.get("run_id"),
@@ -707,7 +728,7 @@ class JobService:
                     )
                     self._prepare_history_snapshot(archived)
                     archive_path = self._write_archived_run(context, archived, suffix="preparation-reset")
-                run_file.unlink()
+                self.run_store.remove(run_file, run)
                 archived_runs.append(
                     {
                         "run_id": run.get("run_id"),
@@ -759,41 +780,40 @@ class JobService:
         run = self._load_run(context)
         if run is None:
             raise NotFoundError("No existe una ejecución de trabajo para este montaje/cara.")
-        adapter = self.adapter_factory(self.runtime) if action in {"pause", "cancel"} else self._motion_adapter(context)
+        if action == "cancel":
+            return self._cancel_run(context, run)
+        self.run_store.validate(self._run_file(context), run)
+        adapter = self._motion_adapter(context)
         if action == "pause":
-            try:
-                adapter.pause()
-            except Exception:
-                pass
-            run["state"] = "JOB_PAUSED"
+            operation = self.run_store._operation(run)
+            if operation.get("remote_file"):
+                if not self._existing_print_action(context, run, adapter, "pause", {'printing', 'paused'}):
+                    return run
+                operation["execution_status"] = "PAUSED"
+                run["state"] = "OPERATION_PAUSED"
+            else:
+                run["state"] = "JOB_PAUSED"
             run["next_action"] = "Reanudar trabajo"
             run["available_actions"] = ["resume", "cancel"]
             self._append_event(run, "warning", "Trabajo pausado por el operador.")
         elif action == "resume":
             if run["state"] not in {"JOB_PAUSED", "OPERATION_PAUSED", "TOOL_REFERENCE_READY", "READY_TO_RESUME", "NEXT_OPERATION_READY"}:
                 raise ApplicationError(f"No se puede reanudar desde {run['state']}.")
-            try:
-                if run["state"] == "OPERATION_PAUSED":
-                    adapter.resume()
-            except Exception:
-                pass
-            run["state"] = "JOB_STARTING" if run["state"] in {"JOB_PAUSED", "TOOL_REFERENCE_READY", "READY_TO_RESUME", "NEXT_OPERATION_READY"} else "OPERATION_RUNNING"
+            operation = self.run_store._operation(run)
+            if (run["state"] == "OPERATION_PAUSED" or
+                    (run["state"] == "JOB_PAUSED" and operation.get('remote_file')
+                     and operation.get('execution_status') != 'COMPLETED')):
+                if not self._existing_print_action(context, run, adapter, "resume", {'paused'}):
+                    return run
+                run["state"] = "OPERATION_RUNNING"
+            else:
+                run["state"] = "JOB_STARTING"
             run["available_actions"] = ["pause", "cancel"]
             run["next_action"] = "Reanudando trabajo"
             self._append_event(run, "info", "Trabajo reanudado por el operador.")
+            self._save_run(context, run)
             self._start_worker(context)
-        elif action == "cancel":
-            self.runtime.physical_ownership.request_cancel()
-            try:
-                adapter.cancel()
-            except Exception:
-                pass
-            run["state"] = "JOB_CANCELLED"
-            run["completed_at"] = _iso_now()
-            run["available_actions"] = []
-            run["next_action"] = "Trabajo cancelado"
-            self._append_event(run, "warning", "Trabajo cancelado por el operador.")
-            self._archive_run(context, run)
+            return run
         elif action == "retry-tool-change-transition":
             if run["state"] != "RECOVERY_REQUIRED":
                 raise ApplicationError("El reintento de transición solo aplica cuando la ejecución quedó en recuperación.")
@@ -863,6 +883,67 @@ class JobService:
         if action in {"confirm-tool-change", "measure-reference"}:
             self._start_worker(context)
         return run
+
+    def _identity_failure(self, context, run, error):
+        run.update(state='RECOVERY_REQUIRED', recovery_state='PRINT_IDENTITY_REQUIRED',
+                   next_action='Verificar el archivo Moonraker antes de continuar',
+                   available_actions=['cancel'], last_watcher_error=str(error))
+        self._append_event(run, 'error', str(error))
+        self._save_run(context, run)
+
+    def _existing_print_action(self, context, run, adapter, action, states):
+        operation = self.run_store._operation(run)
+        try:
+            identity = PrintIdentity(operation.get('remote_file'))
+            def before_send():
+                self.run_store.validate(self._run_file(context), run)
+                identity.require_match(adapter.print_status(), states=states)
+                self.runtime.physical_ownership.validate(adapter.permit)
+                self.run_store.validate(self._run_file(context), run)
+            getattr(adapter, action)(before_send=before_send)
+            return True
+        except JobRunConflict:
+            raise
+        except Exception as error:
+            self._identity_failure(context, run, error)
+            return False
+
+    def _cancel_run(self, context, run):
+        # Persist cancellation before any network IO. A stale caller can cancel
+        # this run, but never a replacement run at the same path.
+        path = self._run_file(context)
+        cancelled = self.run_store.cancel(path, run['run_id'])
+        key = (context.project_id, context.setup_id, context.face)
+        permit = self._physical_leases.get(key)
+        if permit is not None:
+            self.runtime.physical_ownership.request_cancel(permit)
+        adapter = self.adapter_factory(self.runtime)
+        result = 'identity_unverified'
+        try:
+            operation = self.run_store._operation(cancelled)
+            expected = operation.get('remote_file')
+            if expected:
+                identity = PrintIdentity(expected)
+                def before_send():
+                    identity.require_match(adapter.print_status())
+                    self.run_store.validate(path, cancelled, allow_cancelled=True)
+                adapter.cancel(before_send=before_send)
+                result = 'cancel_sent_requires_reconciliation'
+            else:
+                result = 'no_expected_print_no_remote_action'
+        except JobRunConflict:
+            raise
+        except Exception:
+            # Unknown/mismatched identity never authorizes a global cancel.
+            result = 'identity_or_transport_error_requires_reconciliation'
+        cancelled = self.run_store.cancel_result(path, cancelled, result)
+        self._archive_run(context, cancelled)
+        with self._lock:
+            thread = self._threads.get(key)
+            producer_active = thread is not None and thread.is_alive()
+        if permit is not None and not producer_active:
+            self.runtime.physical_ownership.retire(permit)
+        return cancelled
 
     def _measure_tool_reference(self, context: JobContext, run: dict[str, Any]) -> None:
         plan = self._load_or_build_plan(context)
@@ -952,17 +1033,23 @@ class JobService:
             thread = self._threads.get(key)
             if thread is not None and thread.is_alive():
                 return
-            worker = threading.Thread(target=self._run_worker, args=(context,), name=f"job-{context.setup_id}-{context.face}", daemon=True)
+            run = self._load_run(context)
+            if run is None or run.get("state") in RUN_TERMINAL_STATES:
+                return
+            worker = threading.Thread(target=self._run_worker, args=(context, run["run_id"]), name=f"job-{context.setup_id}-{context.face}", daemon=True)
             self._threads[key] = worker
             worker.start()
 
-    def _run_worker(self, context: JobContext) -> None:
+    def _run_worker(self, context: JobContext, run_id: str | None = None) -> None:
         key = (context.project_id, context.setup_id, context.face)
+        initial = self._load_run(context)
+        run_id = run_id or (initial or {}).get('run_id')
+        permit = self._physical_leases.get(key)
         try:
             try:
                 while True:
                     run = self._load_run(context)
-                    if run is None or run.get("state") in RUN_TERMINAL_STATES | RUN_WAITING_STATES:
+                    if run is None or run.get("run_id") != run_id or run.get("state") in RUN_TERMINAL_STATES | RUN_WAITING_STATES:
                         return
                     state = str(run.get("state"))
                     if state in {"JOB_STARTING", "NEXT_OPERATION_READY", "TOOL_REFERENCE_READY"}:
@@ -978,10 +1065,12 @@ class JobService:
                         self._watch_operation(context, run)
                         continue
                     return
+            except JobRunConflict:
+                return
             except Exception as error:
                 self.runtime.physical_ownership.enter_recovery("Fallo del supervisor JOB; estado físico incierto.")
-                current = self._load_run(context)
-                if current is not None:
+                current = run
+                if current is not None and current.get('run_id') == run_id:
                     current["state"] = "JOB_ERROR"
                     current["completed_at"] = current.get("completed_at") or _iso_now()
                     current["updated_at"] = _iso_now()
@@ -989,11 +1078,13 @@ class JobService:
                     current["next_action"] = "Revisar error del supervisor"
                     current["last_watcher_error"] = traceback.format_exc()
                     self._append_event(current, "error", f"Fallo del supervisor: {error}")
-                    self._save_run(context, current)
+                    try:
+                        self._save_run(context, current)
+                    except JobRunConflict:
+                        pass
         finally:
             current = self._load_run(context)
-            if current is None or current.get('state') in RUN_TERMINAL_STATES:
-                permit = self._physical_leases.get(key)
+            if current is None or (current.get('run_id') == run_id and current.get('state') in RUN_TERMINAL_STATES):
                 if permit is not None:
                     self.runtime.physical_ownership.retire(permit)
                 if current is not None and current.get('state') == 'JOB_COMPLETE':
@@ -1060,7 +1151,7 @@ class JobService:
             operation_index=index,
             expected_remote_file=expected_remote_file,
         )
-        if recovered is not None:
+        if recovered is not None or run.get("state") == "RECOVERY_REQUIRED":
             return
         run["state"] = "OPERATION_UPLOADING"
         run["next_action"] = f"Subiendo {operation['generated_file_name']} a Moonraker"
@@ -1099,32 +1190,51 @@ class JobService:
         operation["progress"] = 0.0
         run["recovery_state"] = None
         self._append_event(run, "info", f"Archivo subido a Moonraker: {remote_file}.")
-        if upload.get("print_started"):
-            run["state"] = "WAITING_FOR_KLIPPER"
-            run["next_action"] = f"Esperando confirmación de Klipper para {operation['name']}"
-            self._save_run(context, run)
-            return
-        if upload.get("print_queued"):
-            operation["execution_status"] = "PRINT_QUEUED"
-            run["state"] = "PRINT_QUEUED"
-            run["next_action"] = f"Moonraker dejó {operation['name']} en cola; esperando impresión"
-            self._save_run(context, run)
-            return
-        operation["execution_status"] = "START_NOT_ACCEPTED"
-        run["state"] = "JOB_ERROR"
+        if upload.get("print_started") or upload.get("print_queued"):
+            raise PrintIdentityError('El upload inició o encoló una impresión inesperadamente.')
+        identity = PrintIdentity(expected_remote_file)
+        if PrintIdentity(remote_file) != identity or item.get('root') != 'gcodes':
+            raise PrintIdentityError('El archivo subido no coincide con el archivo JIT esperado.')
+        run["state"] = "WAITING_FOR_KLIPPER"
+        run["next_action"] = f"Esperando confirmación de Klipper para {operation['name']}"
         self._save_run(context, run)
+        attempt_id = None
+        def before_send():
+            nonlocal attempt_id
+            self.run_store.validate(self._run_file(context), run)
+            PrintIdentity.require_idle(adapter.print_status())
+            self.runtime.physical_ownership.validate(adapter.permit)
+            authorized = self.run_store.begin_start(self._run_file(context), run,
+                                                    operation['operation_id'], identity.filename)
+            run.update(revision=authorized['revision'], start_attempt=authorized['start_attempt'])
+            attempt_id = authorized['start_attempt']['id']
+        try:
+            adapter.start_file(identity.filename, before_send=before_send)
+        except BaseException:
+            if attempt_id is not None:
+                self.run_store.finish_start(self._run_file(context), run['run_id'], attempt_id, status='uncertain')
+            raise
+        else:
+            self.run_store.finish_start(self._run_file(context), run['run_id'], attempt_id, status='sent')
 
     def _watch_operation(self, context: JobContext, run: dict[str, Any]) -> None:
         adapter = self.adapter_factory(self.runtime)
         operation = run["operations"][int(run["current_operation_index"])]
         while True:
             current = self._load_run(context)
-            if current is None:
+            if (current is None or current.get('run_id') != run['run_id']
+                    or current.get('current_operation_id') != run.get('current_operation_id')):
                 return
             if current.get("state") in RUN_TERMINAL_STATES | RUN_WAITING_STATES | {"JOB_PAUSED"}:
                 return
-            status = adapter.print_status()
             operation = current["operations"][int(current["current_operation_index"])]
+            try:
+                status = adapter.print_status()
+                PrintIdentity(operation.get('remote_file')).require_match(status)
+            except Exception as error:
+                self._identity_failure(context, current, error)
+                return
+            transition = False
             operation["progress"] = max(0.0, min(1.0, float(status.get("progress") or 0.0)))
             operation["machine_status"] = status
             operation["moonraker_filename"] = status.get("filename")
@@ -1140,6 +1250,7 @@ class JobService:
                 current["state"] = "OPERATION_RUNNING"
                 current["next_action"] = f"Ejecutando {operation['name']}"
                 if first_printing:
+                    transition = True
                     self._append_event(current, "info", f"Klipper confirmó la ejecución de {operation['name']}.")
             if state in {"paused"}:
                 operation["execution_status"] = "PAUSED"
@@ -1184,7 +1295,12 @@ class JobService:
                 self._save_run(context, current)
                 self._archive_run(context, current)
                 return
-            self._save_run(context, current)
+            if transition:
+                self._save_run(context, current)
+            else:
+                self.run_store.observe(self._run_file(context), current, {},
+                    operation_id=operation['operation_id'],
+                    operation_fields={key: operation.get(key) for key in JobRunStore.OPERATION_OBSERVATIONS})
             time.sleep(0.5)
 
     def _retry_tool_change_transition(self, context: JobContext, run: dict[str, Any]) -> None:
@@ -1764,38 +1880,32 @@ class JobService:
         operation_index: int | None = None,
         expected_remote_file: str | None = None,
     ) -> dict[str, Any] | None:
+        if run.get('state') in JobRunStore.CANCELLED:
+            return None
         try:
             status = self.adapter_factory(self.runtime).print_status()
-        except Exception:
+            PrintIdentity.require_status(status)
+        except Exception as error:
+            self._identity_failure(context, run, error)
+            raise PrintIdentityError('No se pudo identificar el archivo Moonraker.') from error
+        if str(status.get("state") or "").lower() not in {'printing', 'paused'}:
+            PrintIdentity.require_idle(status)
             return None
-        if str(status.get("state") or "").lower() != "printing":
-            return None
-        observed_filename = self._normalize_filename(status.get("filename"))
         operations = list(run.get("operations") or [])
-        candidate_indexes: list[int] = []
-        if operation_index is not None:
-            candidate_indexes.append(operation_index)
-        current_index = run.get("current_operation_index")
-        if isinstance(current_index, int):
-            candidate_indexes.append(current_index)
-        pending_index = self._next_pending_operation_index(run)
-        if pending_index is not None:
-            candidate_indexes.append(pending_index)
-        seen_indexes: set[int] = set()
-        for candidate_index in candidate_indexes:
-            if candidate_index in seen_indexes or not (0 <= candidate_index < len(operations)):
-                continue
-            seen_indexes.add(candidate_index)
+        candidate_index = operation_index if operation_index is not None else run.get('current_operation_index')
+        if isinstance(candidate_index, int) and 0 <= candidate_index < len(operations):
             operation = operations[candidate_index]
             candidate_remote = expected_remote_file or operation.get("remote_file")
             if not candidate_remote and operation.get("generated_file"):
                 candidate_remote = self._expected_remote_file(context, str(operation["generated_file"]))
-            normalized_candidate = self._normalize_filename(candidate_remote)
-            if not normalized_candidate or normalized_candidate != observed_filename:
-                continue
+            try:
+                PrintIdentity(candidate_remote).require_match(status)
+            except PrintIdentityError as error:
+                self._identity_failure(context, run, error)
+                return None
             operation["remote_file"] = candidate_remote
-            operation["execution_status"] = "RUNNING"
-            operation["observed_printing"] = True
+            operation["execution_status"] = "PAUSED" if status['state'] == 'paused' else "RUNNING"
+            operation["observed_printing"] = status['state'] == 'printing' or bool(operation.get('observed_printing'))
             operation["progress"] = self._clamp_progress(status.get("progress"))
             operation["moonraker_filename"] = status.get("filename")
             operation["moonraker_state"] = status.get("state")
@@ -1804,15 +1914,15 @@ class JobService:
             run["current_operation_index"] = candidate_index
             run["current_operation_id"] = operation["operation_id"]
             run["current_tool_key"] = operation["tool_key"]
-            run["state"] = "OPERATION_RUNNING"
+            run["state"] = "OPERATION_PAUSED" if status['state'] == 'paused' else "OPERATION_RUNNING"
             run["next_action"] = f"RECOVERED_ACTIVE_PRINT · Ejecutando {operation['name']}"
-            run["available_actions"] = ["pause", "cancel"]
+            run["available_actions"] = ["resume", "cancel"] if status['state'] == 'paused' else ["pause", "cancel"]
             run["updated_at"] = _iso_now()
             run["recovery_state"] = "RECOVERED_ACTIVE_PRINT"
             self._append_event(run, "warning", f"RECOVER_ACTIVE_PRINT: se recupero la impresion activa de {operation['name']} sin re-subir el archivo.")
             self._save_run(context, run)
             return run
-        if str(run.get("state")) == "JOB_ERROR":
+        if str(status.get('state')) in {'printing', 'paused'}:
             run["state"] = "RECOVERY_REQUIRED"
             run["next_action"] = "Revision manual requerida: Moonraker imprime un archivo que no coincide con este JobRun"
             run["available_actions"] = ["cancel"]
@@ -1903,7 +2013,7 @@ class JobService:
         for context, run_file in self._setup_run_files(project_id, setup_id):
             if not run_file.exists():
                 continue
-            current.append((context, run_file, json.loads(run_file.read_text(encoding="utf-8"))))
+            current.append((context, run_file, self.run_store.load(run_file)))
         return current
 
     def _history_contains_run(self, context: JobContext, run_id: str) -> bool:
@@ -2053,18 +2163,7 @@ class JobService:
         plan["manifest_path"] = self._relative_to_project(context.project_id, manifest_path)
 
     def _load_run(self, context: JobContext) -> dict[str, Any] | None:
-        path = self._existing_run_file(context)
-        try:
-            with self._lock:
-                payload = path.read_text(encoding="utf-8")
-        except FileNotFoundError:
-            # A missing regular current_run is the normal "no execution" state,
-            # including a concurrent archive/reset that atomically removes it.
-            # A dangling symlink is inconsistent storage and must remain visible.
-            if path.is_symlink():
-                raise
-            return None
-        return json.loads(payload)
+        return self.run_store.load(self._existing_run_file(context))
 
     def _is_stale_run(self, run: dict[str, Any], state: str | None = None) -> bool:
         run_state = str(state or run.get("status") or run.get("state") or "")
@@ -2089,7 +2188,10 @@ class JobService:
         return unique
 
     def _normalize_filename(self, value: Any) -> str:
-        return str(value or "").replace("\\", "/").lstrip("/")
+        try:
+            return PrintIdentity(value).filename
+        except PrintIdentityError:
+            return ""
 
     def _clamp_progress(self, value: Any) -> float:
         try:
@@ -2100,17 +2202,17 @@ class JobService:
 
     def _save_run(self, context: JobContext, run: dict[str, Any]) -> None:
         path = self._run_file(context)
-        payload = json.dumps(run, ensure_ascii=True, indent=2, sort_keys=True)
-        with self._lock:
-            tmp = path.with_suffix('.tmp')
-            tmp.write_text(payload, encoding="utf-8")
-            tmp.replace(path)
+        if "revision" not in run:
+            saved = self.run_store.create(path, run)
+        else:
+            saved = self.run_store.save(path, run)
+        run.update(revision=saved['revision'], cancellation_epoch=saved['cancellation_epoch'])
 
     def _archive_run(self, context: JobContext, run: dict[str, Any]) -> None:
-        archived = dict(run)
+        self.run_store.validate(self._run_file(context), run, allow_cancelled=True)
+        archived = json.loads(json.dumps(run))
         self._prepare_history_snapshot(archived)
         self._write_archived_run(context, archived)
-        self._save_run(context, run)
 
     def _write_archived_run(self, context: JobContext, run: dict[str, Any], *, suffix: str | None = None) -> Path:
         stamp = _utc_now().strftime("%Y%m%d-%H%M%S")

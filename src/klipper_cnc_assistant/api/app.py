@@ -107,6 +107,12 @@ def create_app(
     async def stop_machine_runtime() -> None:
         machine_runtime.stop()
 
+    from klipper_cnc_assistant.storage.job_run_store import JobRunConflict
+
+    @app.exception_handler(JobRunConflict)
+    async def handle_job_run_conflict(_request, exc: JobRunConflict) -> JSONResponse:
+        return JSONResponse(status_code=409, content={"detail": str(exc)})
+
     @app.exception_handler(RequestValidationError)
     async def handle_validation_error(_request, exc: RequestValidationError) -> JSONResponse:
         translated: list[str] = []

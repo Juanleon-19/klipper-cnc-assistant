@@ -84,28 +84,30 @@ class FakeAdapter:
     def upload_file(self, *, local_path: Path, project_id: str, setup_id: str, face: str) -> dict:
         remote = f"klipper-cnc-assistant/{project_id}/{setup_id}/{face}/{local_path.name}"
         self.uploads.append(remote)
-        self.current_filename = remote
-        self.state = "complete"
-        self._printing_seen = False
-        return {"item": {"path": remote, "root": "gcodes"}, "print_started": True, "print_queued": False}
+        return {"item": {"path": remote, "root": "gcodes"}, "print_started": False, "print_queued": False}
 
-    def start_file(self, remote_path: str) -> dict:
+    def start_file(self, remote_path: str, *, before_send) -> dict:
+        before_send()
         self.current_filename = remote_path
         self.started.append(remote_path)
         self.state = "complete"
+        self._printing_seen = False
         return {"started": remote_path}
 
-    def pause(self) -> dict:
+    def pause(self, *, before_send) -> dict:
+        before_send()
         self.pause_calls += 1
         self.state = "paused"
         return {"state": self.state}
 
-    def resume(self) -> dict:
+    def resume(self, *, before_send) -> dict:
+        before_send()
         self.resume_calls += 1
         self.state = "complete"
         return {"state": self.state}
 
-    def cancel(self) -> dict:
+    def cancel(self, *, before_send) -> dict:
+        before_send()
         self.cancel_calls += 1
         self.state = "cancelled"
         return {"state": self.state}
@@ -608,7 +610,7 @@ class JobServiceTest(unittest.TestCase):
         self.assertEqual(live["transition"]["tool_change_profile"], "long_tool")
         self.assertEqual(live["transition"]["tool_change_clearance_z_mm"], 130.0)
         self.assertEqual(live["transition"]["reference_prep_z_mm"], 115.0)
-        self.assertEqual(len(self.adapter.started), 0)
+        self.assertEqual(len(self.adapter.started), 2)
         self.assertIsNone(run["operations"][2]["generated_file"])
         self.assertIsNone(run["operations"][3]["generated_file"])
 
@@ -664,7 +666,7 @@ class JobServiceTest(unittest.TestCase):
                 "incoming-reference-probe",
             ],
         )
-        self.assertEqual(len(self.adapter.started), 0)
+        self.assertEqual(len(self.adapter.started), 4)
         self.assertEqual(run["operations"][3]["execution_status"], "COMPLETED")
         self.assertTrue({"M3", "M4", "M5"}.isdisjoint(self.adapter.command_log))
 
@@ -722,6 +724,9 @@ class JobServiceTest(unittest.TestCase):
         original["operations"][0]["execution_status"] = "COMPLETED"
         original["operations"][1]["execution_status"] = "COMPLETED"
         original["operations"][2]["execution_status"] = "RUNNING"
+        original["operations"][2]["remote_file"] = "test/current.gcode"
+        self.adapter.current_filename = "test/current.gcode"
+        self.adapter.state = "paused"
         self.job_service._save_run(context, original)
 
         cancelled = self.job_service.run_action(
@@ -856,9 +861,12 @@ class JobServiceTest(unittest.TestCase):
 
     def test_live_execution_reports_running_progress_from_current_run(self) -> None:
         self.job_service.generate_project_compensation(project_id=self.project_id, setup_id=self.setup_id, face="superior")
-        self.adapter.status_sequence = [
-            {"state": "printing", "progress": 0.553, "is_active": True},
-        ]
+        original_start = self.adapter.start_file
+        def start_then_print(remote_path, *, before_send):
+            result = original_start(remote_path, before_send=before_send)
+            self.adapter.status_sequence = [{"state": "printing", "progress": 0.553, "is_active": True}]
+            return result
+        self.adapter.start_file = start_then_print
         self.job_service.start_run(project_id=self.project_id, setup_id=self.setup_id, face="superior")
         time.sleep(0.7)
         context = self.job_service._context(self.project_id, self.setup_id, "superior")
@@ -1186,7 +1194,7 @@ class JobServiceTest(unittest.TestCase):
         persisted = json.loads(self.job_service._run_file(context).read_text(encoding="utf-8"))
         self.assertEqual(self.adapter.uploads, [])
         self.assertEqual(persisted["state"], "RECOVERY_REQUIRED")
-        self.assertEqual(persisted["recovery_state"], "RECOVERY_REQUIRED")
+        self.assertEqual(persisted["recovery_state"], "PRINT_IDENTITY_REQUIRED")
 
     def test_start_run_refreshes_job_validating_before_reporting_blockers(self) -> None:
         self.job_service.generate_project_compensation(project_id=self.project_id, setup_id=self.setup_id, face="superior")
