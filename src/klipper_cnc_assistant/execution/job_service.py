@@ -366,9 +366,11 @@ class JobService:
 
     def live_execution(self, *, project_id: str, setup_id: str, face: str) -> dict[str, Any]:
         context = self._context(project_id, setup_id, face)
+        self._validate_execution_target(context)
         run = self._load_run(context)
         if run is None:
-            run = self.prepare_run(project_id=project_id, setup_id=setup_id, face=face)
+            return self._no_active_execution_snapshot()
+        self._validate_run_context(context, run)
         diagnosis = self._diagnose_run(context, run)
         status = diagnosis["moonraker"]
         worker_alive = bool(diagnosis["run"].get("worker_alive"))
@@ -441,6 +443,7 @@ class JobService:
         if eta.get("available") and "eta_ratio_ema" in run:
             self._save_run(context, run)
         return {
+            "has_active_run": True,
             "moonraker": {
                 "connected": bool(status.get("connected", True)),
                 "klipper_state": status.get("klipper_state"),
@@ -507,6 +510,77 @@ class JobService:
             "events": self._dedupe_events(run.get("events") or []),
             "job_run": run,
             "eta": eta,
+        }
+
+    def _no_active_execution_snapshot(self) -> dict[str, Any]:
+        """Represent normal JobRun absence without creating or probing anything."""
+        runtime_snapshot = self.runtime.snapshot()
+        runtime_moonraker = runtime_snapshot.get("moonraker") or {}
+        return {
+            "has_active_run": False,
+            "moonraker": {
+                "connected": bool(runtime_moonraker.get("http_connected")),
+                "klipper_state": runtime_moonraker.get("klippy_state"),
+                "print_state": None,
+                "filename": None,
+                "progress": 0.0,
+                "is_active": False,
+                "file_position": None,
+                "file_size": None,
+                "print_duration": None,
+                "total_duration": None,
+                "message": "Sin ejecución activa; no se consultó el estado de impresión de Moonraker.",
+                "updated_at": _iso_now(),
+            },
+            "run": {
+                "run_id": None,
+                "status": "NO_EXECUTION",
+                "current_operation_index": 0,
+                "total_operations": 0,
+                "completed_operations": 0,
+                "overall_progress": 0.0,
+                "next_action": "Preparar trabajo",
+                "available_actions": [],
+                "worker_alive": False,
+                "watcher_alive": False,
+                "supervisor_registered": False,
+                "movement_lock": None,
+                "job_lock": False,
+                "last_watcher_error": None,
+                "recovery_state": None,
+                "stale_candidate": False,
+                "updated_at": None,
+            },
+            "operation": {
+                "operation_id": None,
+                "name": None,
+                "tool": None,
+                "execution_status": "NO_EXECUTION",
+                "expected_remote_file": None,
+                "observed_filename": None,
+                "filename_match": False,
+                "observed_printing": False,
+                "progress": 0.0,
+            },
+            "operations": [],
+            "transition": {
+                "state": "NO_EXECUTION",
+                "required_tool": None,
+                "tool": None,
+                "tool_reference_profile": "standard",
+                "tool_change_profile": "standard",
+                "tool_change_clearance_z_mm": None,
+                "outgoing_tool": None,
+                "outgoing_tool_change_profile": "standard",
+                "outgoing_tool_change_clearance_z_mm": None,
+                "reference_prep_z_mm": None,
+                "last_error": None,
+                "operator_confirmation_required": False,
+            },
+            "synchronization": {"ok": True, "reason": None},
+            "events": [],
+            "job_run": None,
+            "eta": {"available": False, "reason": "no_active_run"},
         }
 
     def describe_run_conflict(self, *, project_id: str, setup_id: str, face: str) -> dict[str, Any]:
@@ -1710,8 +1784,44 @@ class JobService:
         run["events"] = self._dedupe_events(run["events"])[-300:]
 
     def _context(self, project_id: str, setup_id: str, face: str) -> JobContext:
-        normalized_face = BoardFace(face).value if face in {BoardFace.SUPERIOR.value, BoardFace.INFERIOR.value} else str(face)
+        if not setup_id or setup_id in {".", ".."} or "/" in setup_id or "\\" in setup_id:
+            raise ApplicationError("Identificador de montaje inválido.")
+        try:
+            normalized_face = BoardFace(face).value
+        except ValueError as error:
+            raise ApplicationError("Cara de montaje inválida.") from error
         return JobContext(project_id=project_id, setup_id=setup_id, face=normalized_face)
+
+    def _validate_execution_target(self, context: JobContext) -> None:
+        project_file = self._project_dir(context.project_id) / "project.json"
+        try:
+            payload = json.loads(project_file.read_text(encoding="utf-8"))
+        except FileNotFoundError as error:
+            raise NotFoundError(f"El proyecto '{context.project_id}' no existe.") from error
+        setups = payload.get("montajes") if isinstance(payload, dict) else None
+        if not isinstance(setups, list):
+            raise ValueError("project.json no contiene una lista válida de montajes.")
+        if not any(isinstance(item, dict) and item.get("id") == context.setup_id for item in setups):
+            raise NotFoundError(f"El montaje '{context.setup_id}' no existe en el proyecto.")
+
+    @staticmethod
+    def _validate_run_context(context: JobContext, run: dict[str, Any]) -> None:
+        expected = {
+            "project_id": context.project_id,
+            "setup_id": context.setup_id,
+            "face": context.face,
+        }
+        mismatches = [
+            field
+            for field, value in expected.items()
+            if str(run.get(field) or "") != value
+        ]
+        if mismatches:
+            raise ApplicationError(
+                "current_run.json no corresponde a la ruta solicitada: "
+                + ", ".join(sorted(mismatches))
+                + "."
+            )
 
     def _reference_preparation_z(self) -> float:
         resolver = getattr(self.runtime, "reference_preparation_z", None)
@@ -1873,6 +1983,17 @@ class JobService:
     def _run_file(self, context: JobContext) -> Path:
         return self._plan_dir(context) / "current_run.json"
 
+    def _existing_run_file(self, context: JobContext) -> Path:
+        """Return the read path without creating report directories."""
+        return (
+            self._project_dir(context.project_id)
+            / "reports"
+            / "jobs"
+            / context.setup_id
+            / _safe_face(context.face)
+            / "current_run.json"
+        )
+
     def _load_plan(self, context: JobContext) -> dict[str, Any] | None:
         path = self._plan_file(context)
         if not path.exists():
@@ -1889,11 +2010,18 @@ class JobService:
         plan["manifest_path"] = self._relative_to_project(context.project_id, manifest_path)
 
     def _load_run(self, context: JobContext) -> dict[str, Any] | None:
-        path = self._run_file(context)
-        if not path.exists():
+        path = self._existing_run_file(context)
+        try:
+            with self._lock:
+                payload = path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            # A missing regular current_run is the normal "no execution" state,
+            # including a concurrent archive/reset that atomically removes it.
+            # A dangling symlink is inconsistent storage and must remain visible.
+            if path.is_symlink():
+                raise
             return None
-        with self._lock:
-            return json.loads(path.read_text(encoding="utf-8"))
+        return json.loads(payload)
 
     def _is_stale_run(self, run: dict[str, Any], state: str | None = None) -> bool:
         run_state = str(state or run.get("status") or run.get("state") or "")

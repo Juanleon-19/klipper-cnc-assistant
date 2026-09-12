@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import tempfile
 import threading
@@ -8,6 +9,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from fastapi.testclient import TestClient
+import httpx
 
 from klipper_cnc_assistant.api import create_app
 from klipper_cnc_assistant.application.errors import ApplicationError
@@ -143,6 +145,89 @@ class ApiTest(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["archived_run_id"], "job-run/setup-main/superior/20260722-040230")
         self.assertTrue(response.json()["can_start_new_run"])
+
+    def test_live_execution_without_current_run_is_200_and_has_no_side_effects(self) -> None:
+        project = self.app.state.project_service.create_project(
+            nombre="Proyecto API sin ejecución",
+            ancho_mm=80.0,
+            alto_mm=50.0,
+        )
+        project_id = project.id
+        setup_id = project.montajes[0].id
+        project_dir = self.data_dir / "projects" / project_id
+        before = {
+            path.relative_to(project_dir): ("dir" if path.is_dir() else path.read_bytes())
+            for path in project_dir.rglob("*")
+        }
+
+        with patch.object(
+            self.app.state.job_service,
+            "prepare_run",
+            side_effect=AssertionError("GET /execution/live no debe preparar una ejecución"),
+        ), patch.object(
+            self.app.state.job_service,
+            "adapter_factory",
+            side_effect=AssertionError("GET sin JobRun no debe consultar Moonraker"),
+        ):
+            response = asyncio.run(
+                self._asgi_get(
+                    f"/api/projects/{project_id}/execution/live",
+                    params={"setup_id": setup_id, "face": "superior"},
+                )
+            )
+
+        after = {
+            path.relative_to(project_dir): ("dir" if path.is_dir() else path.read_bytes())
+            for path in project_dir.rglob("*")
+        }
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertFalse(payload["has_active_run"])
+        self.assertEqual(payload["run"]["status"], "NO_EXECUTION")
+        self.assertIsNone(payload["run"]["run_id"])
+        self.assertIsNone(payload["job_run"])
+        self.assertEqual(payload["operations"], [])
+        self.assertEqual(payload["events"], [])
+        self.assertEqual(after, before)
+        self.assertFalse((project_dir / "reports" / "jobs" / setup_id / "superior" / "current_run.json").exists())
+
+    def test_live_execution_does_not_hide_corrupt_current_run_as_no_execution(self) -> None:
+        project = self.app.state.project_service.create_project(
+            nombre="Proyecto API con ejecución corrupta",
+            ancho_mm=80.0,
+            alto_mm=50.0,
+        )
+        project_id = project.id
+        setup_id = project.montajes[0].id
+        run_file = (
+            self.data_dir
+            / "projects"
+            / project_id
+            / "reports"
+            / "jobs"
+            / setup_id
+            / "superior"
+            / "current_run.json"
+        )
+        run_file.parent.mkdir(parents=True, exist_ok=True)
+        corrupt_payload = "{not-json"
+        run_file.write_text(corrupt_payload, encoding="utf-8")
+
+        response = asyncio.run(
+            self._asgi_get(
+                f"/api/projects/{project_id}/execution/live",
+                params={"setup_id": setup_id, "face": "superior"},
+            )
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertNotIn("NO_EXECUTION", response.text)
+        self.assertEqual(run_file.read_text(encoding="utf-8"), corrupt_payload)
+
+    async def _asgi_get(self, path: str, *, params: dict[str, str]) -> httpx.Response:
+        transport = httpx.ASGITransport(app=self.app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            return await client.get(path, params=params)
 
     def test_go_to_reference_rejects_missing_saved_reference_without_motion(self) -> None:
         project_id = self._create_project()
