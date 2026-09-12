@@ -541,21 +541,10 @@ def build_router() -> APIRouter:
 
     @router.post("/projects/{project_id}/physical-maps/{map_id:path}/execute-next", response_model=PhysicalMapResponse)
     def execute_next_physical_map_point(project_id: str, map_id: str, request: Request) -> PhysicalMapResponse:
-        service = request.app.state.physical_map_service
-        runtime = request.app.state.machine_runtime
-        payload = service.get_by_id(project_id, map_id)
-        if payload.get("status") in {"CANCELLED", "MESH_COMPLETE"}:
-            raise ApplicationError("La malla no está en un estado ejecutable.")
-        point = service.next_pending_point(project_id, map_id)
-        result = runtime.probe_mesh_point(point, probe_config=payload.get("probe_config"))
-        updated = service.record_point(
+        updated = request.app.state.mesh_execution_service.start_next(
             project_id=project_id,
             map_id=map_id,
-            point_index=int(point["index"]),
-            z_measured=float(result["z_measured"]),
-            status="MEASURED",
-            duration_s=float(result["duration_s"]),
-            error=None,
+            runtime=request.app.state.machine_runtime,
         )
         return _physical_map_response(request, updated)
 

@@ -83,6 +83,12 @@ class MeshExecutionService:
         self._physical_leases = {}
 
     def start_all(self, *, project_id: str, map_id: str, runtime: Any) -> dict[str, Any]:
+        return self._start(project_id=project_id, map_id=map_id, runtime=runtime, point_budget=None)
+
+    def start_next(self, *, project_id: str, map_id: str, runtime: Any) -> dict[str, Any]:
+        return self._start(project_id=project_id, map_id=map_id, runtime=runtime, point_budget=1)
+
+    def _start(self, *, project_id: str, map_id: str, runtime: Any, point_budget: int | None) -> dict[str, Any]:
         guard = self.motion_ownership_snapshot(runtime=runtime, project_id=project_id, map_id=map_id)
         if not guard["can_start_motion"]:
             raise ApplicationError(str(guard["reason"]))
@@ -123,7 +129,7 @@ class MeshExecutionService:
                     "last_progress_at": _iso_now(),
                 },
             )
-            thread = threading.Thread(target=self._run, args=(project_id, map_id, runtime), name=f"mesh-{map_id}", daemon=True)
+            thread = threading.Thread(target=self._run, args=(project_id, map_id, runtime, point_budget), name=f"mesh-{map_id}", daemon=True)
             self._threads[key] = thread
             thread.start()
         self._log_transition("MESH_WORKER_START", project_id, map_id, execution=updated.get("execution") or {})
@@ -391,8 +397,9 @@ class MeshExecutionService:
             "cleanup_pending_other_map": cleanup_other,
         }
 
-    def _run(self, project_id: str, map_id: str, runtime: Any) -> None:
+    def _run(self, project_id: str, map_id: str, runtime: Any, point_budget: int | None = None) -> None:
         key = (project_id, map_id)
+        attempted_points = 0
         with self._lock:
             self._cancel_requests.setdefault(key, threading.Event())
             if key not in self._physical_leases:
@@ -451,6 +458,23 @@ class MeshExecutionService:
                         },
                     )
                     return
+                if point_budget is not None and attempted_points >= point_budget:
+                    self.physical_map_service.mark_status(
+                        project_id=project_id,
+                        map_id=map_id,
+                        status="MESH_PAUSED",
+                        worker_active=False,
+                        point_state="MESH_PAUSED",
+                        last_event="Punto seleccionado terminado; continúe explícitamente con los puntos pendientes.",
+                        metadata={
+                            "pause_requested": True,
+                            "pause_reason": "Presupuesto de un punto completado.",
+                            "cancel_requested": False,
+                            "phase": "paused",
+                            "last_progress_at": _iso_now(),
+                        },
+                    )
+                    return
                 try:
                     self._require_current_machine_state(runtime)
                 except Exception as error:
@@ -491,6 +515,7 @@ class MeshExecutionService:
                     return
                 self._log_transition("POINT_START", project_id, map_id, point_index=int(point["index"]), target=point, execution=execution)
                 self._probe_one_point(project_id, map_id, runtime, point, probe_config=payload.get("probe_config"))
+                attempted_points += 1
         finally:
             if sys.exception() is not None:
                 runtime.physical_ownership.enter_recovery('Worker MESH falló; quiescencia no confirmada.')
