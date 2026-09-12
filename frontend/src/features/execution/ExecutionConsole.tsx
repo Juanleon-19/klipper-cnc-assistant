@@ -7,6 +7,8 @@ type ExecutionConsoleProps = {
   snapshot: LiveExecutionSnapshot | null;
   error: ApiError | null;
   busy: boolean;
+  settingsBlocked?: boolean;
+  settingsBlockReason?: string;
   onPrepare: () => void | Promise<void>;
   onStart: () => void | Promise<void>;
   onAction: (action: string) => void | Promise<void>;
@@ -22,7 +24,7 @@ const ACTION_LABELS: Record<string, string> = {
   "confirm-tool-change": "Herramienta cambiada",
   "retry-tool-change-transition": "Reintentar transición de herramienta",
   "measure-reference": "Medir referencia",
-  continue: "Continuar trabajo",
+  continue: "Spindle preparado — continuar",
 };
 
 const CHECK_LABELS: Record<string, string> = {
@@ -43,6 +45,7 @@ const STARTABLE_STATES = new Set(["JOB_READY"]);
 const ARCHIVE_CANDIDATE_STATES = new Set(["JOB_VALIDATING", "JOB_STARTING", "OPERATION_PREFLIGHT", "OPERATION_UPLOADING", "WAITING_FOR_KLIPPER", "PRINT_QUEUED", "OPERATION_RUNNING", "RECOVERY_REQUIRED", "SPINDLE_STOP_REQUIRED", "TOOL_CHANGE_REQUIRED", "READY_TO_RESUME", "OPERATION_PAUSED", "JOB_PAUSED", "NEXT_OPERATION_READY"]);
 const TOOL_WAIT_STATES = new Set(["SPINDLE_STOP_REQUIRED", "TOOL_CHANGE_REQUIRED", "TOOL_CHANGE_CONFIRMED", "MOVING_TO_REFERENCE", "CALIBRATING_TOOL", "REGENERATING_COMPENSATION", "VALIDATING_REGENERATED_PLAN", "READY_TO_RESUME"]);
 const ACTIVE_EXECUTION_STATES = new Set(["JOB_STARTING", "OPERATION_PREFLIGHT", "OPERATION_UPLOADING", "WAITING_FOR_KLIPPER", "PRINT_QUEUED", "OPERATION_RUNNING", "OPERATION_PAUSED", "JOB_PAUSED"]);
+const REFERENCE_TRANSITION_STATES = new Set(["TOOL_CHANGE_CONFIRMED", "RETURNING_TO_REFERENCE_SAFE_Z", "RETURNING_TO_REFERENCE_XY", "MOVING_TO_REFERENCE", "CALIBRATING_TOOL"]);
 const AUTOMATIC_FLOW_STEPS = [
   { state: "READY_TO_RESUME", label: "Referencia Z medida" },
   { state: "OPERATION_PREFLIGHT", label: "Generar Legacy JIT" },
@@ -163,7 +166,7 @@ function currentOperationLabel(snapshot: LiveExecutionSnapshot | null): string {
   return `Operación ${index} de ${snapshot.run.total_operations}`;
 }
 
-export function ExecutionConsole({ snapshot, error, busy, onPrepare, onStart, onAction, onArchiveStale }: ExecutionConsoleProps) {
+export function ExecutionConsole({ snapshot, error, busy, settingsBlocked = false, settingsBlockReason = "", onPrepare, onStart, onAction, onArchiveStale }: ExecutionConsoleProps) {
   const jobRun = snapshot?.job_run ?? null;
   const actions = (snapshot?.run.available_actions ?? jobRun?.available_actions ?? []).filter((action, index, list) => list.indexOf(action) === index);
   const events = dedupeEvents(snapshot?.events ?? []);
@@ -180,6 +183,7 @@ export function ExecutionConsole({ snapshot, error, busy, onPrepare, onStart, on
   const showToolChangeRequired = runStatus === "TOOL_CHANGE_REQUIRED";
   const showRecoveryRequired = runStatus === "RECOVERY_REQUIRED";
   const showReadyToResume = runStatus === "READY_TO_RESUME";
+  const showReferenceTransition = REFERENCE_TRANSITION_STATES.has(runStatus);
   const eta = snapshot?.eta;
   const etaIsCalculating = ACTIVE_EXECUTION_STATES.has(runStatus) && eta?.available === false;
   const transitionProfile = snapshot?.transition.tool_change_profile ?? snapshot?.transition.tool_reference_profile ?? "standard";
@@ -209,6 +213,7 @@ export function ExecutionConsole({ snapshot, error, busy, onPrepare, onStart, on
       </div>
 
       {desync ? <div className="alert alert--danger"><strong>DESINCRONIZACIÓN:</strong> Moonraker está ejecutando el archivo, pero JobRun no lo está siguiendo.</div> : null}
+      {settingsBlocked ? <div className="alert alert--warning"><strong>Ejecución bloqueada por configuración</strong><p>{settingsBlockReason}</p></div> : null}
       {showSpindleStopRequired ? (
         <div className="alert alert--warning">
           <strong>Apague manualmente el spindle</strong>
@@ -217,8 +222,14 @@ export function ExecutionConsole({ snapshot, error, busy, onPrepare, onStart, on
       ) : null}
       {showToolChangeRequired ? (
         <div className="alert alert--warning">
-          <strong>Cambie la herramienta</strong>
-          <p>Instale la herramienta requerida y pulse Herramienta cambiada.</p>
+          <strong>Máquina ubicada en posición de cambio</strong>
+          <div className="info-grid info-grid--double compact-grid">
+            <div className="metric-box"><span>Herramienta actual</span><strong>{snapshot?.transition.outgoing_tool ?? snapshot?.operation.tool ?? "-"}</strong></div>
+            <div className="metric-box"><span>Herramienta requerida</span><strong>{snapshot?.transition.required_tool ?? "-"}</strong></div>
+            <div className="metric-box"><span>Perfil entrante</span><strong>{transitionProfileLabel}</strong></div>
+            <div className="metric-box"><span>Clearance entrante</span><strong>{typeof snapshot?.transition.tool_change_clearance_z_mm === "number" ? `${snapshot.transition.tool_change_clearance_z_mm.toFixed(3)} mm` : "-"}</strong></div>
+          </div>
+          <p>Cambie físicamente la herramienta y pulse Herramienta cambiada.</p>
           <p>Después de confirmar el cambio, la referencia anterior dejará de ser válida y se medirá la nueva herramienta antes de generar su compensación.</p>
         </div>
       ) : null}
@@ -235,10 +246,22 @@ export function ExecutionConsole({ snapshot, error, busy, onPrepare, onStart, on
           <div className="info-grid info-grid--double compact-grid">
             <div className="metric-box"><span>Herramienta</span><strong>{transitionTool}</strong></div>
             <div className="metric-box"><span>Perfil de cambio</span><strong>{transitionProfileLabel}</strong></div>
-            <div className="metric-box execution-console-v2__resume-next"><span>Siguiente paso</span><strong>Continuar trabajo</strong></div>
+            <div className="metric-box execution-console-v2__resume-next"><span>Siguiente paso</span><strong>Spindle preparado — continuar</strong></div>
           </div>
           <p>Al continuar, el sistema generará automáticamente una nueva compensación Legacy para la siguiente operación usando la referencia Z recién medida, la subirá a Moonraker y comenzará la ejecución cuando Klipper la acepte.</p>
           <p><strong>No es necesario volver a la sección Compensación.</strong></p>
+        </section>
+      ) : null}
+
+      {showReferenceTransition ? (
+        <section className="execution-panel" aria-label="Medición automática de la nueva referencia">
+          <div className="section-heading"><h4>Preparando referencia de la nueva herramienta</h4></div>
+          <ol className="execution-console-v2__automatic-steps">
+            <li className={runStatus === "RETURNING_TO_REFERENCE_SAFE_Z" || runStatus === "TOOL_CHANGE_CONFIRMED" ? "is-current" : "is-complete"}>1. Subiendo a clearance{typeof snapshot?.transition.tool_change_clearance_z_mm === "number" ? ` ${snapshot.transition.tool_change_clearance_z_mm.toFixed(3)} mm` : ""} · {typeof snapshot?.transition.z_clearance_feed_mm_min === "number" ? `${snapshot.transition.z_clearance_feed_mm_min.toFixed(0)} mm/min` : "velocidad pendiente"}</li>
+            <li className={runStatus === "RETURNING_TO_REFERENCE_XY" ? "is-current" : ["MOVING_TO_REFERENCE", "CALIBRATING_TOOL"].includes(runStatus) ? "is-complete" : undefined}>2. Moviendo a referencia</li>
+            <li className={runStatus === "MOVING_TO_REFERENCE" ? "is-current" : runStatus === "CALIBRATING_TOOL" ? "is-complete" : undefined}>3. Aproximando Z{typeof snapshot?.transition.reference_prep_z_mm === "number" ? ` a ${snapshot.transition.reference_prep_z_mm.toFixed(3)} mm` : ""} · {typeof snapshot?.transition.reference_approach_z_feed_mm_min === "number" ? `${snapshot.transition.reference_approach_z_feed_mm_min.toFixed(0)} mm/min` : "velocidad pendiente"}</li>
+            <li className={runStatus === "CALIBRATING_TOOL" ? "is-current" : undefined}>4. Midiendo referencia Z · {typeof snapshot?.transition.reference_probe_feed_mm_min === "number" ? `${snapshot.transition.reference_probe_feed_mm_min.toFixed(0)} mm/min` : "velocidad pendiente"}</li>
+          </ol>
         </section>
       ) : null}
 
@@ -277,6 +300,13 @@ export function ExecutionConsole({ snapshot, error, busy, onPrepare, onStart, on
             <strong>{readinessTitle}</strong>
             <p>{readinessDetail}</p>
           </div>
+          <div className="info-grid info-grid--double compact-grid">
+            <div className="metric-box"><span>Mapa</span><strong>{jobRun?.active_map_id ? "LISTO" : "PENDIENTE"}</strong></div>
+            <div className="metric-box"><span>Referencia inicial</span><strong>{checks.find((check) => check.name === "referencia_inicial")?.ok ? "LISTA" : "PENDIENTE"}</strong></div>
+            <div className="metric-box"><span>Operaciones</span><strong>{jobRun?.summary.operations_total ?? snapshot?.run.total_operations ?? 0}</strong></div>
+            <div className="metric-box"><span>Cambios de herramienta</span><strong>{jobRun?.summary.tool_changes_required ?? 0}</strong></div>
+          </div>
+          <p className="muted">La compensación Legacy se genera automáticamente justo antes de cada operación usando la referencia Z vigente.</p>
           {checks.length ? (
             <div className="stack gap-sm">
               {checks.map((check) => (
@@ -361,8 +391,8 @@ export function ExecutionConsole({ snapshot, error, busy, onPrepare, onStart, on
       </section>
 
       <div className="action-grid execution-console-v2__actions">
-        <button className="button button--ghost" type="button" disabled={busy} onClick={() => void onPrepare()}>Preparar trabajo</button>
-        {showStart ? <button className="button" type="button" disabled={busy || snapshot?.run.status === "OPERATION_RUNNING"} onClick={() => void onStart()}>Iniciar trabajo</button> : null}
+        <button className="button button--ghost" type="button" disabled={busy || settingsBlocked} onClick={() => void onPrepare()}>Preparar trabajo</button>
+        {showStart ? <button className="button" type="button" disabled={busy || settingsBlocked || snapshot?.run.status === "OPERATION_RUNNING"} onClick={() => void onStart()}>Iniciar trabajo</button> : null}
         {extraActions.map((action) => (
           <button
             key={action}
@@ -440,7 +470,10 @@ export function ExecutionConsole({ snapshot, error, busy, onPrepare, onStart, on
           <div className="metric-box"><span>Herramienta</span><strong>{snapshot?.transition.tool ?? "-"}</strong></div>
           <div className="metric-box"><span>Perfil de cambio</span><strong>{transitionProfileLabel}</strong></div>
           <div className="metric-box"><span>Z segura durante cambio</span><strong>{typeof snapshot?.transition.tool_change_clearance_z_mm === "number" ? `${snapshot.transition.tool_change_clearance_z_mm.toFixed(3)} mm` : "-"}</strong></div>
+          <div className="metric-box"><span>Velocidad Z de despeje</span><strong>{typeof snapshot?.transition.z_clearance_feed_mm_min === "number" ? `${snapshot.transition.z_clearance_feed_mm_min.toFixed(0)} mm/min` : "-"}</strong></div>
           <div className="metric-box"><span>Z de aproximación a referencia</span><strong>{typeof snapshot?.transition.reference_prep_z_mm === "number" ? `${snapshot.transition.reference_prep_z_mm.toFixed(3)} mm` : "-"}</strong></div>
+          <div className="metric-box"><span>Velocidad Z de aproximación</span><strong>{typeof snapshot?.transition.reference_approach_z_feed_mm_min === "number" ? `${snapshot.transition.reference_approach_z_feed_mm_min.toFixed(0)} mm/min` : "-"}</strong></div>
+          <div className="metric-box"><span>Velocidad de sonda</span><strong>{typeof snapshot?.transition.reference_probe_feed_mm_min === "number" ? `${snapshot.transition.reference_probe_feed_mm_min.toFixed(0)} mm/min` : "-"}</strong></div>
           <div className="metric-box"><span>Confirmación del operador</span><strong>{snapshot?.transition.operator_confirmation_required ? "requerida" : "no"}</strong></div>
         </div>
         <p className="muted">La Z segura se usa solo durante el cambio de herramienta. No modifica el mapa ni la compensación Z.</p>

@@ -457,8 +457,10 @@ export type MachineRuntime = {
   klipper: Record<string, unknown>;
   preparation?: {
     reference_prep_z_mm?: number;
-    reference_prep_z_feed_mm_min?: number;
-    reference_prep_z_speed_mm_s?: number;
+    z_clearance_feed_mm_min?: number;
+    z_clearance_speed_mm_s?: number;
+    reference_approach_z_feed_mm_min?: number;
+    reference_approach_z_speed_mm_s?: number;
     reference_prep_xy_feed_mm_min?: number;
     reference_prep_xy_speed_mm_s?: number;
     center_x_mm?: number | null;
@@ -476,7 +478,12 @@ export type MachineRuntime = {
     z_positive_up?: boolean;
     z_feed_mm_min?: number;
     z_speed_mm_s?: number;
+    clearance_z_feed_mm_min?: number;
+    clearance_z_speed_mm_s?: number;
+    xy_feed_mm_min?: number;
+    xy_speed_mm_s?: number;
   };
+  settings?: Record<string, number>;
   arduino: Record<string, unknown>;
   probe_live?: Record<string, unknown>;
   last_probe_failure?: Record<string, unknown> | null;
@@ -684,6 +691,9 @@ export type JobOperationPlan = {
   tool_reference_profile?: ToolReferenceProfile;
   tool_change_clearance_z_mm?: number;
   reference_prep_z_mm?: number;
+  z_clearance_feed_mm_min?: number;
+  reference_approach_z_feed_mm_min?: number;
+  reference_probe_feed_mm_min?: number;
   tool_changed: boolean;
   map_status: string;
   coverage_status: string;
@@ -742,6 +752,9 @@ export type JobRunOperation = {
   tool_reference_profile?: ToolReferenceProfile;
   tool_change_clearance_z_mm?: number;
   reference_prep_z_mm?: number;
+  z_clearance_feed_mm_min?: number;
+  reference_approach_z_feed_mm_min?: number;
+  reference_probe_feed_mm_min?: number;
   tool_changed: boolean;
   reference_status: string;
   generated_file: string | null;
@@ -933,6 +946,10 @@ export type LiveExecutionSnapshot = {
     tool_reference_profile?: ToolReferenceProfile;
     tool_change_profile?: ToolReferenceProfile;
     tool_change_clearance_z_mm?: number | null;
+    z_clearance_feed_mm_min?: number | null;
+    reference_approach_z_feed_mm_min?: number | null;
+    reference_probe_feed_mm_min?: number | null;
+    stage?: string | null;
     outgoing_tool?: string | null;
     outgoing_tool_change_profile?: ToolReferenceProfile;
     outgoing_tool_change_clearance_z_mm?: number | null;

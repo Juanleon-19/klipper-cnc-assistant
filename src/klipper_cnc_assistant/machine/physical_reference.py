@@ -35,7 +35,7 @@ def reference_context(repository, runtime, project_id, operation_id, physical_ma
     snapshot = runtime.snapshot()
     config = runtime.config
     relevant = {name: getattr(config, name) for name in dir(config)
-                if name.startswith(('probe_', 'reference_', 'tool_change_', 'long_tool_', 'safe_z_',
+                if name.startswith(('probe_', 'reference_', 'tool_change_', 'long_tool_', 'safe_z_', 'z_clearance_',
                                     'settle_', 'velocity_', 'serial_', 'telemetry_', 'move_'))
                 and not callable(getattr(config, name))}
     # Persist only a digest of transport/configuration identity, never endpoints.

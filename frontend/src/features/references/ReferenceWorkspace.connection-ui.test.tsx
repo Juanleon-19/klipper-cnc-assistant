@@ -91,6 +91,7 @@ function renderReference(options?: {
     machineSettingsDirty: options?.machineSettingsDirty ?? false,
     machineSettingsHasUnsavedChanges: options?.machineSettingsHasUnsavedChanges ?? false,
     machineSettingsRuntimeStatus: options?.machineSettingsRuntimeStatus ?? "coherent",
+    machineSettingsLockedByJobRun: false,
   };
 
   const renderResult = render(
@@ -105,7 +106,8 @@ function renderReference(options?: {
       machineSettingsInput={{
         reference_prep_z_mm: options?.referencePrepZInput ?? "115",
         long_tool_change_clearance_z_mm: options?.longToolReferencePrepZInput ?? "130",
-        reference_prep_z_feed_mm_min: "180",
+        z_clearance_feed_mm_min: "180",
+        reference_approach_z_feed_mm_min: "180",
         move_total_timeout_s: "180",
         no_progress_timeout_s: "60",
         position_tolerance_mm: "0.25",

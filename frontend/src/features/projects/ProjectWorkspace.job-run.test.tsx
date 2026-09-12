@@ -327,7 +327,8 @@ describe("ProjectWorkspace job run flow", () => {
     apiMock.getPhysicalMapHistory.mockResolvedValue([]);
     apiMock.getMachineSettings.mockResolvedValue({
       reference_prep_z_mm: 115,
-      reference_prep_z_feed_mm_min: 180,
+      z_clearance_feed_mm_min: 180,
+      reference_approach_z_feed_mm_min: 180,
       move_total_timeout_s: 180,
       no_progress_timeout_s: 60,
       position_tolerance_mm: 0.05,
@@ -335,7 +336,8 @@ describe("ProjectWorkspace job run flow", () => {
     });
     apiMock.updateMachineSettings.mockResolvedValue({
       reference_prep_z_mm: 115,
-      reference_prep_z_feed_mm_min: 180,
+      z_clearance_feed_mm_min: 180,
+      reference_approach_z_feed_mm_min: 180,
       move_total_timeout_s: 180,
       no_progress_timeout_s: 60,
       position_tolerance_mm: 0.05,
