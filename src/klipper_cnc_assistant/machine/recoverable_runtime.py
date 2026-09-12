@@ -154,29 +154,30 @@ class RecoverableMachineRuntime(MachineRuntime):
         diagnostic session. It refuses to run while any physical operation,
         movement lock or mesh cleanup still owns the machine.
         """
-        if self.config.mode is not MachineMode.PHYSICAL:
-            raise MachineRuntimeError("La reconexión completa solo está disponible en modo FÍSICO.")
+        with self._lifecycle_lock:
+            if self.config.mode is not MachineMode.PHYSICAL:
+                raise MachineRuntimeError("La reconexión completa solo está disponible en modo FÍSICO.")
 
-        ownership = self.motion_ownership_snapshot()
-        if (
-            ownership.get("active_operation") is not None
-            or bool(ownership.get("movement_lock"))
-            or bool(ownership.get("recovery_pending"))
-        ):
-            raise MachineRuntimeError(
-                str(ownership.get("reason") or RECOVERY_PENDING_MESSAGE)
-            )
-
-        with self._lock:
-            if self._state in _RECONNECT_BLOCKING_STATES:
+            ownership = self.motion_ownership_snapshot()
+            if (
+                ownership.get("active_operation") is not None
+                or bool(ownership.get("movement_lock"))
+                or bool(ownership.get("recovery_pending"))
+            ):
                 raise MachineRuntimeError(
-                    f"No se puede reconectar el runtime durante {self._state.value}. "
-                    "Cancele o espere a que termine la operación actual."
+                    str(ownership.get("reason") or RECOVERY_PENDING_MESSAGE)
                 )
-            self._event("warning", "Reconexión completa del runtime solicitada; el movimiento permanece bloqueado.")
 
-        self.stop()
-        return self.connect()
+            with self._lock:
+                if self._state in _RECONNECT_BLOCKING_STATES:
+                    raise MachineRuntimeError(
+                        f"No se puede reconectar el runtime durante {self._state.value}. "
+                        "Cancele o espere a que termine la operación actual."
+                    )
+                self._event("warning", "Reconexión completa del runtime solicitada; el movimiento permanece bloqueado.")
+
+            self.stop()
+            return self.connect()
 
     def cancel_operation(
         self,

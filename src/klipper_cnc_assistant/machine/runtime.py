@@ -15,7 +15,7 @@ from typing import Any, Callable
 
 from klipper_cnc_assistant.input.command_mapper import CommandMapper, ControllerCommand
 from klipper_cnc_assistant.input.connection_manager import ArduinoConnectionManager, ArduinoConnectionState, UsbIdentity
-from klipper_cnc_assistant.input.serial_driver import ControllerPacket, SerialDriver, SerialProtocolError
+from klipper_cnc_assistant.input.serial_driver import ControllerPacket, SerialDriver
 from klipper_cnc_assistant.jog.controller import JogController, JogError
 from klipper_cnc_assistant.jog.manual import ManualJogController
 from klipper_cnc_assistant.jog.profiles import JogMode, get_jog_profile
@@ -194,6 +194,10 @@ class MachineRuntime:
         self._serial_factory = serial_factory
         self._discovery = discovery
         self._lock = threading.RLock()
+        # Serializes every lifecycle operation that may install or remove a
+        # connection manager. Manager callbacks never acquire this lock; they
+        # are accepted under _lock only when their immutable epoch is current.
+        self._lifecycle_lock = threading.RLock()
         self._movement_lock = threading.Lock()
         self._operation_generation = 0
         self._active_operation: OperationContext | None = None
@@ -207,6 +211,10 @@ class MachineRuntime:
         self._telemetry_failures: list[BaseException] = []
         self._driver: SerialDriver | None = None
         self._connection_manager: ArduinoConnectionManager | None = None
+        self._manager_epoch_counter = 0
+        self._connection_manager_epoch: int | None = None
+        self._manager_session_generation = 0
+        self._known_arduino_identity: UsbIdentity | None = None
         self._serial_thread: threading.Thread | None = None
         self._mapper = CommandMapper()
         self._jog: JogController | None = None
@@ -228,6 +236,7 @@ class MachineRuntime:
         self._events: list[RuntimeEvent] = []
         self._counters = RuntimeCounters()
         self._serial_generation = 0
+        self._session_valid_packets = 0
         self._packet_sequence = 0
         self._probe_raw = False
         self._probe_filtered = False
@@ -467,16 +476,35 @@ class MachineRuntime:
             self.connect()
 
     def stop(self) -> None:
+        with self._lifecycle_lock:
+            self._stop_locked()
+
+    def _stop_locked(self) -> None:
         with self._lock:
             self._state = MachineRuntimeState.STOPPING
             self._manual_enabled = False
+            self._diagnostic_input_only = True
+            self._ready_for_jog = False
             self._serial_stop.set()
             telemetry = self._telemetry
             manager = self._connection_manager
+        if manager is not None:
+            try:
+                manager.stop()
+            except Exception as error:
+                message = (
+                    "No se pudo detener el manager Arduino; conserva ownership serial y no será reemplazado."
+                )
+                with self._lock:
+                    self._state = MachineRuntimeState.ERROR
+                    self._last_error = message
+                    self._event(
+                        "error",
+                        "No se reemplazó el manager Arduino: su hilo conserva ownership serial.",
+                    )
+                raise MachineRuntimeError(message) from error
         if telemetry is not None:
             telemetry.stop()
-        if manager is not None:
-            manager.stop()
         if self._telemetry_thread is not None:
             self._telemetry_thread.join(timeout=2.0)
         with self._lock:
@@ -485,6 +513,8 @@ class MachineRuntime:
             self._telemetry = None
             self._driver = None
             self._connection_manager = None
+            self._connection_manager_epoch = None
+            self._manager_session_generation = 0
             self._serial_thread = None
             self._jog = None
             self._manual = None
@@ -498,46 +528,61 @@ class MachineRuntime:
         return f"{started}#serial-{generation}"
 
     def reconnect_arduino(self) -> dict[str, Any]:
-        self._require_physical_ready()
-        with self._lock:
-            if self.config.mode is MachineMode.SIMULATED:
-                raise MachineRuntimeError("Arduino no disponible en modo SIMULADO.")
-            if self._state in {MachineRuntimeState.STOPPING, MachineRuntimeState.DISCONNECTED}:
-                raise MachineRuntimeError("Runtime detenido; no se puede reconectar Arduino.")
-            if self._active_operation is not None:
-                raise MachineRuntimeError("No se puede reconectar Arduino durante una operación física activa.")
-            manager = self._connection_manager
-            if manager is None:
-                raise MachineRuntimeError("Arduino no inicializado.")
-            self._prepare_for_new_serial_session()
-            self._event("warning", "Reconexión manual de Arduino solicitada; el movimiento permanece bloqueado.")
-        manager.request_reconnect()
+        with self._lifecycle_lock:
+            self._require_physical_ready()
+            with self._lock:
+                if self.config.mode is MachineMode.SIMULATED:
+                    raise MachineRuntimeError("Arduino no disponible en modo SIMULADO.")
+                if self._state in {MachineRuntimeState.STOPPING, MachineRuntimeState.DISCONNECTED}:
+                    raise MachineRuntimeError("Runtime detenido; no se puede reconectar Arduino.")
+                if self._active_operation is not None:
+                    raise MachineRuntimeError("No se puede reconectar Arduino durante una operación física activa.")
+                if self._movement_lock.locked():
+                    raise MachineRuntimeError("No se puede reconectar Arduino mientras movement_lock está ocupado.")
+                if bool(getattr(self, "_motion_recovery_pending", False)):
+                    raise MachineRuntimeError("No se puede reconectar Arduino mientras existe recuperación física pendiente.")
+                manager = self._connection_manager
+                if manager is None:
+                    raise MachineRuntimeError("Arduino no inicializado.")
+                self._prepare_for_new_serial_session_locked()
+                self._event("warning", "Reconexión manual de Arduino solicitada; el movimiento permanece bloqueado.")
+            if not manager.request_reconnect():
+                raise MachineRuntimeError("El manager Arduino ya está detenido.")
         return self.snapshot()
 
     def _prepare_for_new_serial_session(self) -> None:
         with self._lock:
-            self._manual_enabled = False
-            self._diagnostic_input_only = True
-            self._ready_for_jog = False
-            self._probe_requested = False
-            self._previous_command = ControllerCommand()
-            self._last_command = ControllerCommand()
-            self._last_packet = None
-            self._last_packet_at = None
-            self._last_command_text = None
-            self._last_probe_result = None
-            self._last_probe_failure = None
-            self._packet_sequence = 0
-            self._probe_raw = False
-            self._probe_filtered = False
-            self._probe_filtered_since = None
-            self._probe_raw_since = None
+            self._prepare_for_new_serial_session_locked()
+
+    def _prepare_for_new_serial_session_locked(self) -> None:
+        self._manual_enabled = False
+        self._diagnostic_input_only = True
+        self._ready_for_jog = False
+        self._probe_requested = False
+        self._previous_command = ControllerCommand()
+        self._last_command = ControllerCommand()
+        self._last_packet = None
+        self._last_packet_at = None
+        self._last_command_text = None
+        self._last_probe_result = None
+        self._last_probe_failure = None
+        self._packet_sequence = 0
+        self._session_valid_packets = 0
+        self._probe_raw = False
+        self._probe_filtered = False
+        self._probe_filtered_since = None
+        self._probe_raw_since = None
 
     def _build_connection_manager(self) -> ArduinoConnectionManager:
+        with self._lock:
+            self._manager_epoch_counter += 1
+            manager_epoch = self._manager_epoch_counter
         return ArduinoConnectionManager(
             configured_port=self.config.serial_port,
             baudrate=self.config.serial_baudrate,
             startup_delay=self.config.serial_startup_delay_s,
+            manager_epoch=manager_epoch,
+            known_identity=self._known_arduino_identity,
             driver_factory=self._serial_factory,
             on_packet=self._handle_controller_packet_from_manager,
             on_session_started=self._on_serial_session_started,
@@ -545,14 +590,20 @@ class MachineRuntime:
             on_state_change=self._on_connection_state,
         )
 
-    def _on_connection_state(self, snapshot: dict[str, object]) -> None:
+    def _on_connection_state(self, manager_epoch: int, snapshot: dict[str, object]) -> None:
         state = str(snapshot.get("state") or ArduinoConnectionState.DISCONNECTED)
         last_error = snapshot.get("last_error")
+        snapshot_generation = int(snapshot.get("generation") or 0)
         with self._lock:
+            if manager_epoch != self._connection_manager_epoch:
+                return
             manager = self._connection_manager
-            if manager is not None:
-                self._driver = manager.driver
-                self._serial_thread = manager.thread
+            if manager is None or manager.manager_epoch != manager_epoch:
+                return
+            if snapshot_generation < self._manager_session_generation:
+                return
+            self._driver = manager.driver
+            self._serial_thread = manager.thread
             if last_error:
                 self._last_error = str(last_error)
             if state == ArduinoConnectionState.CONNECTED:
@@ -562,18 +613,31 @@ class MachineRuntime:
                 if self._client is not None and self._state not in {MachineRuntimeState.STOPPING, MachineRuntimeState.DISCONNECTED, MachineRuntimeState.ERROR}:
                     self._state = MachineRuntimeState.DEGRADED
 
-    def _on_serial_session_started(self, generation: int, identity: UsbIdentity | None) -> None:
-        self._prepare_for_new_serial_session()
+    def _on_serial_session_started(
+        self,
+        manager_epoch: int,
+        generation: int,
+        identity: UsbIdentity | None,
+    ) -> None:
         with self._lock:
-            self._serial_generation = generation
+            if manager_epoch != self._connection_manager_epoch:
+                return
             manager = self._connection_manager
-            if manager is not None:
-                self._driver = manager.driver
-                self._serial_thread = manager.thread
+            if manager is None or manager.manager_epoch != manager_epoch:
+                return
+            if generation <= self._manager_session_generation:
+                return
+            self._prepare_for_new_serial_session_locked()
+            self._serial_generation += 1
+            self._manager_session_generation = generation
+            if identity is not None:
+                self._known_arduino_identity = identity
+            self._driver = manager.driver
+            self._serial_thread = manager.thread
             if self._client is not None:
                 self._state = MachineRuntimeState.DIAGNOSTIC
             self._last_error = None
-            if generation > 1:
+            if self._serial_generation > 1:
                 message = "Arduino reconectado en modo diagnóstico; el movimiento sigue bloqueado hasta nueva habilitación explícita."
             else:
                 message = "Arduino conectado en modo diagnóstico; el movimiento sigue bloqueado hasta nueva habilitación explícita."
@@ -581,9 +645,19 @@ class MachineRuntime:
                 message += " Sin número de serie USB; la reconexión automática queda limitada al puerto configurado."
             self._event("info", message)
 
-    def _on_serial_session_lost(self, message: str) -> None:
-        self._prepare_for_new_serial_session()
+    def _on_serial_session_lost(
+        self,
+        manager_epoch: int,
+        generation: int,
+        message: str,
+        _failure: dict[str, object],
+    ) -> None:
         with self._lock:
+            if manager_epoch != self._connection_manager_epoch:
+                return
+            if generation != self._manager_session_generation:
+                return
+            self._prepare_for_new_serial_session_locked()
             self._counters.disconnects += 1
             self._driver = None
             if self._client is not None and self._state not in {MachineRuntimeState.STOPPING, MachineRuntimeState.DISCONNECTED, MachineRuntimeState.ERROR}:
@@ -591,14 +665,25 @@ class MachineRuntime:
             self._last_error = message
             self._event("warning", f"Arduino degradado: {message}")
 
-    def _handle_controller_packet_from_manager(self, packet: ControllerPacket, generation: int) -> None:
-        with self._lock:
-            if generation != self._serial_generation:
-                return
+    def _handle_controller_packet_from_manager(
+        self,
+        manager_epoch: int,
+        packet: ControllerPacket,
+        generation: int,
+    ) -> None:
         command = self._mapper.map(packet)
-        self._handle_controller_packet(packet, command)
+        with self._lock:
+            if manager_epoch != self._connection_manager_epoch:
+                return
+            if generation != self._manager_session_generation:
+                return
+            self._handle_controller_packet(packet, command)
 
     def connect(self) -> dict[str, Any]:
+        with self._lifecycle_lock:
+            return self._connect_locked()
+
+    def _connect_locked(self) -> dict[str, Any]:
         telemetry_thread: threading.Thread | None = None
         with self._lock:
             if self.config.mode is MachineMode.SIMULATED:
@@ -631,6 +716,8 @@ class MachineRuntime:
                 self._machine = machine
                 self._telemetry = telemetry
                 self._connection_manager = connection_manager
+                self._connection_manager_epoch = connection_manager.manager_epoch
+                self._manager_session_generation = 0
                 self._jog = JogController(client, machine)
                 self._manual = ManualJogController(self._jog, mode=JogMode.FINE)
                 self._state = MachineRuntimeState.DIAGNOSTIC
@@ -673,26 +760,37 @@ class MachineRuntime:
                 telemetry = self._telemetry
                 if self._telemetry_thread is not None:
                     thread_to_join = self._telemetry_thread
+            manager_stop_error: Exception | None = None
             if manager is not None:
-                manager.stop()
+                try:
+                    manager.stop()
+                except Exception as stop_error:
+                    manager_stop_error = stop_error
             if telemetry is not None:
                 telemetry.stop()
             if thread_to_join is not None:
                 thread_to_join.join(timeout=2.0)
             with self._lock:
-                self._connection_manager = None
-                self._driver = None
-                self._serial_thread = None
-                self._client = None
-                self._machine = None
-                self._telemetry = None
-                self._jog = None
-                self._manual = None
-                self._telemetry_thread = None
+                if manager_stop_error is None:
+                    self._connection_manager = None
+                    self._connection_manager_epoch = None
+                    self._manager_session_generation = 0
+                    self._driver = None
+                    self._serial_thread = None
+                    self._client = None
+                    self._machine = None
+                    self._telemetry = None
+                    self._jog = None
+                    self._manual = None
+                    self._telemetry_thread = None
                 self._state = MachineRuntimeState.ERROR
-                self._last_error = str(error)
+                self._last_error = str(manager_stop_error or error)
                 self._last_http_error = str(error)
-                self._event("error", str(error))
+                self._event("error", self._last_error)
+            if manager_stop_error is not None:
+                raise MachineRuntimeError(
+                    "Falló la conexión y el manager Arduino anterior aún conserva ownership serial."
+                ) from manager_stop_error
             raise
 
     def disconnect(self) -> dict[str, Any]:
@@ -700,37 +798,39 @@ class MachineRuntime:
         return self.snapshot()
 
     def reset_physical_session(self) -> dict[str, Any]:
-        with self._lock:
-            active_operation = self._active_operation
-        if active_operation is not None or self._movement_lock.locked():
-            raise MachineRuntimeError(
-                "No se puede reiniciar la sesión física mientras una operación o movimiento conserva el control de la máquina."
-            )
-        lock_acquired = self._movement_lock.acquire(blocking=False)
-        if not lock_acquired:
-            raise MachineRuntimeError("No se pudo reiniciar: movement_lock sigue ocupado.")
-        try:
-            self.stop()
-        finally:
-            self._movement_lock.release()
-        with self._lock:
-            self._active_operation = None
-            self._manual_enabled = False
-            self._diagnostic_input_only = True
-            self._ready_for_jog = False
-            self._previous_command = ControllerCommand()
-            self._last_packet = None
-            self._last_command = ControllerCommand()
-            self._last_packet_at = None
-            self._last_command_text = None
-            self._last_movement = None
-            self._last_error = None
-            self._last_probe_result = None
-            self._probe_requested = False
-            self._initialization_steps = []
-            self._serial_stop = threading.Event()
-            self._state = MachineRuntimeState.DISCONNECTED
-            self._event("warning", "Sesión física reiniciada; Arduino desconectado y paquetes anteriores invalidados.")
+        with self._lifecycle_lock:
+            with self._lock:
+                active_operation = self._active_operation
+                recovery_pending = bool(getattr(self, "_motion_recovery_pending", False))
+            if active_operation is not None or self._movement_lock.locked() or recovery_pending:
+                raise MachineRuntimeError(
+                    "No se puede reiniciar la sesión física mientras una operación o movimiento conserva el control de la máquina, o existe recuperación pendiente."
+                )
+            lock_acquired = self._movement_lock.acquire(blocking=False)
+            if not lock_acquired:
+                raise MachineRuntimeError("No se pudo reiniciar: movement_lock sigue ocupado.")
+            try:
+                self._stop_locked()
+            finally:
+                self._movement_lock.release()
+            with self._lock:
+                self._active_operation = None
+                self._manual_enabled = False
+                self._diagnostic_input_only = True
+                self._ready_for_jog = False
+                self._previous_command = ControllerCommand()
+                self._last_packet = None
+                self._last_command = ControllerCommand()
+                self._last_packet_at = None
+                self._last_command_text = None
+                self._last_movement = None
+                self._last_error = None
+                self._last_probe_result = None
+                self._probe_requested = False
+                self._initialization_steps = []
+                self._serial_stop = threading.Event()
+                self._state = MachineRuntimeState.DISCONNECTED
+                self._event("warning", "Sesión física reiniciada; Arduino desconectado y paquetes anteriores invalidados.")
         return self.snapshot()
 
     def set_diagnostic_mode(self, enabled: bool) -> dict[str, Any]:
@@ -1601,33 +1701,6 @@ class MachineRuntime:
                 "events": [event.__dict__ for event in self._events[-30:]],
             }
 
-    def _serial_loop(self) -> None:
-        if self._driver is not None:
-            self._driver.diagnostics.thread_active = True
-        while not self._serial_stop.is_set():
-            try:
-                if self._driver is None:
-                    time.sleep(0.1)
-                    continue
-                packet = self._driver.read_packet()
-                command = self._mapper.map(packet)
-                self._handle_controller_packet(packet, command)
-            except SerialProtocolError as error:
-                with self._lock:
-                    self._counters.invalid_packets += 1
-                    self._counters.checksum_errors += 1
-                    self._last_error = str(error)
-            except Exception as error:
-                if self._driver is not None:
-                    self._driver.diagnostics.last_exception = str(error)
-                with self._lock:
-                    self._counters.disconnects += 1
-                    self._last_error = str(error)
-                    self._state = MachineRuntimeState.DEGRADED
-                time.sleep(0.25)
-        if self._driver is not None:
-            self._driver.diagnostics.thread_active = False
-
     def _handle_controller_packet(self, packet: ControllerPacket, command: ControllerCommand) -> None:
         with self._lock:
             self._last_packet = packet
@@ -1635,6 +1708,7 @@ class MachineRuntime:
             now = time.monotonic()
             self._last_packet_at = now
             self._counters.valid_packets += 1
+            self._session_valid_packets += 1
             self._packet_sequence += 1
             # ControllerPacket.probe is already the logical contact bit: false=OPEN, true=TRIGGERED.
             # Do not apply active-low inversion again in the runtime.
@@ -1672,7 +1746,7 @@ class MachineRuntime:
                 self._manual_move(command)
                 with self._lock:
                     self._ready_for_jog = False
-        elif packet.direction == "CENTER":
+        elif packet.direction == "CENTER" and not diagnostic_only and manual_enabled:
             with self._lock:
                 self._ready_for_jog = True
         with self._lock:
@@ -2496,10 +2570,14 @@ class MachineRuntime:
         return numeric if numeric > 0 else None
 
     def _arduino_snapshot(self, *, now: float, serial_age: float | None) -> dict[str, Any]:
-        connection_snapshot = self._connection_manager.snapshot() if self._connection_manager is not None else {
+        manager = self._connection_manager
+        connection_snapshot = manager.snapshot() if manager is not None else {
             "state": ArduinoConnectionState.DISCONNECTED,
+            "manager_epoch": self._connection_manager_epoch,
             "generation": self._serial_generation,
+            "session_generation": self._serial_generation,
             "configured_port": self.config.serial_port,
+            "resolved_port": None,
             "connected_port": None,
             "usb_identity": None,
             "known_identity": None,
@@ -2507,12 +2585,21 @@ class MachineRuntime:
             "rejected_devices": 0,
             "retry_wait_s": None,
             "last_error": None,
+            "last_session_error": None,
+            "last_session_error_class": None,
+            "last_session_error_phase": None,
+            "last_session_exception_class": None,
+            "last_session_errno": None,
+            "last_session_failure": None,
+            "session_received_packet": False,
             "thread_alive": False,
+            "thread_id": None,
             "open": False,
         }
+        current_driver = manager.driver if manager is not None else None
         driver_diagnostics = (
-            self._driver.diagnostics.snapshot(now=now)
-            if self._driver is not None
+            current_driver.diagnostics.snapshot(now=now)
+            if current_driver is not None
             else {
                 "port": self.config.serial_port,
                 "baudrate": self.config.serial_baudrate,
@@ -2530,13 +2617,15 @@ class MachineRuntime:
                 "last_valid_packet_age_s": None,
                 "last_invalid_packet_age_s": None,
                 "last_exception": None,
+                "exclusive_requested": False,
+                "exclusive_supported": None,
             }
         )
         frequency = None
         if serial_age not in (None, 0):
             frequency = 1.0 / max(serial_age, 1e-6)
         reason = None
-        if self._driver is None:
+        if current_driver is None:
             reason = "Puerto serie no abierto."
         elif self._serial_thread is None or not self._serial_thread.is_alive():
             reason = "Hilo serial inactivo."
@@ -2549,6 +2638,10 @@ class MachineRuntime:
             **connection_snapshot,
             "connection_state": str(connection_snapshot.get("state") or ArduinoConnectionState.DISCONNECTED),
             "recent": serial_age is not None and serial_age <= self.config.serial_fresh_timeout_s,
+            "manager_generation": int(connection_snapshot.get("generation") or 0),
+            "session_generation": self._serial_generation,
+            "session_valid_packets": self._session_valid_packets,
+            "lifetime_valid_packets": self._counters.valid_packets,
             "valid_packets": self._counters.valid_packets,
             "runtime_invalid_packets": self._counters.invalid_packets,
             "runtime_checksum_errors": self._counters.checksum_errors,

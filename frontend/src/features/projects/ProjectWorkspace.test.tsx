@@ -768,6 +768,96 @@ describe("ProjectWorkspace", () => {
     expect(await screen.findByRole("button", { name: /Reconectar Arduino/i })).toBeDisabled();
   });
 
+  it("habilita Reconectar Arduino durante RETRY_WAIT", async () => {
+    const retryMachine: MachineContextValue = {
+      ...physicalMachine,
+      runtimeState: "DEGRADED",
+      runtime: {
+        ...physicalRuntime,
+        state: "DEGRADED",
+        arduino: {
+          ...physicalRuntime.arduino,
+          connection_state: "RETRY_WAIT",
+          connected_port: null,
+        },
+      },
+    };
+    renderWorkspace(retryMachine);
+    fireEvent.click(screen.getByRole("button", { name: /^Referencia$/i }));
+
+    expect(await screen.findByRole("button", { name: /Reconectar Arduino/i })).toBeEnabled();
+  });
+
+  it.each(["CONNECTING", "DISCOVERING"])(
+    "bloquea Reconectar Arduino durante %s",
+    async (arduinoState) => {
+      const connectingMachine: MachineContextValue = {
+        ...physicalMachine,
+        runtimeState: "DEGRADED",
+        runtime: {
+          ...physicalRuntime,
+          state: "DEGRADED",
+          arduino: { ...physicalRuntime.arduino, connection_state: arduinoState },
+        },
+      };
+      renderWorkspace(connectingMachine);
+      fireEvent.click(screen.getByRole("button", { name: /^Referencia$/i }));
+
+      expect(await screen.findByRole("button", { name: /Reconectar Arduino/i })).toBeDisabled();
+    }
+  );
+
+  it("muestra puerto conectado ninguno cuando la sesión no está confirmada", async () => {
+    const retryMachine: MachineContextValue = {
+      ...physicalMachine,
+      runtimeState: "DEGRADED",
+      runtime: {
+        ...physicalRuntime,
+        state: "DEGRADED",
+        arduino: {
+          ...physicalRuntime.arduino,
+          connection_state: "RETRY_WAIT",
+          resolved_port: "/dev/ttyUSB1",
+          connected_port: null,
+        },
+      },
+    };
+    renderWorkspace(retryMachine);
+    fireEvent.click(screen.getByRole("button", { name: /^Referencia$/i }));
+
+    const label = await screen.findByText("Puerto conectado");
+    expect(label.parentElement).toHaveTextContent("ninguno");
+    expect(label.parentElement).not.toHaveTextContent("/dev/ttyUSB0");
+  });
+
+  it("separa paquetes históricos de frescura de la sesión actual", async () => {
+    const retryMachine: MachineContextValue = {
+      ...physicalMachine,
+      runtimeState: "DEGRADED",
+      runtime: {
+        ...physicalRuntime,
+        state: "DEGRADED",
+        arduino: {
+          ...physicalRuntime.arduino,
+          connection_state: "RETRY_WAIT",
+          connected_port: null,
+          session_valid_packets: 0,
+          lifetime_valid_packets: 19527,
+          last_packet_age_s: null,
+        },
+      },
+    };
+    renderWorkspace(retryMachine);
+    fireEvent.click(screen.getByRole("button", { name: /^Referencia$/i }));
+
+    const sessionPackets = await screen.findByText("Paquetes sesión actual");
+    const lifetimePackets = screen.getByText("Paquetes históricos");
+    const packetAge = screen.getByText("Edad último paquete");
+    expect(sessionPackets.parentElement).toHaveTextContent("0");
+    expect(lifetimePackets.parentElement).toHaveTextContent("19527");
+    expect(packetAge.parentElement).toHaveTextContent("-");
+  });
+
   it("muestra Z de preparación, centro y posición de cambio en referencia física", async () => {
     vi.mocked(physicalMachine.runMachineAction).mockClear();
     renderWorkspace(physicalMachine);

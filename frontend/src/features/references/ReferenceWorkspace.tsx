@@ -161,13 +161,17 @@ export function ReferenceWorkspace({
   const canProbe = machine.isPhysical && ["WAITING_FOR_XY_REFERENCE", "REFERENCE_ARMED", "REFERENCE_CAPTURED"].includes(machine.runtimeState);
   const canGoToReference = machine.isPhysical && Boolean(referenceSession?.referencia_z) && Boolean(selectedOperation) && !runtime?.active_operation;
   const arduinoState = String(arduino.connection_state ?? arduino.state ?? "DISCONNECTED");
-  const reconnectBlocked = !machine.isPhysical || referenceBusy || machine.refreshing || machine.runtimeState === "STOPPING" || Boolean(activeOperation) || runtime?.mode === "SIMULATED" || arduinoState === "CONNECTING" || arduinoState === "RETRY_WAIT" || arduinoState === "DISCOVERING";
+  const reconnectBlocked = !machine.isPhysical || referenceBusy || machine.refreshing || machine.runtimeState === "STOPPING" || Boolean(activeOperation) || runtime?.mode === "SIMULATED" || arduinoState === "CONNECTING" || arduinoState === "DISCOVERING";
   const httpState = String(moonraker.http_state ?? "").toUpperCase();
   const websocketState = String(moonraker.websocket_state ?? moonraker.telemetry_state ?? "").toUpperCase();
   const arduinoStateNormalized = arduinoState.toUpperCase();
+  const usbIdentity = ((arduino.usb_identity ?? arduino.known_identity ?? null) as Record<string, unknown> | null);
   const moonrakerHttpConnected = machine.connected || moonraker.http_connected === true || httpState === "CONNECTED";
   const websocketConnected = moonraker.websocket_connected === true || websocketState === "CONNECTED";
-  const arduinoConnected = arduino.open === true || ["CONNECTED", "OPEN", "READY"].includes(arduinoStateNormalized);
+  const arduinoConnected = ["CONNECTED", "READY"].includes(arduinoStateNormalized);
+  const httpStatusLabel = httpState === "STALE" && moonraker.http_connected === true
+    ? "STALE (conectado; sin consulta HTTP reciente)"
+    : String(moonraker.http_state ?? "DISCONNECTED");
   const runtimeConnected = machine.isPhysical && machine.runtimeState !== "DISCONNECTED" && moonrakerHttpConnected && websocketConnected && machine.klipperReady && arduinoConnected;
   const runtimeReconnectBlocked = !machine.isPhysical || referenceBusy || Boolean(activeOperation) || ["HOMING", "MOVING_TO_SAFE_Z", "MOVING_TO_CENTER", "PROBING_REFERENCE", "MESH_PROBING", "STOPPING"].includes(machine.runtimeState);
   const [connectAttemptStarted, setConnectAttemptStarted] = useState(false);
@@ -233,7 +237,7 @@ export function ReferenceWorkspace({
           {machine.lastError ? <div className="alert alert--warning">{machine.lastError}</div> : null}
           <div className="info-grid info-grid--double compact-grid">
             <div className="metric-box"><span>Estado</span><strong>{machine.runtimeState}</strong></div>
-            <div className="metric-box"><span>Moonraker HTTP</span><strong>{String(moonraker.http_state ?? "DISCONNECTED")}</strong></div>
+            <div className="metric-box"><span>Moonraker HTTP</span><strong>{httpStatusLabel}</strong></div>
             <div className="metric-box"><span>WebSocket</span><strong>{String(moonraker.websocket_state ?? moonraker.telemetry_state ?? "DISCONNECTED")}</strong></div>
             <div className="metric-box"><span>Klipper</span><strong>{String(klipper.state ?? (machine.klipperReady ? "ready" : "no ready"))}</strong></div>
             <div className="metric-box"><span>Homing</span><strong>{machine.homedAxes || "sin ejes"}</strong></div>
@@ -265,12 +269,16 @@ export function ReferenceWorkspace({
             <p className="muted">Use Reconectar Arduino solo para fallos exclusivamente seriales. Para una recuperación general use Reconectar runtime.</p>
             <dl className="definition-grid definition-grid--compact">
               <div><dt>Puerto configurado</dt><dd>{String(arduino.configured_port ?? arduino.port ?? "-")}</dd></div>
-              <div><dt>Puerto conectado</dt><dd>{String(arduino.connected_port ?? arduino.port ?? "-")}</dd></div>
-              <div><dt>USB identidad</dt><dd>{String(((arduino.usb_identity as Record<string, unknown> | null)?.serial_number) ?? ((arduino.usb_identity as Record<string, unknown> | null)?.port) ?? "sin identidad")}</dd></div>
-              <div><dt>Generación</dt><dd>{String(arduino.generation ?? 0)}</dd></div>
+              <div><dt>Puerto resuelto</dt><dd>{String(arduino.resolved_port ?? "ninguno")}</dd></div>
+              <div><dt>Puerto conectado</dt><dd>{String(arduino.connected_port ?? "ninguno")}</dd></div>
+              <div><dt>USB identidad</dt><dd>{String(usbIdentity?.serial_number ?? usbIdentity?.location ?? usbIdentity?.port ?? "sin identidad")}</dd></div>
+              <div><dt>Epoch del manager</dt><dd>{String(arduino.manager_epoch ?? 0)}</dd></div>
+              <div><dt>Generación de sesión</dt><dd>{String(arduino.session_generation ?? arduino.generation ?? 0)}</dd></div>
               <div><dt>Reconexiones</dt><dd>{String(arduino.reconnects ?? 0)}</dd></div>
-              <div><dt>Paquetes válidos</dt><dd>{String(arduino.valid_packets ?? 0)}</dd></div>
+              <div><dt>Paquetes sesión actual</dt><dd>{String(arduino.session_valid_packets ?? 0)}</dd></div>
+              <div><dt>Paquetes históricos</dt><dd>{String(arduino.lifetime_valid_packets ?? arduino.valid_packets ?? 0)}</dd></div>
               <div><dt>Edad último paquete</dt><dd>{typeof arduino.last_packet_age_s === "number" ? `${Number(arduino.last_packet_age_s).toFixed(2)} s` : "-"}</dd></div>
+              <div><dt>Último error serial</dt><dd>{String(arduino.last_session_error_class ?? "-")} · {String(arduino.last_session_error_phase ?? "-")}</dd></div>
               <div><dt>Moonraker HTTP</dt><dd>{typeof moonraker.last_http_observation_age_s === "number" ? `${Number(moonraker.last_http_observation_age_s).toFixed(2)} s` : "sin consulta"}</dd></div>
               <div><dt>Edad último WS</dt><dd>{typeof moonraker.last_websocket_message_age_s === "number" ? `${Number(moonraker.last_websocket_message_age_s).toFixed(2)} s` : "sin mensajes"}</dd></div>
               <div><dt>Edad de posición</dt><dd>{typeof moonraker.last_position_age_s === "number" ? `${Number(moonraker.last_position_age_s).toFixed(2)} s` : "sin posición"}</dd></div>
