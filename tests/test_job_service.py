@@ -5,7 +5,7 @@ import tempfile
 import threading
 import time
 import unittest
-from tests.physical_fakes import FakeWorkflowOwnership
+from tests.physical_fakes import FakeWorkflowOwnership, measure_test_tool_reference
 from pathlib import Path
 
 from klipper_cnc_assistant.application import CompensatedGCodeService, PhysicalMapService, ProjectService, ReferenceSessionService
@@ -295,6 +295,8 @@ class JobServiceTest(unittest.TestCase):
         )
         for index, z in enumerate((5.0, 5.01, 5.02, 5.01, 4.99)):
             self.physical_map_service.record_point(project_id=self.project_id, map_id=payload["map_id"], point_index=index, z_measured=z, attempts=1, duration_s=0.1)
+        measure_test_tool_reference(self.repository, self.physical_map_service, self.runtime,
+                                    self.project_id, first.id, payload["map_id"])
 
     def _create_same_diameter_distinct_tool_project(self, *, legacy_diameter_ids: bool = False) -> tuple[str, str, str]:
         project = self.project_service.create_project(nombre="PCB etiquetas", ancho_mm=80.0, alto_mm=60.0)
@@ -357,6 +359,9 @@ class JobServiceTest(unittest.TestCase):
                 }
             }
             map_file.write_text(json.dumps(map_payload, ensure_ascii=True, indent=2, sort_keys=True), encoding="utf-8")
+        else:
+            measure_test_tool_reference(self.repository, self.physical_map_service, self.runtime,
+                                        project_id, first_operation_id, payload["map_id"])
         return project_id, setup_id, payload["map_id"]
 
     def test_mesh_owner_rejects_job_start_without_upload_or_worker(self):
@@ -492,7 +497,7 @@ class JobServiceTest(unittest.TestCase):
         self.assertEqual([operation.tool_id for operation in operations], ["tool-label-0.8", "tool-label-0.8-mm", "tool-c-1-mm", "tool-d-3-mm", "tool-e-1.2"])
         self.assertEqual(refreshed_plan["summary"]["distinct_tools"], 5)
         self.assertEqual(refreshed_plan["summary"]["tool_changes"], 4)
-        self.assertEqual([item["reference_status"] for item in refreshed_plan["operations"]], ["LISTA", "REQUIERE_REFERENCIA", "REQUIERE_REFERENCIA", "REQUIERE_REFERENCIA", "REQUIERE_REFERENCIA"])
+        self.assertEqual([item["reference_status"] for item in refreshed_plan["operations"]], ["REQUIERE_REFERENCIA"] * 5)
 
     def test_archive_stale_run_rejects_fresh_job_validating_even_if_idle(self) -> None:
         project_id, setup_id, _map_id = self._create_same_diameter_distinct_tool_project()
@@ -513,7 +518,7 @@ class JobServiceTest(unittest.TestCase):
 
         self.assertEqual(plan["summary"]["operations_total"], 4)
         self.assertEqual(plan["summary"]["tool_changes"], 2)
-        self.assertEqual(plan["summary"]["generated_files"], 4)
+        self.assertEqual(plan["summary"]["generated_files"], 2)
         self.assertTrue(plan["manifest_path"])
         self.assertEqual(plan["operations"][0]["tool_name"], "V-bit 30°")
         self.assertEqual(plan["operations"][1]["tool_name"], "V-bit 30°")
@@ -534,6 +539,10 @@ class JobServiceTest(unittest.TestCase):
             face="superior",
         )
         operation = first_plan["operations"][2]
+        preview = self.compensated_service.generate(self.project_id, operation["operation_id"], require_tool_reference=False)
+        self.assertFalse(preview["executable"])
+        operation["generated_file"] = preview["relative_path"]
+        operation["generated_metadata_path"] = preview["metadata_path"]
         generated_path = self.repository.project_dir(self.project_id) / str(operation["generated_file"])
         metadata_path = self.repository.project_dir(self.project_id) / str(operation["generated_metadata_path"])
         first_gcode = generated_path.read_text(encoding="utf-8")
@@ -555,6 +564,9 @@ class JobServiceTest(unittest.TestCase):
             face="superior",
         )
         second_operation = second_plan["operations"][2]
+        second_preview = self.compensated_service.generate(self.project_id, second_operation["operation_id"], require_tool_reference=False)
+        self.assertFalse(second_preview["executable"])
+        second_operation["generated_metadata_path"] = second_preview["metadata_path"]
         second_metadata_path = self.repository.project_dir(self.project_id) / str(second_operation["generated_metadata_path"])
         second_metadata = json.loads(second_metadata_path.read_text(encoding="utf-8"))
         second_map = second_plan["active_map"]
@@ -575,7 +587,8 @@ class JobServiceTest(unittest.TestCase):
     def test_dry_run_uses_compensated_plan_without_adapter_calls(self) -> None:
         self.job_service.generate_project_compensation(project_id=self.project_id, setup_id=self.setup_id, face="superior")
         result = self.job_service.dry_run(project_id=self.project_id, setup_id=self.setup_id, face="superior")
-        self.assertTrue(result["ok"])
+        self.assertFalse(result["ok"])
+        self.assertEqual([item["ok"] for item in result["operations"]], [True, True, False, False])
         self.assertEqual(result["mode"], "DRY_RUN")
         self.assertFalse(result["movement_lock_acquired"])
         self.assertEqual(result["moonraker_commands_sent"], 0)
@@ -880,9 +893,8 @@ class JobServiceTest(unittest.TestCase):
         self.assertEqual(live["moonraker"]["print_state"], "printing")
         self.assertEqual(live["operation"]["execution_status"], "RUNNING")
         self.assertAlmostEqual(live["operation"]["progress"], 0.553, places=3)
-        estimates = [float(item["estimated_time_s"]) for item in persisted["operations"]]
-        expected_weighted_progress = estimates[0] * 0.553 / sum(estimates)
-        self.assertAlmostEqual(live["run"]["overall_progress"], expected_weighted_progress, places=3)
+        self.assertIsNone(persisted["operations"][2]["estimated_time_s"])
+        self.assertAlmostEqual(live["run"]["overall_progress"], 0.553 / 4, places=3)
         self.adapter.status_sequence = [{"state": "cancelled", "progress": 0.553, "is_active": False}]
         self.job_service._threads[(self.project_id, self.setup_id, "superior")].join(timeout=5)  # type: ignore[attr-defined]
 
@@ -1019,10 +1031,15 @@ class JobServiceTest(unittest.TestCase):
             project_id=self.project_id,
             operation_id=operation.id,
             nombre=operation.nombre,
+            tool_id=operation.tool_id,
+            herramienta=operation.herramienta,
             compensation_mode="adaptive_fast",
             max_z_error_mm=operation.max_z_error_mm,
         )
 
+        active_map = self.physical_map_service.get_active(self.project_id, operation.id)
+        measure_test_tool_reference(self.repository, self.physical_map_service, self.runtime,
+                                    self.project_id, operation.id, active_map["map_id"])
         original_build_report = self.compensated_service.build_comparison_report
 
         def force_experimental(project_id: str, operation_id: str) -> dict[str, object]:

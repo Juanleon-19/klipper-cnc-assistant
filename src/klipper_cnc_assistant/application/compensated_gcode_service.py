@@ -113,6 +113,9 @@ class CompensatedGCodeService:
 
         physical_map = self.physical_map_service.get_active(project_id, operation_id)
         self._validate_map_for_operation(physical_map, operation, require_tool_reference=require_tool_reference)
+        reference_token = None
+        if require_tool_reference:
+            reference_token = self.validate_tool_reference(project_id, operation_id, physical_map)
         height_map = self._height_map_from_payload(physical_map["height_map"])
         coverage = build_coverage_report(
             height_map=height_map,
@@ -136,14 +139,14 @@ class CompensatedGCodeService:
         original = self.repository.read_project_file(project_id, operation.archivo_gcode)
         original_hash = hashlib.sha256(original.encode("utf-8")).hexdigest()
         map_hash = hashlib.sha256(json.dumps(physical_map, sort_keys=True).encode("utf-8")).hexdigest()
-        executable = True
-        artifact_kind = "production"
-        artifact_warning: str | None = None
+        executable = require_tool_reference
+        artifact_kind = "production" if require_tool_reference else "preview"
+        artifact_warning: str | None = None if require_tool_reference else "Vista previa; requiere una referencia de herramienta vigente antes de ejecutar."
         adaptive_settings = self._adaptive_clearance_settings(physical_map=physical_map, reference_frame=reference_frame)
         if selected_mode == CompensationMode.ADAPTIVE_FAST:
             audit = self.build_comparison_report(project_id, operation_id)
             adaptive_summary = audit["adaptive_fast"]
-            executable = bool(adaptive_summary.get("eligible"))
+            executable = require_tool_reference and bool(adaptive_summary.get("eligible"))
             artifact_kind = "production" if executable else "experimental"
             artifact_warning = None if executable else str(
                 adaptive_summary.get("error")
@@ -198,6 +201,7 @@ class CompensatedGCodeService:
             "map_id": physical_map["map_id"],
             "map_hash": map_hash,
             "reference_required": physical_map.get("tool_references", {}).get(_tool_key(operation)),
+            "physical_reference_token": reference_token,
             "created_at": _now().isoformat(),
             "placement_revision": setup.placement_revision,
             "original_path": operation.archivo_gcode,
@@ -226,6 +230,8 @@ class CompensatedGCodeService:
             "warnings": preview["warnings"],
             "convention": "machine_xy=pcb_xy+machine_origin; cutting_z=reference_z+surface_delta+programmed_z; safe_z=reference_z+programmed_z",
         }
+        if require_tool_reference:
+            self.validate_tool_reference(project_id, operation_id, expected_token=reference_token)
         (project_dir / relative_path).write_text(output, encoding="utf-8")
         (project_dir / metadata_path).write_text(json.dumps(metadata, ensure_ascii=True, indent=2, sort_keys=True), encoding="utf-8")
         return GeneratedGCodeResult(
@@ -240,6 +246,17 @@ class CompensatedGCodeService:
             "artifact_kind": artifact_kind,
             "warning": artifact_warning,
         }
+
+    def validate_tool_reference(self, project_id, operation_id, physical_map=None, *, expected_token=None):
+        from klipper_cnc_assistant.machine.physical_reference import PhysicalReferenceError, require_current_reference
+        try:
+            return require_current_reference(
+                self.repository, self.machine_runtime, project_id, operation_id,
+                physical_map if physical_map is not None else self.physical_map_service.get_active(project_id, operation_id),
+                expected_token=expected_token,
+            )
+        except PhysicalReferenceError as error:
+            raise ApplicationError(str(error)) from error
 
     def resolve_generated_file(self, project_id: str, relative_path: str) -> Path:
         if not relative_path.startswith("generated/compensated/"):

@@ -977,6 +977,8 @@ class PhysicalMapService:
         homed_axes: str | None,
         session_id: str | None,
         installation_id: str | None = None,
+        runtime: Any | None = None,
+        measurement_context: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         payload = self.get_by_id(project_id, map_id)
         project = self._load_project(project_id)
@@ -993,6 +995,9 @@ class PhysicalMapService:
         refs = dict(updated.get("tool_references") or {})
         key = _tool_key(operation)
         reference = dict(refs.get(key) or {})
+        if runtime is not None and installation_id is None:
+            from uuid import uuid4
+            installation_id = uuid4().hex
         if installation_id:
             reference["installation_id"] = installation_id
             reference["installation_session_id"] = installation_id
@@ -1002,6 +1007,18 @@ class PhysicalMapService:
         reference["probe_method"] = "conductive_probe"
         reference["invalidation_reason"] = None
         reference["valid"] = True
+        if runtime is not None:
+            from klipper_cnc_assistant.machine.physical_reference import PhysicalReferenceToken, reference_context
+            context = reference_context(self.repository, runtime, project_id, operation_id, updated,
+                                        reference.get("installation_id"))
+            if measurement_context is not None and any(
+                context[key] != value for key, value in measurement_context.items()
+                if key != 'reference_context_fingerprint'
+            ):
+                raise ApplicationError('La sesión o contexto físico cambió antes de persistir la medición.')
+            token = PhysicalReferenceToken.measured(context, position).payload()
+            reference["physical_reference_token"] = token
+            reference["measured_at"] = token["measured_at"]
         refs[key] = reference
         updated["tool_references"] = refs
         updated["updated_at"] = _iso_now()

@@ -22,6 +22,7 @@ from klipper_cnc_assistant.moonraker.client import MoonrakerClient, MoonrakerErr
 from klipper_cnc_assistant.storage import JsonProjectRepository
 from klipper_cnc_assistant.machine.physical_ownership import OwnerKind, OwnershipError
 from klipper_cnc_assistant.machine.motion_authorization import MotionRequirements
+from klipper_cnc_assistant.machine.physical_reference import PhysicalReferenceError, reference_context, require_current_reference
 from klipper_cnc_assistant.storage.job_run_store import JobRunStore, JobRunConflict
 from .print_identity import PrintIdentity, PrintIdentityError
 
@@ -256,6 +257,7 @@ class JobService:
         self.reference_service = reference_service
         self.compensated_gcode_service = compensated_gcode_service
         self.runtime = runtime
+        self.compensated_gcode_service.machine_runtime = runtime
         self.time_estimation_service = time_estimation_service
         self.adapter_factory = adapter_factory
         self.mesh_execution_service = mesh_execution_service
@@ -300,7 +302,7 @@ class JobService:
                     project_id,
                     item["operation_id"],
                     mode="legacy",
-                    require_tool_reference=False,
+                    require_tool_reference=item["reference_status"] == "LISTA",
                 )
                 if self.time_estimation_service is not None:
                     estimate = self.time_estimation_service.estimate_project_file(
@@ -362,6 +364,7 @@ class JobService:
         run = prepared
         if run.get("state") not in {"JOB_READY", "JOB_PAUSED", "OPERATION_PAUSED", "TOOL_REFERENCE_READY", "READY_TO_RESUME", "NEXT_OPERATION_READY"}:
             raise ApplicationError(f"El trabajo no puede iniciar desde estado {run.get('state')}.")
+        self._require_run_reference(context, run, next_pending=True)
         self._job_permit(context)
         run["state"] = "JOB_STARTING"
         run["started_at"] = run.get("started_at") or _iso_now()
@@ -800,6 +803,8 @@ class JobService:
             if run["state"] not in {"JOB_PAUSED", "OPERATION_PAUSED", "TOOL_REFERENCE_READY", "READY_TO_RESUME", "NEXT_OPERATION_READY"}:
                 raise ApplicationError(f"No se puede reanudar desde {run['state']}.")
             operation = self.run_store._operation(run)
+            if run["state"] in {"TOOL_REFERENCE_READY", "READY_TO_RESUME", "NEXT_OPERATION_READY"}:
+                self._require_run_reference(context, run, next_pending=True)
             if (run["state"] == "OPERATION_PAUSED" or
                     (run["state"] == "JOB_PAUSED" and operation.get('remote_file')
                      and operation.get('execution_status') != 'COMPLETED')):
@@ -807,6 +812,7 @@ class JobService:
                     return run
                 run["state"] = "OPERATION_RUNNING"
             else:
+                self._require_run_reference(context, run, next_pending=True)
                 run["state"] = "JOB_STARTING"
             run["available_actions"] = ["pause", "cancel"]
             run["next_action"] = "Reanudando trabajo"
@@ -859,7 +865,8 @@ class JobService:
                 operation_id=next_operation["operation_id"],
             )
             next_operation["reference_status"] = "REQUIERE_REFERENCIA"
-            next_operation["installation_revision"] = _utc_now().strftime("%Y%m%d-%H%M%S")
+            from uuid import uuid4
+            next_operation["installation_revision"] = uuid4().hex
             run["state"] = "TOOL_CHANGE_CONFIRMED"
             run["next_action"] = "Moviendo al punto de referencia para calibrar la nueva herramienta"
             run["available_actions"] = ["cancel"]
@@ -869,6 +876,7 @@ class JobService:
         elif action == "continue":
             if run["state"] not in {"TOOL_REFERENCE_READY", "READY_TO_RESUME", "NEXT_OPERATION_READY"}:
                 raise ApplicationError("Continuar solo aplica cuando ya existe referencia Z y hay una siguiente operación preparada.")
+            self._require_run_reference(context, run, next_pending=True)
             run["state"] = "JOB_STARTING"
             run["next_action"] = "Continuando secuencia"
             run["available_actions"] = ["pause", "cancel"]
@@ -885,7 +893,8 @@ class JobService:
         return run
 
     def _identity_failure(self, context, run, error):
-        run.update(state='RECOVERY_REQUIRED', recovery_state='PRINT_IDENTITY_REQUIRED',
+        reference_failure = isinstance(error, ApplicationError) and not isinstance(error, PrintIdentityError)
+        run.update(state='RECOVERY_REQUIRED', recovery_state='PHYSICAL_REFERENCE_REQUIRED' if reference_failure else 'PRINT_IDENTITY_REQUIRED',
                    next_action='Verificar el archivo Moonraker antes de continuar',
                    available_actions=['cancel'], last_watcher_error=str(error))
         self._append_event(run, 'error', str(error))
@@ -898,6 +907,8 @@ class JobService:
             def before_send():
                 self.run_store.validate(self._run_file(context), run)
                 identity.require_match(adapter.print_status(), states=states)
+                if action == 'resume':
+                    self._require_run_reference(context, run)
                 self.runtime.physical_ownership.validate(adapter.permit)
                 self.run_store.validate(self._run_file(context), run)
             getattr(adapter, action)(before_send=before_send)
@@ -953,6 +964,13 @@ class JobService:
         returning_from_tool_change = run["state"] == "TOOL_CHANGE_CONFIRMED"
         operation_index = int(run["current_operation_index"]) + 1 if returning_from_tool_change else int(run.get("current_operation_index", 0) or 0)
         operation_payload = run["operations"][operation_index]
+        if not operation_payload.get('installation_revision'):
+            from uuid import uuid4
+            operation_payload['installation_revision'] = uuid4().hex
+        measurement_context = reference_context(
+            self.repository, self.runtime, context.project_id, operation_payload["operation_id"],
+            active_map, operation_payload.get("installation_revision"),
+        )
         adapter = self._motion_adapter(context)
         reference_x = float(active_map["machine_origin_x"])
         reference_y = float(active_map["machine_origin_y"])
@@ -994,6 +1012,12 @@ class JobService:
             probe_config=active_map.get("probe_config"),
         )
         snapshot = adapter.runtime_snapshot()
+        self.run_store.validate(self._run_file(context), run)
+        current_map = self.physical_map_service.get_active(context.project_id, operation_payload["operation_id"])
+        if reference_context(self.repository, self.runtime, context.project_id,
+                             operation_payload["operation_id"], current_map,
+                             operation_payload.get("installation_revision")) != measurement_context:
+            raise ApplicationError("La sesión o contexto físico cambió durante probe; repita la medición.")
         position = probe.get("probe") or self.runtime.last_probe_position()
         self.reference_service.capture_physical_z_reference(
             context.project_id,
@@ -1001,18 +1025,33 @@ class JobService:
             position=position,
             machine_label=str(snapshot["moonraker"].get("url") or "physical"),
             homed_axes=snapshot["klipper"].get("homed_axes"),
-            session_id=snapshot.get("started_at"),
+            session_id=measurement_context['physical_session_id'],
         )
-        self.physical_map_service.record_tool_reference(
+        measured_map = self.physical_map_service.record_tool_reference(
             project_id=context.project_id,
             map_id=active_map["map_id"],
             operation_id=operation_payload["operation_id"],
             position=position,
             machine_label=str(snapshot["moonraker"].get("url") or "physical"),
             homed_axes=snapshot["klipper"].get("homed_axes"),
-            session_id=snapshot.get("started_at"),
+            session_id=measurement_context['physical_session_id'],
             installation_id=operation_payload.get("installation_revision"),
+            runtime=self.runtime,
+            measurement_context=measurement_context,
         )
+        token = self._require_operation_reference(
+            context, operation_payload, physical_map=measured_map,
+            expected_token=measured_map['tool_references'][operation_payload['tool_key']]['physical_reference_token'],
+        )
+        if any(token.get(key) != measurement_context[key] for key in
+               ("physical_session_id", "ownership_session_id", "physical_config_fingerprint")):
+            self.physical_map_service.invalidate_tool_reference(
+                project_id=context.project_id, map_id=active_map["map_id"],
+                operation_id=operation_payload["operation_id"],
+            )
+            raise ApplicationError("La sesión física cambió al publicar la medición.")
+        operation_payload["physical_reference_token"] = token
+        operation_payload["installation_revision"] = token['installation_id']
         operation_payload["reference_status"] = "LISTA"
         run["current_tool_key"] = operation_payload["tool_key"]
         run["summary"]["tool_changes_completed"] = int(run["summary"].get("tool_changes_completed", 0)) + 1
@@ -1125,6 +1164,8 @@ class JobService:
             self._save_run(context, run)
             return
         adapter = self._motion_adapter(context)
+        reference_token = self._require_operation_reference(context, operation)
+        operation["physical_reference_token"] = reference_token
         operation["execution_status"] = "PREFLIGHT"
         run["current_operation_index"] = index
         run["current_operation_id"] = operation["operation_id"]
@@ -1140,6 +1181,9 @@ class JobService:
             mode="legacy",
             require_tool_reference=True,
         )
+        self._require_operation_reference(context, operation, expected_token=reference_token)
+        if not generated.get('executable'):
+            raise ApplicationError('El artefacto JIT no autoriza ejecución.')
         operation["generated_file"] = generated["relative_path"]
         operation["generated_file_name"] = Path(str(generated["relative_path"])).name
         operation["generated_metadata_path"] = generated.get("metadata_path")
@@ -1203,6 +1247,7 @@ class JobService:
             nonlocal attempt_id
             self.run_store.validate(self._run_file(context), run)
             PrintIdentity.require_idle(adapter.print_status())
+            self._require_operation_reference(context, operation, expected_token=reference_token)
             self.runtime.physical_ownership.validate(adapter.permit)
             authorized = self.run_store.begin_start(self._run_file(context), run,
                                                     operation['operation_id'], identity.filename)
@@ -1632,6 +1677,7 @@ class JobService:
                     "error": None,
                     "progress": 0.0,
                     "installation_revision": None if not item.get("tool_installation_calibration") else item["tool_installation_calibration"].get("installation_id"),
+                    "physical_reference_token": None if not item.get("tool_installation_calibration") else item["tool_installation_calibration"].get("physical_reference_token"),
                 }
                 for item in plan["operations"]
             ],
@@ -1683,8 +1729,33 @@ class JobService:
         return result
 
     def _reference_status(self, active_map: dict[str, Any] | None, operation: OperacionPCB, initial_reference_binding: dict[str, Any] | None = None) -> str:
-        reference = self._reference_entry(active_map, operation, initial_reference_binding)
-        return "LISTA" if isinstance(reference, dict) and reference.get("valid") else "REQUIERE_REFERENCIA"
+        try:
+            require_current_reference(self.repository, self.runtime, active_map["project_id"], operation.id, active_map)
+            return "LISTA"
+        except (PhysicalReferenceError, TypeError, KeyError):
+            return "REQUIERE_REFERENCIA"
+
+    def _require_operation_reference(self, context, operation, *, physical_map=None, expected_token=None):
+        if operation.get('remote_file') and not operation.get('physical_reference_token'):
+            raise ApplicationError('La impresión existente carece de evidencia de referencia de herramienta.')
+        project_operation = self.repository.load_project(context.project_id).get_operation(operation['operation_id'])
+        if project_operation.setup_id != context.setup_id or str(project_operation.cara) != context.face:
+            raise ApplicationError('El montaje/cara de la referencia no coincide con el JobRun.')
+        try:
+            return require_current_reference(
+                self.repository, self.runtime, context.project_id, operation['operation_id'],
+                physical_map if physical_map is not None else self.physical_map_service.get_active(context.project_id, operation['operation_id']),
+                installation_id=operation.get('installation_revision'),
+                expected_token=expected_token if expected_token is not None else operation.get('physical_reference_token'),
+            )
+        except PhysicalReferenceError as error:
+            raise ApplicationError(str(error)) from error
+
+    def _require_run_reference(self, context, run, *, next_pending=False):
+        index = self._next_pending_operation_index(run) if next_pending else int(run['current_operation_index'])
+        if index is None:
+            raise ApplicationError('No existe una operación pendiente con referencia ejecutable.')
+        return self._require_operation_reference(context, run['operations'][index])
 
     def _tool_installation_calibration(self, active_map: dict[str, Any] | None, operation: OperacionPCB, initial_reference_binding: dict[str, Any] | None = None) -> dict[str, Any] | None:
         reference = self._reference_entry(active_map, operation, initial_reference_binding)
@@ -1703,6 +1774,7 @@ class JobService:
             "probe_method": reference.get("probe_method", reference.get("source", "MEASURED")),
             "valid": bool(reference.get("valid")),
             "invalidation_reason": reference.get("invalidation_reason"),
+            "physical_reference_token": reference.get("physical_reference_token"),
         }
 
     def _reference_entry(self, active_map: dict[str, Any] | None, operation: OperacionPCB, initial_reference_binding: dict[str, Any] | None = None) -> dict[str, Any] | None:
@@ -1817,6 +1889,13 @@ class JobService:
     ) -> bool:
         if active_map is None or metadata.get("operation_id") != operation.id:
             return False
+        try:
+            require_current_reference(self.repository, self.runtime, project_id, operation.id, active_map,
+                                      expected_token=metadata.get('physical_reference_token'))
+            if not metadata.get('physical_reference_token'):
+                return False
+        except PhysicalReferenceError:
+            return False
         if metadata.get("map_id") != active_map.get("map_id"):
             return False
         active_map_hash = hashlib.sha256(json.dumps(active_map, sort_keys=True).encode("utf-8")).hexdigest()
@@ -1900,7 +1979,8 @@ class JobService:
                 candidate_remote = self._expected_remote_file(context, str(operation["generated_file"]))
             try:
                 PrintIdentity(candidate_remote).require_match(status)
-            except PrintIdentityError as error:
+                self._require_operation_reference(context, operation)
+            except (PrintIdentityError, ApplicationError) as error:
                 self._identity_failure(context, run, error)
                 return None
             operation["remote_file"] = candidate_remote

@@ -4,6 +4,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from tests.physical_fakes import FakeWorkflowOwnership, measure_test_tool_reference
 
 from klipper_cnc_assistant.application import CompensatedGCodeService, PhysicalMapService, ProjectService, ReferenceSessionService
 from klipper_cnc_assistant.application.physical_map_service import PhysicalMeshConfig
@@ -12,8 +13,9 @@ from klipper_cnc_assistant.execution import JobService
 from klipper_cnc_assistant.storage import JsonProjectRepository
 
 
-class FakeRuntime:
+class FakeRuntime(FakeWorkflowOwnership):
     def __init__(self) -> None:
+        self.init_ownership()
         self.config = type(
             "Config",
             (),
@@ -146,6 +148,9 @@ class JobPlanHotfixTest(unittest.TestCase):
                 attempts=1,
                 duration_s=0.1,
             )
+
+        measure_test_tool_reference(self.repository, self.physical_map_service, self.runtime,
+                                    self.project_id, operation.id, payload["map_id"])
 
     def _generated_metadata_file(self) -> Path:
         plan = self.job_service.get_plan(project_id=self.project_id, setup_id=self.setup_id, face="superior")
