@@ -83,6 +83,7 @@ class MoonrakerTelemetry:
             'method': 'printer.objects.subscribe',
             'params': {
                 'objects': {
+                    'webhooks': ['state'],
                     'motion_report': ['live_position', 'live_velocity'],
                     'toolhead': ['position', 'homed_axes', 'axis_minimum', 'axis_maximum', 'max_velocity', 'max_accel'],
                     'gcode_move': ['gcode_position', 'position', 'absolute_coordinates', 'homing_origin'],
@@ -126,6 +127,9 @@ class MoonrakerTelemetry:
 
     def _process_message(self, data: dict[str, Any]) -> None:
         self._mark_message()
+        if data.get("method") in {"notify_klippy_shutdown", "notify_klippy_disconnected"}:
+            self.machine_state.update_klippy("shutdown")
+            return
         if data.get('id') == 1:
             result = data.get('result')
             if not isinstance(result, dict):
@@ -133,6 +137,8 @@ class MoonrakerTelemetry:
             status = result.get('status')
             if not isinstance(status, dict):
                 return
+            if isinstance(status.get('webhooks'), dict) and 'state' in status['webhooks']:
+                self.machine_state.update_klippy(status['webhooks']['state'])
             motion_report = status.get('motion_report')
             if isinstance(motion_report, dict):
                 self._process_motion_report(motion_report)
@@ -151,6 +157,8 @@ class MoonrakerTelemetry:
         status = params[0]
         if not isinstance(status, dict):
             return
+        if isinstance(status.get('webhooks'), dict) and 'state' in status['webhooks']:
+            self.machine_state.update_klippy(status['webhooks']['state'])
         motion_report = status.get('motion_report')
         if isinstance(motion_report, dict):
             self._process_motion_report(motion_report)

@@ -14,6 +14,7 @@ import httpx
 from klipper_cnc_assistant.api import create_app
 from klipper_cnc_assistant.application.errors import ApplicationError
 from klipper_cnc_assistant.application.physical_map_service import PhysicalMeshConfig
+from tests.physical_fakes import FakeWorkflowOwnership
 
 
 class ApiTest(unittest.TestCase):
@@ -616,8 +617,9 @@ class ApiTest(unittest.TestCase):
             session_id="session",
         )
 
-        class BlockingRuntime:
+        class BlockingRuntime(FakeWorkflowOwnership):
             def __init__(self) -> None:
+                self.init_ownership()
                 self.entered = threading.Event()
                 self.release = threading.Event()
                 self.calls: list[int] = []
@@ -632,7 +634,7 @@ class ApiTest(unittest.TestCase):
                     "serial_age_s": 0.01,
                 }
 
-            def probe_mesh_point(self, point: dict[str, object], probe_config=None, progress_callback=None) -> dict[str, float]:
+            def probe_mesh_point(self, point: dict[str, object], probe_config=None, progress_callback=None, *, permit=None) -> dict[str, float]:
                 self.calls.append(int(point["index"]))
                 self.entered.set()
                 if progress_callback is not None:

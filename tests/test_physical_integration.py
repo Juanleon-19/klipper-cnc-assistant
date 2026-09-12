@@ -5,6 +5,8 @@ import threading
 import tempfile
 import time
 import unittest
+from tests.physical_fakes import FakeWorkflowOwnership
+from klipper_cnc_assistant.machine.physical_ownership import OwnerKind
 from pathlib import Path
 from unittest.mock import patch
 
@@ -65,14 +67,15 @@ class FakeSerial:
         self.is_open = False
 
 
-class FakeMeshRuntime:
+class FakeMeshRuntime(FakeWorkflowOwnership):
     def __init__(self, *, fail_first: bool = False) -> None:
+        self.init_ownership()
         self.calls: list[int] = []
         self.probe_configs: list[dict | None] = []
         self.fail_first = fail_first
         self.failed_once = False
 
-    def probe_mesh_point(self, point: dict, probe_config: dict | None = None, progress_callback=None) -> dict:
+    def probe_mesh_point(self, point: dict, probe_config: dict | None = None, progress_callback=None, *, permit=None) -> dict:
         if progress_callback is not None:
             progress_callback("POINT_MOVE_XY", {"x_mm": point.get("x_machine"), "y_mm": point.get("y_machine")})
         self.calls.append(int(point["index"]))
@@ -93,10 +96,11 @@ class FakeMeshRuntime:
         }
 
 
-class StatefulMeshRuntime:
+class StatefulMeshRuntime(FakeWorkflowOwnership):
     """Stateful mesh runtime used to exercise worker lifecycle without hardware."""
 
     def __init__(self, *, refresh_fails: bool = False, serial_stale: bool = False, unexpected: bool = False, block: bool = False) -> None:
+        self.init_ownership()
         self.position = {"x": 0.0, "y": 0.0, "z": 10.0}
         self.refresh_fails = refresh_fails
         self.serial_stale = serial_stale
@@ -126,7 +130,7 @@ class StatefulMeshRuntime:
         current["safety"] = {"telemetry_recent": True, "serial_recent": not self.serial_stale}
         return current
 
-    def probe_mesh_point(self, point: dict, probe_config: dict | None = None, progress_callback=None) -> dict:
+    def probe_mesh_point(self, point: dict, probe_config: dict | None = None, progress_callback=None, *, permit=None) -> dict:
         if self.movement_lock:
             raise RuntimeError("movement lock leaked")
         self.movement_lock = True
@@ -169,7 +173,7 @@ class BlockingMeshRuntime(StatefulMeshRuntime):
         self.cancelled.set()
         self.release.set()
 
-    def probe_mesh_point(self, point: dict, probe_config: dict | None = None, progress_callback=None) -> dict:
+    def probe_mesh_point(self, point: dict, probe_config: dict | None = None, progress_callback=None, *, permit=None) -> dict:
         point_index = int(point["index"])
         if point_index != self.block_point_index:
             return super().probe_mesh_point(point, probe_config=probe_config, progress_callback=progress_callback)
@@ -206,7 +210,7 @@ class WatchdogMeshRuntime(StatefulMeshRuntime):
         self.cancel_calls += 1
         self.cancelled.set()
 
-    def probe_mesh_point(self, point: dict, probe_config: dict | None = None, progress_callback=None) -> dict:
+    def probe_mesh_point(self, point: dict, probe_config: dict | None = None, progress_callback=None, *, permit=None) -> dict:
         point_index = int(point["index"])
         if point_index == 1:
             return super().probe_mesh_point(point, probe_config=probe_config, progress_callback=progress_callback)
@@ -223,7 +227,7 @@ class CadenceMeshRuntime(StatefulMeshRuntime):
         self.step_started_at: list[float] = []
         self.step_completed_at: list[float] = []
 
-    def probe_mesh_point(self, point: dict, probe_config: dict | None = None, progress_callback=None) -> dict:
+    def probe_mesh_point(self, point: dict, probe_config: dict | None = None, progress_callback=None, *, permit=None) -> dict:
         if self.movement_lock:
             raise RuntimeError("movement lock leaked")
         self.movement_lock = True
@@ -848,6 +852,7 @@ class PhysicalIntegrationTest(unittest.TestCase):
                 return original_save(project_id, operation_id, payload)
 
             with patch.object(repository, "save_height_map_payload", side_effect=counting_save):
+                worker._physical_leases[(project.id, plan["map_id"])] = runtime.physical_ownership.acquire(OwnerKind.MESH, "direct-test")
                 worker._probe_one_point(project.id, plan["map_id"], runtime, point, probe_config=plan.get("probe_config"))
 
             updated = service.get_by_id(project.id, plan["map_id"])
@@ -882,6 +887,7 @@ class PhysicalIntegrationTest(unittest.TestCase):
                 return original_update(**kwargs)
 
             with patch.object(service, "update_execution_state", side_effect=slow_update):
+                worker._physical_leases[(project.id, plan["map_id"])] = runtime.physical_ownership.acquire(OwnerKind.MESH, "direct-test")
                 worker._probe_one_point(project.id, plan["map_id"], runtime, point, probe_config=plan.get("probe_config"))
 
             updated = service.get_by_id(project.id, plan["map_id"])

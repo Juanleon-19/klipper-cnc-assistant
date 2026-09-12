@@ -81,6 +81,7 @@ def discover_machine(
         ),
         max_z_velocity=max_z_velocity,
     )
+    machine.update_toolhead(position=position)
     motion_report = status.get("motion_report")
     if isinstance(motion_report, dict):
         machine.update_motion(

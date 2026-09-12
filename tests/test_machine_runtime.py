@@ -17,7 +17,15 @@ from klipper_cnc_assistant.application.services import ProjectService
 from klipper_cnc_assistant.input.command_mapper import CommandMapper, ControllerCommand
 from klipper_cnc_assistant.input.serial_driver import ControllerPacket
 from klipper_cnc_assistant.machine.config import MachineMode, MachineRuntimeConfig
-from klipper_cnc_assistant.machine.runtime import MachineRuntime, MachineRuntimeError
+from klipper_cnc_assistant.machine.runtime import MachineRuntime as ProductMachineRuntime, MachineRuntimeError
+from tests.physical_fakes import FakePhysicalAccess
+from contextlib import contextmanager
+from klipper_cnc_assistant.machine.physical_ownership import PhysicalMachineCoordinator
+
+
+def MachineRuntime(*args, **kwargs):
+    return ProductMachineRuntime(*args, process_lock=FakePhysicalAccess(), coordinator=PhysicalMachineCoordinator(), **kwargs)
+
 import klipper_cnc_assistant.machine.runtime as runtime_module
 from klipper_cnc_assistant.machine.state import AxisLimits, MachinePosition, MachineState
 from klipper_cnc_assistant.moonraker.client import MoonrakerError, MoonrakerTimeout
@@ -65,6 +73,15 @@ def config(mode: MachineMode = MachineMode.SIMULATED, **overrides) -> MachineRun
     return replace(cfg, **overrides) if overrides else cfg
 
 
+@contextmanager
+def runtime_motion(runtime):
+    context = runtime._begin_operation_context('test_motion')
+    try:
+        yield context
+    finally:
+        runtime._finish_operation_context(context)
+
+
 class FakeDiagnostics:
     thread_active = True
 
@@ -98,6 +115,10 @@ class MotionClient:
     def __init__(self, machine: MachineState) -> None:
         self.machine = machine
         self.scripts: list[str] = []
+
+    def query_objects(self, _objects):
+        return {'webhooks': {'state': 'ready'}, 'print_stats': {'state': 'standby'},
+                'virtual_sdcard': {'is_active': False}, 'motion_report': {'live_velocity': self.machine.live_velocity}}
 
     def send_gcode(self, script: str, *, timeout: float | None = None) -> dict[str, object]:
         self.scripts.append(script)
@@ -325,7 +346,7 @@ class ProbeJogSpy:
         self.machine = machine
         self.calls: list[dict[str, float | str]] = []
 
-    def move_relative(self, axis, distance, speed):
+    def move_relative(self, axis, distance, speed, *, permit=None, motion_context=None):
         snapshot = self.machine.get_motion_snapshot()
         target = float(snapshot[axis]) + float(distance)
         self.calls.append({"axis": axis, "distance": float(distance), "speed": float(speed), "target": target})
@@ -442,6 +463,8 @@ def physical_runtime_with_machine(machine: MachineState, cfg: MachineRuntimeConf
     client = MotionClient(machine)
     runtime._client = client
     runtime._machine = machine
+    machine.bind_physical_session(runtime.physical_ownership.session)
+    machine.update_klippy("ready")
     runtime._driver = type("Driver", (), {"diagnostics": FakeDiagnostics()})()
     runtime._serial_thread = FakeThread()
     runtime._last_packet_at = time.monotonic()
@@ -687,6 +710,7 @@ class MachineRuntimeTest(unittest.TestCase):
     def test_transport_timeout_is_cleared_when_homing_is_confirmed_by_state(self) -> None:
         class TimeoutClient:
             def send_gcode(self, _script: str, *, timeout: float | None = None) -> dict[str, object]:
+                machine.update_motion(live_position=(0, 0, 10), live_velocity=0)
                 raise MoonrakerTimeout("G-code request timed out: prueba")
 
         machine = MachineState(
@@ -702,11 +726,16 @@ class MachineRuntimeTest(unittest.TestCase):
         runtime = MachineRuntime(config(MachineMode.PHYSICAL), discovery=lambda _client: machine)
         runtime._client = TimeoutClient()
         runtime._machine = machine
+        machine.bind_physical_session(runtime.physical_ownership.session)
+        machine.update_klippy("ready")
 
+        context = runtime._begin_operation_context("home_test")
+        runtime._last_packet_at = time.monotonic()
         runtime._send_script("G28", label="homing")
         self.assertIn("G-code request timed out", runtime.snapshot()["last_error"])
 
         runtime._wait_for_homing({"x", "y", "z"})
+        runtime._finish_operation_context(context)
 
         snapshot = runtime.snapshot()
         self.assertIsNone(snapshot["last_error"])
@@ -736,11 +765,15 @@ class MachineRuntimeTest(unittest.TestCase):
         runtime.reset_physical_session()
         runtime._client = client
         runtime._machine = machine
+        machine.bind_physical_session(runtime.physical_ownership.session)
+        machine.update_klippy("ready")
         runtime._driver = type("Driver", (), {"diagnostics": FakeDiagnostics()})()
         runtime._serial_thread = FakeThread()
         runtime._last_packet_at = time.monotonic()
         runtime._last_telemetry_at = time.monotonic()
 
+        runtime._process_lock.acquire()
+        self.assertTrue(runtime.reconcile_physical_ownership())
         snapshot = runtime.initialize()
 
         self.assertEqual(snapshot["state"], "WAITING_FOR_XY_REFERENCE")
@@ -790,6 +823,7 @@ class MachineRuntimeTest(unittest.TestCase):
         runtime._movement_lock.release()
 
         runtime._client = MotionClient(machine)
+        self.assertTrue(runtime.reconcile_physical_ownership())
         retry = runtime.initialize()
 
         self.assertEqual(retry["state"], "WAITING_FOR_XY_REFERENCE")
@@ -801,6 +835,11 @@ class MachineRuntimeTest(unittest.TestCase):
         runtime = MachineRuntime(config(MachineMode.PHYSICAL))
         reference_context = runtime._begin_operation_context("reference_z")
         runtime.cancel_operation()
+        with self.assertRaises(MachineRuntimeError):
+            runtime._begin_operation_context("preparation")
+        runtime._finish_operation_context(reference_context)
+        # Explicit simulated quiescence; cancellation alone was insufficient.
+        runtime.physical_ownership.reconcile_quiescent(expected_session=runtime.physical_ownership.session, quiescent=True)
         preparation_context = runtime._begin_operation_context("preparation")
 
         self.assertTrue(reference_context.cancel_event.is_set())
@@ -969,6 +1008,8 @@ class MachineRuntimeTest(unittest.TestCase):
         runtime = MachineRuntime(config(MachineMode.PHYSICAL), discovery=discovery)
         runtime._client = client
         runtime._machine = machine
+        machine.bind_physical_session(runtime.physical_ownership.session)
+        machine.update_klippy("ready")
         runtime._driver = type("Driver", (), {"diagnostics": FakeDiagnostics()})()
         runtime._serial_thread = FakeThread()
         runtime._last_packet_at = time.monotonic()
@@ -1161,7 +1202,8 @@ class MachineRuntimeTest(unittest.TestCase):
         original_time = runtime_module.time
         runtime_module.time = fake_clock
         try:
-            runtime._move_absolute(z=0.0, label="z_descenso_prueba", feed_mm_min=180.0)
+            with runtime_motion(runtime):
+                runtime._move_absolute(z=0.0, label="z_descenso_prueba", feed_mm_min=180.0)
         finally:
             runtime_module.time = original_time
 
@@ -1188,7 +1230,8 @@ class MachineRuntimeTest(unittest.TestCase):
         original_time = runtime_module.time
         runtime_module.time = fake_clock
         try:
-            runtime._move_absolute(z=115.0, label="z_ruido_prueba", feed_mm_min=180.0)
+            with runtime_motion(runtime):
+                runtime._move_absolute(z=115.0, label="z_ruido_prueba", feed_mm_min=180.0)
         finally:
             runtime_module.time = original_time
 
@@ -1214,7 +1257,8 @@ class MachineRuntimeTest(unittest.TestCase):
         original_time = runtime_module.time
         runtime_module.time = fake_clock
         try:
-            runtime._move_absolute(z=115.0, label="z_away_aislado", feed_mm_min=180.0)
+            with runtime_motion(runtime):
+                runtime._move_absolute(z=115.0, label="z_away_aislado", feed_mm_min=180.0)
         finally:
             runtime_module.time = original_time
 
@@ -1241,7 +1285,8 @@ class MachineRuntimeTest(unittest.TestCase):
         runtime_module.time = fake_clock
         try:
             with self.assertRaisesRegex(MachineRuntimeError, "se aleja del objetivo"):
-                runtime._move_absolute(z=115.0, label="z_away_cinco", feed_mm_min=180.0)
+                with runtime_motion(runtime):
+                    runtime._move_absolute(z=115.0, label="z_away_cinco", feed_mm_min=180.0)
         finally:
             runtime_module.time = original_time
 
@@ -1676,7 +1721,8 @@ class MachineRuntimeTest(unittest.TestCase):
             runtime._last_command = ControllerCommand()
             runtime._wait_for_axis = lambda *args, **kwargs: None
             states: list[str] = []
-            runtime._perform_probe_descent(label="probe", profile=profile_factory(runtime), progress_callback=lambda state, _detail: states.append(state))
+            with runtime_motion(runtime):
+                runtime._perform_probe_descent(label="probe", profile=profile_factory(runtime), progress_callback=lambda state, _detail: states.append(state))
             return states
 
         expected = [
@@ -1785,7 +1831,8 @@ class MachineRuntimeTest(unittest.TestCase):
         )
         runtime, _client = physical_runtime_with_machine(machine)
 
-        runtime._move_absolute(z=115.0, label="frame_check", coordinate_frame="gcode_position")
+        with runtime_motion(runtime):
+            runtime._move_absolute(z=115.0, label="frame_check", coordinate_frame="gcode_position")
 
         self.assertEqual(runtime._last_movement["coordinate_frame"], "gcode_position")
         self.assertEqual(runtime._last_movement["position_source"], "gcode_position")
@@ -2033,3 +2080,109 @@ class ReferencePointMoveTest(unittest.TestCase):
                 runtime.go_to_reference_point(reference_x=42.5, reference_y=67.25)
         finally:
             runtime._movement_lock.release()
+
+
+class PhysicalEmissionSafetyTest(unittest.TestCase):
+    def setUp(self):
+        from klipper_cnc_assistant.jog.controller import JogController
+        from klipper_cnc_assistant.jog.manual import ManualJogController
+        self.machine = MachineState(MachinePosition(10, 10, 10), AxisLimits(0, 100),
+                                    AxisLimits(0, 100), AxisLimits(0, 200), 'xyz', 100, 500)
+        self.runtime, self.client = physical_runtime_with_machine(self.machine)
+        self.runtime._jog = JogController(self.client, self.machine,
+            authorizer=self.runtime._motion_authorizer(), before_send=self.runtime._mark_operation_emission)
+        self.runtime._manual = ManualJogController(self.runtime._jog)
+        self.runtime._manual_enabled = True
+        self.runtime._diagnostic_input_only = False
+        self.runtime._ready_for_jog = True
+
+    def cardinal(self):
+        self.runtime._handle_controller_packet(
+            ControllerPacket(direction='RIGHT', joystick_button=False, external_button=False,
+                             probe=False, x=900, y=512), ControllerCommand(jog_x=1))
+
+    def test_stale_position_fresh_arduino_manual_enabled_has_zero_emissions(self):
+        self.machine.live_position_updated_at = time.monotonic() - 10
+        self.cardinal()
+        self.assertLess(time.monotonic() - self.runtime._last_packet_at, 1)
+        self.assertTrue(self.runtime._manual_enabled)
+        self.assertEqual(len(self.client.scripts), 0)
+        self.assertIn('stale', self.runtime._last_error)
+
+    def test_job_owner_rejects_manual_even_when_all_frames_are_fresh(self):
+        from klipper_cnc_assistant.machine.physical_ownership import OwnerKind
+        self.runtime.physical_ownership.acquire(OwnerKind.JOB_EXECUTION, 'job')
+        self.cardinal()
+        self.assertEqual(len(self.client.scripts), 0)
+        self.assertEqual(self.runtime.physical_ownership.snapshot()['owner_id'], 'job')
+        self.assertFalse(self.runtime._movement_lock.locked())
+
+    def test_coordinated_motion_rejects_stale_consumed_frame(self):
+        self.machine.live_position_updated_at = time.monotonic() - 10
+        self.machine.update_toolhead(position=(10, 10, 10))
+        from klipper_cnc_assistant.machine.motion_authorization import MotionAuthorizationError
+        with runtime_motion(self.runtime):
+            with self.assertRaises(MotionAuthorizationError):
+                self.runtime._move_absolute(x=20, label='stale_test')
+        self.assertEqual(len(self.client.scripts), 0)
+
+    def test_valid_job_child_can_move_and_parent_survives_between_actions(self):
+        from klipper_cnc_assistant.machine.physical_ownership import OwnerKind
+        root = self.runtime.physical_ownership.acquire(OwnerKind.JOB_EXECUTION, 'job')
+        context = self.runtime._begin_motion_operation('tool-change', permit=root)
+        try:
+            self.runtime._move_absolute(z=20, label='delegated_test')
+        finally:
+            self.runtime._finish_operation_context(context)
+            self.runtime._movement_lock.release()
+        self.assertEqual(len(self.client.scripts), 1)
+        self.assertEqual(self.runtime.physical_ownership.snapshot()['kind'], 'JOB_EXECUTION')
+        self.assertEqual(self.runtime.physical_ownership.snapshot()['children'], 0)
+
+    def test_emergency_and_cancel_remain_available_with_stale_frames(self):
+        from klipper_cnc_assistant.machine.physical_ownership import OwnerKind
+        self.runtime.physical_ownership.acquire(OwnerKind.JOB_EXECUTION, 'job')
+        self.machine.live_position_updated_at = time.monotonic() - 10
+        self.machine.update_klippy('shutdown')
+        self.runtime.cancel_operation()
+        self.assertEqual(self.runtime.physical_ownership.snapshot()['kind'], 'RECOVERY')
+        self.runtime.emergency_stop()
+        self.assertEqual(self.client.scripts, ['M112'])  # fake transport only
+
+    def test_missing_process_access_rejects_dispatch(self):
+        self.runtime._process_lock.close()
+        with runtime_motion(self.runtime):
+            with self.assertRaisesRegex(RuntimeError, 'access closed'):
+                self.runtime._move_absolute(x=20, label='no_process_access')
+        self.assertEqual(self.client.scripts, [])
+
+    def test_http_shutdown_invalidates_ready_before_a_later_emission(self):
+        from klipper_cnc_assistant.machine.motion_authorization import MotionAuthorizationError
+        with patch.object(self.client, 'get_server_info', create=True, return_value={'klippy_state': 'shutdown'}):
+            with self.assertRaisesRegex(MachineRuntimeError, 'no está ready'):
+                self.runtime._refresh_machine()
+        with runtime_motion(self.runtime):
+            with self.assertRaises(MotionAuthorizationError):
+                self.runtime._move_absolute(x=20, label='after_shutdown')
+        self.assertEqual(self.client.scripts, [])
+
+    def test_http_position_without_velocity_does_not_refresh_stop_evidence(self):
+        refreshed = MachineState(MachinePosition(10, 10, 10), AxisLimits(0, 100),
+                                 AxisLimits(0, 100), AxisLimits(0, 200), 'xyz', 100, 500)
+        refreshed.update_motion(live_position=(10, 10, 10))
+        self.machine.live_velocity_updated_at = time.monotonic() - 10
+        previous_stamp = self.machine.live_velocity_updated_at
+        self.runtime._discovery = lambda _client: refreshed
+        self.runtime._refresh_machine()
+        snapshot = self.machine.get_motion_snapshot()
+        self.assertEqual(snapshot['velocity_updated_at'], previous_stamp)
+        self.assertLess(snapshot['live_position_age_s'], 1)
+        self.assertGreater(snapshot['velocity_age_s'], 9)
+
+    def test_uncertain_remote_state_cannot_clear_recovery(self):
+        self.runtime.physical_ownership.enter_recovery('previous process')
+        with patch.object(self.client, 'query_objects', return_value={}):
+            self.assertFalse(self.runtime.reconcile_physical_ownership())
+        self.assertEqual(self.runtime.physical_ownership.snapshot()['kind'], 'RECOVERY')
+        self.assertTrue(self.runtime.reconcile_physical_ownership())
+        self.assertEqual(self.runtime.physical_ownership.snapshot()['kind'], 'IDLE')

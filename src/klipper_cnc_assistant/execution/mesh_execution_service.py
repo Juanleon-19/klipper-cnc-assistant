@@ -4,6 +4,8 @@ import logging
 from dataclasses import dataclass
 from queue import Empty, SimpleQueue
 import threading
+import sys
+from klipper_cnc_assistant.machine.physical_ownership import OwnerKind
 import time
 from datetime import datetime, timezone
 from typing import Any
@@ -78,6 +80,7 @@ class MeshExecutionService:
         self._threads: dict[tuple[str, str], threading.Thread] = {}
         self._probe_threads: dict[tuple[str, str], ProbeThreadOwnership] = {}
         self._cancel_requests: dict[tuple[str, str], threading.Event] = {}
+        self._physical_leases = {}
 
     def start_all(self, *, project_id: str, map_id: str, runtime: Any) -> dict[str, Any]:
         guard = self.motion_ownership_snapshot(runtime=runtime, project_id=project_id, map_id=map_id)
@@ -94,6 +97,8 @@ class MeshExecutionService:
                 raise ApplicationError("La malla ya tiene un worker activo y no puede iniciarse dos veces.")
             if any(thread.is_alive() for other_key, thread in self._threads.items() if other_key != key):
                 raise ApplicationError("Ya hay una operación física de malla en curso.")
+            permit = runtime.physical_ownership.acquire(OwnerKind.MESH, f"{project_id}/{map_id}")
+            self._physical_leases[key] = permit
             cancel_request = self._cancel_requests.get(key)
             if cancel_request is None:
                 cancel_request = threading.Event()
@@ -344,7 +349,7 @@ class MeshExecutionService:
                         cleanup_same = True
                     else:
                         cleanup_other = True
-        if should_clear_runtime_pending and hasattr(runtime, "clear_motion_recovery_pending"):
+        if should_clear_runtime_pending and not runtime.physical_ownership.snapshot()["active"] and hasattr(runtime, "clear_motion_recovery_pending"):
             try:
                 runtime.clear_motion_recovery_pending()
             except Exception:
@@ -390,6 +395,8 @@ class MeshExecutionService:
         key = (project_id, map_id)
         with self._lock:
             self._cancel_requests.setdefault(key, threading.Event())
+            if key not in self._physical_leases:
+                self._physical_leases[key] = runtime.physical_ownership.acquire(OwnerKind.MESH, f"{project_id}/{map_id}")
         try:
             while True:
                 with self._lock:
@@ -485,6 +492,8 @@ class MeshExecutionService:
                 self._log_transition("POINT_START", project_id, map_id, point_index=int(point["index"]), target=point, execution=execution)
                 self._probe_one_point(project_id, map_id, runtime, point, probe_config=payload.get("probe_config"))
         finally:
+            if sys.exception() is not None:
+                runtime.physical_ownership.enter_recovery('Worker MESH falló; quiescencia no confirmada.')
             with self._lock:
                 thread = self._threads.get(key)
                 if thread is threading.current_thread():
@@ -513,6 +522,12 @@ class MeshExecutionService:
                     },
                 )
             self.motion_ownership_snapshot(runtime=runtime, project_id=project_id, map_id=map_id)
+            owner = runtime.physical_ownership.snapshot()
+            runtime.physical_ownership.retire(self._physical_leases[key])
+            if not owner['recovery_pending'] and runtime.reconcile_physical_ownership():
+                self._physical_leases.pop(key, None)
+            else:
+                runtime.physical_ownership.enter_recovery('MESH finalizado con recuperación física pendiente.')
             self._log_transition("MESH_WORKER_END", project_id, map_id, execution=execution)
 
     def _probe_one_point(self, project_id: str, map_id: str, runtime: Any, point: dict[str, Any], *, probe_config: dict[str, Any] | None = None) -> None:
@@ -837,11 +852,11 @@ class MeshExecutionService:
         def run_probe() -> None:
             try:
                 try:
-                    result_holder["result"] = runtime.probe_mesh_point(point, probe_config=probe_config, progress_callback=progress_callback)
+                    result_holder["result"] = runtime.probe_mesh_point(point, probe_config=probe_config, progress_callback=progress_callback, permit=self._physical_leases[key])
                 except TypeError as error:
                     if "progress_callback" not in str(error):
                         raise
-                    result_holder["result"] = runtime.probe_mesh_point(point, probe_config=probe_config)
+                    result_holder["result"] = runtime.probe_mesh_point(point, probe_config=probe_config, permit=self._physical_leases[key])
             except BaseException as error:  # pragma: no cover - exercised in tests through holders
                 error_holder["error"] = error
             finally:
@@ -886,6 +901,7 @@ class MeshExecutionService:
                 runtime.cancel_operation()
             except Exception:
                 pass
+            runtime.physical_ownership.enter_recovery("Watchdog MESH: timeout sin quiescencia confirmada.")
             timeout_message = f"Timeout sin progreso durante {elapsed_without_progress:.3f} s en el punto {point_index + 1}/{total_points}."
             self.physical_map_service.update_execution_state(
                 project_id=project_id,

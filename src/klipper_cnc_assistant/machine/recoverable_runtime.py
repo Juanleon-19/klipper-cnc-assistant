@@ -72,7 +72,7 @@ class RecoverableMachineRuntime(MachineRuntime):
         """
         payload = super().snapshot()
         with self._lock:
-            recovery_pending = bool(self._motion_recovery_pending)
+            recovery_pending = bool(self._motion_recovery_pending) or self.physical_ownership.snapshot()["recovery_pending"]
             recovery_reason = self._motion_recovery_reason
             internal_state = self._state
         if recovery_pending and internal_state not in _SEVERE_STATES:
@@ -86,7 +86,7 @@ class RecoverableMachineRuntime(MachineRuntime):
         with self._lock:
             context = self._active_operation
             movement_lock = self._movement_lock.locked()
-            recovery_pending = bool(self._motion_recovery_pending)
+            recovery_pending = bool(self._motion_recovery_pending) or self.physical_ownership.snapshot()["recovery_pending"]
 
             # A mesh state without any remaining ownership is stale, not proof
             # that a movement is still running. Reconcile it here while all
@@ -110,7 +110,9 @@ class RecoverableMachineRuntime(MachineRuntime):
                 }
 
             blocked_by_state = state in _BLOCKING_STATES
-            active = bool(active_operation is not None or movement_lock or recovery_pending or blocked_by_state)
+            ownership = self.physical_ownership.snapshot()
+            recovery_pending = recovery_pending or ownership["recovery_pending"]
+            active = bool(ownership["active"] or active_operation is not None or movement_lock or recovery_pending or blocked_by_state)
 
             if recovery_pending or active_operation is not None or movement_lock:
                 reason = self._motion_recovery_reason or RECOVERY_PENDING_MESSAGE
@@ -120,6 +122,7 @@ class RecoverableMachineRuntime(MachineRuntime):
                 reason = None
 
             return {
+                "physical_owner": ownership,
                 "state": state.value,
                 "active": active,
                 "can_start_motion": not active,
@@ -130,6 +133,7 @@ class RecoverableMachineRuntime(MachineRuntime):
             }
 
     def mark_motion_recovery_pending(self, reason: str | None = None) -> dict[str, Any]:
+        self.physical_ownership.enter_recovery(reason or RECOVERY_PENDING_MESSAGE)
         with self._lock:
             self._motion_recovery_pending = True
             self._motion_recovery_reason = reason or RECOVERY_PENDING_MESSAGE
@@ -137,9 +141,9 @@ class RecoverableMachineRuntime(MachineRuntime):
 
     def clear_motion_recovery_pending(self) -> bool:
         """Clear cleanup state only after real runtime ownership disappeared."""
+        if not self.reconcile_physical_ownership():
+            return False
         with self._lock:
-            if self._active_operation is not None or self._movement_lock.locked():
-                return False
             self._motion_recovery_pending = False
             self._motion_recovery_reason = None
             if self._state is MachineRuntimeState.MESH_PROBING:
@@ -194,6 +198,7 @@ class RecoverableMachineRuntime(MachineRuntime):
         """
         if not preserve_mesh_pause:
             return super().cancel_operation()
+        self.physical_ownership.request_cancel()
 
         with self._lock:
             context = self._active_operation
@@ -211,13 +216,11 @@ class RecoverableMachineRuntime(MachineRuntime):
         point: dict[str, Any],
         probe_config: dict[str, Any] | None = None,
         progress_callback=None,
+        *, permit=None,
     ) -> dict[str, Any]:
         """Probe one mesh point and leave recoverable failures in MESH_PAUSED."""
         self._require_physical_ready()
-        if not self._movement_lock.acquire(blocking=False):
-            raise MachineRuntimeError("Ya hay un movimiento u operación física activa.")
-
-        context = self._begin_operation_context("mesh")
+        context = self._begin_motion_operation("mesh", permit=permit)
         started = time.monotonic()
         try:
             with self._lock:

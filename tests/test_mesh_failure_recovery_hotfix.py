@@ -5,6 +5,10 @@ from types import SimpleNamespace
 import threading
 import time
 import unittest
+from tests.physical_fakes import FakePhysicalAccess, FakeWorkflowOwnership
+from tests.test_motion_authorization import observed_machine
+from tests.test_machine_runtime import MotionClient
+from klipper_cnc_assistant.machine.physical_ownership import PhysicalMachineCoordinator, OwnerKind
 
 from klipper_cnc_assistant.application.errors import ApplicationError
 from klipper_cnc_assistant.execution.recoverable_mesh_execution_service import RecoverableMeshExecutionService
@@ -72,8 +76,9 @@ class _PhysicalMapStub:
         return {"execution": dict(kwargs)}
 
 
-class _BlockingProbeRuntime:
+class _BlockingProbeRuntime(FakeWorkflowOwnership):
     def __init__(self) -> None:
+        self.init_ownership()
         self.config = SimpleNamespace(no_progress_timeout_s=0.01)
         self.release = threading.Event()
         self.started = threading.Event()
@@ -118,13 +123,17 @@ class _BlockingProbeRuntime:
 
 class MeshFailureRecoveryHotfixTest(unittest.TestCase):
     def _runtime(self) -> RecoverableMachineRuntime:
-        runtime = RecoverableMachineRuntime(_config())
+        runtime = RecoverableMachineRuntime(_config(), coordinator=PhysicalMachineCoordinator(), process_lock=FakePhysicalAccess())
         runtime._require_physical_ready = lambda: None
         runtime._assert_safety_for_motion = lambda: None
         runtime._refresh_machine = lambda: None
-        runtime._machine = _Machine()
+        runtime._machine = observed_machine(runtime.physical_ownership)
+        runtime._client = MotionClient(runtime._machine)
         runtime._mesh_safe_z = lambda _machine, probe_config=None: 5.0
-        runtime._move_absolute = lambda **_kwargs: None
+        def fake_move(**_kwargs):
+            runtime._active_operation.emitted = True
+            runtime._active_operation.quiescent = True
+        runtime._move_absolute = fake_move
         runtime._resolve_probe_profile = lambda _probe_config: object()
         runtime._packet_sequence = 1
         return runtime
@@ -147,7 +156,7 @@ class MeshFailureRecoveryHotfixTest(unittest.TestCase):
         self.assertFalse(ownership["movement_lock"])
         self.assertIsNone(ownership["active_operation"])
 
-    def test_recoverable_mesh_failure_pauses_and_releases_runtime_ownership(self) -> None:
+    def test_recoverable_mesh_failure_pauses_and_retains_physical_ownership(self) -> None:
         runtime = self._runtime()
 
         def fail_probe(**_kwargs):
@@ -160,10 +169,12 @@ class MeshFailureRecoveryHotfixTest(unittest.TestCase):
 
         ownership = runtime.motion_ownership_snapshot()
         self.assertEqual(ownership["state"], "MESH_PAUSED")
-        self.assertFalse(ownership["active"])
+        self.assertTrue(ownership["active"])
         self.assertFalse(ownership["movement_lock"])
         self.assertIsNone(ownership["active_operation"])
         self.assertEqual(runtime._last_error, "No se detectó contacto en el punto.")
+        self.assertTrue(runtime.clear_motion_recovery_pending())
+        self.assertTrue(runtime.motion_ownership_snapshot()["can_start_motion"])
 
     def test_severe_runtime_state_is_not_downgraded_to_mesh_paused(self) -> None:
         runtime = self._runtime()
@@ -218,6 +229,7 @@ class MeshFailureRecoveryHotfixTest(unittest.TestCase):
             point_watchdog_grace_s=0.001,
         )
         runtime = _BlockingProbeRuntime()
+        service._physical_leases[("project-1", "map-1")] = runtime.physical_ownership.acquire(OwnerKind.MESH, "test-mesh")
         progress_state = {
             "monotonic": time.monotonic(),
             "iso": "2026-08-09T00:00:00+00:00",
@@ -260,8 +272,13 @@ class MeshFailureRecoveryHotfixTest(unittest.TestCase):
             project_id="project-1",
             map_id="map-1",
         )
-        self.assertFalse(ready["recovery_pending"])
+        self.assertTrue(ready["recovery_pending"])
         self.assertFalse(ready["probe_thread_active"])
+        self.assertFalse(ready["can_start_motion"])
+        runtime.physical_ownership.retire(service._physical_leases[("project-1", "map-1")])
+        self.assertTrue(runtime.reconcile_physical_ownership())
+        self.assertTrue(runtime.clear_motion_recovery_pending())
+        ready = service.motion_ownership_snapshot(runtime=runtime, project_id="project-1", map_id="map-1")
         self.assertTrue(ready["can_start_motion"])
 
     def test_missing_public_runtime_ownership_fails_closed(self) -> None:

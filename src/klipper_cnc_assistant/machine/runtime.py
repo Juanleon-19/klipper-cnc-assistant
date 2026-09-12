@@ -5,6 +5,7 @@ import asyncio
 import json
 import logging
 import math
+import sys
 import threading
 import time
 from dataclasses import dataclass, field, replace
@@ -63,6 +64,11 @@ class MachineHealth(StrEnum):
     OFFLINE = "OFFLINE"
 
 
+from .physical_ownership import PhysicalMachineCoordinator, PhysicalPermit, OwnerKind, OwnershipError
+from .process_lock import PhysicalProcessLock
+from .motion_authorization import MotionAuthorizer, MotionRequirements, MotionAuthorizationError
+
+
 class MachineRuntimeError(RuntimeError):
     pass
 
@@ -74,6 +80,11 @@ class OperationContext:
     generation: int
     cancel_event: threading.Event
     started_at: float
+    permit: PhysicalPermit
+    emitted: bool = False
+    quiescent: bool = False
+    serial_generation: int = 0
+    dispatched_at: float | None = None
 
 
 @dataclass
@@ -186,7 +197,11 @@ class MachineRuntime:
         serial_factory: Callable[..., SerialDriver] = SerialDriver,
         discovery: Callable[[MoonrakerClient], Any] = discover_machine,
         settings_path: Path | None = None,
+        process_lock: PhysicalProcessLock | None = None,
+        coordinator: PhysicalMachineCoordinator | None = None,
     ) -> None:
+        self.physical_ownership = coordinator or PhysicalMachineCoordinator(uncertain=config.mode is MachineMode.PHYSICAL)
+        self._process_lock = process_lock or PhysicalProcessLock(config.physical_machine_id)
         self._settings_path = settings_path
         self.config = self._load_persisted_config(config)
         self._client_factory = client_factory
@@ -480,6 +495,9 @@ class MachineRuntime:
             self._stop_locked()
 
     def _stop_locked(self) -> None:
+        owner = self.physical_ownership.snapshot()
+        if self._active_operation is not None or owner['producer_active'] or owner['children'] or owner['dispatching']:
+            raise MachineRuntimeError('No se puede cerrar acceso físico mientras un owner conserva la máquina.')
         with self._lock:
             self._state = MachineRuntimeState.STOPPING
             self._manual_enabled = False
@@ -520,6 +538,8 @@ class MachineRuntime:
             self._manual = None
             self._state = MachineRuntimeState.DISCONNECTED
             self._event("info", "Runtime detenido.")
+        self.physical_ownership.enter_recovery("Acceso físico cerrado; requiere reconciliación al conectar.")
+        self._process_lock.close()
 
     def current_physical_session_id(self) -> str:
         with self._lock:
@@ -541,6 +561,8 @@ class MachineRuntime:
                     raise MachineRuntimeError("No se puede reconectar Arduino mientras movement_lock está ocupado.")
                 if bool(getattr(self, "_motion_recovery_pending", False)):
                     raise MachineRuntimeError("No se puede reconectar Arduino mientras existe recuperación física pendiente.")
+                if self.physical_ownership.snapshot()["active"]:
+                    raise MachineRuntimeError("No se puede reconectar Arduino mientras otro flujo posee la máquina.")
                 manager = self._connection_manager
                 if manager is None:
                     raise MachineRuntimeError("Arduino no inicializado.")
@@ -658,6 +680,10 @@ class MachineRuntime:
             if generation != self._manager_session_generation:
                 return
             self._prepare_for_new_serial_session_locked()
+            if self.physical_ownership.snapshot()["active"]:
+                self.physical_ownership.request_cancel()
+                if self._active_operation is not None:
+                    self._active_operation.cancel_event.set()
             self._counters.disconnects += 1
             self._driver = None
             if self._client is not None and self._state not in {MachineRuntimeState.STOPPING, MachineRuntimeState.DISCONNECTED, MachineRuntimeState.ERROR}:
@@ -672,12 +698,7 @@ class MachineRuntime:
         generation: int,
     ) -> None:
         command = self._mapper.map(packet)
-        with self._lock:
-            if manager_epoch != self._connection_manager_epoch:
-                return
-            if generation != self._manager_session_generation:
-                return
-            self._handle_controller_packet(packet, command)
+        self._handle_controller_packet(packet, command, serial_session=(manager_epoch, generation))
 
     def connect(self) -> dict[str, Any]:
         with self._lifecycle_lock:
@@ -695,6 +716,7 @@ class MachineRuntime:
                 return self.snapshot()
             self._state = MachineRuntimeState.CONNECTING
         try:
+            self._process_lock.acquire()
             assert self.config.moonraker_url is not None
             assert self.config.moonraker_ws is not None
             client = self._client_factory(self.config.moonraker_url, timeout=self.config.moonraker_request_timeout_s)
@@ -703,6 +725,8 @@ class MachineRuntime:
             if klippy_state != "ready":
                 raise MachineRuntimeError("Klipper no está ready.")
             machine = self._discovery(client)
+            machine.bind_physical_session(self.physical_ownership.session, observed_in_session=True)
+            machine.update_klippy(klippy_state)
             self._attach_telemetry_tracking(machine)
             telemetry = self._telemetry_factory(self.config.moonraker_ws, machine)
             if hasattr(telemetry, "set_snapshot_callback"):
@@ -718,7 +742,7 @@ class MachineRuntime:
                 self._connection_manager = connection_manager
                 self._connection_manager_epoch = connection_manager.manager_epoch
                 self._manager_session_generation = 0
-                self._jog = JogController(client, machine)
+                self._jog = JogController(client, machine, authorizer=self._motion_authorizer(), before_send=self._mark_operation_emission)
                 self._manual = ManualJogController(self._jog, mode=JogMode.FINE)
                 self._state = MachineRuntimeState.DIAGNOSTIC
                 self._diagnostic_input_only = True
@@ -729,6 +753,8 @@ class MachineRuntime:
                 self._last_http_error = None
                 self._last_klippy_state = klippy_state
                 self._last_websocket_error = None
+            # A new process never assumes the previous one left the machine idle.
+            self.reconcile_physical_ownership()
             telemetry_thread.start()
             connection_manager.start()
             deadline = time.monotonic() + max(self.config.serial_startup_delay_s + 1.5, 1.5)
@@ -787,6 +813,8 @@ class MachineRuntime:
                 self._last_error = str(manager_stop_error or error)
                 self._last_http_error = str(error)
                 self._event("error", self._last_error)
+            if manager_stop_error is None:
+                self._process_lock.close()
             if manager_stop_error is not None:
                 raise MachineRuntimeError(
                     "Falló la conexión y el manager Arduino anterior aún conserva ownership serial."
@@ -868,12 +896,10 @@ class MachineRuntime:
             self._event("info", f"Modo de jog cambiado a {selected.name}.")
         return self.snapshot()
 
-    def initialize(self, target_z_mm: float | None = None) -> dict[str, Any]:
+    def initialize(self, target_z_mm: float | None = None, *, permit: PhysicalPermit | None = None) -> dict[str, Any]:
         """Prepare the machine in strict HOME → configured absolute Z → center order."""
         self._require_physical_ready()
-        if not self._movement_lock.acquire(blocking=False):
-            raise MachineRuntimeError("Ya hay un movimiento u operación física activa.")
-        context = self._begin_operation_context("preparation")
+        context = self._begin_motion_operation("preparation", permit=permit)
         started = time.monotonic()
         center_x: float | None = None
         center_y: float | None = None
@@ -893,6 +919,7 @@ class MachineRuntime:
             self._wait_for_serial_recent()
             self._step("verificar_arduino", "ok", "Arduino con paquetes válidos recientes.")
 
+            self._refresh_machine()
             self._send_script("G28", label="homing")
             self._step("homing_solicitado", "ok", "G28 enviado; la finalización se confirma por toolhead.homed_axes y velocidad cero.")
             self._wait_for_homing({"x", "y", "z"})
@@ -963,11 +990,9 @@ class MachineRuntime:
             self._finish_operation_context(context)
             self._movement_lock.release()
 
-    def move_to_tool_change_position(self, tool_change_profile: str = "standard") -> dict[str, Any]:
+    def move_to_tool_change_position(self, tool_change_profile: str = "standard", *, permit: PhysicalPermit | None = None) -> dict[str, Any]:
         self._require_physical_ready()
-        if not self._movement_lock.acquire(blocking=False):
-            raise MachineRuntimeError("Ya hay un movimiento u operación física activa.")
-        context = self._begin_operation_context("tool_change")
+        context = self._begin_motion_operation("tool_change", permit=permit)
         try:
             with self._lock:
                 self._manual_enabled = False
@@ -986,7 +1011,8 @@ class MachineRuntime:
             self._validate_machine_target(x=target_x, y=target_y, label="posición XY de cambio de herramienta")
             self._validate_machine_target(z=work_z, label="Z de trabajo de cambio de herramienta")
             frame_snapshot = machine.get_motion_snapshot()
-            current_gcode, _frame_age = self._frame_position(frame_snapshot, "gcode_position", label="tool_change_clearance")
+            source_context = self._motion_context("tool_change_clearance", frame="gcode_position")
+            current_gcode = dict(zip(("x", "y", "z"), source_context.frame.position))
             current_gcode_z = float(current_gcode["z"])
             configured_clearance = self.tool_change_clearance_z(tool_change_profile)
             clearance_target = self._tool_change_clearance_target(
@@ -998,12 +1024,16 @@ class MachineRuntime:
                 self._move_absolute(
                     z=clearance_target,
                     label="tool_change_clearance_z",
+                    source_context=source_context,
                     feed_mm_min=self.config.tool_change_z_feed_mm_min,
                     coordinate_frame="gcode_position",
                 )
             with self._lock:
                 self._state = MachineRuntimeState.MOVING_TO_CENTER
-            self._move_absolute(x=target_x, y=target_y, label="tool_change_xy", coordinate_frame="gcode_position")
+            if abs(clearance_target - current_gcode_z) <= self.config.settle_tolerance_mm:
+                self._motion_authorizer().revalidate(source_context)
+            self._move_absolute(x=target_x, y=target_y, label="tool_change_xy", coordinate_frame="gcode_position",
+                                dependencies=(source_context,) if abs(clearance_target - current_gcode_z) <= self.config.settle_tolerance_mm else ())
             self._refresh_machine_best_effort()
             xy_snapshot = self._machine.get_motion_snapshot() if self._machine is not None else frame_snapshot
             current_after_xy, _age_after_xy = self._frame_position(xy_snapshot, "gcode_position", label="tool_change_work_z")
@@ -1044,14 +1074,13 @@ class MachineRuntime:
         reference_x: float,
         reference_y: float,
         tool_reference_profile: str = "standard",
+        permit: PhysicalPermit | None = None,
     ) -> dict[str, Any]:
         """Move to a saved CNC reference point without probing or changing it."""
         self._require_physical_ready()
-        if not self._movement_lock.acquire(blocking=False):
-            raise MachineRuntimeError("Ya hay un movimiento u operación física activa.")
         with self._lock:
             preserve_reference_captured = self._state is MachineRuntimeState.REFERENCE_CAPTURED
-        context = self._begin_operation_context("reference_move")
+        context = self._begin_motion_operation("reference_move", permit=permit)
         preparation_z = self.reference_preparation_z()
         try:
             with self._lock:
@@ -1112,6 +1141,7 @@ class MachineRuntime:
         reference_x: float,
         reference_y: float,
         tool_change_profile: str = "standard",
+        permit: PhysicalPermit | None = None,
     ) -> dict[str, Any]:
         """Leave the tool-change station safely, then approach the reference.
 
@@ -1120,9 +1150,7 @@ class MachineRuntime:
         same reference preparation Z before probing.
         """
         self._require_physical_ready()
-        if not self._movement_lock.acquire(blocking=False):
-            raise MachineRuntimeError("Ya hay un movimiento u operación física activa.")
-        context = self._begin_operation_context("tool_change_to_reference")
+        context = self._begin_motion_operation("tool_change_to_reference", permit=permit)
         try:
             with self._lock:
                 self._manual_enabled = False
@@ -1156,11 +1184,8 @@ class MachineRuntime:
                 label="punto de referencia CNC",
             )
             frame_snapshot = machine.get_motion_snapshot()
-            current_gcode, _frame_age = self._frame_position(
-                frame_snapshot,
-                "gcode_position",
-                label="tool_change_exit_clearance",
-            )
+            source_context = self._motion_context("tool_change_exit_clearance", frame="gcode_position")
+            current_gcode = dict(zip(("x", "y", "z"), source_context.frame.position))
             current_gcode_z = float(current_gcode["z"])
             clearance_target = self._tool_change_clearance_target(
                 current_gcode_z,
@@ -1178,6 +1203,7 @@ class MachineRuntime:
                 self._move_absolute(
                     z=clearance_target,
                     label="tool_change_exit_clearance_z",
+                    source_context=source_context,
                     feed_mm_min=self.config.tool_change_z_feed_mm_min,
                     coordinate_frame="gcode_position",
                 )
@@ -1192,6 +1218,7 @@ class MachineRuntime:
                 x=float(reference_x),
                 y=float(reference_y),
                 label="tool_change_to_reference_xy",
+                dependencies=(source_context,) if abs(clearance_target - current_gcode_z) <= self.config.settle_tolerance_mm else (),
                 feed_mm_min=REFERENCE_PREP_XY_FEED_MM_MIN,
             )
             self._event(
@@ -1246,11 +1273,9 @@ class MachineRuntime:
             self._event("info", "REFERENCE_ARMED: pulse el botón externo para sondear la referencia.")
         return self.snapshot()
 
-    def confirm_probe(self) -> dict[str, Any]:
+    def confirm_probe(self, *, permit: PhysicalPermit | None = None) -> dict[str, Any]:
         self._require_physical_ready()
-        if not self._movement_lock.acquire(blocking=False):
-            raise MachineRuntimeError("Ya hay un movimiento u operación física activa.")
-        context = self._begin_operation_context("reference_z")
+        context = self._begin_motion_operation("reference_z", permit=permit)
         try:
             with self._lock:
                 if self._state in {MachineRuntimeState.WAITING_FOR_XY_REFERENCE, MachineRuntimeState.REFERENCE_CAPTURED}:
@@ -1281,11 +1306,9 @@ class MachineRuntime:
             self._finish_operation_context(context)
             self._movement_lock.release()
 
-    def probe_mesh_point(self, point: dict[str, Any], probe_config: dict[str, Any] | None = None, progress_callback: Callable[[str, dict[str, Any]], None] | None = None) -> dict[str, Any]:
+    def probe_mesh_point(self, point: dict[str, Any], probe_config: dict[str, Any] | None = None, progress_callback: Callable[[str, dict[str, Any]], None] | None = None, *, permit: PhysicalPermit | None = None) -> dict[str, Any]:
         self._require_physical_ready()
-        if not self._movement_lock.acquire(blocking=False):
-            raise MachineRuntimeError("Ya hay un movimiento u operación física activa.")
-        context = self._begin_operation_context("mesh")
+        context = self._begin_motion_operation("mesh", permit=permit)
         started = time.monotonic()
         try:
             with self._lock:
@@ -1426,9 +1449,8 @@ class MachineRuntime:
             stage="POINT_VERIFY_PROBE_OPEN",
             progress_callback=progress_callback,
         )
-        start = machine.get_motion_snapshot()
-        start_x = float(start["x"])
-        start_y = float(start["y"])
+        initial_context = self._motion_context(label)
+        start_x, start_y, _ = initial_context.frame.position
         self._notify_probe_progress(
             progress_callback,
             "POINT_DESCENT_STARTED",
@@ -1442,15 +1464,17 @@ class MachineRuntime:
             probe_state = self.get_live_probe_state(require_fresh=True)
             if probe_state["filtered_triggered"]:
                 break
-            snapshot = machine.get_motion_snapshot()
-            current_z = float(snapshot["z"])
+            step_context = self._motion_context("probe_step")
+            current_z = step_context.frame.position[2]
             remaining = current_z - machine.z_limits.minimum
             if remaining <= profile.settle_tolerance_mm:
                 raise MachineRuntimeError("Se alcanzó el límite mínimo Z sin contacto de sonda.")
             step = min(profile.probe_step_mm, remaining)
             command_started_at = time.monotonic()
             self._notify_probe_progress(progress_callback, "POINT_LOWER_STEP", step_mm=step, feed_mm_min=profile.probe_feed_mm_min, command_started_at=command_started_at)
-            result = jog.move_relative("z", -step, profile.probe_speed_mm_s)
+            self._active_operation.emitted = True
+            self._active_operation.quiescent = False
+            result = jog.move_relative("z", -step, profile.probe_speed_mm_s, permit=self._operation_permit(), motion_context=step_context)
             with self._lock:
                 self._last_movement = result
                 self._last_command_text = f"{label}_lower_step"
@@ -1466,8 +1490,8 @@ class MachineRuntime:
                 command_completed_at=command_completed_at,
                 command_duration_s=command_completed_at - command_started_at,
             )
-        snapshot = machine.get_motion_snapshot()
-        contact_z = float(snapshot["z"])
+        retract_context = self._motion_context("probe_retract")
+        contact_z = retract_context.frame.position[2]
         self._notify_probe_progress(progress_callback, "POINT_CONTACT_DETECTED", z_mm=contact_z)
         retract_available = machine.z_limits.maximum - contact_z
         if retract_available <= profile.settle_tolerance_mm:
@@ -1477,7 +1501,9 @@ class MachineRuntime:
         with self._lock:
             retract_sequence = self._packet_sequence
         command_started_at = time.monotonic()
-        result = jog.move_relative("z", retract, profile.retract_speed_mm_s)
+        self._active_operation.emitted = True
+        self._active_operation.quiescent = False
+        result = jog.move_relative("z", retract, profile.retract_speed_mm_s, permit=self._operation_permit(), motion_context=retract_context)
         with self._lock:
             self._last_movement = result
             self._last_command_text = f"{label}_retract"
@@ -1498,30 +1524,117 @@ class MachineRuntime:
             stage="POINT_VERIFY_PROBE_OPEN_AFTER_RETRACT",
             progress_callback=progress_callback,
         )
+        self._active_operation.quiescent = True
         return ProbeResult(x_mm=start_x, y_mm=start_y, z_mm=contact_z, captured_at=_iso_now())
 
-    def _begin_operation_context(self, operation_type: str) -> OperationContext:
+    def _begin_motion_operation(self, operation_type, *, permit=None):
+        if not self._movement_lock.acquire(blocking=False):
+            raise MachineRuntimeError('Ya hay un movimiento u operación física activa.')
+        try:
+            return self._begin_operation_context(operation_type, permit=permit)
+        except BaseException:
+            self._movement_lock.release()
+            raise
+
+    def _mark_operation_emission(self):
+        if self._active_operation is None:
+            raise MachineRuntimeError('Emisión sin operación física.')
+        self._assert_serial_recent()
         with self._lock:
-            previous = self._active_operation
+            context = self._active_operation
+            if context.serial_generation != self._serial_generation:
+                raise MachineRuntimeError('La sesión Arduino cambió antes de la emisión.')
+            if context.operation_type == 'manual_jog' and (not self._manual_enabled or self._diagnostic_input_only):
+                raise MachineRuntimeError('El control manual dejó de estar habilitado.')
+            context.emitted = True
+            context.quiescent = False
+            context.dispatched_at = time.monotonic()
+
+    def _begin_operation_context(self, operation_type: str, *, permit=None) -> OperationContext:
+        try:
             self._operation_generation += 1
-            context = OperationContext(
-                operation_id=f"{operation_type}-{self._operation_generation}",
-                operation_type=operation_type,
-                generation=self._operation_generation,
-                cancel_event=threading.Event(),
-                started_at=time.monotonic(),
-            )
+            operation_id = f"{operation_type}-{self._operation_generation}"
+            lease = (self.physical_ownership.acquire(OwnerKind.RUNTIME_MOTION, operation_id)
+                     if permit is None else self.physical_ownership.delegate(permit, operation_id))
+        except OwnershipError as error:
+            raise MachineRuntimeError(str(error)) from error
+        context = OperationContext(operation_id, operation_type, self._operation_generation,
+                                   threading.Event(), time.monotonic(), lease, serial_generation=self._serial_generation)
+        with self._lock:
             self._active_operation = context
-            if previous is not None:
-                logger.warning("OPERATION_CONTEXT_REPLACED operation_type=%s operation_id=%s previous_id=%s cancel_event_is_set=%s movement_lock=%s worker_alive=%s", operation_type, context.operation_id, previous.operation_id, previous.cancel_event.is_set(), self._movement_lock.locked(), False)
-            logger.info("OPERATION_CONTEXT_CREATED operation_type=%s operation_id=%s generation=%s cancel_event_is_set=%s movement_lock=%s worker_alive=%s", operation_type, context.operation_id, context.generation, False, self._movement_lock.locked(), False)
-            return context
+        return context
 
     def _finish_operation_context(self, context: OperationContext) -> None:
+        uncertain = context.emitted and (sys.exception() is not None or not context.quiescent)
+        if uncertain or context.cancel_event.is_set():
+            if context.permit.root == context.permit.token:
+                self.physical_ownership.retire(context.permit)
+            self.physical_ownership.enter_recovery('Operación terminada sin quiescencia confirmada.', context.permit)
+        try:
+            self.physical_ownership.release(context.permit, quiescent=not context.emitted or context.quiescent)
+        except OwnershipError:
+            # The root deliberately survives timeout, cancellation and failure.
+            pass
         with self._lock:
             if self._active_operation is context:
                 self._active_operation = None
-            logger.info("OPERATION_CONTEXT_FINISHED operation_type=%s operation_id=%s generation=%s cancel_event_is_set=%s movement_lock=%s worker_alive=%s", context.operation_type, context.operation_id, context.generation, context.cancel_event.is_set(), self._movement_lock.locked(), False)
+
+    def _operation_permit(self):
+        context = self._active_operation
+        if context is None:
+            raise MachineRuntimeError('Emisión sin lease explícito de operación.')
+        return context.permit
+
+    def require_physical_access(self):
+        self._process_lock.require_held()
+
+    def _motion_authorizer(self):
+        if self._machine is None:
+            raise MachineRuntimeError('No hay estado físico.')
+        return MotionAuthorizer(self.physical_ownership, self._machine, require_access=self.require_physical_access)
+
+    def _motion_context(self, action, *, frame='live_position', homed_axes='xyz'):
+        return self._motion_authorizer().require_context(
+            self._operation_permit(), action,
+            MotionRequirements(frame, homed_axes, self.config.telemetry_fresh_timeout_s))
+
+    def reconcile_physical_ownership(self) -> bool:
+        """Explicit reconciliation, only after local producers have relinquished leases.
+
+        Fresh HTTP idle/velocity evidence is read without coordinator/state locks.
+        Workflow owners must end their producers before calling this method.
+        """
+        ownership = self.physical_ownership.snapshot()
+        if self._active_operation is not None or self._movement_lock.locked() or ownership['children'] or ownership['producer_active']:
+            return False
+        try:
+            self.require_physical_access()
+            if self._client is None:
+                return False
+            status = self._client.query_objects({'webhooks': ['state'], 'print_stats': ['state'],
+                'virtual_sdcard': ['is_active'], 'motion_report': ['live_velocity']})
+            velocity = float(status['motion_report']['live_velocity'])
+            idle = (status['webhooks']['state'] == 'ready'
+                    and status['print_stats']['state'] in {'standby', 'complete', 'cancelled', 'error'}
+                    and status['virtual_sdcard']['is_active'] is False
+                    and math.isfinite(velocity) and abs(velocity) <= self.config.velocity_tolerance_mm_s)
+            if not idle:
+                return False
+            self.physical_ownership.reconcile_quiescent(expected_session=ownership['session'], expected_revision=ownership['revision'], quiescent=True)
+            if self._machine is not None:
+                self._machine.bind_physical_session(self.physical_ownership.session)
+                self._machine.update_klippy('ready')
+            return True
+        except Exception:
+            return False
+
+    def motion_ownership_snapshot(self):
+        owner = self.physical_ownership.snapshot()
+        active = owner['active'] or self._active_operation is not None or self._movement_lock.locked()
+        return {'state': self._state.value, 'active': active, 'can_start_motion': not active,
+                'active_operation': self._active_operation_snapshot(),
+                'movement_lock': self._movement_lock.locked(), 'recovery_pending': owner['recovery_pending'],
+                'reason': owner['reason'], 'physical_owner': owner}
 
     def _active_operation_snapshot(self) -> dict[str, Any] | None:
         with self._lock:
@@ -1531,6 +1644,7 @@ class MachineRuntime:
             return {"operation_id": context.operation_id, "operation_type": context.operation_type, "generation": context.generation, "cancel_event_is_set": context.cancel_event.is_set()}
 
     def cancel_operation(self) -> dict[str, Any]:
+        self.physical_ownership.request_cancel()
         with self._lock:
             context = self._active_operation
             if context is not None:
@@ -1559,6 +1673,7 @@ class MachineRuntime:
             pass
 
     def emergency_stop(self) -> dict[str, Any]:
+        self.physical_ownership.enter_recovery("Emergencia; estado físico incierto.")
         with self._lock:
             client = self._client
             self._manual_enabled = False
@@ -1566,6 +1681,7 @@ class MachineRuntime:
             self._last_error = "Emergencia solicitada por el operador."
             self._event("error", self._last_error)
         if self.config.mode is MachineMode.PHYSICAL and client is not None:
+            self.require_physical_access()
             client.send_gcode("M112")
             with self._lock:
                 self._last_command_text = "M112"
@@ -1701,8 +1817,10 @@ class MachineRuntime:
                 "events": [event.__dict__ for event in self._events[-30:]],
             }
 
-    def _handle_controller_packet(self, packet: ControllerPacket, command: ControllerCommand) -> None:
+    def _handle_controller_packet(self, packet: ControllerPacket, command: ControllerCommand, *, serial_session=None) -> None:
         with self._lock:
+            if serial_session is not None and serial_session != (self._connection_manager_epoch, self._manager_session_generation):
+                return
             self._last_packet = packet
             self._last_command = command
             now = time.monotonic()
@@ -1743,7 +1861,7 @@ class MachineRuntime:
             with self._lock:
                 can_jog = self._ready_for_jog
             if can_jog:
-                self._manual_move(command)
+                self._manual_move(command, serial_session=serial_session)
                 with self._lock:
                     self._ready_for_jog = False
         elif packet.direction == "CENTER" and not diagnostic_only and manual_enabled:
@@ -1752,28 +1870,36 @@ class MachineRuntime:
         with self._lock:
             self._previous_command = command
 
-    def _manual_move(self, command: ControllerCommand) -> None:
+    def _manual_move(self, command: ControllerCommand, *, serial_session=None) -> None:
         if self._manual is None:
             return
-        if not self._movement_lock.acquire(blocking=False):
-            return
+        context = None
         try:
+            context = self._begin_motion_operation("manual_jog")
+            with self._lock:
+                if serial_session is not None and serial_session != (self._connection_manager_epoch, self._manager_session_generation):
+                    raise MachineRuntimeError("La sesión Arduino cambió antes del jog.")
             self._assert_safety_for_motion()
             if command.jog_x:
-                result = self._manual.move("x", command.jog_x)
+                result = self._manual.move("x", command.jog_x, permit=context.permit)
             elif command.jog_y:
-                result = self._manual.move("y", command.jog_y)
+                result = self._manual.move("y", command.jog_y, permit=context.permit)
             else:
                 return
             with self._lock:
                 self._last_movement = result
                 self._last_command_text = "manual_jog"
-        except (JogError, MachineRuntimeError) as error:
+            context.emitted = True
+            self._wait_for_axis(result["axis"], result["target"], "manual_jog", start_position=result["current_position"])
+            context.quiescent = True
+        except (JogError, MachineRuntimeError, OwnershipError, MotionAuthorizationError, MoonrakerError) as error:
             with self._lock:
                 self._last_error = str(error)
                 self._state = MachineRuntimeState.DEGRADED
         finally:
-            self._movement_lock.release()
+            if context is not None:
+                self._finish_operation_context(context)
+                self._movement_lock.release()
 
     def _require_physical_config(self) -> None:
         if self.config.mode is not MachineMode.PHYSICAL:
@@ -1851,6 +1977,8 @@ class MachineRuntime:
                 server_info = self._client.get_server_info()
                 klippy_state = str(server_info.get("klippy_state") or "unknown")
                 if klippy_state != "ready":
+                    if self._machine is not None:
+                        self._machine.update_klippy(klippy_state)
                     raise MachineRuntimeError("Klipper no está ready.")
             else:
                 klippy_state = "ready"
@@ -1865,6 +1993,7 @@ class MachineRuntime:
             if self._machine is None:
                 self._attach_telemetry_tracking(refreshed)
                 self._machine = refreshed
+                refreshed.bind_physical_session(self.physical_ownership.session, observed_in_session=True)
                 if self._jog is not None:
                     self._jog.machine = refreshed
             else:
@@ -1879,13 +2008,18 @@ class MachineRuntime:
                     max_z_velocity=refreshed.max_z_velocity,
                 )
                 if refreshed.live_position is not None:
-                    self._machine.update_motion(live_position=refreshed.live_position.as_tuple(), live_velocity=refreshed.live_velocity, source=refreshed.live_position_source)
+                    self._machine.update_motion(
+                        live_position=refreshed.live_position.as_tuple(),
+                        live_velocity=refreshed.live_velocity if refreshed.live_velocity_updated_at is not None else None,
+                        source=refreshed.live_position_source,
+                    )
                 self._machine.update_gcode_move(
                     gcode_position=None if refreshed.gcode_position is None else refreshed.gcode_position.as_tuple(),
                     position=None if refreshed.gcode_move_position is None else refreshed.gcode_move_position.as_tuple(),
                     absolute_coordinates=refreshed.absolute_coordinates,
                     homing_origin=None if refreshed.homing_origin is None else refreshed.homing_origin.as_tuple(),
                 )
+            self._machine.update_klippy(klippy_state)
             self._last_telemetry_at = observed_at
             self._last_http_observation_at = observed_at
             self._last_http_error = None
@@ -1954,13 +2088,16 @@ class MachineRuntime:
         machine.update_toolhead = update_toolhead_with_timestamp
         machine.update_gcode_move = update_gcode_move_with_timestamp
 
-    def _send_script(self, script: str, *, label: str) -> None:
+    def _send_script(self, script: str, *, label: str, motion_context=None) -> None:
         if self._client is None:
             raise MachineRuntimeError("Moonraker no está conectado.")
+        if motion_context is None:
+            motion_context = self._motion_context(label, frame=None if script == "G28" else "live_position", homed_axes="" if script == "G28" else "xyz")
         response: dict[str, Any] | None = None
         sent_at = _iso_now()
         try:
-            response = self._client.send_gcode(script, timeout=self.config.moonraker_request_timeout_s)
+            self._mark_operation_emission()
+            response = self._motion_authorizer().dispatch(motion_context, lambda: self._client.send_gcode(script, timeout=self.config.moonraker_request_timeout_s))
         except MoonrakerTimeout as error:
             with self._lock:
                 self._last_error = str(error)
@@ -1972,6 +2109,9 @@ class MachineRuntime:
             self._event("info", f"Comando físico enviado: {label}.")
 
     def _clear_resolved_transport_timeout(self, label: str) -> None:
+        if self._active_operation is not None:
+            self._active_operation.quiescent = True
+            self.physical_ownership.confirm_motion(self._active_operation.permit)
         with self._lock:
             if self._last_error and "G-code request timed out" in self._last_error:
                 self._event("info", f"Timeout HTTP de {label} resuelto por confirmación de estado Klipper.")
@@ -1993,7 +2133,7 @@ class MachineRuntime:
             if value < minimum or value > maximum:
                 raise MachineRuntimeError(f"{label}: {axis}={value:.3f} mm fuera de límites Klipper {minimum:.3f}..{maximum:.3f} mm.")
 
-    def _move_absolute(self, *, x: float | None = None, y: float | None = None, z: float | None = None, label: str, feed_mm_min: float = 600.0, coordinate_frame: str = "live_position") -> None:
+    def _move_absolute(self, *, x: float | None = None, y: float | None = None, z: float | None = None, label: str, feed_mm_min: float = 600.0, coordinate_frame: str = "live_position", source_context=None, dependencies=()) -> None:
         self._raise_if_cancelled()
         self._validate_machine_target(x=x, y=y, z=z, label=label)
         if self._machine is None:
@@ -2001,8 +2141,11 @@ class MachineRuntime:
         requested_feed_mm_min = float(feed_mm_min)
         if requested_feed_mm_min <= 0:
             raise MachineRuntimeError(f"{label}: velocidad inválida F{requested_feed_mm_min:.3f}; debe ser positiva.")
+        motion_context = source_context or self._motion_context(label, frame=coordinate_frame)
+        motion_context = replace(motion_context, dependencies=dependencies)
+        self._motion_authorizer().revalidate(motion_context)
         start_snapshot = self._machine.get_motion_snapshot()
-        start_position, _start_age = self._frame_position(start_snapshot, coordinate_frame, label=label)
+        start_position = dict(zip(("x", "y", "z"), motion_context.frame.position))
         targets = {axis: target for axis, target in (("x", x), ("y", y), ("z", z)) if target is not None}
         effective_feed_mm_min = self._effective_feed_mm_min(targets, requested_feed_mm_min)
         distance_mm = self._target_distance(start_position, targets)
@@ -2050,8 +2193,9 @@ class MachineRuntime:
         }
         with self._lock:
             self._last_movement = movement
-        self._send_script(script, label=label)
+        self._send_script(script, label=label, motion_context=motion_context)
         result = self._wait_for_targets(targets, label, operation_timeout_s=operation_timeout_s, coordinate_frame=coordinate_frame)
+        self._active_operation.quiescent = True
         movement.update(result)
         with self._lock:
             self._last_movement = movement
@@ -2120,7 +2264,7 @@ class MachineRuntime:
         return ({axis: float(raw[axis]) for axis in ("x", "y", "z")}, None if age is None else float(age))
 
     def _frame_is_stale(self, age_s: float | None) -> bool:
-        return age_s is None or age_s > self.config.telemetry_fresh_timeout_s
+        return age_s is None or not math.isfinite(age_s) or age_s < 0 or age_s > self.config.telemetry_fresh_timeout_s
 
     def _frame_offset_z(self, snapshot: dict[str, Any]) -> float | None:
         gcode_move = snapshot.get("gcode_move_position")
@@ -2153,7 +2297,11 @@ class MachineRuntime:
             abs(float(observed_position[axis]) - target) <= self.config.settle_tolerance_mm
             for axis, target in targets.items()
         )
-        stopped = velocity <= self.config.velocity_tolerance_mm_s
+        velocity_age = snapshot.get("velocity_age_s")
+        issued_at = None if self._active_operation is None else self._active_operation.dispatched_at
+        velocity_stamp = snapshot.get("velocity_updated_at")
+        observed_after_send = issued_at is None or (velocity_stamp is not None and velocity_stamp >= issued_at)
+        stopped = observed_after_send and math.isfinite(velocity) and not self._frame_is_stale(velocity_age) and velocity <= self.config.velocity_tolerance_mm_s
         return positions_ok and stopped, positions_ok, velocity, observed_position, frame_age
 
     def _remaining_distance(self, observed_position: dict[str, float], targets: dict[str, float]) -> float:
@@ -2383,7 +2531,7 @@ class MachineRuntime:
             homed = set(str(self._machine.homed_axes))
             missing = required_axes - homed
             velocity = abs(float(snapshot["velocity"]))
-            if not missing and velocity <= self.config.velocity_tolerance_mm_s:
+            if not missing and not self._frame_is_stale(snapshot.get("velocity_age_s")) and math.isfinite(velocity) and velocity <= self.config.velocity_tolerance_mm_s:
                 self._clear_resolved_transport_timeout("homing")
                 return
             time.sleep(0.2)
@@ -2424,13 +2572,7 @@ class MachineRuntime:
     def _position_age_s(self, machine_snapshot: dict[str, Any] | None) -> float | None:
         if machine_snapshot is None:
             return None
-        ages = [
-            machine_snapshot.get("live_position_age_s"),
-            machine_snapshot.get("commanded_position_age_s"),
-            machine_snapshot.get("gcode_position_age_s"),
-        ]
-        numeric = [float(age) for age in ages if isinstance(age, (int, float))]
-        return min(numeric) if numeric else None
+        return machine_snapshot.get("live_position_age_s")
 
     def _position_is_stale(self) -> bool:
         machine_snapshot = None if self._machine is None else self._machine.get_motion_snapshot()
@@ -2513,6 +2655,9 @@ class MachineRuntime:
                 self._refresh_machine_best_effort()
                 last_refresh = now
             snapshot = self._machine.get_motion_snapshot()
+            if self._frame_is_stale(snapshot.get("live_position_age_s")) or self._frame_is_stale(snapshot.get("velocity_age_s")):
+                time.sleep(0.05)
+                continue
             position = float(snapshot[axis])
             velocity = abs(float(snapshot["velocity"]))
             moved_enough = start_position is None or abs(position - start_position) > 0.001
@@ -2528,6 +2673,8 @@ class MachineRuntime:
             time.sleep(0.05)
         self._refresh_machine_best_effort()
         snapshot = self._machine.get_motion_snapshot()
+        if self._frame_is_stale(snapshot.get("live_position_age_s")) or self._frame_is_stale(snapshot.get("velocity_age_s")):
+            raise MachineRuntimeError("No se pudo confirmar finalización con telemetría fresca.")
         position = float(snapshot[axis])
         velocity = abs(float(snapshot["velocity"]))
         moved_enough = start_position is None or abs(position - start_position) > 0.001

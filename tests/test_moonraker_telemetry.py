@@ -120,3 +120,29 @@ class MoonrakerTelemetryTest(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TelemetryFrameFreshnessTest(unittest.TestCase):
+    def test_partial_notifications_only_refresh_their_exact_frame(self):
+        machine = MachineState(MachinePosition(0, 0, 0), AxisLimits(0, 100),
+                               AxisLimits(0, 100), AxisLimits(0, 100), 'xyz', 100, 500)
+        telemetry = MoonrakerTelemetry('ws://unused.invalid', machine)
+        machine.update_motion((1, 2, 3), 0)
+        machine.update_gcode_move(gcode_position=(4, 5, 6))
+        live_stamp = machine.live_position_updated_at
+        gcode_stamp = machine.gcode_position_updated_at
+        telemetry._process_message({'method': 'notify_status_update', 'params': [
+            {'toolhead': {'position': [7, 8, 9]}, 'gcode_move': {'position': [10, 11, 12]}}]})
+        self.assertEqual(machine.live_position_updated_at, live_stamp)
+        self.assertEqual(machine.gcode_position_updated_at, gcode_stamp)
+        self.assertIsNotNone(machine.commanded_position_updated_at)
+        self.assertIsNotNone(machine.gcode_move_position_updated_at)
+        self.assertEqual(machine.authorization_snapshot('live_position').position, (1, 2, 3))
+
+    def test_toolhead_fallback_is_not_a_live_frame(self):
+        machine = MachineState(MachinePosition(0, 0, 0), AxisLimits(0, 100),
+                               AxisLimits(0, 100), AxisLimits(0, 100), 'xyz', 100, 500)
+        machine.update_toolhead(position=(7, 8, 9))
+        self.assertIsNone(machine.authorization_snapshot('live_position').position)
+        self.assertIsNone(machine.get_motion_snapshot()['live_position_age_s'])
+        self.assertEqual(machine.authorization_snapshot('commanded_position').position, (7, 8, 9))

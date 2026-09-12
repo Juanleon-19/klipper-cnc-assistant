@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import time
+import math
+from klipper_cnc_assistant.machine.motion_authorization import MotionRequirements, MotionAuthorizationError
 
 
 class JogError(Exception):
@@ -18,9 +20,12 @@ class JogController:
         self,
         moonraker_client,
         machine_state,
+        *, authorizer=None, before_send=None,
     ):
         self.client = moonraker_client
         self.machine = machine_state
+        self.authorizer = authorizer
+        self.before_send = before_send
 
         self._continuous_x = 0
         self._continuous_y = 0
@@ -68,24 +73,25 @@ class JogController:
         self,
         axis,
         distance,
+        *, motion_context=None,
     ):
         axis = axis.lower()
 
-        current_position = (
-            self._get_axis_position(axis)
-        )
+        if motion_context is None:
+            raise JogError("Cálculo de jog sin contexto físico.")
+        current_position = motion_context.frame.position[self.AXES[axis]]
 
-        limits = self._get_axis_limits(axis)
+        minimum, maximum = motion_context.frame.limits[self.AXES[axis]]
 
         requested_target = (
             current_position + distance
         )
 
         target = max(
-            limits.minimum,
+            minimum,
             min(
                 requested_target,
-                limits.maximum,
+                maximum,
             ),
         )
 
@@ -100,6 +106,7 @@ class JogController:
         axis,
         distance,
         speed,
+        *, permit=None, motion_context=None,
     ):
         axis = axis.lower()
 
@@ -107,6 +114,13 @@ class JogController:
             raise JogError(
                 f"Unsupported axis: {axis}"
             )
+
+        if self.authorizer is None or not all(math.isfinite(v) for v in (distance, speed)):
+            raise JogError('Jog sin autorizador o parámetros no finitos.')
+        context = motion_context or self.authorizer.require_context(permit, 'jog', MotionRequirements(homed_axes=axis))
+        if context.permit != permit or context.requirements.frame != 'live_position':
+            raise MotionAuthorizationError('El permiso/frame de jog no coincide.')
+        self.authorizer.revalidate(context)
 
         if distance == 0:
             raise JogError(
@@ -124,13 +138,13 @@ class JogController:
                 "Jog speed must be positive"
             )
 
-        if speed > self.machine.max_velocity:
+        if not math.isfinite(context.frame.max_velocity) or speed > context.frame.max_velocity:
             raise JogError(
                 "Requested jog speed exceeds "
                 "the machine maximum velocity"
             )
 
-        if self.machine.max_accel <= 0:
+        if not math.isfinite(context.frame.max_accel) or context.frame.max_accel <= 0:
             raise JogError(
                 "Machine maximum acceleration must be positive"
             )
@@ -142,6 +156,7 @@ class JogController:
         ) = self.calculate_target(
             axis,
             distance,
+            motion_context=context,
         )
 
         effective_distance = (
@@ -167,9 +182,12 @@ class JogController:
             "NAME=cnc_assistant_jog"
         )
 
-        self.client.send_gcode(
-            script
-        )
+        def send():
+            if self.before_send is not None:
+                self.before_send()
+            return self.client.send_gcode(script)
+
+        self.authorizer.dispatch(context, send)
 
         return {
             "axis": axis,

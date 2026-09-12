@@ -1,5 +1,6 @@
 from dataclasses import dataclass, field
 from threading import Lock
+from uuid import uuid4
 import time
 
 
@@ -27,6 +28,22 @@ class MachinePosition:
         return (self.x, self.y, self.z)
 
 
+@dataclass(frozen=True)
+class PositionFrame:
+    position: tuple[float, float, float] | None
+    timestamp: float | None
+    age_s: float | None
+    frame: str | None
+    source: str | None
+    homed_axes: str
+    session: str
+    klippy_state: str | None
+    klippy_updated_at: float | None
+    limits: tuple[tuple[float, float], ...]
+    max_velocity: float
+    max_accel: float
+
+
 @dataclass
 class MachineState:
     position: MachinePosition
@@ -52,6 +69,12 @@ class MachineState:
     live_position_source: str | None = None
     commanded_position_updated_at: float | None = None
     gcode_position_updated_at: float | None = None
+
+    gcode_move_position_updated_at: float | None = None
+    physical_session: str = field(default_factory=lambda: uuid4().hex)
+    klippy_state: str | None = None
+    klippy_updated_at: float | None = None
+    live_velocity_updated_at: float | None = None
 
     _lock: Lock = field(default_factory=Lock, repr=False)
 
@@ -100,6 +123,7 @@ class MachineState:
                 self.position = MachinePosition(self.live_position.x, self.live_position.y, self.live_position.z)
             if live_velocity is not None:
                 self.live_velocity = float(live_velocity)
+                self.live_velocity_updated_at = now
 
     def update_gcode_move(self, *, gcode_position=None, position=None, absolute_coordinates=None, homing_origin=None):
         with self._lock:
@@ -109,11 +133,44 @@ class MachineState:
                 self.gcode_position_updated_at = now
             if position is not None:
                 self.gcode_move_position = MachinePosition.from_iterable(position)
-                self.gcode_position_updated_at = now
+                self.gcode_move_position_updated_at = now
             if absolute_coordinates is not None:
                 self.absolute_coordinates = bool(absolute_coordinates)
             if homing_origin is not None:
                 self.homing_origin = MachinePosition.from_iterable(homing_origin)
+
+    def update_klippy(self, state):
+        with self._lock:
+            self.klippy_state = str(state)
+            self.klippy_updated_at = time.monotonic()
+
+    def bind_physical_session(self, session, *, observed_in_session=False):
+        with self._lock:
+            if session != self.physical_session and not observed_in_session:
+                self.live_position_updated_at = None
+                self.commanded_position_updated_at = None
+                self.gcode_position_updated_at = None
+                self.gcode_move_position_updated_at = None
+                self.live_velocity_updated_at = None
+                self.klippy_updated_at = None
+            self.physical_session = session
+
+    def authorization_snapshot(self, frame):
+        sources = {'live_position': 'motion_report.live_position',
+                   'commanded_position': 'toolhead.position',
+                   'gcode_position': 'gcode_move.gcode_position',
+                   'gcode_move_position': 'gcode_move.position'}
+        if frame is not None and frame not in sources:
+            raise ValueError('Frame desconocido.')
+        with self._lock:
+            value = None if frame is None else getattr(self, frame)
+            stamp = None if frame is None else getattr(self, frame + '_updated_at')
+            return PositionFrame(None if value is None else value.as_tuple(), stamp,
+                                 None if stamp is None else time.monotonic() - stamp,
+                                 frame, sources.get(frame), self.homed_axes, self.physical_session,
+                                 self.klippy_state, self.klippy_updated_at,
+                                 tuple((axis.minimum, axis.maximum) for axis in (self.x_limits, self.y_limits, self.z_limits)),
+                                 self.max_velocity, self.max_accel)
 
     def get_motion_snapshot(self):
         with self._lock:
@@ -128,11 +185,14 @@ class MachineState:
                 "velocity": self.live_velocity,
                 "source": "motion_report.live_position" if self.live_position is not None else "toolhead.position",
                 "live_position_source": self.live_position_source,
-                "live_position": {"x": live.x, "y": live.y, "z": live.z},
+                "live_position": None if self.live_position is None else {"x": live.x, "y": live.y, "z": live.z},
                 "commanded_position": None if commanded is None else {"x": commanded.x, "y": commanded.y, "z": commanded.z},
                 "gcode_position": None if gcode is None else {"x": gcode.x, "y": gcode.y, "z": gcode.z},
                 "gcode_move_position": None if gcode_move is None else {"x": gcode_move.x, "y": gcode_move.y, "z": gcode_move.z},
                 "absolute_coordinates": self.absolute_coordinates,
+                "gcode_move_position_age_s": None if self.gcode_move_position_updated_at is None else time.monotonic() - self.gcode_move_position_updated_at,
+                "velocity_updated_at": self.live_velocity_updated_at,
+                "velocity_age_s": None if self.live_velocity_updated_at is None else time.monotonic() - self.live_velocity_updated_at,
                 "homing_origin": None if self.homing_origin is None else {"x": self.homing_origin.x, "y": self.homing_origin.y, "z": self.homing_origin.z},
                 "live_position_age_s": None if self.live_position_updated_at is None else max(0.0, time.monotonic() - self.live_position_updated_at),
                 "commanded_position_age_s": None if self.commanded_position_updated_at is None else max(0.0, time.monotonic() - self.commanded_position_updated_at),

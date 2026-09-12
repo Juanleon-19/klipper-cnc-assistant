@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from klipper_cnc_assistant.machine.physical_ownership import PhysicalMachineCoordinator
 
 from klipper_cnc_assistant.api.machine_routes import build_machine_router
 from klipper_cnc_assistant.machine.config import MachineMode, MachineRuntimeConfig
@@ -50,7 +51,7 @@ def physical_config() -> MachineRuntimeConfig:
 
 class FakeReconnectRuntime(RecoverableMachineRuntime):
     def __init__(self) -> None:
-        super().__init__(physical_config())
+        super().__init__(physical_config(), coordinator=PhysicalMachineCoordinator())
         self.stop_calls = 0
         self.connect_calls = 0
 

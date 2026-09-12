@@ -25,6 +25,7 @@ class ManualJogController:
         self,
         axis,
         direction,
+        *, permit=None,
     ):
         if direction not in (-1, 1):
             raise ValueError(
@@ -43,4 +44,5 @@ class ManualJogController:
             axis=axis,
             distance=distance,
             speed=profile.speed,
+            permit=permit,
         )

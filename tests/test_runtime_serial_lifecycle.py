@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import threading
 import unittest
+from klipper_cnc_assistant.machine.physical_ownership import PhysicalMachineCoordinator
 from unittest.mock import patch
 
 from klipper_cnc_assistant.input.connection_manager import ArduinoConnectionStopError, UsbIdentity
@@ -72,7 +73,7 @@ class RuntimeSerialLifecycleTest(unittest.TestCase):
         stop_error: Exception | None = None,
     ) -> tuple[MachineRuntime, FakeManager]:
         runtime_type = RecoverableMachineRuntime if recoverable else MachineRuntime
-        runtime = runtime_type(physical_config())
+        runtime = runtime_type(physical_config(), coordinator=PhysicalMachineCoordinator())
         manager = FakeManager(epoch, stop_error=stop_error)
         with runtime._lock:
             runtime._client = object()  # type: ignore[assignment]
@@ -80,6 +81,36 @@ class RuntimeSerialLifecycleTest(unittest.TestCase):
             runtime._connection_manager_epoch = epoch
             runtime._state = MachineRuntimeState.DEGRADED
         return runtime, manager
+
+    def test_current_serial_loss_keeps_job_owner_blocked_in_recovery(self):
+        from klipper_cnc_assistant.machine.physical_ownership import OwnerKind, OwnershipError
+        runtime, _manager = self._runtime_with_manager(epoch=2)
+        lease = runtime.physical_ownership.acquire(OwnerKind.JOB_EXECUTION, 'job')
+        runtime._on_serial_session_lost(2, 0, 'unplug', {})
+        self.assertEqual(runtime.physical_ownership.snapshot()['kind'], 'RECOVERY')
+        self.assertEqual(runtime.physical_ownership.snapshot()['owner_id'], 'job')
+        with self.assertRaises(OwnershipError):
+            runtime.physical_ownership.validate(lease)
+
+    def test_packet_motion_does_not_retain_runtime_mutex(self):
+        from klipper_cnc_assistant.input.command_mapper import ControllerCommand
+        runtime, _manager = self._runtime_with_manager(epoch=2)
+        runtime._manual_enabled = True
+        runtime._diagnostic_input_only = False
+        runtime._ready_for_jog = True
+        acquired = []
+        def move(_command, **_kwargs):
+            def check_lock():
+                ok = runtime._lock.acquire(timeout=0.2)
+                acquired.append(ok)
+                if ok:
+                    runtime._lock.release()
+            checker = threading.Thread(target=check_lock)
+            checker.start()
+            checker.join(0.5)
+        with patch.object(runtime._mapper, 'map', return_value=ControllerCommand(jog_x=1)), patch.object(runtime, '_manual_move', side_effect=move):
+            runtime._handle_controller_packet_from_manager(2, PACKET, 0)
+        self.assertEqual(acquired, [True])
 
     def test_late_callbacks_and_packets_from_old_manager_epoch_are_ignored(self) -> None:
         runtime, _manager = self._runtime_with_manager(epoch=2)

@@ -55,6 +55,7 @@ class MachineRuntimeConfig:
     long_tool_change_clearance_z_mm: float = 115.0
     spindle_control_mode: SpindleControlMode = SpindleControlMode.MANUAL
     safe_z_is_configured: bool = False
+    physical_machine_id: str = "default-cnc"
 
     @property
     def mode_label(self) -> str:
@@ -88,6 +89,7 @@ def load_machine_runtime_config() -> MachineRuntimeConfig:
     safe_z_env = os.getenv("MACHINE_SAFE_Z")
     return MachineRuntimeConfig(
         mode=mode,
+        physical_machine_id=os.getenv("PHYSICAL_MACHINE_ID", "default-cnc"),
         spindle_control_mode=SpindleControlMode(os.getenv("SPINDLE_CONTROL_MODE", "manual").strip().lower() or "manual"),
         auto_connect=_env_bool("MACHINE_AUTO_CONNECT", False),
         moonraker_url=os.getenv("MOONRAKER_URL") or None,

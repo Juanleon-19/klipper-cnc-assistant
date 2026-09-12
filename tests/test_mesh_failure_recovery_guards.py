@@ -13,6 +13,10 @@ from klipper_cnc_assistant.machine.recoverable_runtime import (
 from klipper_cnc_assistant.machine.runtime import MachineRuntimeState
 
 from tests.test_mesh_failure_recovery_hotfix import _PhysicalMapStub, _config
+from tests.physical_fakes import FakePhysicalAccess
+from tests.test_machine_runtime import MotionClient
+from tests.test_motion_authorization import observed_machine
+from klipper_cnc_assistant.machine.physical_ownership import PhysicalMachineCoordinator
 
 
 class MeshFailureRecoveryGuardTest(unittest.TestCase):
@@ -28,6 +32,10 @@ class MeshFailureRecoveryGuardTest(unittest.TestCase):
         with self.assertRaises(ApplicationError):
             _reject_active_motion(request)
 
+        self.assertFalse(runtime.clear_motion_recovery_pending())
+        runtime._process_lock = FakePhysicalAccess()
+        runtime._machine = observed_machine(runtime.physical_ownership)
+        runtime._client = MotionClient(runtime._machine)
         self.assertTrue(runtime.clear_motion_recovery_pending())
         self.assertEqual(runtime.snapshot()["state"], "MESH_PAUSED")
         _reject_active_motion(request)

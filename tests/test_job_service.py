@@ -5,6 +5,7 @@ import tempfile
 import threading
 import time
 import unittest
+from tests.physical_fakes import FakeWorkflowOwnership
 from pathlib import Path
 
 from klipper_cnc_assistant.application import CompensatedGCodeService, PhysicalMapService, ProjectService, ReferenceSessionService
@@ -14,8 +15,9 @@ from klipper_cnc_assistant.application.physical_map_service import PhysicalMeshC
 from klipper_cnc_assistant.storage import JsonProjectRepository
 
 
-class FakeRuntime:
+class FakeRuntime(FakeWorkflowOwnership):
     def __init__(self) -> None:
+        self.init_ownership()
         self.config = type("Config", (), {
             "moonraker_url": "http://moonraker.local",
             "moonraker_request_timeout_s": 2.0,
@@ -354,6 +356,15 @@ class JobServiceTest(unittest.TestCase):
             }
             map_file.write_text(json.dumps(map_payload, ensure_ascii=True, indent=2, sort_keys=True), encoding="utf-8")
         return project_id, setup_id, payload["map_id"]
+
+    def test_mesh_owner_rejects_job_start_without_upload_or_worker(self):
+        from klipper_cnc_assistant.machine.physical_ownership import OwnerKind, OwnershipError
+        self.job_service.generate_project_compensation(project_id=self.project_id, setup_id=self.setup_id, face='superior')
+        self.runtime.physical_ownership.acquire(OwnerKind.MESH, 'mesh-between-points')
+        with self.assertRaises(OwnershipError):
+            self.job_service.start_run(project_id=self.project_id, setup_id=self.setup_id, face='superior')
+        self.assertEqual(self.adapter.uploads, [])
+        self.assertEqual(self.job_service._threads, {})
 
     def test_manual_spindle_mode_never_sends_spindle_gcode(self) -> None:
         sent_commands: list[str] = []

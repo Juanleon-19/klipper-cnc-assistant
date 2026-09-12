@@ -20,6 +20,8 @@ from klipper_cnc_assistant.domain import BoardFace, OperacionPCB, ProjectValidat
 from klipper_cnc_assistant.heightmap.coverage import DOMAIN_TOLERANCE_MM, build_coverage_report
 from klipper_cnc_assistant.moonraker.client import MoonrakerClient, MoonrakerError
 from klipper_cnc_assistant.storage import JsonProjectRepository
+from klipper_cnc_assistant.machine.physical_ownership import OwnerKind, OwnershipError
+from klipper_cnc_assistant.machine.motion_authorization import MotionRequirements
 
 
 JOB_PLAN_SCHEMA = "job-plan-v1"
@@ -108,29 +110,36 @@ class MoonrakerJobAdapter:
     def __init__(self, runtime: Any, client_factory: Callable[..., MoonrakerClient] = MoonrakerClient) -> None:
         self.runtime = runtime
         self.client_factory = client_factory
+        self.permit = None
 
     def runtime_snapshot(self) -> dict[str, Any]:
         return self.runtime.snapshot()
 
     def _client(self) -> MoonrakerClient:
-        config = self.runtime.config
-        if not config.moonraker_url:
-            raise ApplicationError("Moonraker no está configurado para ejecución del trabajo.")
-        return self.client_factory(config.moonraker_url, timeout=config.moonraker_request_timeout_s)
+        self.runtime.require_physical_access()
+        client = self.runtime._client
+        if client is None:
+            raise ApplicationError('Runtime físico desconectado.')
+        return client
+
+    def _dispatch(self, action, send):
+        authorizer = self.runtime._motion_authorizer()
+        context = authorizer.require_context(self.permit, action, MotionRequirements())
+        return authorizer.dispatch(context, send)
 
     def upload_file(self, *, local_path: Path, project_id: str, setup_id: str, face: str) -> dict[str, Any]:
         remote_dir = f"klipper-cnc-assistant/{project_id}/{setup_id}/{_safe_face(face)}"
         checksum = hashlib.sha256(local_path.read_bytes()).hexdigest()
-        return self._client().upload_file(local_path=local_path, remote_dir=remote_dir, checksum=checksum, print_file=True)
+        return self._dispatch("job_upload_and_start", lambda: self._client().upload_file(local_path=local_path, remote_dir=remote_dir, checksum=checksum, print_file=True))
 
     def start_file(self, remote_path: str) -> dict[str, Any]:
-        return self._client().start_print(remote_path)
+        return self._dispatch("job_start", lambda: self._client().start_print(remote_path))
 
     def pause(self) -> dict[str, Any]:
         return self._client().pause_print()
 
     def resume(self) -> dict[str, Any]:
-        return self._client().resume_print()
+        return self._dispatch("job_resume", lambda: self._client().resume_print())
 
     def cancel(self) -> dict[str, Any]:
         return self._client().cancel_print()
@@ -181,7 +190,7 @@ class MoonrakerJobAdapter:
         return self._client().send_gcode("M5")
 
     def move_to_tool_change_position(self, *, tool_change_profile: str = "standard") -> dict[str, Any]:
-        return self.runtime.move_to_tool_change_position(tool_change_profile=tool_change_profile)
+        return self.runtime.move_to_tool_change_position(tool_change_profile=tool_change_profile, permit=self.permit)
 
     def move_to_reference_point(
         self,
@@ -191,6 +200,7 @@ class MoonrakerJobAdapter:
         tool_reference_profile: str = "standard",
     ) -> dict[str, Any]:
         return self.runtime.go_to_reference_point(
+            permit=self.permit,
             reference_x=x_mm,
             reference_y=y_mm,
         )
@@ -203,6 +213,7 @@ class MoonrakerJobAdapter:
         tool_change_profile: str = "standard",
     ) -> dict[str, Any]:
         return self.runtime.move_from_tool_change_to_reference_point(
+            permit=self.permit,
             reference_x=x_mm,
             reference_y=y_mm,
             tool_change_profile=tool_change_profile,
@@ -215,7 +226,7 @@ class MoonrakerJobAdapter:
             "x_machine": x_mm,
             "y_machine": y_mm,
         }
-        return self.runtime.probe_mesh_point(point, probe_config=probe_config)
+        return self.runtime.probe_mesh_point(point, probe_config=probe_config, permit=self.permit)
 
 
 class JobService:
@@ -241,6 +252,24 @@ class JobService:
         self.mesh_execution_service = mesh_execution_service
         self._lock = threading.RLock()
         self._threads: dict[tuple[str, str, str], threading.Thread] = {}
+        self._physical_leases = {}
+
+    def _job_permit(self, context):
+        key = (context.project_id, context.setup_id, context.face)
+        with self._lock:
+            permit = self._physical_leases.get(key)
+            if permit is None:
+                permit = self.runtime.physical_ownership.acquire(OwnerKind.JOB_EXECUTION, '/'.join(key))
+                self._physical_leases[key] = permit
+            else:
+                self.runtime.physical_ownership.validate(permit)
+            return permit
+
+    def _motion_adapter(self, context):
+        permit = self._job_permit(context)
+        adapter = self.adapter_factory(self.runtime)
+        adapter.permit = permit
+        return adapter
 
     def get_plan(self, *, project_id: str, setup_id: str, face: str) -> dict[str, Any]:
         context = self._context(project_id, setup_id, face)
@@ -319,6 +348,7 @@ class JobService:
         run = prepared
         if run.get("state") not in {"JOB_READY", "JOB_PAUSED", "OPERATION_PAUSED", "TOOL_REFERENCE_READY", "READY_TO_RESUME", "NEXT_OPERATION_READY"}:
             raise ApplicationError(f"El trabajo no puede iniciar desde estado {run.get('state')}.")
+        self._job_permit(context)
         run["state"] = "JOB_STARTING"
         run["started_at"] = run.get("started_at") or _iso_now()
         run["updated_at"] = _iso_now()
@@ -729,7 +759,7 @@ class JobService:
         run = self._load_run(context)
         if run is None:
             raise NotFoundError("No existe una ejecución de trabajo para este montaje/cara.")
-        adapter = self.adapter_factory(self.runtime)
+        adapter = self.adapter_factory(self.runtime) if action in {"pause", "cancel"} else self._motion_adapter(context)
         if action == "pause":
             try:
                 adapter.pause()
@@ -753,6 +783,7 @@ class JobService:
             self._append_event(run, "info", "Trabajo reanudado por el operador.")
             self._start_worker(context)
         elif action == "cancel":
+            self.runtime.physical_ownership.request_cancel()
             try:
                 adapter.cancel()
             except Exception:
@@ -841,7 +872,7 @@ class JobService:
         returning_from_tool_change = run["state"] == "TOOL_CHANGE_CONFIRMED"
         operation_index = int(run["current_operation_index"]) + 1 if returning_from_tool_change else int(run.get("current_operation_index", 0) or 0)
         operation_payload = run["operations"][operation_index]
-        adapter = self.adapter_factory(self.runtime)
+        adapter = self._motion_adapter(context)
         reference_x = float(active_map["machine_origin_x"])
         reference_y = float(active_map["machine_origin_y"])
         tool_reference_profile = str(operation_payload.get("tool_reference_profile") or "standard")
@@ -915,6 +946,7 @@ class JobService:
         self._save_run(context, run)
 
     def _start_worker(self, context: JobContext) -> None:
+        self._job_permit(context)
         key = (context.project_id, context.setup_id, context.face)
         with self._lock:
             thread = self._threads.get(key)
@@ -947,6 +979,7 @@ class JobService:
                         continue
                     return
             except Exception as error:
+                self.runtime.physical_ownership.enter_recovery("Fallo del supervisor JOB; estado físico incierto.")
                 current = self._load_run(context)
                 if current is not None:
                     current["state"] = "JOB_ERROR"
@@ -958,6 +991,16 @@ class JobService:
                     self._append_event(current, "error", f"Fallo del supervisor: {error}")
                     self._save_run(context, current)
         finally:
+            current = self._load_run(context)
+            if current is None or current.get('state') in RUN_TERMINAL_STATES:
+                permit = self._physical_leases.get(key)
+                if permit is not None:
+                    self.runtime.physical_ownership.retire(permit)
+                if current is not None and current.get('state') == 'JOB_COMPLETE':
+                    if self.runtime.reconcile_physical_ownership():
+                        self._physical_leases.pop(key, None)
+                else:
+                    self.runtime.physical_ownership.enter_recovery('JOB terminado sin cierre físico confirmado.')
             with self._lock:
                 existing = self._threads.get(key)
                 if existing is threading.current_thread():
@@ -990,7 +1033,7 @@ class JobService:
             self._append_event(run, "warning", f"La operación {operation['name']} requiere una referencia Z vigente antes de ejecutar.")
             self._save_run(context, run)
             return
-        adapter = self.adapter_factory(self.runtime)
+        adapter = self._motion_adapter(context)
         operation["execution_status"] = "PREFLIGHT"
         run["current_operation_index"] = index
         run["current_operation_id"] = operation["operation_id"]
@@ -1193,7 +1236,7 @@ class JobService:
         self._save_run(context, run)
 
     def _perform_tool_change_transition(self, context: JobContext, run: dict[str, Any]) -> None:
-        adapter = self.adapter_factory(self.runtime)
+        adapter = self._motion_adapter(context)
         current_index = int(run.get("current_operation_index", 0) or 0)
         next_index = current_index + 1
         if next_index >= len(run.get("operations") or []):
