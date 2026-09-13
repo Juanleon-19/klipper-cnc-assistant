@@ -113,13 +113,14 @@ class JsonProjectRepository:
         path = self.project_dir(project_id) / "project.json"
         if not path.exists():
             raise FileNotFoundError(f"El proyecto '{project_id}' no existe.")
-        with storage_lock(path):
-            payload = json.loads(path.read_text(encoding="utf-8"))
-            project = self._deserialize_project(payload)
-            remember_snapshot(path, self._serialize_project(project))
-            if self._needs_project_migration(payload):
-                project = self.save_project(project)
-            return project
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        project = self._deserialize_project(payload)
+        remember_snapshot(path, self._serialize_project(project))
+        return project
+
+    def migrate_project(self, project_id: str) -> ProyectoPCB:
+        """Explicit compatible normalization, using the safe write authority."""
+        return self.save_project(self.load_project(project_id))
 
     def _needs_project_migration(self, payload: dict) -> bool:
         return (
@@ -714,7 +715,6 @@ class JsonProjectRepository:
         operation_id: str,
     ) -> Path:
         project_dir = self.project_dir(project_id)
-        self._ensure_project_layout(project_dir)
         relative = Path("maps") / operation_id / "height_map.json"
         if relative.is_absolute() or ".." in relative.parts:
             raise RuntimeError("La ruta del mapa sale del directorio del proyecto.")

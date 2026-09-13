@@ -652,12 +652,12 @@ class PhysicalMapService:
             try:
                 active = self.get_by_id(project_id, setup.active_map_id)
                 if self._payload_matches_setup_face(active, operation):
-                    return self._ensure_completed_map_finalized(project_id, active)
+                    return active
             except Exception:
                 pass
         payload = self._latest_surface_map(project_id, operation)
         if payload is not None:
-            return self._decorate_execution_payload(self._ensure_completed_map_finalized(project_id, payload))
+            return self._decorate_execution_payload(payload)
         legacy = self._latest_legacy_tool_map(project_id, operation)
         if legacy is not None:
             return self._decorate_execution_payload(self._migrate_legacy_payload(legacy, operation))
@@ -686,7 +686,7 @@ class PhysicalMapService:
             operation_id = str((payload.get("operation_ids") or [""])[0])
             if operation_id:
                 payload = self._migrate_legacy_payload(payload, project.get_operation(operation_id))
-        return self._decorate_execution_payload(self._ensure_completed_map_finalized(project_id, payload))
+        return self._decorate_execution_payload(payload)
 
     def height_map_from_payload(self, payload: dict[str, Any]) -> HeightMap:
         return self._height_map_from_payload(payload)
@@ -1662,6 +1662,10 @@ class PhysicalMapService:
             estado="medido relativo" if payload["status"] == "MESH_COMPLETE" else "medicion parcial",
         )
         return self._serialize_height_map(height_map)
+
+    def finalize_map(self, *, project_id: str, map_id: str) -> dict[str, Any]:
+        """Explicit finalization for completed legacy maps; GET never publishes."""
+        return self._ensure_completed_map_finalized(project_id, self.get_by_id(project_id, map_id))
 
     def _ensure_completed_map_finalized(self, project_id: str, payload: dict[str, Any]) -> dict[str, Any]:
         if payload.get("source") != "MEASURED" or payload.get("status") != "MESH_COMPLETE":

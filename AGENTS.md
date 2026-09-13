@@ -36,7 +36,7 @@ Antes de modificar el repositorio, leer en este orden:
 
 ## Prohibiciones de duplicacion
 
-- No duplicar conexiones Moonraker HTTP o WebSocket.
+- No duplicar la implementación del transporte Moonraker ni la autoridad WebSocket. Las instancias aprobadas del cliente HTTP mantienen sesiones independientes por consumidor; no se garantiza una conexión TCP única ni se comparte una sesión mutable entre threads.
 - No duplicar estado de maquina fuera de `MachineState` y los adaptadores aprobados.
 - No duplicar logica de seguridad entre frontend, rutas API y runtime.
 - No introducir una segunda fuente de verdad para referencias, mapas, `JobRun` o persistencia de proyectos.

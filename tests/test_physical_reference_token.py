@@ -24,6 +24,8 @@ class PhysicalReferenceTokenTest(unittest.TestCase):
         self.args = dict(project_id=fixture.project_id, setup_id=fixture.setup_id, face='superior')
         self.context = self.service._context(**self.args)
         self.run = self.service.prepare_run(**self.args)
+        self.service._record_spindle_confirmation(self.context, self.run, "prepared", 0)
+        self.service._save_run(self.context, self.run)
         self.operation = self.run['operations'][0]
         self.operation_id = self.operation['operation_id']
         self.map = self.maps.get_active(fixture.project_id, self.operation_id)
@@ -195,6 +197,8 @@ class PhysicalReferenceTokenTest(unittest.TestCase):
         self.assertEqual(self.run['state'], 'READY_TO_RESUME')
         token = self.current()
         self.assertEqual(self.run['operations'][0]['physical_reference_token'], token)
+        with patch.object(self.service, '_start_worker'):
+            self.run = self.service.run_action(**self.args, action='continue')
         self.service._execute_next_operation(self.context, self.run)
         self.assertEqual(len(self.adapter.started), 1)
         current = self.service._load_run(self.context)

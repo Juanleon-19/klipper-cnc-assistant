@@ -1040,6 +1040,7 @@ export function ProjectWorkspace({
       if (project && selectedOperation) {
         setReferenceSession(await api.getReferenceSession(project.id, selectedOperation.id));
       }
+      if (onRefreshProject) await onRefreshProject();
     } catch (error) {
       setWorkspaceError(error instanceof Error ? error.message : "No fue posible actualizar el mapa de alturas.");
     } finally {
@@ -1053,6 +1054,7 @@ export function ProjectWorkspace({
     try {
       const nextSession = await action();
       setReferenceSession(nextSession);
+      if (onRefreshProject) await onRefreshProject();
     } catch (error) {
       if (error instanceof ApiError && options?.onApiFieldError) {
         options.onApiFieldError(error);
@@ -1074,6 +1076,7 @@ export function ProjectWorkspace({
       } else if (project && selectedOperation) {
         setReferenceSession(await api.getReferenceSession(project.id, selectedOperation.id));
       }
+      if (onRefreshProject) await onRefreshProject();
     } catch (error) {
       setWorkspaceError(error instanceof Error ? error.message : "No fue posible completar la acción física de referencia.");
     } finally {
@@ -1593,7 +1596,7 @@ export function ProjectWorkspace({
   const remeasurePhysicalReference = async () => {
     if (!project || !selectedOperation || !referenceSettingsAllowMovement()) return;
     await withPhysicalReferenceAction(async () => {
-      await api.confirmProbe();
+      await api.confirmProbe(project.id, selectedOperation.id);
       await machine.refreshRuntime();
       await api.capturePhysicalWorkOrigin(project.id, selectedOperation.id);
       return await api.capturePhysicalZReferenceFromProbe(project.id, selectedOperation.id);

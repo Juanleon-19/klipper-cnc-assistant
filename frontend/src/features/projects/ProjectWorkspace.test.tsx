@@ -1820,7 +1820,8 @@ describe("ProjectWorkspace", () => {
 
 
   it("acepta 0 válido en X e Y del origen de trabajo", async () => {
-    renderWorkspace();
+    const onRefreshProject = vi.fn().mockResolvedValue(undefined);
+    renderWorkspace(undefined, { onRefreshProject });
     fireEvent.click(screen.getByRole("button", { name: /^Referencia$/i }));
     const originHeading = await screen.findByText(/2. Origen de trabajo X\/Y/i);
     const originPanel = originHeading.closest("article");
@@ -1832,6 +1833,7 @@ describe("ProjectWorkspace", () => {
     fireEvent.click(scope.getByRole("button", { name: /Confirmar en simulación/i }));
 
     await waitFor(() => expect(apiMock.confirmWorkOrigin).toHaveBeenCalledWith("proj_1", "op_1", { x_mm: 0, y_mm: 0 }));
+    await waitFor(() => expect(onRefreshProject).toHaveBeenCalled());
   });
 
   it("acepta 0 válido en Z y números decimales", async () => {
@@ -2022,7 +2024,7 @@ describe("ProjectWorkspace", () => {
 
     expect(await screen.findByText(/CONSOLA DE EJECUCIÓN EN VIVO — V2/i)).toBeInTheDocument();
     expect(screen.queryByText(/Secuencia automática por operaciones/i)).toBeNull();
-    expect(screen.getByText(/Moonraker real/i)).toBeInTheDocument();
+    expect(screen.getByText(/Observación Moonraker/i)).toBeInTheDocument();
     expect(screen.getByText(/Orquestador JobRun/i)).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: /Generar artefacto Legacy de inspección/i }));

@@ -434,9 +434,9 @@ export function ExecutionConsole({ snapshot, error, busy, settingsBlocked = fals
         </section>
 
         <section className="execution-panel">
-          <div className="section-heading"><h4>Moonraker real</h4></div>
+          <div className="section-heading"><h4>Observación Moonraker</h4></div>
           <div className="info-grid info-grid--double compact-grid">
-            <div className="metric-box"><span>State</span><strong>{snapshot?.moonraker.print_state ?? "standby"}</strong></div>
+            <div className="metric-box"><span>State</span><strong>{snapshot?.moonraker.print_state ?? "sin observación"}</strong></div>
             <div className="metric-box"><span>Virtual SD activa</span><strong>{snapshot?.moonraker.is_active ? "si" : "no"}</strong></div>
             <div className="metric-box"><span>Archivo</span><strong className="mono-text execution-console-v2__file">{snapshot?.moonraker.filename ?? "-"}</strong></div>
             <div className="metric-box"><span>Progreso</span><strong>{percent(snapshot?.moonraker.progress ?? 0)}</strong></div>

@@ -12,6 +12,7 @@ from .machine_schemas import (
     MachineRuntimeResponse,
     MachineSettingsRequest,
     ManualControlRequest,
+    ProbeContextRequest,
 )
 
 
@@ -79,8 +80,9 @@ def build_machine_router() -> APIRouter:
         return MachineRuntimeResponse(**runtime(request).request_probe())
 
     @router.post("/probe/confirm", response_model=MachineRuntimeResponse)
-    def confirm_probe(request: Request) -> MachineRuntimeResponse:
-        return MachineRuntimeResponse(**runtime(request).confirm_probe())
+    def confirm_probe(request: Request, payload: ProbeContextRequest | None = None) -> MachineRuntimeResponse:
+        context = None if payload is None else request.app.state.reference_session_service.probe_capture_context(payload.project_id, payload.operation_id)
+        return MachineRuntimeResponse(**runtime(request).confirm_probe(reference_context=context))
 
     @router.post("/cancel", response_model=MachineRuntimeResponse)
     def cancel(request: Request) -> MachineRuntimeResponse:

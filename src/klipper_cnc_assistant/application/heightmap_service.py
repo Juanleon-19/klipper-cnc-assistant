@@ -210,7 +210,6 @@ class HeightMapService:
                 raise NotFoundError(
                     f"El mapa de alturas para el montaje {map_key} no existe."
                 )
-            self.repository.save_height_map_payload(project_id, map_key, payload)
         return self._deserialize_map(payload)
 
     def _load_legacy_map(self, project, operation_id: str) -> dict | None:

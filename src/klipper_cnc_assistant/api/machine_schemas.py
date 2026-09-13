@@ -1,6 +1,10 @@
 from __future__ import annotations
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel as PydanticBaseModel, ConfigDict, Field
+
+
+class BaseModel(PydanticBaseModel):
+    model_config = ConfigDict(allow_inf_nan=False)
 
 
 class MachineRuntimeResponse(BaseModel):
@@ -46,22 +50,27 @@ class MachineInitializationRequest(BaseModel):
 
 
 class MachineSettingsRequest(BaseModel):
-    reference_prep_z_mm: float | None = None
-    long_tool_change_clearance_z_mm: float | None = None
+    reference_prep_z_mm: float | None = Field(default=None, gt=0)
+    long_tool_change_clearance_z_mm: float | None = Field(default=None, gt=0)
     # Alias transitorio de lectura/escritura para clientes anteriores al hotfix.
-    long_tool_reference_prep_z_mm: float | None = None
-    z_clearance_feed_mm_min: float | None = None
-    reference_approach_z_feed_mm_min: float | None = None
+    long_tool_reference_prep_z_mm: float | None = Field(default=None, gt=0)
+    z_clearance_feed_mm_min: float | None = Field(default=None, gt=0)
+    reference_approach_z_feed_mm_min: float | None = Field(default=None, gt=0)
     # Alias transitorio: al leerlo se aplica a ambos feeds Z canónicos.
-    reference_prep_z_feed_mm_min: float | None = None
-    move_total_timeout_s: float | None = None
-    no_progress_timeout_s: float | None = None
-    position_tolerance_mm: float | None = None
-    velocity_tolerance_mm_s: float | None = None
-    reference_probe_step_mm: float | None = None
-    reference_probe_feed_mm_min: float | None = None
-    reference_probe_retract_mm: float | None = None
-    reference_probe_retract_feed_mm_min: float | None = None
+    reference_prep_z_feed_mm_min: float | None = Field(default=None, gt=0)
+    move_total_timeout_s: float | None = Field(default=None, gt=0)
+    no_progress_timeout_s: float | None = Field(default=None, gt=0)
+    position_tolerance_mm: float | None = Field(default=None, gt=0)
+    velocity_tolerance_mm_s: float | None = Field(default=None, gt=0)
+    reference_probe_step_mm: float | None = Field(default=None, gt=0)
+    reference_probe_feed_mm_min: float | None = Field(default=None, gt=0)
+    reference_probe_retract_mm: float | None = Field(default=None, gt=0)
+    reference_probe_retract_feed_mm_min: float | None = Field(default=None, gt=0)
+
+
+class ProbeContextRequest(BaseModel):
+    project_id: str = Field(min_length=1)
+    operation_id: str = Field(min_length=1)
 
 
 class EmergencyStopRequest(BaseModel):

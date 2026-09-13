@@ -1,7 +1,7 @@
 # Klipper CNC Assistant
 
-Estado de referencia: Fase 2 activa en `fase-2/referencias-conectividad`.
-Fecha de referencia: Thursday, July 30, 2026.
+Estado de referencia: cierre de software en `release/final-software-stabilization-2026-09-12`.
+Fecha de referencia: 12 de septiembre de 2026.
 
 Klipper CNC Assistant es una aplicacion web para preparar trabajos CNC basados en G-code sobre una maquina controlada por Klipper. El producto combina un backend FastAPI, un frontend React, persistencia JSON local y una frontera fisica que integra Moonraker, Klipper y un controlador Arduino.
 
@@ -16,13 +16,25 @@ Klipper CNC Assistant es una aplicacion web para preparar trabajos CNC basados e
 - captura de referencias fisicas basada en observacion activa antes de persistir;
 - pestana `Referencia` extraida como feature del frontend.
 
-## Capacidades todavia incompletas
+## Cierre de software y siguiente etapa
 
-- mapa de alturas fisico y compensacion completa;
-- ejecucion fisica de trabajos, recuperacion y cierre del flujo `JobRun`;
-- validacion fisica integral de la reconexion Arduino y de la captura de referencias sobre la CNC real.
+La base incorpora ownership físico, autorización por frescura, process lock,
+JobRunStore con CAS y cancelación dominante, PrintIdentity, worker único de mapa,
+PhysicalReferenceToken, identidad serial verificable y exclusiva, y persistencia
+atómica con revisiones y comprobación de generaciones/hash de artefactos.
+También conserva el flujo humano de cambio de herramienta y las velocidades Z
+auxiliares de PR #24; el feed de mecanizado sigue viniendo del G-code FlatCAM.
 
-Esas areas quedan fuera de Fase 2 y no se repararon deliberadamente en esta rama.
+Las lecturas no preparan ejecuciones ni publican planes/mapas. Preparar JobRun,
+abrir proyecto y finalizar un mapa recuperado son acciones POST explícitas.
+La confirmación de spindle es humana y queda vinculada al run, operación y sesión.
+
+La validación física con el usuario sigue pendiente. `MACHINE_MODE=simulated`
+permite preparación, referencias y mapa simulados, pero no implementa un impresor
+Moonraker ni probe productivo: un JobRun físico permanece bloqueado por preflight.
+Las pruebas con fakes verifican el workflow sin afirmar movimiento real.
+
+Resultados y límites del cierre: [validación final de software](docs/final-software-validation.md).
 
 ## Seguridad
 

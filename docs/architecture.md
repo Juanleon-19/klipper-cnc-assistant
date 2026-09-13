@@ -4,7 +4,7 @@ Fecha de referencia: September 12, 2026.
 
 ## 1. Arquitectura actual comprobada
 
-La aplicacion servida en produccion sigue fuera de este worktree. La arquitectura de codigo verificada en `fase-2/referencias-conectividad` queda organizada alrededor de una unica frontera fisica y una unica fuente de verdad de estado.
+La aplicación servida en producción sigue fuera de este worktree. La arquitectura de código verificada en `release/final-software-stabilization-2026-09-12` conserva una frontera física y las autoridades de seguridad estabilizadas; este cierre no modifica producción.
 
 ### Vista general actual
 
@@ -135,7 +135,7 @@ STOPPED
 
 Reglas vigentes:
 
-- `moonraker/client.py` sigue siendo la unica conexion HTTP.
+- `moonraker/client.py` es la única implementación del transporte HTTP. Cada instancia tiene su propia `requests.Session`; runtime, adapters de JobRun y estimación pueden usar instancias independientes. No existe una garantía de conexión TCP única.
 - `moonraker/telemetry.py` sigue siendo la unica conexion WebSocket.
 - El WebSocket usa `ping/pong` para verificar transporte cuando la maquina permanece quieta.
 - Una maquina estacionaria puede seguir en `CONNECTED` sin reconexiones falsas.
@@ -223,7 +223,7 @@ Restricciones activas:
 
 - El frontend no es autoridad de seguridad fisica.
 - No existe una segunda fuente de verdad fuera de `MachineState`.
-- No existe un segundo cliente Moonraker HTTP ni un segundo WebSocket.
+- Hay una implementación HTTP compartida, con sesiones independientes deliberadas por consumidor; no se comparte una `requests.Session` mutable entre threads. El runtime conserva una autoridad WebSocket.
 - La reconexion Arduino no habilita movimiento.
 - Una posicion cacheada por si sola no autoriza capturar referencias fisicas.
 - Un fallo WebSocket no destruye el cliente HTTP.
@@ -245,3 +245,29 @@ Restricciones activas:
 - `JobRun`;
 - cambio de herramienta;
 - recuperacion y cierre del producto.
+
+## Cierre residual P1 (12 de septiembre de 2026)
+
+- Settings comprueba la revisión del coordinator y obtiene su lease existente
+  antes de persistir/aplicar; un owner que aparece entre check/apply invalida la
+  revisión. Ningún lock interno del coordinator cubre I/O de storage.
+- Schemas y runtime rechazan valores numéricos no finitos y feeds no positivos.
+- RUNNING frente a standby contradictorio tiene una tolerancia de dos segundos
+  desde la primera observación; persistencia de la contradicción lleva a recovery
+  mediante JobRunStore. Una observación compatible reinicia esa espera.
+- Probe histórico requiere contexto, sesión/generación, configuración, frame y
+  captured_at propios vigentes. Telemetría nueva no rejuvenece la medición.
+- GET de proyecto/lista, mapa, plan y JobRun no publica dominio. La normalización
+  legacy se hace en memoria y se persiste únicamente en una escritura explícita.
+  Apertura y finalización recuperada disponen de POST; el worker sigue finalizando
+  mapas normalmente. GET /execution/live puede reconciliar una contradicción
+  observada de ejecución, pero nunca crea JobRun.
+- Spindle mantiene confirmación humana, no sensor. La evidencia identifica run,
+  operación, instante y contexto de sesión física; start/continue/resume la
+  revalidan. Operaciones consecutivas de la misma herramienta pueden conservar
+  la confirmación original mientras el contexto permanezca idéntico.
+- JobRunStore sigue independiente de locks de project/map/storage; se mantienen
+  las garantías documentadas en `docs/safe-persistence.md`.
+
+El runtime simulated no ejecuta impresión Moonraker ni probe productivo. La
+preparación simulada y los tests con fakes no equivalen a validación física.

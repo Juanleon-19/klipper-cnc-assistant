@@ -201,7 +201,7 @@ class SafePersistenceTests(unittest.TestCase):
         fixture.setUp()
         self.addCleanup(fixture.doCleanups)
         context = fixture.job_service._context(fixture.project.id, fixture.setup_id, 'superior')
-        plan = fixture.job_service.get_plan(project_id=fixture.project.id, setup_id=fixture.setup_id, face='superior')
+        plan = fixture.job_service.create_plan(project_id=fixture.project.id, setup_id=fixture.setup_id, face='superior')
         manifest_path = fixture.job_service._plan_dir(context) / 'job_manifest.json'
         manifest = json.loads(manifest_path.read_text())
         validate_generation(plan, manifest)
@@ -216,7 +216,7 @@ class SafePersistenceTests(unittest.TestCase):
         self.addCleanup(fixture.doCleanups)
         service = fixture.job_service
         context = service._context(fixture.project_id, fixture.setup_id, 'superior')
-        service.get_plan(project_id=fixture.project_id, setup_id=fixture.setup_id, face='superior')
+        service.create_plan(project_id=fixture.project_id, setup_id=fixture.setup_id, face='superior')
         from klipper_cnc_assistant.execution import job_service
         original = job_service.atomic_write
         def fail_plan(path, content, **kwargs):
@@ -225,7 +225,7 @@ class SafePersistenceTests(unittest.TestCase):
             original(path, content, **kwargs)
         with patch.object(job_service, 'atomic_write', fail_plan):
             with self.assertRaises(OSError):
-                service.get_plan(project_id=fixture.project_id, setup_id=fixture.setup_id, face='superior')
+                service.create_plan(project_id=fixture.project_id, setup_id=fixture.setup_id, face='superior')
         self.assertIsNone(service._load_plan(context))
 
     def test_real_artifact_consumer_rejects_mismatched_metadata(self):

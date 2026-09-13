@@ -92,7 +92,7 @@ class ApiTest(unittest.TestCase):
     def test_physical_z_reference_from_probe_uses_active_probe_observation(self) -> None:
         project_id = self._create_project()
         operation_id = self._create_operation(project_id)
-        self.app.state.machine_runtime.capture_probe_reference_observation = lambda: {
+        self.app.state.machine_runtime.capture_probe_reference_observation = lambda **kwargs: {
             "position": {"x_mm": 60.0, "y_mm": 88.75, "z_mm": 0.015},
             "machine_label": "http://moonraker.local",
             "homed_axes": "xyz",
@@ -351,7 +351,7 @@ class ApiTest(unittest.TestCase):
         })
         calls = {"capture": 0}
 
-        def capture_probe_reference_observation() -> dict[str, object]:
+        def capture_probe_reference_observation(**kwargs) -> dict[str, object]:
             calls["capture"] += 1
             return {
                 "position": {"x_mm": 60.0, "y_mm": 88.75, "z_mm": 0.015},

@@ -61,7 +61,7 @@ Base aprobada: `main` en `5de5f163ba207404f0d260f466eb732a1de27938`
 ## Decisiones arquitectonicas
 
 - `MachineState` sigue siendo la unica fuente de verdad para posicion, homing y edades observadas.
-- `MoonrakerClient` sigue siendo el unico cliente HTTP.
+- `MoonrakerClient` sigue siendo la única implementación del cliente HTTP. Esto no implica una sola instancia, sesión HTTP o conexión TCP; el runtime y los consumidores aprobados mantienen sesiones independientes (véase `docs/architecture.md`).
 - `MoonrakerTelemetry` sigue siendo la unica conexion WebSocket.
 - `ArduinoConnectionManager` es la unica autoridad serial.
 - La seguridad fisica no se delega al frontend; la validacion final queda en backend.

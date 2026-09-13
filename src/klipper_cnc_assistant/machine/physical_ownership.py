@@ -45,11 +45,13 @@ class PhysicalMachineCoordinator:
         with self._lock:
             return self._session
 
-    def acquire(self, owner_kind, owner_id):
+    def acquire(self, owner_kind, owner_id, *, expected_revision=None):
         kind = OwnerKind(owner_kind)
         if kind in {OwnerKind.IDLE, OwnerKind.RECOVERY} or not owner_id:
             raise OwnershipError('Owner inválido.')
         with self._lock:
+            if expected_revision is not None and expected_revision != self._revision:
+                raise OwnershipError("La autoridad física cambió antes de aplicar configuración.")
             if self._root is not None or self._recovery:
                 raise OwnershipError('La máquina ya tiene ownership físico o recuperación pendiente.')
             token = uuid4().hex

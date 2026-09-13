@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import math
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
@@ -107,6 +108,9 @@ def create_app(
     async def stop_machine_runtime() -> None:
         machine_runtime.stop()
 
+    from klipper_cnc_assistant.storage.safe_persistence import PersistenceConflict
+    app.add_exception_handler(PersistenceConflict, lambda request, exc: JSONResponse(status_code=409, content={"detalle": str(exc)}))
+
     from klipper_cnc_assistant.storage.job_run_store import JobRunConflict
 
     @app.exception_handler(JobRunConflict)
@@ -121,6 +125,8 @@ def create_app(
             location = ".".join(str(item) for item in error["loc"] if item != "body") or "solicitud"
             error_type = error.get("type", "")
             received = error.get("input")
+            if isinstance(received, float) and not math.isfinite(received):
+                received = str(received)
             if error_type in {"missing"}:
                 message = "campo obligatorio."
                 expected = "valor presente"

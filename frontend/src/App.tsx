@@ -447,6 +447,19 @@ export default function App() {
   };
 
 
+  const handleOpenProject = async (projectId: string) => {
+    try {
+      const project = await api.openProject(projectId);
+      setProjects((current) => current.map((item) => item.id === project.id ? project : item));
+      setSelectedProjectId(projectId);
+      setWorkspaceViewOverride(undefined);
+      setSidebarOpen(false);
+      handleSelectView("proyectos");
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : "No fue posible abrir el proyecto.");
+    }
+  };
+
   const handleContinueProject = async (projectId: string) => {
     setBusyKey(`project:continue:${projectId}`);
     setError("");
@@ -716,11 +729,7 @@ Después deberá volver a conectar el Arduino, hacer homing, posicionar X0/Y0 y 
               health={health}
               machineSession={machineSession}
               onCreateProject={() => handleSelectView("nuevo")}
-              onOpenProject={(projectId) => {
-                setSelectedProjectId(projectId);
-                setWorkspaceViewOverride(undefined);
-                handleSelectView("proyectos");
-              }}
+              onOpenProject={handleOpenProject}
               onContinueProject={handleContinueProject}
               onGoToProjects={() => handleSelectView("proyectos")}
             />
@@ -735,11 +744,7 @@ Después deberá volver a conectar el Arduino, hacer homing, posicionar X0/Y0 y 
               <ProjectList
                 projects={projects}
                 selectedProjectId={selectedProjectId}
-                onSelect={(projectId) => {
-                  setSelectedProjectId(projectId);
-                  setWorkspaceViewOverride(undefined);
-                  setSidebarOpen(false);
-                }}
+                onSelect={handleOpenProject}
                 onCreateProject={() => handleSelectView("nuevo")}
                 onContinueProject={handleContinueProject}
                 onArchiveProject={handleArchiveProject}

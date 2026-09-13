@@ -3,12 +3,14 @@ from __future__ import annotations
 import _thread
 import asyncio
 import json
+import hashlib
 import logging
 import math
 import sys
 import threading
 import time
-from dataclasses import dataclass, field, replace
+from copy import deepcopy
+from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
 from enum import StrEnum
 from pathlib import Path
@@ -116,6 +118,7 @@ class ProbeResult:
     y_mm: float
     z_mm: float
     captured_at: str
+    evidence: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -386,19 +389,28 @@ class MachineRuntime:
             value = float(normalized_payload[external])
             if external in {"reference_probe_feed_mm_min", "reference_probe_retract_feed_mm_min"}:
                 value /= 60.0
-            if value <= 0:
-                raise MachineRuntimeError(f"{external} debe ser mayor que cero.")
+            if not math.isfinite(value) or value <= 0:
+                raise MachineRuntimeError(f"{external} debe ser finito y mayor que cero.")
             overrides[field] = value
         if "move_timeout_s" in overrides:
             overrides["move_minimum_timeout_s"] = overrides["move_timeout_s"]
         candidate = replace(self.config, **overrides)
         self._validate_reference_preparation_settings(candidate)
         self._validate_tool_change_clearance_settings(candidate)
-        self.config = candidate
-        if self._settings_path is not None:
-            self._settings_path.parent.mkdir(parents=True, exist_ok=True)
-            self._settings_path.write_text(json.dumps(self.machine_settings(), indent=2, sort_keys=True))
-        return self.machine_settings()
+        try:
+            permit = self.physical_ownership.acquire(OwnerKind.RUNTIME_MOTION, "machine-settings", expected_revision=ownership["revision"])
+        except OwnershipError as error:
+            raise MachineRuntimeError(str(error)) from error
+        try:
+            if self._settings_path is not None:
+                from klipper_cnc_assistant.storage.safe_persistence import atomic_json
+                settings = {external: getattr(candidate, field) * (60.0 if external in {"reference_probe_feed_mm_min", "reference_probe_retract_feed_mm_min"} else 1.0)
+                            for external, field in mapping.items()}
+                atomic_json(self._settings_path, settings, durable=True)
+            self.config = candidate
+            return self.machine_settings()
+        finally:
+            self.physical_ownership.release(permit, quiescent=True)
 
     def reference_preparation_z(self, tool_reference_profile: str | None = None) -> float:
         """Return the single approach Z used at the reference point.
@@ -1352,8 +1364,9 @@ class MachineRuntime:
             self._event("info", "REFERENCE_ARMED: pulse el botón externo para sondear la referencia.")
         return self.snapshot()
 
-    def confirm_probe(self, *, permit: PhysicalPermit | None = None) -> dict[str, Any]:
+    def confirm_probe(self, *, permit: PhysicalPermit | None = None, reference_context: dict[str, Any] | None = None) -> dict[str, Any]:
         self._require_physical_ready()
+        evidence = self._probe_capture_evidence(reference_context)
         context = self._begin_motion_operation("reference_z", permit=permit)
         try:
             with self._lock:
@@ -1369,6 +1382,9 @@ class MachineRuntime:
                 self._diagnostic_input_only = True
                 self._state = MachineRuntimeState.PROBING_REFERENCE
             probe = self._perform_probe_descent(label="reference_probe", profile=self._reference_probe_profile())
+            if evidence != self._probe_capture_evidence(reference_context):
+                raise MachineRuntimeError("La sesión o configuración cambió durante probe; repita la medición.")
+            probe.evidence = evidence
             with self._lock:
                 self._last_probe_result = probe
                 self._probe_requested = False
@@ -1792,8 +1808,8 @@ class MachineRuntime:
         observation = self.capture_probe_reference_observation()
         return dict(observation["position"])
 
-    def capture_probe_reference_observation(self) -> dict[str, Any]:
-        return self._observe_reference_position(use_last_probe=True)
+    def capture_probe_reference_observation(self, *, expected_context=None) -> dict[str, Any]:
+        return self._observe_reference_position(use_last_probe=True, expected_context=expected_context)
 
     def snapshot(self) -> dict[str, Any]:
         with self._lock:
@@ -2238,7 +2254,7 @@ class MachineRuntime:
         if self._machine is None:
             raise MachineRuntimeError("No hay telemetría de máquina.")
         requested_feed_mm_min = float(feed_mm_min)
-        if requested_feed_mm_min <= 0:
+        if not math.isfinite(requested_feed_mm_min) or requested_feed_mm_min <= 0:
             raise MachineRuntimeError(f"{label}: velocidad inválida F{requested_feed_mm_min:.3f}; debe ser positiva.")
         motion_context = source_context or self._motion_context(label, frame=coordinate_frame)
         motion_context = replace(motion_context, dependencies=dependencies)
@@ -2703,7 +2719,41 @@ class MachineRuntime:
             if not math.isfinite(value):
                 raise MachineRuntimeError(f"Posición observada inválida en {axis}: {value}.")
 
-    def _observe_reference_position(self, *, use_last_probe: bool) -> dict[str, Any]:
+    def _probe_capture_evidence(self, reference_context):
+        return {
+            "physical_session_id": self.current_physical_session_id(),
+            "ownership_session_id": self.physical_ownership.session,
+            "settings": self.machine_settings(),
+            "physical_config_fingerprint": hashlib.sha256(json.dumps(asdict(self.config), sort_keys=True, default=str, allow_nan=False).encode()).hexdigest(),
+            "frame": None if self._machine is None else {key: self._machine.get_motion_snapshot().get(key) for key in ("homing_origin", "absolute_coordinates")},
+            "reference_context": deepcopy(reference_context),
+        }
+
+    def _validate_probe_capture(self, probe, expected_context):
+        evidence = probe.evidence
+        if not evidence or not expected_context or not evidence.get("reference_context"):
+            raise MachineRuntimeError("La sonda histórica no tiene evidencia de contexto; mida de nuevo.")
+        expected = self._probe_capture_evidence(expected_context)
+        recorded = deepcopy(evidence)
+        # Initial origin may be explicitly captured from this same fresh XY.
+        if recorded["reference_context"].get("work_origin") is None:
+            origin = expected_context.get("work_origin")
+            if origin == [probe.x_mm, probe.y_mm]:
+                expected["reference_context"]["work_origin"] = None
+        if recorded != expected:
+            raise MachineRuntimeError("La sesión o el contexto de la sonda histórica cambió; mida de nuevo.")
+        try:
+            captured = datetime.fromisoformat(probe.captured_at)
+            if captured.tzinfo is None:
+                raise ValueError("timestamp sin zona")
+            age = (datetime.now(timezone.utc) - captured).total_seconds()
+        except (TypeError, ValueError) as error:
+            raise MachineRuntimeError("La sonda no tiene captured_at verificable.") from error
+        if not math.isfinite(age) or age < 0 or age > self.config.telemetry_fresh_timeout_s:
+            raise MachineRuntimeError("La medición de sonda está obsoleta; mida de nuevo.")
+        return age
+
+    def _observe_reference_position(self, *, use_last_probe: bool, expected_context=None) -> dict[str, Any]:
         self._require_physical_ready()
         with self._lock:
             if self._state in {MachineRuntimeState.STOPPING, MachineRuntimeState.DISCONNECTED}:
@@ -2737,6 +2787,7 @@ class MachineRuntime:
         if use_last_probe:
             if last_probe is None:
                 raise MachineRuntimeError("No hay resultado de sonda de un punto disponible.")
+            position_age = self._validate_probe_capture(last_probe, expected_context)
             position = {
                 "x_mm": float(last_probe.x_mm),
                 "y_mm": float(last_probe.y_mm),
@@ -2832,7 +2883,9 @@ class MachineRuntime:
             numeric = float(value)
         except (TypeError, ValueError):
             return None
-        return numeric if numeric > 0 else None
+        if not math.isfinite(numeric) or numeric <= 0:
+            raise MachineRuntimeError(f"{key} debe ser finito y mayor que cero.")
+        return numeric
 
     def _arduino_snapshot(self, *, now: float, serial_age: float | None) -> dict[str, Any]:
         manager = self._connection_manager

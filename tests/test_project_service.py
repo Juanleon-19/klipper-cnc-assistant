@@ -385,6 +385,10 @@ class ProjectServiceTest(unittest.TestCase):
             project.id, operation.id
         )
         self.assertEqual(migrated.montajes[0].nombre, "Montaje principal")
+        self.assertEqual(json.loads(project_file.read_text())["version_esquema"], "1.3")
+        self.assertFalse((project_dir / "maps" / "setup-main" / "height_map.json").exists())
+        migrated_service.repository.migrate_project(project.id)
+        HeightMapService(migrated_service.repository).recalculate_map(project.id, operation.id)
         persisted = json.loads(project_file.read_text(encoding="utf-8"))
         self.assertEqual(persisted["version_esquema"], "1.7")
         self.assertEqual(persisted["operaciones"][0]["tool_reference_profile"], "standard")

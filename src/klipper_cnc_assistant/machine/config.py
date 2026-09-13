@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import math
 from dataclasses import dataclass
 from enum import StrEnum
 
@@ -57,6 +58,14 @@ class MachineRuntimeConfig:
     spindle_control_mode: SpindleControlMode = SpindleControlMode.MANUAL
     safe_z_is_configured: bool = False
     physical_machine_id: str = "default-cnc"
+
+    def __post_init__(self):
+        for name, value in self.__dict__.items():
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                if not math.isfinite(value):
+                    raise ValueError(f"{name} debe ser finito.")
+                if (name.endswith(("_feed_mm_min", "_speed_mm_s")) or name in {"probe_step_mm", "probe_retract_mm"}) and value <= 0:
+                    raise ValueError(f"{name} debe ser mayor que cero.")
 
     @property
     def mode_label(self) -> str:

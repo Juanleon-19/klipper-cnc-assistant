@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel as PydanticBaseModel, ConfigDict, Field
 
 from klipper_cnc_assistant.domain import (
     AnalysisIssue,
@@ -14,6 +14,10 @@ from klipper_cnc_assistant.domain import (
     ProyectoPCB,
     ToolReferenceProfile,
 )
+
+
+class BaseModel(PydanticBaseModel):
+    model_config = ConfigDict(allow_inf_nan=False)
 
 
 class HealthResponse(BaseModel):

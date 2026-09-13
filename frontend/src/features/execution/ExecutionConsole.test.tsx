@@ -192,7 +192,7 @@ describe("ExecutionConsole", () => {
     expect(screen.getAllByText(/55.3 %/i).length).toBeGreaterThan(0);
     expect(screen.getByText(/13.8 %/i)).toBeInTheDocument();
     expect(screen.getByText(/0 de 4 operaciones terminadas/i)).toBeInTheDocument();
-    expect(screen.getByText(/Moonraker real/i)).toBeInTheDocument();
+    expect(screen.getByText(/Observación Moonraker/i)).toBeInTheDocument();
     expect(screen.getByText(/Orquestador JobRun/i)).toBeInTheDocument();
     expect(screen.queryByText(/^info$/i)).toBeNull();
   });
@@ -591,12 +591,12 @@ describe("ExecutionConsole", () => {
     expect(screen.getByText(/se medirá la nueva herramienta antes de generar su compensación/i)).toBeInTheDocument();
   });
 
-  it("no muestra cerrar ejecución obsoleta para un JOB_VALIDATING nuevo", () => {
+  it("no inventa standby sin observación ni permite cerrar un JOB_VALIDATING nuevo", () => {
     render(
       <ExecutionConsole
         snapshot={{
           ...baseSnapshot,
-          moonraker: { ...baseSnapshot.moonraker, print_state: "standby", is_active: false, filename: "", progress: 0 },
+          moonraker: { ...baseSnapshot.moonraker, print_state: null, is_active: false, filename: "", progress: 0 },
           run: { ...baseSnapshot.run, status: "JOB_VALIDATING", worker_alive: false, watcher_alive: false, supervisor_registered: false, stale_candidate: false, available_actions: [] },
           operation: { ...baseSnapshot.operation, execution_status: "PENDING", progress: 0, observed_printing: false },
           synchronization: { ok: true, reason: null },
@@ -612,6 +612,7 @@ describe("ExecutionConsole", () => {
     );
 
     expect(screen.queryByRole("button", { name: /Cerrar ejecución obsoleta/i })).toBeNull();
+    expect(screen.getByText("sin observación")).toBeInTheDocument();
   });
 
   it("muestra el conflicto estructurado y la acción para cerrar la ejecución obsoleta", () => {

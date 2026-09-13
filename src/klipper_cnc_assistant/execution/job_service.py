@@ -273,6 +273,8 @@ class JobService:
         self._lock = threading.RLock()
         self._threads: dict[tuple[str, str, str], threading.Thread] = {}
         self._physical_leases = {}
+        self._standby_observations = {}
+        self.remote_standby_grace_s = 2.0
         self.run_store = JobRunStore()
 
     def _job_permit(self, context):
@@ -294,8 +296,11 @@ class JobService:
 
     def get_plan(self, *, project_id: str, setup_id: str, face: str) -> dict[str, Any]:
         context = self._context(project_id, setup_id, face)
+        return self._build_plan(context)
+
+    def create_plan(self, *, project_id: str, setup_id: str, face: str) -> dict[str, Any]:
+        context = self._context(project_id, setup_id, face)
         plan = self._build_plan(context)
-        self._write_manifest(context, plan)
         self._save_plan(context, plan)
         return plan
 
@@ -354,26 +359,29 @@ class JobService:
         context = self._context(project_id, setup_id, face)
         with self._lock:
             current = self._load_run(context)
-        run: dict[str, Any] | None = current
-        if current is not None:
-            recovered = self._recover_active_print_if_possible(context, current)
-            if recovered is not None:
-                self._start_worker(context)
-                return recovered
-            state = str(current.get("state") or "")
-            if state in RUN_TERMINAL_STATES:
-                run = None
-            elif state in RUN_REFRESHABLE_IDLE_STATES:
-                run = self.prepare_run(project_id=project_id, setup_id=setup_id, face=face)
-            elif state != "JOB_READY":
-                raise ApplicationError("JOB_ACTIVE_CONFLICT")
-        prepared = run if run is not None else self.prepare_run(project_id=project_id, setup_id=setup_id, face=face)
+        if current is None:
+            raise ApplicationError("Prepare explícitamente un JobRun antes de iniciar.")
+        recovered = self._recover_active_print_if_possible(context, current)
+        if recovered is not None:
+            self._start_worker(context)
+            return recovered
+        if current.get("state") == "JOB_VALIDATING":
+            current["checks"] = self._build_run_checks(context, self._load_or_build_plan(context))
+            current["ready"] = all(check["ok"] for check in current["checks"])
+            current["state"] = "JOB_READY" if current["ready"] else "JOB_VALIDATING"
+            self._save_run(context, current)
+            if not current["ready"]:
+                raise ApplicationError("El trabajo no está listo para iniciar. Revise el preflight general.")
+        if current.get("state") != "JOB_READY":
+            raise ApplicationError("JOB_ACTIVE_CONFLICT")
+        prepared = current
         if not prepared.get("ready"):
             raise ApplicationError("El trabajo no está listo para iniciar. Revise el preflight general.")
         run = prepared
         if run.get("state") not in {"JOB_READY", "JOB_PAUSED", "OPERATION_PAUSED", "TOOL_REFERENCE_READY", "READY_TO_RESUME", "NEXT_OPERATION_READY"}:
             raise ApplicationError(f"El trabajo no puede iniciar desde estado {run.get('state')}.")
         self._require_run_reference(context, run, next_pending=True)
+        self._record_spindle_confirmation(context, run, "prepared", self._next_pending_operation_index(run))
         self._job_permit(context)
         run["state"] = "JOB_STARTING"
         run["started_at"] = run.get("started_at") or _iso_now()
@@ -413,12 +421,10 @@ class JobService:
             })
         return {"mode": "DRY_RUN", "movement_lock_acquired": False, "moonraker_commands_sent": 0, "operations": operations, "ok": all(item["ok"] for item in operations)}
 
-    def get_run(self, *, project_id: str, setup_id: str, face: str) -> dict[str, Any]:
+    def get_run(self, *, project_id: str, setup_id: str, face: str) -> dict[str, Any] | None:
         context = self._context(project_id, setup_id, face)
-        run = self._load_run(context)
-        if run is None:
-            return self.prepare_run(project_id=project_id, setup_id=setup_id, face=face)
-        return run
+        self._validate_execution_target(context)
+        return self._load_run(context)
 
     def live_execution(self, *, project_id: str, setup_id: str, face: str) -> dict[str, Any]:
         context = self._context(project_id, setup_id, face)
@@ -429,6 +435,8 @@ class JobService:
         self._validate_run_context(context, run)
         diagnosis = self._diagnose_run(context, run)
         status = diagnosis["moonraker"]
+        self._reconcile_standby(context, run, status)
+        diagnosis["run"]["status"] = run["state"]
         worker_alive = bool(diagnosis["run"].get("worker_alive"))
         operations = list(run.get("operations") or [])
         index = int(run.get("current_operation_index", 0) or 0)
@@ -767,7 +775,7 @@ class JobService:
         }
 
     def history(self, *, project_id: str, setup_id: str, face: str) -> list[dict[str, Any]]:
-        history_dir = self._history_dir(self._context(project_id, setup_id, face))
+        history_dir = self._existing_run_file(self._context(project_id, setup_id, face)).parent / "history"
         if not history_dir.exists():
             return []
         items: list[dict[str, Any]] = []
@@ -828,6 +836,7 @@ class JobService:
                 run["state"] = "OPERATION_RUNNING"
             else:
                 self._require_run_reference(context, run, next_pending=True)
+                self._record_spindle_confirmation(context, run, "prepared", self._next_pending_operation_index(run))
                 run["state"] = "JOB_STARTING"
             run["available_actions"] = ["pause", "cancel"]
             run["next_action"] = "Reanudando trabajo"
@@ -859,6 +868,7 @@ class JobService:
                 raise ApplicationError("No existe una siguiente operación que requiera cambio de herramienta.")
             self._validate_spindle_stop_confirmation(adapter)
             next_operation = run["operations"][next_index]
+            self._record_spindle_confirmation(context, run, "stopped", next_index)
             run["state"] = "SPINDLE_STOP_CONFIRMED"
             run["next_action"] = "Iniciando transición segura hacia el cambio de herramienta"
             run["available_actions"] = ["cancel"]
@@ -872,6 +882,7 @@ class JobService:
                 raise ApplicationError("El cambio de herramienta solo puede confirmarse cuando el trabajo está esperando al operador.")
             next_index = int(run["current_operation_index"]) + 1
             next_operation = run["operations"][next_index]
+            self._require_spindle_confirmation(context, run, "stopped", next_index)
             plan = self._load_or_build_plan(context)
             active_map = plan["active_map"]
             self.physical_map_service.invalidate_tool_reference(
@@ -892,6 +903,7 @@ class JobService:
             if run["state"] not in {"TOOL_REFERENCE_READY", "READY_TO_RESUME", "NEXT_OPERATION_READY"}:
                 raise ApplicationError("Continuar solo aplica cuando ya existe referencia Z y hay una siguiente operación preparada.")
             self._require_run_reference(context, run, next_pending=True)
+            self._record_spindle_confirmation(context, run, "prepared", self._next_pending_operation_index(run))
             run["state"] = "JOB_STARTING"
             run["next_action"] = "Continuando secuencia"
             run["available_actions"] = ["pause", "cancel"]
@@ -924,6 +936,7 @@ class JobService:
                 identity.require_match(adapter.print_status(), states=states)
                 if action == 'resume':
                     self._require_run_reference(context, run)
+                    self._require_spindle_confirmation(context, run, "prepared", int(run["current_operation_index"]))
                 self.runtime.physical_ownership.validate(adapter.permit)
                 self.run_store.validate(self._run_file(context), run)
             getattr(adapter, action)(before_send=before_send)
@@ -1229,6 +1242,7 @@ class JobService:
             self._save_run(context, run)
             return
         adapter = self._motion_adapter(context)
+        self._require_spindle_confirmation(context, run, "prepared", index)
         reference_token = self._require_operation_reference(context, operation)
         operation["physical_reference_token"] = reference_token
         operation["execution_status"] = "PREFLIGHT"
@@ -1249,6 +1263,7 @@ class JobService:
         self._require_operation_reference(context, operation, expected_token=reference_token)
         if not generated.get('executable'):
             raise ApplicationError('El artefacto JIT no autoriza ejecución.')
+        self._require_spindle_confirmation(context, run, "prepared", index)
         self._validate_generated_pair(context, generated)
         operation["generated_file"] = generated["relative_path"]
         operation["generated_file_name"] = Path(str(generated["relative_path"])).name
@@ -1315,6 +1330,7 @@ class JobService:
             PrintIdentity.require_idle(adapter.print_status())
             self._require_operation_reference(context, operation, expected_token=reference_token)
             self._validate_generated_pair(context, generated)
+            self._require_spindle_confirmation(context, run, "prepared", index)
             self.runtime.physical_ownership.validate(adapter.permit)
             authorized = self.run_store.begin_start(self._run_file(context), run,
                                                     operation['operation_id'], identity.filename)
@@ -1329,6 +1345,34 @@ class JobService:
         else:
             self.run_store.finish_start(self._run_file(context), run['run_id'], attempt_id, status='sent')
 
+    def _reconcile_standby(self, context, run, status):
+        if run.get('state') not in {'OPERATION_RUNNING', 'WAITING_FOR_KLIPPER', 'OPERATION_STARTING', 'PRINT_QUEUED'}:
+            with self._lock:
+                for key in list(self._standby_observations):
+                    if key[0] == run['run_id']:
+                        self._standby_observations.pop(key)
+            return False
+        operation = self.run_store._operation(run)
+        key = (run['run_id'], operation.get('operation_id'))
+        state = str(status.get('state') or status.get('print_state') or '').lower()
+        expected = self._normalize_filename(operation.get('remote_file'))
+        observed = self._normalize_filename(status.get('filename'))
+        contradiction = (run.get('state') in {'OPERATION_RUNNING', 'WAITING_FOR_KLIPPER', 'OPERATION_STARTING', 'PRINT_QUEUED'}
+                         and state == 'standby' and expected and observed in {'', expected}
+                         and not status.get('is_active', status.get('active', False)))
+        with self._lock:
+            if not contradiction:
+                self._standby_observations.pop(key, None)
+                return False
+            now = time.monotonic()
+            since = self._standby_observations.setdefault(key, now)
+            while len(self._standby_observations) > 128:
+                self._standby_observations.pop(next(iter(self._standby_observations)))
+        if now - since >= self.remote_standby_grace_s:
+            self._identity_failure(context, run, PrintIdentityError('Moonraker standby persistente contradice la ejecución; requiere recovery.'))
+            self.runtime.physical_ownership.enter_recovery('Impresión esperada no activa en Moonraker.')
+        return True
+
     def _watch_operation(self, context: JobContext, run: dict[str, Any]) -> None:
         adapter = self.adapter_factory(self.runtime)
         operation = run["operations"][int(run["current_operation_index"])]
@@ -1342,6 +1386,11 @@ class JobService:
             operation = current["operations"][int(current["current_operation_index"])]
             try:
                 status = adapter.print_status()
+                if self._reconcile_standby(context, current, status):
+                    if current.get("state") == "RECOVERY_REQUIRED":
+                        return
+                    time.sleep(0.5)
+                    continue
                 PrintIdentity(operation.get('remote_file')).require_match(status)
             except Exception as error:
                 self._identity_failure(context, current, error)
@@ -1471,6 +1520,7 @@ class JobService:
             raise ApplicationError("No existe una siguiente operación para completar el cambio de herramienta.")
         current_operation = run["operations"][current_index]
         next_operation = run["operations"][next_index]
+        self._require_spindle_confirmation(context, run, "stopped", next_index)
         outgoing_profile = str(current_operation.get("tool_reference_profile") or "standard")
         outgoing_clearance_z = self._tool_change_clearance_z(outgoing_profile)
         try:
@@ -1656,7 +1706,8 @@ class JobService:
                 "original_estimated_time_s": sum(float(item.get("original_estimated_time_s") or 0.0) for item in operation_rows),
                 "estimated_time_s": sum(float(item.get("estimated_time_s") or 0.0) for item in operation_rows),
             },
-            "manifest_path": self._existing_manifest_path(context),
+            # An in-memory inspection is not a published plan/manifest generation.
+            "manifest_path": None,
             "created_at": _iso_now(),
             "updated_at": _iso_now(),
         }
@@ -1834,6 +1885,39 @@ class JobService:
         if index is None:
             raise ApplicationError('No existe una operación pendiente con referencia ejecutable.')
         return self._require_operation_reference(context, run['operations'][index])
+
+    def _spindle_confirmation_context(self, context, operation):
+        physical_map = self.physical_map_service.get_active(context.project_id, operation['operation_id'])
+        return reference_context(self.repository, self.runtime, context.project_id,
+                                 operation['operation_id'], physical_map, operation.get('installation_revision'))
+
+    def _record_spindle_confirmation(self, context, run, kind, index):
+        operation = run['operations'][index]
+        run.setdefault('spindle_confirmations', {})[kind] = {
+            'source': 'human', 'kind': kind, 'run_id': run['run_id'],
+            'operation_id': operation['operation_id'], 'operation_index': index,
+            'confirmed_at': _iso_now(),
+            'context': self._spindle_confirmation_context(context, operation),
+        }
+
+    def _require_spindle_confirmation(self, context, run, kind, index):
+        proof = (run.get('spindle_confirmations') or {}).get(kind)
+        if not proof or proof.get('source') != 'human' or proof.get('run_id') != run['run_id']:
+            raise ApplicationError('Se requiere una confirmación humana de spindle vigente.')
+        source = proof.get('operation_index')
+        if not isinstance(source, int) or source < 0 or source >= len(run['operations']):
+            raise ApplicationError('La confirmación de spindle no identifica una operación vigente.')
+        if proof.get('operation_id') != run['operations'][source]['operation_id']:
+            raise ApplicationError('La operación confirmada de spindle cambió.')
+        if source != index:
+            # Continuous same-tool operations may retain the original human proof.
+            if kind != 'prepared' or source > index or any(
+                op['tool_key'] != run['operations'][index]['tool_key'] or op['execution_status'] != 'COMPLETED'
+                for op in run['operations'][source:index]
+            ):
+                raise ApplicationError('La confirmación humana no corresponde a esta operación/herramienta.')
+        if proof.get('context') != self._spindle_confirmation_context(context, run['operations'][index]):
+            raise ApplicationError('La sesión o contexto cambió; confirme nuevamente el spindle.')
 
     def _tool_installation_calibration(self, active_map: dict[str, Any] | None, operation: OperacionPCB, initial_reference_binding: dict[str, Any] | None = None) -> dict[str, Any] | None:
         reference = self._reference_entry(active_map, operation, initial_reference_binding)
@@ -2287,7 +2371,7 @@ class JobService:
             self._write_manifest(context, refreshed)
             self._save_plan(context, refreshed)
             return refreshed
-        return self.get_plan(project_id=context.project_id, setup_id=context.setup_id, face=context.face)
+        return self.create_plan(project_id=context.project_id, setup_id=context.setup_id, face=context.face)
 
     def _project_dir(self, project_id: str) -> Path:
         return self.repository.project_dir(project_id)
@@ -2301,10 +2385,6 @@ class JobService:
         target = self._plan_dir(context) / "history"
         target.mkdir(parents=True, exist_ok=True)
         return target
-
-    def _existing_manifest_path(self, context: JobContext) -> str | None:
-        path = self._plan_dir(context) / "job_manifest.json"
-        return self._relative_to_project(context.project_id, path) if path.exists() else None
 
     def _plan_file(self, context: JobContext) -> Path:
         return self._plan_dir(context) / "job_plan.json"

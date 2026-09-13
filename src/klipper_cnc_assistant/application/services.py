@@ -146,14 +146,16 @@ class ProjectService:
         self,
         project_id: str,
     ) -> ProyectoPCB:
+        return self._load_project(project_id)
+
+    def open_project(self, project_id: str) -> ProyectoPCB:
         project = self._load_project(project_id)
         opened = replace(
             project,
             last_opened_at=datetime.now(timezone.utc),
             current_setup_id=project.current_setup_id or project.montajes[0].id,
         )
-        self.repository.save_project(opened)
-        return opened
+        return self.repository.save_project(opened)
 
     def add_setup(
         self,

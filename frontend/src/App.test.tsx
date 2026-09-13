@@ -86,6 +86,9 @@ function seedOperationProfileApi(initialProject: Project, options: { persistPatc
       }
       return patchResponse.promise;
     }
+    if (url === "/api/projects/proj_1/open" && method === "POST") {
+      return Promise.resolve(jsonResponse(persistedProject));
+    }
     if (url === "/api/projects/proj_1" && method === "GET") {
       projectGets += 1;
       return Promise.resolve(jsonResponse(persistedProject));

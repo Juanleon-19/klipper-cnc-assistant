@@ -715,7 +715,7 @@ class PhysicalIntegrationTest(unittest.TestCase):
             self.assertNotIn("F600", generated)
             self.assertNotIn("F1800", generated)
 
-    def test_completed_existing_physical_map_is_finalized_on_read_without_reprobing(self) -> None:
+    def test_completed_existing_physical_map_is_finalized_explicitly_without_reprobing(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             repository, project_service, project, operation = self._physical_project(temp)
             service = PhysicalMapService(repository)
@@ -741,7 +741,7 @@ class PhysicalIntegrationTest(unittest.TestCase):
             setup = loaded_project.get_setup(operation.setup_id)
             repository.save_project(loaded_project.replace_setup(replace(setup, active_map_id=None)))
 
-            finalized = service.get_active(project.id, operation.id)
+            finalized = service.finalize_map(project_id=project.id, map_id=plan["map_id"])
             self.assertEqual(finalized["map_id"], plan["map_id"])
             self.assertEqual(finalized["map_ready_state"], "MAP_READY")
             self.assertEqual(finalized["validation"]["status"], "VALID")

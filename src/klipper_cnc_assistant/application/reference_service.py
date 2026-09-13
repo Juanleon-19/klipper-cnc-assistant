@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from dataclasses import replace
+from dataclasses import asdict, replace
+import hashlib
+import json
 from typing import Any
 from datetime import datetime, timezone
 
@@ -195,6 +197,24 @@ class ReferenceSessionService:
         )
         self.repository.save_project(project.replace_setup(updated))
         return self.get_session(project_id, operation_id)
+
+    def probe_capture_context(self, project_id: str, operation_id: str) -> dict[str, Any]:
+        project = self._load_project(project_id)
+        operation = project.get_operation(operation_id)
+        setup = project.get_setup(operation.setup_id)
+        origin = setup.preparacion.origen_trabajo
+        reference = setup.preparacion.referencia_z
+        return {
+            "project_id": project_id, "operation_id": operation_id,
+            "setup_id": setup.id, "face": str(operation.cara),
+            "tool_id": operation.tool_id, "tool_profile": str(operation.tool_reference_profile),
+            "placement_revision": setup.placement_revision,
+            "active_reference_id": setup.active_reference_id,
+            "work_origin": None if origin is None else [origin.x_mm, origin.y_mm],
+            "reference_fingerprint": hashlib.sha256(json.dumps(
+                None if reference is None else asdict(reference), sort_keys=True, default=str, allow_nan=False).encode()).hexdigest(),
+            "alignment_fingerprint": hashlib.sha256(json.dumps(asdict(project.configuracion_alineacion), sort_keys=True, default=str, allow_nan=False).encode()).hexdigest(),
+        }
 
     def get_saved_reference_point(self, project_id: str, operation_id: str) -> dict[str, float]:
         """Return only the persisted CNC coordinates for the active reference."""

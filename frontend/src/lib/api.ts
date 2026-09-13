@@ -207,12 +207,13 @@ export const api = {
   setJogMode: (mode: "fine" | "normal" | "coarse") =>
     request<MachineRuntime>("/api/machine/jog-mode", { method: "POST", body: JSON.stringify({ mode }) }),
   requestProbe: () => request<MachineRuntime>("/api/machine/probe/request", { method: "POST" }),
-  confirmProbe: () => request<MachineRuntime>("/api/machine/probe/confirm", { method: "POST" }),
+  confirmProbe: (projectId?: string, operationId?: string) => request<MachineRuntime>("/api/machine/probe/confirm", { method: "POST", body: projectId && operationId ? JSON.stringify({ project_id: projectId, operation_id: operationId }) : undefined }),
   cancelMachineOperation: () => request<MachineRuntime>("/api/machine/cancel", { method: "POST" }),
   safeStopMachine: () => request<MachineRuntime>("/api/machine/safe-stop", { method: "POST" }),
   emergencyStopMachine: () => request<MachineRuntime>("/api/machine/emergency", { method: "POST", body: JSON.stringify({ confirm: true }) }),
   listProjects: () => request<Project[]>("/api/projects"),
   getProject: (projectId: string) => request<Project>(`/api/projects/${projectId}`),
+  openProject: (projectId: string) => request<Project>(`/api/projects/${projectId}/open`, { method: "POST" }),
   continueProject: (projectId: string) => request<ContinueProjectResult>(`/api/projects/${projectId}/continue`, { method: "POST" }),
   archiveProject: (projectId: string) => request<Project>(`/api/projects/${projectId}/archive`, { method: "POST" }),
   trashProject: (projectId: string) => request<Project>(`/api/projects/${projectId}/trash`, { method: "POST" }),
@@ -412,7 +413,7 @@ export const api = {
   getLiveExecution: (projectId: string, setupId: string, face: string) =>
     request<LiveExecutionSnapshot>(`/api/projects/${projectId}/execution/live?setup_id=${encodeURIComponent(setupId)}&face=${encodeURIComponent(face)}`),
   getJobRun: (projectId: string, setupId: string, face: string) =>
-    request<JobRun>(`/api/projects/${projectId}/job-run?setup_id=${encodeURIComponent(setupId)}&face=${encodeURIComponent(face)}`),
+    request<JobRun | null>(`/api/projects/${projectId}/job-run?setup_id=${encodeURIComponent(setupId)}&face=${encodeURIComponent(face)}`),
   prepareJobRun: (projectId: string, setupId: string, face: string) =>
     request<JobRun>(`/api/projects/${projectId}/job-run/prepare`, { method: "POST", body: JSON.stringify({ setup_id: setupId, face }) }),
   startJobRun: (projectId: string, setupId: string, face: string) =>

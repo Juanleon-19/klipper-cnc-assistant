@@ -18,6 +18,8 @@ class JobCancelIdentityTest(unittest.TestCase):
         self.args = dict(project_id=fixture.project_id, setup_id=fixture.setup_id, face='superior')
         self.context = self.service._context(**self.args)
         self.run = self.service.prepare_run(**self.args)
+        self.service._record_spindle_confirmation(self.context, self.run, "prepared", 0)
+        self.service._save_run(self.context, self.run)
         self.path = self.service._run_file(self.context)
 
     def load(self):
