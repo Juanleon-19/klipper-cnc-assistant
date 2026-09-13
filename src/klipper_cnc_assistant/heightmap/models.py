@@ -126,5 +126,6 @@ class HeightMap:
     muestras: tuple[HeightSample, ...]
     estadisticas: HeightMapStatistics
     plano: PlaneFit | None
+    storage_revision: int = field(default=0, compare=False)
     creado_en: datetime = field(default_factory=utc_now)
     actualizado_en: datetime = field(default_factory=utc_now)

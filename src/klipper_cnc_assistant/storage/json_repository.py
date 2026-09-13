@@ -8,6 +8,8 @@ from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
 
+from .safe_persistence import atomic_json, merge_snapshot, remember_snapshot, storage_lock
+
 from klipper_cnc_assistant.domain import (
     AgujeroAlineacion,
     AnalysisIssue,
@@ -91,47 +93,33 @@ class JsonProjectRepository:
         )
 
     def list_projects(self) -> list[ProyectoPCB]:
-        projects: list[ProyectoPCB] = []
-        for project_file in sorted(self.projects_dir.glob("*/project.json")):
-            payload = json.loads(project_file.read_text(encoding="utf-8"))
-            project = self._deserialize_project(payload)
-            if self._needs_project_migration(payload):
-                self.save_project(project)
-            projects.append(project)
-        return projects
+        return [self.load_project(path.parent.name) for path in sorted(self.projects_dir.glob("*/project.json"))]
 
-    def save_project(
-        self,
-        project: ProyectoPCB,
-    ) -> ProyectoPCB:
+    def save_project(self, project: ProyectoPCB) -> ProyectoPCB:
         project_dir = self.project_dir(project.id)
         self._ensure_project_layout(project_dir)
-        payload = self._serialize_project(project)
-        (project_dir / "project.json").write_text(
-            json.dumps(
-                payload,
-                ensure_ascii=True,
-                indent=2,
-                sort_keys=True,
-            ),
-            encoding="utf-8",
-        )
-        return project
+        path = project_dir / "project.json"
+        with storage_lock(path):
+            current = None
+            if path.exists():
+                current = self._serialize_project(self._deserialize_project(json.loads(path.read_text(encoding="utf-8"))))
+            payload = merge_snapshot(path, self._serialize_project(project), current)
+            saved = self._deserialize_project(payload)
+            atomic_json(path, payload, durable=True)
+            remember_snapshot(path, payload)
+            return saved
 
-    def load_project(
-        self,
-        project_id: str,
-    ) -> ProyectoPCB:
-        project_file = self.project_dir(project_id) / "project.json"
-        if not project_file.exists():
-            raise FileNotFoundError(
-                f"El proyecto '{project_id}' no existe."
-            )
-        payload = json.loads(project_file.read_text(encoding="utf-8"))
-        project = self._deserialize_project(payload)
-        if self._needs_project_migration(payload):
-            self.save_project(project)
-        return project
+    def load_project(self, project_id: str) -> ProyectoPCB:
+        path = self.project_dir(project_id) / "project.json"
+        if not path.exists():
+            raise FileNotFoundError(f"El proyecto '{project_id}' no existe.")
+        with storage_lock(path):
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            project = self._deserialize_project(payload)
+            remember_snapshot(path, self._serialize_project(project))
+            if self._needs_project_migration(payload):
+                project = self.save_project(project)
+            return project
 
     def _needs_project_migration(self, payload: dict) -> bool:
         return (
@@ -221,31 +209,24 @@ class JsonProjectRepository:
         payload: dict,
     ) -> dict:
         target = self._height_map_file(project_id, operation_id)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(
-            json.dumps(
-                payload,
-                ensure_ascii=True,
-                indent=2,
-                sort_keys=True,
-            ),
-            encoding="utf-8",
-        )
-        return payload
+        # The only nested storage order: project -> map. No workflow call here.
+        with storage_lock(self.project_dir(project_id) / "project.json"), storage_lock(target):
+            current = json.loads(target.read_text(encoding="utf-8")) if target.exists() else None
+            merged = merge_snapshot(target, payload, current)
+            atomic_json(target, merged, durable=True)
+            remember_snapshot(target, merged)
+            payload.clear()
+            payload.update(merged)
+            return payload
 
-    def load_height_map_payload(
-        self,
-        project_id: str,
-        operation_id: str,
-    ) -> dict:
+    def load_height_map_payload(self, project_id: str, operation_id: str) -> dict:
         target = self._height_map_file(project_id, operation_id)
-        if not target.exists():
-            target = self._shared_height_map_file(project_id, operation_id)
-        if target is None or not target.exists():
-            raise FileNotFoundError(
-                f"El mapa de alturas para la operacion {operation_id} no existe."
-            )
-        return json.loads(target.read_text(encoding="utf-8"))
+        source = target if target.exists() else self._shared_height_map_file(project_id, operation_id)
+        if source is None or not source.exists():
+            raise FileNotFoundError(f"El mapa de alturas para la operacion {operation_id} no existe.")
+        payload = json.loads(source.read_text(encoding="utf-8"))
+        remember_snapshot(target, payload)
+        return payload
 
     def delete_height_map(
         self,
@@ -253,11 +234,12 @@ class JsonProjectRepository:
         operation_id: str,
     ) -> None:
         target = self._height_map_file(project_id, operation_id)
-        if not target.exists():
-            raise FileNotFoundError(
-                f"El mapa de alturas para la operacion '{operation_id}' no existe."
-            )
-        target.unlink()
+        with storage_lock(self.project_dir(project_id) / "project.json"), storage_lock(target):
+            if not target.exists():
+                raise FileNotFoundError(
+                    f"El mapa de alturas para la operacion '{operation_id}' no existe."
+                )
+            target.unlink()
 
     def _resolve_project_file(
         self,
@@ -292,6 +274,7 @@ class JsonProjectRepository:
         project: ProyectoPCB,
     ) -> dict:
         return {
+            "storage_revision": project.storage_revision,
             "id": project.id,
             "nombre": project.nombre,
             "material": {
@@ -525,6 +508,7 @@ class JsonProjectRepository:
             )
         default_setup_id = setups[0].id
         return ProyectoPCB(
+            storage_revision=payload.get("storage_revision", 0),
             id=payload["id"],
             nombre=payload["nombre"],
             material=MaterialBruto(**payload["material"]),

@@ -4,11 +4,10 @@ from copy import deepcopy
 from datetime import datetime, timezone
 import fcntl
 import json
-import os
 from pathlib import Path
-import tempfile
 import threading
 from uuid import uuid4
+from .safe_persistence import atomic_json
 
 class JobRunConflict(RuntimeError):
     """The caller's run, domain revision or cancellation epoch is obsolete."""
@@ -53,17 +52,7 @@ class JobRunStore:
 
     @staticmethod
     def _write(path, run):
-        path = Path(path)
-        fd, name = tempfile.mkstemp(dir=path.parent, prefix='.job-run-', suffix='.tmp')
-        try:
-            with os.fdopen(fd, 'w', encoding='utf-8') as handle:
-                json.dump(run, handle, ensure_ascii=True, indent=2, sort_keys=True)
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.replace(name, path)
-        finally:
-            if os.path.exists(name):
-                os.unlink(name)
+        atomic_json(path, run, durable=True)
 
     @staticmethod
     def _check(current, expected, *, allow_cancelled=False):

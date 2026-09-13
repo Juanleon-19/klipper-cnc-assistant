@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
+from klipper_cnc_assistant.storage.safe_persistence import atomic_json, atomic_write, storage_lock, validate_artifact
 
 from klipper_cnc_assistant.application.adaptive_compensation import (
     ReferenceFrame as AdaptiveReferenceFrame,
@@ -184,7 +186,7 @@ class CompensatedGCodeService:
         )
 
         relative_dir = Path("generated") / "compensated"
-        stamp = _stamp()
+        stamp = _stamp() + "-" + uuid4().hex
         safe_name = f"{operation.id}_{stamp}_{selected_mode.value}_compensated.gcode"
         metadata_name = f"{operation.id}_{stamp}_{selected_mode.value}_compensated.json"
         project_dir = self.repository.project_dir(project_id)
@@ -232,8 +234,12 @@ class CompensatedGCodeService:
         }
         if require_tool_reference:
             self.validate_tool_reference(project_id, operation_id, expected_token=reference_token)
-        (project_dir / relative_path).write_text(output, encoding="utf-8")
-        (project_dir / metadata_path).write_text(json.dumps(metadata, ensure_ascii=True, indent=2, sort_keys=True), encoding="utf-8")
+        # Unique immutable names; metadata is the publication/commit marker.
+        # Rendering and physical validation happen before taking storage locks.
+        with storage_lock(project_dir / metadata_path):
+            atomic_write(project_dir / relative_path, output)
+            validate_artifact(project_dir / relative_path, metadata)
+            atomic_json(project_dir / metadata_path, metadata)
         return GeneratedGCodeResult(
             relative_path=relative_path.as_posix(),
             metadata_path=metadata_path.as_posix(),
@@ -268,6 +274,8 @@ class CompensatedGCodeService:
             raise ApplicationError("La ruta solicitada sale del directorio del proyecto.")
         if not target.exists():
             raise NotFoundError("El archivo compensado solicitado no existe.")
+        metadata = json.loads(target.with_suffix(".json").read_text(encoding="utf-8"))
+        validate_artifact(target, metadata)
         return target
 
     def build_comparison_report(self, project_id: str, operation_id: str) -> dict[str, Any]:

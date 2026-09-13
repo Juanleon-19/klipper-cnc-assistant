@@ -64,12 +64,17 @@ class PhysicalReferenceTokenTest(unittest.TestCase):
     def test_C_context_changes_reject_reference(self):
         for key, value in (('setup_id', 'different-setup'), ('face', 'inferior'), ('placement_revision', 'placement-2')):
             with self.subTest(field=key):
-                payload = copy.deepcopy(self.map)
+                payload = self.repository.load_height_map_payload(self.fixture.project_id, self.map['map_id'])
+                payload['tool_references'][self.operation['tool_key']]['physical_reference_token'] = copy.deepcopy(
+                    self.map['tool_references'][self.operation['tool_key']]['physical_reference_token'])
                 payload['tool_references'][self.operation['tool_key']]['physical_reference_token'][key] = value
                 self.repository.save_height_map_payload(self.fixture.project_id, self.map['map_id'], payload)
                 with self.assertRaises(PhysicalReferenceError):
                     self.current()
-        self.repository.save_height_map_payload(self.fixture.project_id, self.map['map_id'], self.map)
+        payload = self.repository.load_height_map_payload(self.fixture.project_id, self.map['map_id'])
+        payload['tool_references'][self.operation['tool_key']]['physical_reference_token'] = copy.deepcopy(
+            self.map['tool_references'][self.operation['tool_key']]['physical_reference_token'])
+        self.repository.save_height_map_payload(self.fixture.project_id, self.map['map_id'], payload)
         project = self.repository.load_project(self.fixture.project_id)
         setup = project.get_setup(self.fixture.setup_id)
         self.repository.save_project(project.replace_setup(replace(setup, placement_revision='placement-2')))

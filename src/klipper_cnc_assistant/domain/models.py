@@ -428,6 +428,7 @@ class ProyectoPCB:
     trashed_at: datetime | None = None
     status: str = "active"
     current_setup_id: str = "setup-main"
+    storage_revision: int = field(default=0, compare=False)
     version_esquema: str = PROJECT_SCHEMA_VERSION
     configuracion_alineacion: ConfiguracionAlineacion = field(
         default_factory=ConfiguracionAlineacion

@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
+from uuid import uuid4
 
 from klipper_cnc_assistant.application.compensated_gcode_service import CompensatedGCodeService
 from klipper_cnc_assistant.application.errors import ApplicationError, NotFoundError
@@ -24,6 +25,10 @@ from klipper_cnc_assistant.machine.physical_ownership import OwnerKind, Ownershi
 from klipper_cnc_assistant.machine.motion_authorization import MotionRequirements
 from klipper_cnc_assistant.machine.physical_reference import PhysicalReferenceError, reference_context, require_current_reference
 from klipper_cnc_assistant.storage.job_run_store import JobRunStore, JobRunConflict
+from klipper_cnc_assistant.storage.safe_persistence import (
+    atomic_json, atomic_write, storage_lock, patch_metadata,
+    validate_generation, read_artifact_metadata, PersistenceConflict,
+)
 from .print_identity import PrintIdentity, PrintIdentityError
 
 
@@ -1244,6 +1249,7 @@ class JobService:
         self._require_operation_reference(context, operation, expected_token=reference_token)
         if not generated.get('executable'):
             raise ApplicationError('El artefacto JIT no autoriza ejecución.')
+        self._validate_generated_pair(context, generated)
         operation["generated_file"] = generated["relative_path"]
         operation["generated_file_name"] = Path(str(generated["relative_path"])).name
         operation["generated_metadata_path"] = generated.get("metadata_path")
@@ -1308,6 +1314,7 @@ class JobService:
             self.run_store.validate(self._run_file(context), run)
             PrintIdentity.require_idle(adapter.print_status())
             self._require_operation_reference(context, operation, expected_token=reference_token)
+            self._validate_generated_pair(context, generated)
             self.runtime.physical_ownership.validate(adapter.permit)
             authorized = self.run_store.begin_start(self._run_file(context), run,
                                                     operation['operation_id'], identity.filename)
@@ -2318,18 +2325,35 @@ class JobService:
 
     def _load_plan(self, context: JobContext) -> dict[str, Any] | None:
         path = self._plan_file(context)
-        if not path.exists():
-            return None
-        return json.loads(path.read_text(encoding="utf-8"))
+        with storage_lock(path):
+            if not path.exists():
+                return None
+            plan = json.loads(path.read_text(encoding="utf-8"))
+            manifest_path = self._plan_dir(context) / "job_manifest.json"
+            try:
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                validate_generation(plan, manifest)
+            except (FileNotFoundError, PersistenceConflict):
+                return None  # Rebuild legacy/incomplete pairs instead of combining them.
+            return plan
 
     def _save_plan(self, context: JobContext, plan: dict[str, Any]) -> None:
-        self._plan_file(context).write_text(json.dumps(plan, ensure_ascii=True, indent=2, sort_keys=True), encoding="utf-8")
+        plan["generation_id"] = uuid4().hex
+        manifest_path = self._plan_dir(context) / "job_manifest.json"
+        plan["manifest_path"] = self._relative_to_project(context.project_id, manifest_path)
+        manifest = self._build_manifest(plan)
+        manifest["generation_id"] = plan["generation_id"]
+        validate_generation(plan, manifest)
+        manifest_content = json.dumps(manifest, ensure_ascii=True, indent=2, sort_keys=True)
+        plan_content = json.dumps(plan, ensure_ascii=True, indent=2, sort_keys=True)
+        # Build outside the lock; publish both under the same reader/writer lock.
+        with storage_lock(self._plan_file(context)):
+            atomic_write(manifest_path, manifest_content)
+            atomic_write(self._plan_file(context), plan_content)
 
     def _write_manifest(self, context: JobContext, plan: dict[str, Any]) -> None:
-        manifest = self._build_manifest(plan)
-        manifest_path = self._plan_dir(context) / "job_manifest.json"
-        manifest_path.write_text(json.dumps(manifest, ensure_ascii=True, indent=2, sort_keys=True), encoding="utf-8")
-        plan["manifest_path"] = self._relative_to_project(context.project_id, manifest_path)
+        # Publication belongs exclusively to _save_plan, including its generation.
+        plan["manifest_path"] = self._relative_to_project(context.project_id, self._plan_dir(context) / "job_manifest.json")
 
     def _load_run(self, context: JobContext) -> dict[str, Any] | None:
         return self.run_store.load(self._existing_run_file(context))
@@ -2388,7 +2412,7 @@ class JobService:
         base = str(run["run_id"]).replace("/", "_")
         filename = f"{base}__{suffix}_{stamp}.json" if suffix else f"{base}__{stamp}.json"
         history_file = self._history_dir(context) / filename
-        history_file.write_text(json.dumps(run, ensure_ascii=True, indent=2, sort_keys=True), encoding="utf-8")
+        atomic_json(history_file, run, durable=True)
         return history_file
 
     def _prepare_history_snapshot(self, run: dict[str, Any]) -> None:
@@ -2585,10 +2609,15 @@ class JobService:
         return path.relative_to(self._project_dir(project_id)).as_posix()
 
     def _merge_generated_metadata(self, project_id: str, metadata_path: str, updates: dict[str, Any]) -> None:
-        absolute = self.repository.project_dir(project_id) / metadata_path
-        payload = json.loads(absolute.read_text(encoding="utf-8"))
-        payload.update(updates)
-        absolute.write_text(json.dumps(payload, ensure_ascii=True, indent=2, sort_keys=True), encoding="utf-8")
+        absolute = self.repository._resolve_project_file(project_id, metadata_path)
+        patch_metadata(absolute, updates)
+
+    def _validate_generated_pair(self, context: JobContext, generated: dict[str, Any]) -> None:
+        read_artifact_metadata(
+            self.repository._resolve_project_file(context.project_id, str(generated['relative_path'])),
+            self.repository._resolve_project_file(context.project_id, str(generated['metadata_path'])),
+            expected=generated['metadata'],
+        )
 
     def _build_eta_snapshot(
         self,

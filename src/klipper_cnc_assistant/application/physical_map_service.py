@@ -2266,8 +2266,8 @@ class PhysicalMapService:
             raise NotFoundError(str(error)) from error
 
     def _load_file(self, path) -> dict[str, Any]:
-        import json
-        return json.loads(path.read_text(encoding="utf-8"))
+        from klipper_cnc_assistant.storage.safe_persistence import read_json_snapshot
+        return read_json_snapshot(path)
 
     def _load_project(self, project_id: str):
         try:
