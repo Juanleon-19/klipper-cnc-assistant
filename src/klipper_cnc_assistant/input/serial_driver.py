@@ -95,6 +95,10 @@ class SerialReadCancelled(Exception):
     pass
 
 
+class SerialExclusiveRequiredError(RuntimeError):
+    """A physical serial session must never fall back to shared access."""
+
+
 class SerialDriver:
     def __init__(
         self,
@@ -103,12 +107,14 @@ class SerialDriver:
         timeout: float = 1.0,
         startup_delay: float = 2.0,
         valid_packet_timeout: float = 2.0,
+        require_exclusive: bool = True,
     ) -> None:
         self.port = port
         self.baudrate = baudrate
         self.timeout = timeout
         self.startup_delay = startup_delay
         self.valid_packet_timeout = valid_packet_timeout
+        self.require_exclusive = require_exclusive
         self._serial: Optional[serial.Serial] = None
         self._serial_lock = threading.RLock()
         self._cancel_requested = threading.Event()
@@ -117,6 +123,8 @@ class SerialDriver:
     def open(self) -> None:
         with self._serial_lock:
             if self._serial is not None and self._serial.is_open:
+                if self.require_exclusive and self.diagnostics.exclusive_supported is not True:
+                    raise SerialExclusiveRequiredError("Descriptor serial sin exclusividad verificada; lectura bloqueada.")
                 return
             if self._cancel_requested.is_set():
                 raise SerialReadCancelled("Apertura serial cancelada.")
@@ -135,15 +143,24 @@ class SerialDriver:
             except TypeError as error:
                 if "exclusive" not in str(error):
                     raise
-                serial_port = serial.Serial(**options)
                 self.diagnostics.exclusive_supported = False
+                if self.require_exclusive:
+                    raise SerialExclusiveRequiredError("La apertura exclusive=True no está soportada; conexión física rechazada.") from error
+                serial_port = serial.Serial(**options)
         else:
+            if self.require_exclusive:
+                self.diagnostics.exclusive_supported = False
+                raise SerialExclusiveRequiredError("El OS no permite verificar apertura serial exclusiva; conexión física rechazada.")
             serial_port = serial.Serial(**options)
             self.diagnostics.exclusive_requested = False
             self.diagnostics.exclusive_supported = None
 
         with self._serial_lock:
             self._serial = serial_port
+        if self.require_exclusive and getattr(serial_port, "exclusive", None) is not True:
+            self.diagnostics.exclusive_supported = False
+            # The owning worker's finally closes this unpublished descriptor.
+            raise SerialExclusiveRequiredError("No se confirmó acceso serial exclusivo; conexión física rechazada.")
         now = time.monotonic()
         self.diagnostics.open = True
         self.diagnostics.opened_at = now
@@ -231,8 +248,7 @@ class SerialDriver:
         return payload
 
     def read_packet(self) -> ControllerPacket:
-        if self._serial is None or not self._serial.is_open:
-            self.open()
+        self.open()
 
         assert self._serial is not None
         started = time.monotonic()

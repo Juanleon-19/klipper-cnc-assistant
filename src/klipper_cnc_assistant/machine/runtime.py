@@ -625,6 +625,7 @@ class MachineRuntime:
             startup_delay=self.config.serial_startup_delay_s,
             manager_epoch=manager_epoch,
             known_identity=self._known_arduino_identity,
+            physical_mode=self.config.mode is MachineMode.PHYSICAL,
             driver_factory=self._serial_factory,
             on_packet=self._handle_controller_packet_from_manager,
             on_session_started=self._on_serial_session_started,

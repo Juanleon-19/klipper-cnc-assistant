@@ -72,7 +72,9 @@ STOPPED
 
 - La reconexion automatica solo reutiliza el puerto configurado o la identidad USB previamente conocida.
 - Si existe identidad USB, se compara `VID`, `PID` y `serial_number`.
-- Si no existe `serial_number`, se conserva solo el puerto configurado y esa limitacion queda documentada.
+- En modo fisico, la primera conexion requiere VID/PID y serie USB verificable, o VID/PID/location cuando SERIAL_PORT es un by-path que resuelve al dispositivo descubierto. La identidad se fija tras el primer paquete valido; metadata ausente o insuficiente deja el manager en retry sin publicar sesion.
+- La identidad y el destino configurado se comprueban de nuevo antes de publicar cada sesion; las reconexiones conservan validacion de VID/PID/serie/location. No se seleccionan ttyUSB/ttyACM alternativos.
+- En modo fisico, apertura exclusiva es obligatoria. PySerial/OS sin soporte, o un driver sin evidencia de exclusividad, no publican conexion. El fallback compartido solo existe con politica no fisica explicita; simulated no abre dispositivos reales.
 - La reconexion nunca habilita movimiento por si sola.
 - Tras cada reconexion el sistema queda en diagnostico con `manual_enabled = false` y `ready_for_jog = false`.
 - `POST /api/machine/reconnect-arduino` fuerza una nueva sesion serial sin reiniciar Moonraker ni mover la maquina.

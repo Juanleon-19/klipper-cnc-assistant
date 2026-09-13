@@ -135,7 +135,7 @@ class ScriptedFactory:
         self._sessions = list(sessions)
         self.instances: list[FakeDriver] = []
 
-    def __call__(self, *, port: str, baudrate: int, startup_delay: float) -> FakeDriver:
+    def __call__(self, *, port: str, baudrate: int, startup_delay: float, require_exclusive: bool = True) -> FakeDriver:
         del startup_delay
         raw = self._sessions.pop(0) if self._sessions else [PACKET]
         options = raw if isinstance(raw, dict) else {"behavior": raw}
@@ -148,6 +148,8 @@ class ScriptedFactory:
             close_error=options.get("close_error"),  # type: ignore[arg-type]
         )
         self.instances.append(driver)
+        driver.diagnostics.exclusive_requested = require_exclusive
+        driver.diagnostics.exclusive_supported = True
         return driver
 
 
@@ -166,6 +168,7 @@ class ConnectionManagerTest(unittest.TestCase):
             baudrate=115200,
             startup_delay=0.0,
             manager_epoch=41,
+            physical_mode=False,
             driver_factory=factory,
             **callbacks,
         )
@@ -359,6 +362,7 @@ class ConnectionManagerTest(unittest.TestCase):
             manager_epoch=41,
             driver_factory=factory,
             stop_timeout=0.03,
+            physical_mode=False,
         )
         with patch("klipper_cnc_assistant.input.connection_manager.os.path.exists", return_value=True):
             manager.start()

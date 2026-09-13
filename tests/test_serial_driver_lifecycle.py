@@ -11,6 +11,7 @@ from klipper_cnc_assistant.input.serial_driver import SerialDriver, SerialReadCa
 class FakeSerialPort:
     def __init__(self) -> None:
         self.is_open = True
+        self.exclusive = True
         self.close_calls = 0
         self.cancel_calls = 0
 
@@ -58,7 +59,7 @@ class SerialDriverLifecycleTest(unittest.TestCase):
             return opened
 
         with patch("klipper_cnc_assistant.input.serial_driver.serial.Serial", side_effect=serial_factory):
-            driver = SerialDriver(port="/dev/ttyUSB1", startup_delay=0)
+            driver = SerialDriver(port="/dev/ttyUSB1", startup_delay=0, require_exclusive=False)
             driver.open()
             driver.close()
 

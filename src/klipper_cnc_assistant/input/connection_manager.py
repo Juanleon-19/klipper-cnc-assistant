@@ -16,6 +16,7 @@ from .serial_driver import (
     SerialDriver,
     SerialProtocolStaleError,
     SerialReadCancelled,
+    SerialExclusiveRequiredError,
 )
 
 
@@ -38,6 +39,8 @@ class ArduinoConnectionErrorCode(StrEnum):
     OPEN_FAILED = "OPEN_FAILED"
     READ_HANGUP_OR_CONCURRENT_ACCESS = "READ_HANGUP_OR_CONCURRENT_ACCESS"
     IDENTITY_MISMATCH = "IDENTITY_MISMATCH"
+    IDENTITY_UNVERIFIABLE = "IDENTITY_UNVERIFIABLE"
+    EXCLUSIVE_REQUIRED = "EXCLUSIVE_REQUIRED"
     PROTOCOL_STALE = "PROTOCOL_STALE"
     STOP_REQUESTED = "STOP_REQUESTED"
     RECONNECT_REQUESTED = "RECONNECT_REQUESTED"
@@ -143,6 +146,7 @@ class ArduinoConnectionManager:
         startup_delay: float,
         manager_epoch: int = 0,
         known_identity: UsbIdentity | None = None,
+        physical_mode: bool = True,
         driver_factory: Callable[..., SerialDriver] = SerialDriver,
         on_packet: Callable[[int, ControllerPacket, int], None] | None = None,
         on_session_started: Callable[[int, int, UsbIdentity | None], None] | None = None,
@@ -151,6 +155,7 @@ class ArduinoConnectionManager:
         stop_timeout: float = 3.0,
     ) -> None:
         self._configured_port = configured_port
+        self._physical_mode = physical_mode
         self._baudrate = baudrate
         self._startup_delay = startup_delay
         self._manager_epoch = manager_epoch
@@ -295,6 +300,7 @@ class ArduinoConnectionManager:
                         port=port,
                         baudrate=self._baudrate,
                         startup_delay=self._startup_delay,
+                        require_exclusive=self._physical_mode,
                     )
                     with self._lock:
                         if self._driver is not None:
@@ -304,10 +310,22 @@ class ArduinoConnectionManager:
                     self._raise_if_cancelled(attempt_request_id)
                     driver.open()
                     self._raise_if_cancelled(attempt_request_id)
+                    if self._physical_mode and (
+                        getattr(driver.diagnostics, "exclusive_requested", None) is not True
+                        or getattr(driver.diagnostics, "exclusive_supported", None) is not True
+                    ):
+                        raise SerialExclusiveRequiredError("El driver no confirmó apertura serial exclusiva.")
 
                     phase = "first_packet"
                     packet = driver.read_packet()
                     self._raise_if_cancelled(attempt_request_id)
+                    if self._physical_mode:
+                        _, current_port, current_identity = self._resolve_target()
+                        if current_port != resolved_port or self._identity_mismatch(identity, current_identity):
+                            raise _ConnectionAttemptError(
+                                ArduinoConnectionErrorCode.IDENTITY_MISMATCH,
+                                "La identidad o el destino serial cambió durante la apertura; conexión rechazada.",
+                            )
                     with self._lock:
                         self._raise_if_cancelled_locked(attempt_request_id)
                         self._validate_or_record_identity_locked(identity)
@@ -445,6 +463,13 @@ class ArduinoConnectionManager:
         with self._lock:
             self._resolved_port = resolved_port
         identity = self._port_identity(configured_port)
+        if self._physical_mode and not self._identity_verifiable(identity, configured_port, resolved_port):
+            with self._lock:
+                self._rejected_devices += 1
+            raise _ConnectionAttemptError(
+                ArduinoConnectionErrorCode.IDENTITY_UNVERIFIABLE,
+                "No se puede verificar VID/PID y serie USB, o VID/PID/location del by-path configurado.",
+            )
         if known_identity is not None:
             mismatch = self._identity_mismatch(known_identity, identity)
             if mismatch is not None:
@@ -455,6 +480,18 @@ class ArduinoConnectionManager:
                     mismatch,
                 )
         return configured_port, resolved_port, identity
+
+    @staticmethod
+    def _identity_verifiable(identity, configured_port, resolved_port) -> bool:
+        if identity is None or not (
+            type(identity.vid) is int and 0 < identity.vid <= 0xFFFF
+            and type(identity.pid) is int and 0 <= identity.pid <= 0xFFFF
+        ):
+            return False
+        return identity.exact or (
+            os.path.dirname(configured_port) == "/dev/serial/by-path"
+            and configured_port != resolved_port and _unique_serial(identity.location)
+        )
 
     def _port_identity(self, port: str) -> UsbIdentity | None:
         canonical_port = os.path.realpath(port)
@@ -523,6 +560,8 @@ class ArduinoConnectionManager:
     def _classify_error(error: Exception, phase: str) -> ArduinoConnectionErrorCode:
         if isinstance(error, _ConnectionAttemptError):
             return error.code
+        if isinstance(error, SerialExclusiveRequiredError):
+            return ArduinoConnectionErrorCode.EXCLUSIVE_REQUIRED
         if isinstance(error, SerialReadCancelled):
             return ArduinoConnectionErrorCode.READ_HANGUP_OR_CONCURRENT_ACCESS
         if isinstance(error, SerialProtocolStaleError):

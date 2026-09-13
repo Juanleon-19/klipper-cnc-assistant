@@ -49,6 +49,7 @@ def packet(direction: int, flags: int = 0, x: int = 512, y: int = 512) -> bytes:
 class FakeSerial:
     def __init__(self, *_, **__):
         self.is_open = True
+        self.exclusive = __.get("exclusive", False)
         bad = bytearray(packet(4, flags=0x03))
         bad[-1] ^= 0xFF
         self.buffer = bytearray(b"noise" + bytes(bad) + packet(3, flags=0x04, x=300, y=700))

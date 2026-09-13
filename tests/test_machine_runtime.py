@@ -10,6 +10,7 @@ import time
 import unittest
 from dataclasses import replace
 from unittest.mock import patch
+from types import SimpleNamespace
 
 from klipper_cnc_assistant.application.physical_map_service import PhysicalMapService, PhysicalMeshConfig
 from klipper_cnc_assistant.execution import MeshExecutionService
@@ -412,6 +413,8 @@ class ReconnectableDiagnostics:
         self.open = False
         self.thread_active = False
         self.last_exception = None
+        self.exclusive_requested = True
+        self.exclusive_supported = True
 
     def snapshot(self, *, now: float) -> dict[str, object]:
         return {
@@ -652,7 +655,8 @@ class MachineRuntimeTest(unittest.TestCase):
 
         with patch("klipper_cnc_assistant.input.connection_manager.os.path.exists", side_effect=lambda _path: serial_available.is_set()), patch(
             "klipper_cnc_assistant.input.connection_manager.list_ports.comports",
-            return_value=[],
+            return_value=[SimpleNamespace(device="/dev/ttyUSB0", vid=0x1234, pid=0x5678,
+                                         serial_number="runtime-test", location="2-1:1.0")],
         ):
             try:
                 initial = runtime.connect()
