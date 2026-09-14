@@ -1,0 +1,73 @@
+{
+  "cycles": 160,
+  "warmup_cycles": 10,
+  "requests": 3080,
+  "elapsed_s": 27.12786051398143,
+  "initial": {
+    "rss_kib": 76804,
+    "threads": 6,
+    "python_threads": 3,
+    "async_tasks": 3,
+    "pid": 934872,
+    "cycle": 10,
+    "elapsed_s": 1.7012332868762314
+  },
+  "final": {
+    "rss_kib": 78268,
+    "threads": 6,
+    "python_threads": 3,
+    "async_tasks": 3,
+    "pid": 934872,
+    "cycle": 160,
+    "elapsed_s": 27.127793163992465
+  },
+  "checkpoints": [
+    {
+      "rss_kib": 76804,
+      "threads": 6,
+      "python_threads": 3,
+      "async_tasks": 3,
+      "pid": 934872,
+      "cycle": 10,
+      "elapsed_s": 1.7012332868762314
+    },
+    {
+      "rss_kib": 77064,
+      "threads": 6,
+      "python_threads": 3,
+      "async_tasks": 3,
+      "pid": 934872,
+      "cycle": 40,
+      "elapsed_s": 6.801331714959815
+    },
+    {
+      "rss_kib": 77488,
+      "threads": 6,
+      "python_threads": 3,
+      "async_tasks": 3,
+      "pid": 934872,
+      "cycle": 80,
+      "elapsed_s": 13.408732051961124
+    },
+    {
+      "rss_kib": 77964,
+      "threads": 6,
+      "python_threads": 3,
+      "async_tasks": 3,
+      "pid": 934872,
+      "cycle": 120,
+      "elapsed_s": 20.011433372972533
+    },
+    {
+      "rss_kib": 78268,
+      "threads": 6,
+      "python_threads": 3,
+      "async_tasks": 3,
+      "pid": 934872,
+      "cycle": 160,
+      "elapsed_s": 27.127793163992465
+    }
+  ],
+  "scope": "same synthetic project/map; 5x status/project/live reads each cycle; map recalculation every 5 cycles",
+  "status": "PASS"
+}

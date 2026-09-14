@@ -1,0 +1,199 @@
+{
+  "quadratic": {
+    "max_error_mm": 0.0049998066692246435,
+    "mean_error_mm": 0.0033231503971993376,
+    "analytical_upper_bound_mm": 0.005
+  },
+  "trajectory": {
+    "samples": 400,
+    "original_moves": 6,
+    "generated_moves": 402,
+    "surface_compensated_moves": 401,
+    "out_of_map": 0,
+    "nonfinite": 0,
+    "min_z_mm": 2.903,
+    "max_z_mm": 3.4789999999999996,
+    "max_consecutive_delta_z_mm": 0.006000000000000227,
+    "all_moves_max_consecutive_delta_z_mm": 0.09699999999999998
+  },
+  "counterexamples": {
+    "linear_ramp": {
+      "input_moves": 2,
+      "preview_segments": 2,
+      "incomplete": false,
+      "generated_moves": 11,
+      "first_last_segment_sample": {
+        "plan_index": 1,
+        "line_number": 4,
+        "motion": "G1",
+        "movement_type": "movimiento_lineal",
+        "pcb_x_mm": 1.0,
+        "pcb_y_mm": 0.0,
+        "machine_x_mm": 101.0,
+        "machine_y_mm": 200.0,
+        "programmed_z_mm": -1.1,
+        "surface_z_machine_mm": 3.0,
+        "delta_z_mm": 0.0,
+        "final_z_mm": 1.9,
+        "feed_mm_min": 120.0,
+        "uses_surface_map": true
+      },
+      "last_sample": {
+        "plan_index": 10,
+        "line_number": 4,
+        "motion": "G1",
+        "movement_type": "movimiento_lineal",
+        "pcb_x_mm": 10.0,
+        "pcb_y_mm": 0.0,
+        "machine_x_mm": 110.0,
+        "machine_y_mm": 200.0,
+        "programmed_z_mm": -1.1,
+        "surface_z_machine_mm": 3.0,
+        "delta_z_mm": 0.0,
+        "final_z_mm": 1.9,
+        "feed_mm_min": 120.0,
+        "uses_surface_map": true
+      }
+    },
+    "helical_arc": {
+      "input_moves": 2,
+      "preview_segments": 2,
+      "incomplete": false,
+      "generated_moves": 25,
+      "first_last_segment_sample": {
+        "plan_index": 1,
+        "line_number": 4,
+        "motion": "G2",
+        "movement_type": "arco_horario",
+        "pcb_x_mm": 0.08518543427732972,
+        "pcb_y_mm": 0.6470476127563028,
+        "machine_x_mm": 100.08518543427734,
+        "machine_y_mm": 200.6470476127563,
+        "programmed_z_mm": -1.1,
+        "surface_z_machine_mm": 3.0,
+        "delta_z_mm": 0.0,
+        "final_z_mm": 1.9,
+        "feed_mm_min": 120.0,
+        "uses_surface_map": true
+      },
+      "last_sample": {
+        "plan_index": 24,
+        "line_number": 4,
+        "motion": "G2",
+        "movement_type": "arco_horario",
+        "pcb_x_mm": 10.0,
+        "pcb_y_mm": 0.0,
+        "machine_x_mm": 110.0,
+        "machine_y_mm": 200.0,
+        "programmed_z_mm": -1.1,
+        "surface_z_machine_mm": 3.0,
+        "delta_z_mm": 0.0,
+        "final_z_mm": 1.9,
+        "feed_mm_min": 120.0,
+        "uses_surface_map": true
+      }
+    },
+    "unsupported_R_arc": {
+      "input_moves": 2,
+      "preview_segments": 1,
+      "incomplete": true,
+      "rejected_explicitly": "No se puede generar compensaci\u00f3n Legacy: el an\u00e1lisis G-code est\u00e1 incompleto o contiene errores cr\u00edticos. Corrija los comandos indicados y vuelva a analizar; no se omitir\u00e1 ning\u00fan movimiento no representable."
+    },
+    "units_after_axes": {
+      "input_moves": 1,
+      "preview_segments": 1,
+      "incomplete": false,
+      "generated_moves": 1,
+      "first_last_segment_sample": {
+        "plan_index": 0,
+        "line_number": 1,
+        "motion": "G1",
+        "movement_type": "movimiento_lineal",
+        "pcb_x_mm": 1.0,
+        "pcb_y_mm": 0.0,
+        "machine_x_mm": 101.0,
+        "machine_y_mm": 200.0,
+        "programmed_z_mm": 0.0,
+        "surface_z_machine_mm": 3,
+        "delta_z_mm": 0.0,
+        "final_z_mm": 3.0,
+        "feed_mm_min": 10.0,
+        "uses_surface_map": false
+      },
+      "last_sample": {
+        "plan_index": 0,
+        "line_number": 1,
+        "motion": "G1",
+        "movement_type": "movimiento_lineal",
+        "pcb_x_mm": 1.0,
+        "pcb_y_mm": 0.0,
+        "machine_x_mm": 101.0,
+        "machine_y_mm": 200.0,
+        "programmed_z_mm": 0.0,
+        "surface_z_machine_mm": 3,
+        "delta_z_mm": 0.0,
+        "final_z_mm": 3.0,
+        "feed_mm_min": 10.0,
+        "uses_surface_map": false
+      }
+    },
+    "millimeters_after_axes": {
+      "input_moves": 2,
+      "preview_segments": 2,
+      "incomplete": false,
+      "generated_moves": 6,
+      "first_last_segment_sample": {
+        "plan_index": 3,
+        "line_number": 3,
+        "motion": "G1",
+        "movement_type": "movimiento_lineal",
+        "pcb_x_mm": 3.3866666666666667,
+        "pcb_y_mm": 0.0,
+        "machine_x_mm": 103.38666666666667,
+        "machine_y_mm": 200.0,
+        "programmed_z_mm": 0.0,
+        "surface_z_machine_mm": 3,
+        "delta_z_mm": 0.0,
+        "final_z_mm": 3.0,
+        "feed_mm_min": 508.0,
+        "uses_surface_map": false
+      },
+      "last_sample": {
+        "plan_index": 5,
+        "line_number": 3,
+        "motion": "G1",
+        "movement_type": "movimiento_lineal",
+        "pcb_x_mm": 5.08,
+        "pcb_y_mm": 0.0,
+        "machine_x_mm": 105.08,
+        "machine_y_mm": 200.0,
+        "programmed_z_mm": 0.0,
+        "surface_z_machine_mm": 3,
+        "delta_z_mm": 0.0,
+        "final_z_mm": 3.0,
+        "feed_mm_min": 508.0,
+        "uses_surface_map": false
+      }
+    }
+  },
+  "snapshot_retention": {
+    "paths_before": 0,
+    "paths_after": 80,
+    "retained_bytes_after_tempdir_removal": 19341474,
+    "new_paths": 80,
+    "points_per_snapshot": 1000
+  },
+  "preview_reference_frames": {
+    "map_delta_mm": 0.2,
+    "reference_mm": 3,
+    "programmed_z_mm": -0.1,
+    "reference_session_preview_z_mm": -2.9,
+    "generated_machine_z_mm": 3.1,
+    "expected_local_compensated_z_mm": 0.1
+  },
+  "interpolation_1000_queries_seconds_by_nodes": {
+    "81": 0.02725892304442823,
+    "1681": 0.35795481503009796,
+    "6561": 1.979924735845998
+  }
+}

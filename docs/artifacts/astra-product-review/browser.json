@@ -1,0 +1,34 @@
+{
+  "javascript_errors": [],
+  "http_status_counts": {
+    "200": 13787,
+    "201": 2,
+    "404": 20
+  },
+  "http_error_resource_names": {
+    "physical-map": 13,
+    "height-map": 7
+  },
+  "transport_errors": {
+    "NS_ERROR_CONNECTION_REFUSED": 24
+  },
+  "viewports": [
+    [
+      1440,
+      900
+    ],
+    [
+      390,
+      844
+    ]
+  ],
+  "execution_fake_views": 16,
+  "runtime_fixtures": [
+    "DISCONNECTED",
+    "CONNECTED",
+    "ERROR"
+  ],
+  "native_browser_workflow": "project/operation/upload/analyze/reference/map/3D/inspection/prepare blocked",
+  "limits": "Fake snapshots are presentation tests; native simulated printing is not implemented.",
+  "webgl_3d": "NOT_VERIFIED: Firefox headless could not create WebGL context; 2D reviewed"
+}
