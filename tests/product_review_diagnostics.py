@@ -35,7 +35,7 @@ def main(output_dir):
     (output_dir/'synthetic-original.gcode').write_text(code)
     (output_dir/'synthetic-compensated.gcode').write_text('\n'.join(lines)+'\n')
     with (output_dir/'trajectory.csv').open('w') as out:
-        writer=csv.DictWriter(out,fieldnames=list(trace[0]));writer.writeheader();writer.writerows(trace)
+        writer=csv.DictWriter(out,fieldnames=list(trace[0]),lineterminator='\n');writer.writeheader();writer.writerows(trace)
     cutting=[p for p in trace if p['line_number']>=5]
     z=[p['final_z_mm'] for p in cutting]
     metrics={'samples':len(z),'original_moves':analyze_gcode_text(code).cantidad_movimientos,
