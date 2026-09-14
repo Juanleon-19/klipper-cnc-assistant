@@ -544,6 +544,26 @@ function renderWorkspace(machine?: MachineContextValue, options?: { onRefreshPro
 }
 
 describe("ProjectWorkspace", () => {
+  it("no solapa lecturas live lentas y detiene el polling al desmontar", async () => {
+    vi.useFakeTimers();
+    const pending = deferred<LiveExecutionSnapshot>();
+    apiMock.getLiveExecution.mockReturnValue(pending.promise);
+    const view = renderWorkspace();
+    try {
+      await act(async () => { await vi.advanceTimersByTimeAsync(5000); });
+      expect(apiMock.getLiveExecution).toHaveBeenCalledTimes(1);
+      await act(async () => { pending.resolve(liveExecution); });
+      await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+      expect(apiMock.getLiveExecution).toHaveBeenCalledTimes(2);
+      view.unmount();
+      await act(async () => { await vi.advanceTimersByTimeAsync(5000); });
+      expect(apiMock.getLiveExecution).toHaveBeenCalledTimes(2);
+    } finally {
+      view.unmount();
+      vi.useRealTimers();
+    }
+  });
+
   beforeEach(() => {
     Object.values(apiMock).forEach((fn) => fn.mockReset());
     apiMock.getMachineSettings.mockResolvedValue({ reference_prep_z_mm: 115, reference_prep_z_feed_mm_min: 180, move_total_timeout_s: 180, no_progress_timeout_s: 60, position_tolerance_mm: 0.05, velocity_tolerance_mm_s: 0.02 });

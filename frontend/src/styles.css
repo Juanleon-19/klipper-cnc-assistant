@@ -1483,8 +1483,7 @@ button {
   position: sticky;
   top: 0;
   z-index: 10;
-  backdrop-filter: blur(12px);
-  background: rgba(11, 18, 23, 0.72);
+  background: #0b1217;
 }
 
 .projects-layout {

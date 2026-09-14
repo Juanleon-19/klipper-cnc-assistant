@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import datetime, timezone
+import math
 
 from klipper_cnc_assistant.domain import MaterialBruto, OperationPreparation, ProjectValidationError
 from klipper_cnc_assistant.heightmap import (
@@ -147,6 +148,7 @@ class HeightMapService:
         project.get_operation(operation_id)
         grid, probe_region, exclusion_zones, samples = parse_json_samples(content)
         normalized_grid = self._normalize_grid(project.material, probe_region, exclusion_zones, grid, samples)
+        self._validate_imported_samples(normalized_grid, probe_region, samples)
         self._validate_grid_points(normalized_grid, probe_region, exclusion_zones)
         current = self._try_get_map(project_id, operation_id)
         height_map = compute_height_map(
@@ -178,6 +180,7 @@ class HeightMapService:
         project.get_operation(operation_id)
         grid, probe_region, exclusion_zones, samples = parse_csv_samples(content)
         normalized_grid = self._normalize_grid(project.material, probe_region, exclusion_zones, grid, samples)
+        self._validate_imported_samples(normalized_grid, probe_region, samples)
         self._validate_grid_points(normalized_grid, probe_region, exclusion_zones)
         current = self._try_get_map(project_id, operation_id)
         height_map = compute_height_map(
@@ -416,6 +419,29 @@ class HeightMapService:
                 raise ApplicationError(f"La zona excluida '{zone.nombre}' no tiene dimensiones validas.")
             if zone.min_x_mm < 0 or zone.min_y_mm < 0 or zone.max_x_mm > material.ancho_mm or zone.max_y_mm > material.alto_mm:
                 raise ApplicationError(f"La zona excluida '{zone.nombre}' debe estar dentro del material.")
+
+    def _validate_imported_samples(self, grid: HeightGrid, region: ProbeRegion, samples: list[HeightSample]) -> None:
+        """The interpolator indexes a regular grid, never an arbitrary point cloud."""
+        seen_slots: set[tuple[int, int]] = set()
+        seen_ids: set[str] = set()
+        expected_dx = region.ancho_mm / (grid.columnas - 1) if grid.columnas > 1 else 0.0
+        expected_dy = region.alto_mm / (grid.filas - 1) if grid.filas > 1 else 0.0
+        for actual, expected in ((grid.paso_x_mm, expected_dx), (grid.paso_y_mm, expected_dy),
+                                 (grid.ancho_mm, region.ancho_mm), (grid.alto_mm, region.alto_mm)):
+            if not math.isfinite(actual) or not math.isclose(actual, expected, rel_tol=0, abs_tol=1e-6):
+                raise ApplicationError("El mapa importado debe describir una malla regular coherente con su región.")
+        for sample in samples:
+            slot = (sample.fila, sample.columna)
+            if slot in seen_slots or sample.id in seen_ids:
+                raise ApplicationError("El mapa importado contiene una muestra o posición de malla repetida.")
+            seen_slots.add(slot)
+            seen_ids.add(sample.id)
+            expected_x = region.min_x_mm + sample.columna * grid.paso_x_mm
+            expected_y = region.min_y_mm + sample.fila * grid.paso_y_mm
+            if (not 0 <= sample.fila < grid.filas or not 0 <= sample.columna < grid.columnas
+                    or not math.isclose(sample.x_mm, expected_x, rel_tol=0, abs_tol=1e-6)
+                    or not math.isclose(sample.y_mm, expected_y, rel_tol=0, abs_tol=1e-6)):
+                raise ApplicationError("Las coordenadas importadas no corresponden a su posición en la malla regular.")
 
     def _validate_grid_points(self, grid: HeightGrid, probe_region: ProbeRegion, exclusion_zones: tuple[ExclusionZone, ...]) -> None:
         for fila in range(grid.filas):

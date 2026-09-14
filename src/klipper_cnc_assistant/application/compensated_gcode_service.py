@@ -595,6 +595,12 @@ class CompensatedGCodeService:
         }
 
     def _build_compensated_lines(self, operation: OperacionPCB, height_map: HeightMap, max_segment_mm: float, reference_frame: ReferenceFrame) -> tuple[list[str], dict[str, Any]]:
+        if operation.analisis.analisis_incompleto or operation.analisis.tiene_errores_criticos:
+            raise ApplicationError(
+                "No se puede generar compensación Legacy: el análisis G-code está incompleto "
+                "o contiene errores críticos. Corrija los comandos indicados y vuelva a analizar; "
+                "no se omitirá ningún movimiento no representable."
+            )
         lines = [
             "; Klipper CNC Assistant - plan compensado inmutable",
             f"; Operacion: {operation.nombre} ({operation.id})",

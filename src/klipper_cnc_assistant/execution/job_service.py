@@ -1564,19 +1564,19 @@ class JobService:
         snapshot = self.runtime.snapshot()
         checks: list[dict[str, Any]] = []
 
-        def add(name: str, ok: bool, detail: str) -> None:
-            checks.append({"name": name, "ok": ok, "detail": detail})
+        def add(name: str, ok: bool, detail: str, failure: str | None = None) -> None:
+            checks.append({"name": name, "ok": ok, "detail": detail if ok or failure is None else failure})
 
         add("modo_fisico", snapshot.get("mode") == "PHYSICAL", "MACHINE_MODE=physical requerido para ejecutar.")
-        add("runtime_conectado", bool(snapshot.get("moonraker", {}).get("http_connected")), "Moonraker HTTP conectado.")
-        add("websocket", bool(snapshot.get("moonraker", {}).get("websocket_connected")), "Telemetría WebSocket conectada.")
-        add("klipper_ready", bool(snapshot.get("klipper", {}).get("ready")), "Klipper listo para ejecución.")
+        add("runtime_conectado", bool(snapshot.get("moonraker", {}).get("http_connected")), "Moonraker HTTP conectado.", "Sin conexión HTTP con Moonraker. Revise el diagnóstico de conexión.")
+        add("websocket", bool(snapshot.get("moonraker", {}).get("websocket_connected")), "Telemetría WebSocket conectada.", "Telemetría WebSocket desconectada. Revise el diagnóstico de conexión.")
+        add("klipper_ready", bool(snapshot.get("klipper", {}).get("ready")), "Klipper listo para ejecución.", "Klipper no está listo para ejecutar. Revise su estado en el diagnóstico.")
         homed_axes = str(snapshot.get("klipper", {}).get("homed_axes") or "")
         add("homing", set("xyz").issubset(set(homed_axes)), f"Homing actual: {homed_axes or 'pendiente'}.")
-        add("mapa_activo", bool(plan.get("active_map")), "Mapa físico activo del montaje.")
-        add("plan_generado", len(plan.get("operations", [])) > 0, "Plan multioperación generado.")
+        add("mapa_activo", bool(plan.get("active_map")), "Mapa físico activo del montaje.", "Falta un mapa físico activo para este montaje.")
+        add("plan_generado", len(plan.get("operations", [])) > 0, "Plan multioperación generado.", "Falta generar el plan de operaciones.")
         blocked_operations = [item for item in plan["operations"] if item["blocking"]]
-        add("operaciones_bloqueadas", not blocked_operations, "Todas las operaciones activas están compensables y cubiertas por el mapa.")
+        add("operaciones_bloqueadas", not blocked_operations, "Todas las operaciones activas están compensables y cubiertas por el mapa.", "Hay operaciones bloqueadas. Revise sus archivos, referencias y cobertura del mapa.")
         add(
             "compensacion_jit",
             True,

@@ -834,20 +834,15 @@ export function ProjectWorkspace({
     let cancelled = false;
     const loadJobState = async () => {
       try {
-        const [plan, live] = await Promise.all([
-          api.getJobPlan(project.id, selectedSetup.id, activeJobFace),
-          api.getLiveExecution(project.id, selectedSetup.id, activeJobFace),
-        ]);
+        const plan = await api.getJobPlan(project.id, selectedSetup.id, activeJobFace);
         if (cancelled) {
           return;
         }
         setJobPlan(plan);
-        setLiveExecution(live);
         setExecutionError(null);
       } catch {
         if (!cancelled) {
           setJobPlan(null);
-          setLiveExecution(null);
         }
       }
     };
@@ -862,7 +857,10 @@ export function ProjectWorkspace({
       return;
     }
     let cancelled = false;
+    let inFlight = false;
     const poll = async () => {
+      if (inFlight) return;
+      inFlight = true;
       try {
         const live = await api.getLiveExecution(project.id, selectedSetup.id, activeJobFace);
         if (cancelled) {
@@ -871,6 +869,8 @@ export function ProjectWorkspace({
         setLiveExecution(live);
       } catch {
         // conserve last visible state
+      } finally {
+        inFlight = false;
       }
     };
     const timer = window.setInterval(() => {

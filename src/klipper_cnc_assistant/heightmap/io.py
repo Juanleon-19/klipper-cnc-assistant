@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import json
+import math
 from io import StringIO
 
 from .models import ExclusionZone, HeightGrid, HeightSample, ProbeRegion, SampleQuality
@@ -46,6 +47,10 @@ def _sample_from_mapping(payload: dict[str, object], *, default_source: str) -> 
         parsed_z = None
     else:
         parsed_z = float(z_value)
+    for name, value in (("x_mm", float(payload.get("x_mm", 0.0))),
+                        ("y_mm", float(payload.get("y_mm", 0.0))), ("z_mm", parsed_z)):
+        if value is not None and not math.isfinite(value):
+            raise ValueError(f"La muestra requiere {name} finito.")
     quality = str(payload.get("estado_calidad", payload.get("quality", "valida"))).strip().lower()
     quality_map = {
         "valida": SampleQuality.VALIDA,
