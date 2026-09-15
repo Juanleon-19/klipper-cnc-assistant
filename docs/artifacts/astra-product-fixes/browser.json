@@ -1,0 +1,39 @@
+{
+  "status": "PASS",
+  "native_tour_viewports": [
+    [
+      1440,
+      900
+    ],
+    [
+      390,
+      844
+    ]
+  ],
+  "native_views": [
+    "Archivo",
+    "Trayectoria",
+    "Referencia",
+    "Mapa de alturas",
+    "Ejecuci\u00f3n"
+  ],
+  "fake_execution_states": [
+    "running",
+    "paused",
+    "recovery",
+    "cancelled",
+    "ready",
+    "spindle-stop",
+    "tool-change",
+    "ready-to-resume"
+  ],
+  "fake_state_checks_passed": 16,
+  "fake_state_checks_total": 16,
+  "console_errors_native_tour": 0,
+  "http_5xx_native_tour": 0,
+  "expected_404_native_tour": {
+    "reason": "physical-map absent in simulated project",
+    "count": 1
+  },
+  "scope": "Real simulated app navigation; execution-state presentation uses current fake JobService/API responses; no hardware."
+}

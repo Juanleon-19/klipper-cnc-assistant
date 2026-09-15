@@ -30,7 +30,13 @@ snapshot read at their revision. Independent fields and stable-id collection
 items survive concurrent updates. Conflicting changes to the same field reject
 the stale writer; physical tokens are indivisible. Only observation timestamps
 (`updated_at`, `actualizado_en`, `last_opened_at`) combine by latest time.
-Merge bases are bounded to 32 revisions per path per process. If a writer's base
+Merge bases are bounded to 32 revisions per path, 512 revisions and 8 MiB of
+immutable serialized JSON globally per process, with LRU eviction. Active storage
+transactions protect their paths; cache admission is skipped when protected bases
+exhaust capacity. Deleted-resource hooks and a bounded sweep discard obsolete
+paths. RLocks are weakly registered while live owners/waiters retain strong
+references. See [functional correction evidence](astra-functional-corrections.md).
+If a writer's base
 has expired or was not loaded by that process, it must reload: it cannot replace
 the latest state. Revisions are storage coordination, not physical trust.
 

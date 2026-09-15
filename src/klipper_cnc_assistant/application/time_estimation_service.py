@@ -9,6 +9,7 @@ from typing import Any, Callable
 from klipper_cnc_assistant.application.errors import ApplicationError
 from klipper_cnc_assistant.gcode.models import ModalState
 from klipper_cnc_assistant.gcode.tokenizer import tokenize_gcode
+from klipper_cnc_assistant.gcode.units import block_units, unit_regime_error
 from klipper_cnc_assistant.moonraker.client import MoonrakerClient, MoonrakerError
 from klipper_cnc_assistant.storage import JsonProjectRepository
 
@@ -148,6 +149,8 @@ class TimeEstimationService:
         state = ModalState()
         offsets = _line_offsets(text)
         lines = tokenize_gcode(text)
+        if error := unit_regime_error(lines):
+            raise ApplicationError(error.message)
         events: list[MotionSegment | DwellEvent | UnknownTimeEvent] = []
         offset_table: list[dict[str, float]] = []
         unsupported_commands: list[str] = []
@@ -348,6 +351,7 @@ def _parse_line(*, line, state: ModalState) -> dict[str, Any]:
     unsupported_command: str | None = None
     has_dwell = False
 
+    state.units = block_units(line, state.units)
     for token in line.tokens:
         if token.letter == "G":
             command = _normalize_g_command(token.raw_value)

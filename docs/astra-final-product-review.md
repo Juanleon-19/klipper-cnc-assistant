@@ -1,5 +1,8 @@
 # Revisión final de producto — 13 de septiembre de 2026
 
+> Informe histórico de la revisión inicial. El cierre posterior de los hallazgos
+> funcionales está en [correcciones Astra](astra-functional-corrections.md).
+
 Base exacta: `0493571a71597020b06c177872c762becc8afa64`.
 Rama: `improvement/astra-final-product-review-2026-09-13`.
 Veredicto: **NEEDS_IMPROVEMENT**. La interpolación regular y el signo son correctos;

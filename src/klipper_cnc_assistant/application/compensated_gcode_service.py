@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -20,6 +20,7 @@ from klipper_cnc_assistant.gcode import analyze_gcode_text
 from klipper_cnc_assistant.heightmap import HeightGrid, HeightMap, HeightSample, ProbeRegion, SampleQuality, interpolate_height
 from klipper_cnc_assistant.heightmap.coverage import DOMAIN_TOLERANCE_MM, build_coverage_report, segment_uses_surface_map
 from klipper_cnc_assistant.storage import JsonProjectRepository
+from klipper_cnc_assistant.heightmap.transform import compensated_z, sample_programmed_segment, compensation_tool_key, measured_reference_z
 
 
 def _now() -> datetime:
@@ -31,7 +32,7 @@ def _stamp() -> str:
 
 
 def _tool_key(operation: OperacionPCB) -> str:
-    return operation.tool_id or (operation.herramienta or "sin-herramienta").strip().lower().replace(" ", "-")
+    return compensation_tool_key(operation.tool_id, operation.herramienta)
 
 
 @dataclass(frozen=True)
@@ -76,18 +77,27 @@ def compensate_cut_point(*, pcb: PcbCoordinates, programmed_z_mm: float | None, 
     machine = reference_frame.pcb_to_machine(pcb)
     if programmed_z_mm is None:
         return CompensatedMachineCoordinates(machine, None, None)
-    if not uses_surface_map:
-        return CompensatedMachineCoordinates(MachineCoordinates(machine.x_mm, machine.y_mm, reference_frame.surface_reference_z_mm + programmed_z_mm), reference_frame.surface_reference_z_mm, 0.0)
-    interpolation = interpolate_height(surface_map, x_mm=pcb.x_mm, y_mm=pcb.y_mm, mode="bruto")
-    if interpolation.valor_mm is None:
-        raise ApplicationError(f"No se puede compensar X={pcb.x_mm:.3f}, Y={pcb.y_mm:.3f}. {interpolation.observacion or interpolation.estado}")
-    delta_z = float(interpolation.valor_mm)
-    surface_z = reference_frame.surface_reference_z_mm + delta_z
-    return CompensatedMachineCoordinates(MachineCoordinates(machine.x_mm, machine.y_mm, surface_z + programmed_z_mm), surface_z, delta_z)
+    delta_z = 0.0
+    if uses_surface_map:
+        interpolation = interpolate_height(surface_map, x_mm=pcb.x_mm, y_mm=pcb.y_mm, mode="bruto")
+        if interpolation.valor_mm is None:
+            raise ApplicationError(f"No se puede compensar X={pcb.x_mm:.3f}, Y={pcb.y_mm:.3f}. {interpolation.observacion or interpolation.estado}")
+        delta_z = float(interpolation.valor_mm)
+    final_z = compensated_z(
+        reference_z_mm=reference_frame.surface_reference_z_mm,
+        map_delta_mm=delta_z,
+        programmed_z_mm=programmed_z_mm,
+        uses_surface_map=uses_surface_map,
+    )
+    return CompensatedMachineCoordinates(
+        MachineCoordinates(machine.x_mm, machine.y_mm, final_z),
+        reference_frame.surface_reference_z_mm + delta_z,
+        delta_z,
+    )
 
 
 class CompensatedGCodeService:
-    LEGACY_ALGORITHM_VERSION = "compensated-gcode-v1"
+    LEGACY_ALGORITHM_VERSION = "compensated-gcode-v2"
     ADAPTIVE_ALGORITHM_VERSION = "adaptive-fast-v1"
 
     def __init__(self, repository: JsonProjectRepository, physical_map_service, time_estimation_service=None, machine_runtime=None) -> None:
@@ -113,6 +123,9 @@ class CompensatedGCodeService:
         if not operation.archivo_gcode:
             raise ApplicationError("La operación no tiene archivo G-code original asociado.")
 
+        original = self.repository.read_project_file(project_id, operation.archivo_gcode)
+        operation = replace(operation, analisis=analyze_gcode_text(original, material=project.material))
+        self._validate_legacy_analysis(operation)
         physical_map = self.physical_map_service.get_active(project_id, operation_id)
         self._validate_map_for_operation(physical_map, operation, require_tool_reference=require_tool_reference)
         reference_token = None
@@ -138,7 +151,6 @@ class CompensatedGCodeService:
         segment_limit = max_segment_mm or max(0.25, sample_spacing / 2.0)
         reference_frame = self._reference_frame(physical_map, operation)
         selected_mode = CompensationMode(mode or str(operation.compensation_mode))
-        original = self.repository.read_project_file(project_id, operation.archivo_gcode)
         original_hash = hashlib.sha256(original.encode("utf-8")).hexdigest()
         map_hash = hashlib.sha256(json.dumps(physical_map, sort_keys=True).encode("utf-8")).hexdigest()
         executable = require_tool_reference
@@ -283,12 +295,14 @@ class CompensatedGCodeService:
         operation = project.get_operation(operation_id)
         if operation.analisis is None or not operation.archivo_gcode:
             raise ApplicationError("La operación requiere análisis y archivo original para auditar compensación.")
+        original = self.repository.read_project_file(project_id, operation.archivo_gcode)
+        operation = replace(operation, analisis=analyze_gcode_text(original, material=project.material))
+        self._validate_legacy_analysis(operation)
         physical_map = self.physical_map_service.get_active(project_id, operation_id)
         self._validate_map_for_operation(physical_map, operation, require_tool_reference=False)
         height_map = self._height_map_from_payload(physical_map["height_map"])
         reference_frame = self._reference_frame(physical_map, operation)
         setup = project.get_setup(operation.setup_id)
-        original = self.repository.read_project_file(project_id, operation.archivo_gcode)
         original_hash = hashlib.sha256(original.encode("utf-8")).hexdigest()
         map_hash = hashlib.sha256(json.dumps(physical_map, sort_keys=True).encode("utf-8")).hexdigest()
         adaptive_settings = self._adaptive_clearance_settings(physical_map=physical_map, reference_frame=reference_frame)
@@ -523,10 +537,10 @@ class CompensatedGCodeService:
             raise ApplicationError("La operación no está cubierta por el mapa medido activo.")
 
     def _reference_frame(self, physical_map: dict[str, Any], operation: OperacionPCB) -> ReferenceFrame:
-        reference = (physical_map.get("tool_references") or {}).get(_tool_key(operation))
-        surface_reference_z = physical_map.get("reference_z") if not isinstance(reference, dict) or not reference.get("valid") else reference.get("reference_z")
-        if surface_reference_z is None:
-            raise ApplicationError("Referencia Z inválida o ausente para generar el plan compensado.")
+        try:
+            surface_reference_z = measured_reference_z(physical_map, _tool_key(operation))
+        except ValueError as error:
+            raise ApplicationError(str(error)) from error
         return ReferenceFrame(
             machine_origin_x_mm=float(physical_map["machine_origin_x"]),
             machine_origin_y_mm=float(physical_map["machine_origin_y"]),
@@ -594,13 +608,18 @@ class CompensatedGCodeService:
             "estimation_detail": None,
         }
 
-    def _build_compensated_lines(self, operation: OperacionPCB, height_map: HeightMap, max_segment_mm: float, reference_frame: ReferenceFrame) -> tuple[list[str], dict[str, Any]]:
+    @staticmethod
+    def _validate_legacy_analysis(operation):
         if operation.analisis.analisis_incompleto or operation.analisis.tiene_errores_criticos:
             raise ApplicationError(
                 "No se puede generar compensación Legacy: el análisis G-code está incompleto "
                 "o contiene errores críticos. Corrija los comandos indicados y vuelva a analizar; "
-                "no se omitirá ningún movimiento no representable."
+                "No se generó G-code compensado. "
+                + " ".join(f"Línea {i.linea}, {i.comando}: {i.mensaje}" for i in operation.analisis.incidencias)
             )
+
+    def _build_compensated_lines(self, operation: OperacionPCB, height_map: HeightMap, max_segment_mm: float, reference_frame: ReferenceFrame) -> tuple[list[str], dict[str, Any]]:
+        self._validate_legacy_analysis(operation)
         lines = [
             "; Klipper CNC Assistant - plan compensado inmutable",
             f"; Operacion: {operation.nombre} ({operation.id})",
@@ -616,14 +635,13 @@ class CompensatedGCodeService:
         deltas: list[float] = []
         trace: list[dict[str, Any]] = []
         for segment_index, segment in enumerate(operation.analisis.segmentos_vista_previa):
-            points = segment.puntos or (segment.desde, segment.hasta)
-            sampled = self._sample_points(points, max_segment_mm)
+            sampled = sample_programmed_segment(segment, max_segment_mm)
             uses_surface = segment_uses_surface_map(segment)
             selected = sampled[1:] if len(sampled) > 1 else sampled
             for point in selected:
                 compensated = compensate_cut_point(
                     pcb=PcbCoordinates(point.x_mm, point.y_mm),
-                    programmed_z_mm=segment.z_mm,
+                    programmed_z_mm=point.z_mm,
                     surface_map=height_map,
                     reference_frame=reference_frame,
                     uses_surface_map=uses_surface,
@@ -643,7 +661,7 @@ class CompensatedGCodeService:
                     "pcb_y_mm": point.y_mm,
                     "machine_x_mm": final.x_mm,
                     "machine_y_mm": final.y_mm,
-                    "programmed_z_mm": segment.z_mm,
+                    "programmed_z_mm": point.z_mm,
                     "surface_z_machine_mm": compensated.surface_z_machine_mm,
                     "delta_z_mm": compensated.delta_z_mm,
                     "final_z_mm": final.z_mm,
@@ -669,19 +687,6 @@ class CompensatedGCodeService:
         if feed_mm_min is not None:
             parts.append(f"F{feed_mm_min:.3f}")
         return " ".join(parts)
-
-    def _sample_points(self, points, spacing_mm: float):
-        if len(points) <= 1:
-            return tuple(points)
-        sampled = [points[0]]
-        point_type = type(points[0])
-        for start, end in zip(points, points[1:]):
-            distance = ((end.x_mm - start.x_mm) ** 2 + (end.y_mm - start.y_mm) ** 2) ** 0.5
-            subdivisions = max(1, math.ceil(distance / spacing_mm))
-            for index in range(1, subdivisions + 1):
-                progress = index / subdivisions
-                sampled.append(point_type(x_mm=start.x_mm + (end.x_mm - start.x_mm) * progress, y_mm=start.y_mm + (end.y_mm - start.y_mm) * progress))
-        return tuple(sampled)
 
     def _sample_spacing_mm(self, height_map: HeightMap) -> float:
         candidates = [value for value in (height_map.grid.paso_x_mm, height_map.grid.paso_y_mm) if value > 0]

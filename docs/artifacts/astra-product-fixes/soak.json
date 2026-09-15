@@ -1,0 +1,131 @@
+{
+  "cycles": 160,
+  "warmup_cycles": 10,
+  "requests": 3080,
+  "elapsed_s": 27.01823010505177,
+  "initial": {
+    "rss_kib": 76680,
+    "threads": 5,
+    "python_threads": 2,
+    "async_tasks": 3,
+    "pid": 972875,
+    "snapshots": {
+      "count": 8,
+      "peak_count": 8,
+      "bytes": 33440,
+      "paths": 4,
+      "max_count": 512,
+      "max_bytes": 8388608
+    },
+    "cycle": 10,
+    "elapsed_s": 1.4860837471205741
+  },
+  "final": {
+    "rss_kib": 77652,
+    "threads": 5,
+    "python_threads": 2,
+    "async_tasks": 3,
+    "pid": 972875,
+    "snapshots": {
+      "count": 66,
+      "peak_count": 66,
+      "bytes": 258304,
+      "paths": 4,
+      "max_count": 512,
+      "max_bytes": 8388608
+    },
+    "cycle": 160,
+    "elapsed_s": 27.018152204109356
+  },
+  "checkpoints": [
+    {
+      "rss_kib": 76680,
+      "threads": 5,
+      "python_threads": 2,
+      "async_tasks": 3,
+      "pid": 972875,
+      "snapshots": {
+        "count": 8,
+        "peak_count": 8,
+        "bytes": 33440,
+        "paths": 4,
+        "max_count": 512,
+        "max_bytes": 8388608
+      },
+      "cycle": 10,
+      "elapsed_s": 1.4860837471205741
+    },
+    {
+      "rss_kib": 76888,
+      "threads": 5,
+      "python_threads": 2,
+      "async_tasks": 3,
+      "pid": 972875,
+      "snapshots": {
+        "count": 20,
+        "peak_count": 20,
+        "bytes": 79952,
+        "paths": 4,
+        "max_count": 512,
+        "max_bytes": 8388608
+      },
+      "cycle": 40,
+      "elapsed_s": 6.878788158996031
+    },
+    {
+      "rss_kib": 77180,
+      "threads": 5,
+      "python_threads": 2,
+      "async_tasks": 3,
+      "pid": 972875,
+      "snapshots": {
+        "count": 36,
+        "peak_count": 36,
+        "bytes": 141984,
+        "paths": 4,
+        "max_count": 512,
+        "max_bytes": 8388608
+      },
+      "cycle": 80,
+      "elapsed_s": 13.27576218615286
+    },
+    {
+      "rss_kib": 77488,
+      "threads": 5,
+      "python_threads": 2,
+      "async_tasks": 3,
+      "pid": 972875,
+      "snapshots": {
+        "count": 52,
+        "peak_count": 52,
+        "bytes": 204016,
+        "paths": 4,
+        "max_count": 512,
+        "max_bytes": 8388608
+      },
+      "cycle": 120,
+      "elapsed_s": 20.082373042125255
+    },
+    {
+      "rss_kib": 77652,
+      "threads": 5,
+      "python_threads": 2,
+      "async_tasks": 3,
+      "pid": 972875,
+      "snapshots": {
+        "count": 66,
+        "peak_count": 66,
+        "bytes": 258304,
+        "paths": 4,
+        "max_count": 512,
+        "max_bytes": 8388608
+      },
+      "cycle": 160,
+      "elapsed_s": 27.018152204109356
+    }
+  ],
+  "scope": "same synthetic project/map; 5x status/project/live reads each cycle; map recalculation every 5 cycles",
+  "status": "PASS",
+  "snapshot_max_count": 66,
+  "snapshot_final_count": 66
+}

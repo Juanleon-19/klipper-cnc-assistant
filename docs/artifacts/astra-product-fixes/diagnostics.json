@@ -1,0 +1,137 @@
+{
+  "trajectories": {
+    "horizontal": {
+      "samples": 160,
+      "max_error_mm": 0.0,
+      "max_programmed_z_error_mm": 0.0,
+      "max_abs_delta_z_mm": 0.0,
+      "max_artificial_delta_z_mm": 0.0,
+      "endpoint_error_mm": 0.0,
+      "min_z_mm": 3.1,
+      "max_z_mm": 3.1,
+      "nonfinite": 0,
+      "out_of_map": 0,
+      "unexpected_direction_changes": 0,
+      "status": "PASS"
+    },
+    "ascending_ramp": {
+      "samples": 200,
+      "max_error_mm": 4.440892098500626e-16,
+      "max_programmed_z_error_mm": 2.220446049250313e-16,
+      "max_abs_delta_z_mm": 0.0050000000000003375,
+      "max_artificial_delta_z_mm": 4.440892098500626e-16,
+      "endpoint_error_mm": 0.0,
+      "min_z_mm": 2.1,
+      "max_z_mm": 3.1,
+      "nonfinite": 0,
+      "out_of_map": 0,
+      "unexpected_direction_changes": 0,
+      "status": "PASS"
+    },
+    "descending_ramp": {
+      "samples": 200,
+      "max_error_mm": 4.440892098500626e-16,
+      "max_programmed_z_error_mm": 1.1102230246251565e-16,
+      "max_abs_delta_z_mm": 0.0050000000000003375,
+      "max_artificial_delta_z_mm": 4.440892098500626e-16,
+      "endpoint_error_mm": 0.0,
+      "min_z_mm": 2.1,
+      "max_z_mm": 3.1,
+      "nonfinite": 0,
+      "out_of_map": 0,
+      "unexpected_direction_changes": 0,
+      "status": "PASS"
+    },
+    "cell_crossings_inclined_plane": {
+      "samples": 200,
+      "max_error_mm": 4.440892098500626e-16,
+      "max_programmed_z_error_mm": 2.7755575615628914e-17,
+      "max_abs_delta_z_mm": 0.001000000000000334,
+      "max_artificial_delta_z_mm": 8.881784197001252e-16,
+      "endpoint_error_mm": 0.0,
+      "min_z_mm": 2.5,
+      "max_z_mm": 2.6999999999999997,
+      "nonfinite": 0,
+      "out_of_map": 0,
+      "unexpected_direction_changes": 0,
+      "status": "PASS"
+    },
+    "xmin_boundary_inclined_plane": {
+      "samples": 120,
+      "max_error_mm": 4.440892098500626e-16,
+      "max_programmed_z_error_mm": 5.551115123125783e-17,
+      "max_abs_delta_z_mm": 0.007000000000000561,
+      "max_artificial_delta_z_mm": 8.881784197001252e-16,
+      "endpoint_error_mm": 0.0,
+      "min_z_mm": 2.0999999999999996,
+      "max_z_mm": 2.94,
+      "nonfinite": 0,
+      "out_of_map": 0,
+      "unexpected_direction_changes": 0,
+      "status": "PASS"
+    },
+    "xmax_boundary_inclined_plane": {
+      "samples": 120,
+      "max_error_mm": 4.440892098500626e-16,
+      "max_programmed_z_error_mm": 1.1102230246251565e-16,
+      "max_abs_delta_z_mm": 0.007000000000000117,
+      "max_artificial_delta_z_mm": 8.881784197001252e-16,
+      "endpoint_error_mm": 0.0,
+      "min_z_mm": 2.26,
+      "max_z_mm": 3.0999999999999996,
+      "nonfinite": 0,
+      "out_of_map": 0,
+      "unexpected_direction_changes": 0,
+      "status": "PASS"
+    },
+    "ymax_boundary_inclined_plane": {
+      "samples": 160,
+      "max_error_mm": 4.440892098500626e-16,
+      "max_programmed_z_error_mm": 1.1102230246251565e-16,
+      "max_abs_delta_z_mm": 0.0027500000000002522,
+      "max_artificial_delta_z_mm": 8.881784197001252e-16,
+      "endpoint_error_mm": 0.0,
+      "min_z_mm": 2.5,
+      "max_z_mm": 2.94,
+      "nonfinite": 0,
+      "out_of_map": 0,
+      "unexpected_direction_changes": 0,
+      "status": "PASS"
+    },
+    "former_0_9_mm_error": {
+      "samples": 100,
+      "max_error_mm": 4.440892098500626e-16,
+      "max_programmed_z_error_mm": 0.0,
+      "max_abs_delta_z_mm": 0.010000000000000231,
+      "max_artificial_delta_z_mm": 4.440892098500626e-16,
+      "endpoint_error_mm": 0.0,
+      "min_z_mm": 1.9,
+      "max_z_mm": 2.9,
+      "nonfinite": 0,
+      "out_of_map": 0,
+      "unexpected_direction_changes": 0,
+      "status": "PASS"
+    }
+  },
+  "snapshots": {
+    "max": {
+      "count": 512,
+      "peak_count": 512,
+      "bytes": 493056,
+      "paths": 512,
+      "max_count": 512,
+      "max_bytes": 8388608
+    },
+    "final": {
+      "count": 0,
+      "peak_count": 512,
+      "bytes": 0,
+      "paths": 0,
+      "max_count": 512,
+      "max_bytes": 8388608
+    },
+    "resources_created_deleted": 1024,
+    "status": "PASS"
+  },
+  "status": "PASS"
+}

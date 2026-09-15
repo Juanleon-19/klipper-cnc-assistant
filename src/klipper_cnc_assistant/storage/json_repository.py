@@ -8,7 +8,7 @@ from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
 
-from .safe_persistence import atomic_json, merge_snapshot, remember_snapshot, storage_lock
+from .safe_persistence import atomic_json, merge_snapshot, remember_snapshot, storage_lock, forget_snapshots
 
 from klipper_cnc_assistant.domain import (
     AgujeroAlineacion,
@@ -154,6 +154,7 @@ class JsonProjectRepository:
             raise RuntimeError("La eliminación permanente quedó bloqueada por seguridad de ruta.")
         if target.exists():
             shutil.rmtree(target)
+        forget_snapshots(target)
 
     def storage_available(self) -> bool:
         try:
@@ -241,6 +242,7 @@ class JsonProjectRepository:
                     f"El mapa de alturas para la operacion '{operation_id}' no existe."
                 )
             target.unlink()
+            forget_snapshots(target)
 
     def _resolve_project_file(
         self,
@@ -461,6 +463,7 @@ class JsonProjectRepository:
             "fin_x_mm": segment.fin_x_mm,
             "fin_y_mm": segment.fin_y_mm,
             "z_mm": segment.z_mm,
+            "inicio_z_mm": segment.inicio_z_mm,
             "avance_mm_min": segment.avance_mm_min,
             "distancia_mm": segment.distancia_mm,
             "advertencias": list(segment.advertencias),
@@ -695,6 +698,7 @@ class JsonProjectRepository:
             fin_x_mm=payload["fin_x_mm"],
             fin_y_mm=payload["fin_y_mm"],
             z_mm=payload.get("z_mm"),
+            inicio_z_mm=payload.get("inicio_z_mm"),
             avance_mm_min=payload.get("avance_mm_min"),
             distancia_mm=payload.get("distancia_mm", 0.0),
             advertencias=tuple(payload.get("advertencias", [])),

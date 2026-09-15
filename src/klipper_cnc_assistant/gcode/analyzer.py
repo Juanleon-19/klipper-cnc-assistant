@@ -16,6 +16,7 @@ from klipper_cnc_assistant.domain import (
 
 from .models import GCodeLine, GCodeToken, ModalState
 from .tokenizer import tokenize_gcode
+from .units import block_units, unit_regime_error
 
 
 SUPPORTED_LINEAR_CODES = {"G0", "G1"}
@@ -27,7 +28,7 @@ MANUAL_TOOLCHANGE_CODES = {"M6"}
 ARC_CHORD_TOLERANCE_MM = 0.05
 ARC_MAX_SEGMENTS = 720
 FULL_CIRCLE_EPSILON = 1e-6
-CURRENT_ANALYSIS_VERSION = "gcode-analysis-v2"
+CURRENT_ANALYSIS_VERSION = "gcode-analysis-v3"
 
 
 def _normalize_g_code(token: GCodeToken) -> str:
@@ -216,6 +217,11 @@ def _build_arc_segment(
     target_y = _resolve_target_value(state.y_mm, axes.get("Y"), state.positioning)
     target_z = _resolve_target_value(state.z_mm, axes.get("Z"), state.positioning)
 
+    if target_z != start_z:
+        return None, target_x, target_y, target_z, (
+            f"Línea {line.line_number}, {command}: arco helicoidal (cambio de Z) no soportado por Legacy. "
+            "No se generó G-code compensado. Exporte movimientos lineales o arcos planos I/J."
+        )
     if "R" in arc_parameters:
         return None, target_x, target_y, target_z, "El arco usa parametro R y no es representable con seguridad en esta fase."
     if "I" not in arc_parameters and "J" not in arc_parameters:
@@ -268,6 +274,7 @@ def _build_arc_segment(
         fin_x_mm=target_x,
         fin_y_mm=target_y,
         z_mm=target_z,
+        inicio_z_mm=start_z,
         avance_mm_min=state.feed_mm_min,
         distancia_mm=distance_mm,
         puntos=points,
@@ -360,7 +367,14 @@ def analyze_gcode_text(
     movement_count = 0
     analysis_incomplete = False
 
+    unit_error = unit_regime_error(lines)
+    if unit_error:
+        _append_issue(issues, severity=IssueSeverity.ERROR_CRITICO, code="unit_regime_unsupported",
+                      message=unit_error.message, line=unit_error.line, command=unit_error.command)
+        analysis_incomplete = True
     for line in lines:
+        if unit_error and line.line_number >= unit_error.line:
+            break
         if not line.tokens:
             continue
         movement_count, line_incomplete = _handle_line(
@@ -487,6 +501,7 @@ def _handle_line(
     axes: dict[str, float] = {}
     arc_parameters: dict[str, float] = {}
 
+    state.units = block_units(line, state.units)
     for token in line.tokens:
         if token.letter == "G":
             command = _normalize_g_code(token)
@@ -661,6 +676,7 @@ def _handle_line(
         fin_x_mm=target_x,
         fin_y_mm=target_y,
         z_mm=target_z,
+        inicio_z_mm=start_z,
         avance_mm_min=state.feed_mm_min,
         distancia_mm=_distance_3d(start_x, start_y, start_z, target_x, target_y, target_z),
         puntos=_segment_points_for_line(start_x, start_y, target_x, target_y),

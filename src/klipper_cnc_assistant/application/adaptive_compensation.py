@@ -8,6 +8,7 @@ from typing import Any
 from klipper_cnc_assistant.application.errors import ApplicationError
 from klipper_cnc_assistant.gcode.models import GCodeLine, ModalState
 from klipper_cnc_assistant.gcode.tokenizer import tokenize_gcode
+from klipper_cnc_assistant.gcode.units import block_units, unit_regime_error
 from klipper_cnc_assistant.heightmap import HeightMap, interpolate_height
 from klipper_cnc_assistant.heightmap.coverage import check_domain
 
@@ -105,6 +106,8 @@ def generate_adaptive_gcode(
     enforce_rapid_clearance: bool = True,
 ) -> dict[str, Any]:
     lines = tokenize_gcode(original_text)
+    if error := unit_regime_error(lines):
+        raise ApplicationError(error.message)
     state = ModalState()
     emission_state = EmissionState()
     rapid_clearance_state = RapidClearanceState(
@@ -303,6 +306,7 @@ def _parse_adaptive_line(*, line: GCodeLine, state: ModalState, plane: str) -> P
     has_dwell = False
     incompatible_motion_code: str | None = None
 
+    state.units = block_units(line, state.units)
     for token in line.tokens:
         if token.letter == "G":
             command = _normalize_g_command(token.raw_value)

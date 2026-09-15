@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import tempfile
 import threading
+import weakref
 
 
 class PersistenceConflict(RuntimeError):
@@ -16,8 +17,16 @@ class PersistenceConflict(RuntimeError):
 
 
 _registry_guard = threading.Lock()
-_locks = {}
-_snapshots = {}
+# Weak entries remain alive while any owner/waiter holds its local RLock.
+_locks = weakref.WeakValueDictionary()
+_snapshots = OrderedDict()
+_active_paths = {}
+_snapshot_lru = OrderedDict()
+_snapshot_bytes = 0
+_snapshot_peak_count = 0
+SNAPSHOT_MAX_COUNT = 512
+SNAPSHOT_MAX_PER_PATH = 32
+SNAPSHOT_MAX_BYTES = 8 * 1024 * 1024
 _local = threading.local()
 _MISSING = object()
 
@@ -29,22 +38,32 @@ def storage_lock(path):
     key = str(path)
     with _registry_guard:
         lock = _locks.setdefault(key, threading.RLock())
-    with lock:
-        held = getattr(_local, 'held', None)
-        if held is None:
-            held = _local.held = set()
-        if key in held:
-            yield
-            return
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.with_name('.' + path.name + '.lock').open('a') as handle:
-            fcntl.flock(handle, fcntl.LOCK_EX)
-            held.add(key)
-            try:
+    with _registry_guard:
+        _active_paths[key] = _active_paths.get(key, 0) + 1
+    try:
+        with lock:
+            held = getattr(_local, 'held', None)
+            if held is None:
+                held = _local.held = set()
+            if key in held:
                 yield
-            finally:
-                held.remove(key)
-                fcntl.flock(handle, fcntl.LOCK_UN)
+                return
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.with_name('.' + path.name + '.lock').open('a') as handle:
+                fcntl.flock(handle, fcntl.LOCK_EX)
+                held.add(key)
+                try:
+                    yield
+                finally:
+                    held.remove(key)
+                    fcntl.flock(handle, fcntl.LOCK_UN)
+    finally:
+        with _registry_guard:
+            _active_paths[key] -= 1
+            if not _active_paths[key]:
+                del _active_paths[key]
+                if not path.exists():
+                    _forget_path(key)
 
 
 def atomic_write(path, content, *, durable=False):
@@ -74,14 +93,92 @@ def atomic_json(path, payload, *, durable=False):
     atomic_write(path, json.dumps(payload, ensure_ascii=True, indent=2, sort_keys=True), durable=durable)
 
 
-def remember_snapshot(path, payload):
-    """Bounded merge bases. Unavailable bases cause rejection, never overwrite."""
-    key = str(Path(path).resolve())
+def _drop_snapshot(key, revision):
+    global _snapshot_bytes
+    history = _snapshots[key]
+    _snapshot_bytes -= len(history.pop(revision))
+    _snapshot_lru.pop((key, revision), None)
+    if not history:
+        del _snapshots[key]
+
+
+def _forget_path(key):
+    for revision in tuple(_snapshots.get(key, {})):
+        _drop_snapshot(key, revision)
+
+
+def prune_snapshots():
+    """Discard deleted resources, excluding live transactions; no domain writes."""
     with _registry_guard:
-        history = _snapshots.setdefault(key, OrderedDict())
-        history[payload.get('storage_revision', 0)] = deepcopy(payload)
-        while len(history) > 32:
-            history.popitem(last=False)
+        for key in tuple(_snapshots):
+            if key not in _active_paths and not Path(key).exists():
+                _forget_path(key)
+
+
+def forget_snapshots(path):
+    """Call after deletion; active transactions clean themselves up on release."""
+    path = Path(path).resolve()
+    with _registry_guard:
+        for key in tuple(_snapshots):
+            target = Path(key)
+            if (target == path or path in target.parents) and key not in _active_paths and not target.exists():
+                _forget_path(key)
+
+
+def snapshot_stats():
+    prune_snapshots()
+    with _registry_guard:
+        return {"count": len(_snapshot_lru), "peak_count": _snapshot_peak_count,
+                "bytes": _snapshot_bytes, "paths": len(_snapshots),
+                "max_count": SNAPSHOT_MAX_COUNT, "max_bytes": SNAPSHOT_MAX_BYTES}
+
+
+def remember_snapshot(path, payload):
+    """LRU merge bases: 512 versions / 8 MiB globally, 32 versions per path.
+
+    Immutable JSON bytes bound actual retained payload size. Active transaction
+    paths cannot be evicted. If protected entries exhaust capacity (or a single
+    base is oversized), skip admission. Missing historical bases always cause a
+    stale-write conflict, never an unchecked overwrite. Current-revision saves
+    do not depend on cached history.
+    """
+    global _snapshot_bytes, _snapshot_peak_count
+    key = str(Path(path).resolve())
+    revision = payload.get('storage_revision', 0)
+    encoded = json.dumps(payload, ensure_ascii=True, separators=(',', ':')).encode('utf-8')
+    if len(encoded) > SNAPSHOT_MAX_BYTES:
+        return
+    prune_snapshots()
+    with _registry_guard:
+        history = _snapshots.get(key, {})
+        old_size = len(history.get(revision, b''))
+        new_count = len(_snapshot_lru) + (revision not in history)
+        new_bytes = _snapshot_bytes - old_size + len(encoded)
+        # Plan eviction first; no partial admission or removal of protected bases.
+        victims = []
+        path_count = len(history) + (revision not in history)
+        for candidate in _snapshot_lru:
+            if new_count <= SNAPSHOT_MAX_COUNT and new_bytes <= SNAPSHOT_MAX_BYTES and path_count <= SNAPSHOT_MAX_PER_PATH:
+                break
+            candidate_key, candidate_revision = candidate
+            if candidate_key in _active_paths or candidate == (key, revision):
+                continue
+            if path_count > SNAPSHOT_MAX_PER_PATH and candidate_key != key:
+                continue
+            victims.append(candidate)
+            new_count -= 1
+            new_bytes -= len(_snapshots[candidate_key][candidate_revision])
+            path_count -= candidate_key == key
+        if new_count > SNAPSHOT_MAX_COUNT or new_bytes > SNAPSHOT_MAX_BYTES or path_count > SNAPSHOT_MAX_PER_PATH:
+            return
+        for candidate in victims:
+            _drop_snapshot(*candidate)
+        if revision in _snapshots.get(key, {}):
+            _drop_snapshot(key, revision)
+        _snapshots.setdefault(key, OrderedDict())[revision] = encoded
+        _snapshot_lru[key, revision] = None
+        _snapshot_bytes += len(encoded)
+        _snapshot_peak_count = max(_snapshot_peak_count, len(_snapshot_lru))
 
 
 def read_json_snapshot(path):
@@ -136,7 +233,13 @@ def merge_snapshot(path, proposed, current):
         result = deepcopy(proposed)
     else:
         with _registry_guard:
-            base = deepcopy(_snapshots.get(str(Path(path).resolve()), {}).get(proposed.get('storage_revision', 0)))
+            key = str(Path(path).resolve())
+            revision = proposed.get('storage_revision', 0)
+            encoded = _snapshots.get(key, {}).get(revision)
+            if encoded is not None:
+                _snapshot_lru.move_to_end((key, revision))
+        # Immutable local reference survives any concurrent eviction.
+        base = json.loads(encoded) if encoded is not None else None
         if base is None:
             raise PersistenceConflict('Snapshot obsoleto sin base de fusión; recargue el recurso.')
         result = _merge(base, proposed, current)

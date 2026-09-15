@@ -8,6 +8,8 @@ from datetime import datetime, timezone
 
 from klipper_cnc_assistant.domain import CapturedPosition, CoordinateReference, PreparationState, ProjectValidationError
 from klipper_cnc_assistant.heightmap.compensation import build_compensation_preview
+from klipper_cnc_assistant.gcode import analyze_gcode_text
+from klipper_cnc_assistant.heightmap.transform import compensation_tool_key, measured_reference_z
 from klipper_cnc_assistant.heightmap.coverage import DOMAIN_TOLERANCE_MM, build_coverage_report
 from klipper_cnc_assistant.storage import JsonProjectRepository
 
@@ -286,10 +288,21 @@ class ReferenceSessionService:
             reference_z = setup.preparacion.referencia_z
         if operation.analisis is None:
             raise ApplicationError("La operacion requiere un analisis G-code antes de previsualizar la compensacion.")
+        reference_value = reference_z.z_mm if reference_z and reference_z.z_mm is not None else 0.0
+        if self._is_physical_machine(machine) and physical_map is not None:
+            try:
+                reference_value = measured_reference_z(physical_map, compensation_tool_key(operation.tool_id, operation.herramienta))
+            except ValueError as error:
+                raise ApplicationError(str(error)) from error
+        analysis = operation.analisis
+        if operation.archivo_gcode:
+            analysis = analyze_gcode_text(self.repository.read_project_file(project_id, operation.archivo_gcode), material=project.material)
+        if analysis.analisis_incompleto or analysis.tiene_errores_criticos:
+            raise ApplicationError("Previsualización bloqueada. " + " ".join(i.mensaje for i in analysis.incidencias))
         preview = build_compensation_preview(
-            analysis=operation.analisis,
+            analysis=analysis,
             height_map=height_map,
-            reference_z_mm=reference_z.z_mm if reference_z and reference_z.z_mm is not None else 0.0,
+            reference_z_mm=reference_value,
             operation_id=operation.id,
             operation_name=operation.nombre,
         )

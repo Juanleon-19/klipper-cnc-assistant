@@ -236,6 +236,7 @@ class PreviewSegment:
     distancia_mm: float = 0.0
     advertencias: tuple[str, ...] = ()
     puntos: tuple[PreviewPoint, ...] = ()
+    inicio_z_mm: float | None = None
 
     @property
     def desde(self) -> PreviewPoint:

@@ -74,12 +74,12 @@ def main(output_dir):
             safe_persistence.atomic_json(path,payload)
             safe_persistence.read_json_snapshot(path)
         del payload
+    safe_persistence.prune_snapshots()
     gc.collect();after=tracemalloc.get_traced_memory()[0]
     retention={'paths_before':before_paths,'paths_after':len(safe_persistence._snapshots),
         'retained_bytes_after_tempdir_removal':after-before,'new_paths':80,'points_per_snapshot':1000}
     tracemalloc.stop()
-    # Physical map payloads contain delta, whereas this preview helper subtracts
-    # the measured reference again. Record both frames without changing either.
+    # Physical map payloads contain delta; preview and generation now share machine Z.
     constant_delta=surface(lambda x,y:.2)
     preview_input='G21\nG90\nG1 Z-.1 F120\nG1 X4\n'
     generic=build_compensation_preview(analysis=analyze_gcode_text(preview_input),height_map=constant_delta,reference_z_mm=3)

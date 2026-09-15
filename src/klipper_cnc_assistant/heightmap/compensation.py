@@ -1,12 +1,11 @@
 from __future__ import annotations
 
-import math
-
-from klipper_cnc_assistant.domain import OperationAnalysis, PreviewPoint
+from klipper_cnc_assistant.domain import OperationAnalysis
 
 from .analysis import interpolate_height
 from .coverage import DOMAIN_TOLERANCE_MM, build_coverage_report, segment_uses_surface_map
 from .models import HeightMap
+from .transform import compensated_z, sample_programmed_segment
 
 
 def build_compensation_preview(
@@ -17,6 +16,8 @@ def build_compensation_preview(
     operation_id: str = "operation",
     operation_name: str = "Operacion",
 ) -> dict[str, object]:
+    if analysis.analisis_incompleto or analysis.tiene_errores_criticos:
+        raise ValueError("Preview no disponible: análisis incompleto o crítico. " + " ".join(i.mensaje for i in analysis.incidencias))
     sample_spacing_mm = _sample_spacing_mm(height_map)
     coverage = build_coverage_report(
         height_map=height_map,
@@ -30,7 +31,7 @@ def build_compensation_preview(
     compensated_z_values: list[float] = []
 
     for segment in analysis.segmentos_vista_previa:
-        sampled_points = _sample_segment_points(segment.puntos or (segment.desde, segment.hasta), sample_spacing_mm)
+        sampled_points = sample_programmed_segment(segment, sample_spacing_mm)
         virtual_points += max(0, len(sampled_points) - len(segment.puntos or (segment.desde, segment.hasta)))
         preview_points: list[dict[str, object]] = []
         segment_outside = False
@@ -40,18 +41,19 @@ def build_compensation_preview(
             if result is not None and result.estado == "fuera de dominio":
                 outside_points += 1
                 segment_outside = True
-            if segment.z_mm is not None:
-                original_z_values.append(segment.z_mm)
-            correction_mm = None if result is None or result.valor_mm is None else result.valor_mm - reference_z_mm
-            compensated_z_mm = None if correction_mm is None or segment.z_mm is None else segment.z_mm + correction_mm
+            if point.z_mm is not None:
+                original_z_values.append(point.z_mm)
+            correction_mm = (None if result is None else result.valor_mm) if uses_surface else 0.0
+            compensated_z_mm = compensated_z(reference_z_mm=reference_z_mm,
+                map_delta_mm=correction_mm, programmed_z_mm=point.z_mm, uses_surface_map=uses_surface)
             if compensated_z_mm is not None:
                 compensated_z_values.append(compensated_z_mm)
             preview_points.append(
                 {
                     "x_mm": point.x_mm,
                     "y_mm": point.y_mm,
-                    "z_original_mm": segment.z_mm,
-                    "z_superficie_mm": None if result is None else result.valor_mm,
+                    "z_original_mm": point.z_mm,
+                    "z_superficie_mm": None if correction_mm is None else reference_z_mm + correction_mm,
                     "correccion_mm": correction_mm,
                     "z_compensada_mm": compensated_z_mm,
                     "estado": "sin_compensacion_superficie" if not uses_surface else result.estado if segment.z_mm is not None else "sin_z_original",
@@ -71,8 +73,9 @@ def build_compensation_preview(
 
     return {
         "convencion_matematica": (
-            "z_compensada = z_original + (superficie_xy - z_referencia). "
-            "La compensacion usa la altura interpolada del mapa en cada punto X/Y y conserva los valores reales en las etiquetas."
+            "Z máquina = referencia medida + delta del mapa + Z programada. "
+            "El mapa contiene deltas relativos a la referencia de adquisición; "
+            "los movimientos auxiliares conservan Z máquina = referencia medida + Z programada."
         ),
         "z_referencia_mm": reference_z_mm,
         "paso_muestreo_virtual_mm": sample_spacing_mm,
@@ -108,24 +111,6 @@ def _sample_spacing_mm(height_map: HeightMap) -> float:
     if not candidates:
         return 1.0
     return max(0.5, min(candidates) / 2)
-
-
-def _sample_segment_points(points: tuple[PreviewPoint, ...], spacing_mm: float) -> tuple[PreviewPoint, ...]:
-    if len(points) <= 1:
-        return points
-    sampled: list[PreviewPoint] = [points[0]]
-    for start, end in zip(points, points[1:]):
-        distance = math.dist((start.x_mm, start.y_mm), (end.x_mm, end.y_mm))
-        subdivisions = max(1, math.ceil(distance / spacing_mm))
-        for index in range(1, subdivisions + 1):
-            progress = index / subdivisions
-            sampled.append(
-                PreviewPoint(
-                    x_mm=start.x_mm + (end.x_mm - start.x_mm) * progress,
-                    y_mm=start.y_mm + (end.y_mm - start.y_mm) * progress,
-                )
-            )
-    return tuple(sampled)
 
 
 def _z_summary(values: list[float]) -> dict[str, float | None]:
