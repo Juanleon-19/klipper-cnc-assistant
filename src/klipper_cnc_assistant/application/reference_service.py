@@ -12,6 +12,8 @@ from klipper_cnc_assistant.gcode import analyze_gcode_text
 from klipper_cnc_assistant.heightmap.transform import compensation_tool_key, measured_reference_z
 from klipper_cnc_assistant.heightmap.coverage import DOMAIN_TOLERANCE_MM, build_coverage_report
 from klipper_cnc_assistant.storage import JsonProjectRepository
+from klipper_cnc_assistant.storage.safe_persistence import storage_lock
+from klipper_cnc_assistant.machine.physical_ownership import OwnerKind, OwnershipError
 
 from .errors import ApplicationError, NotFoundError
 from .heightmap_service import HeightMapService
@@ -217,6 +219,52 @@ class ReferenceSessionService:
                 None if reference is None else asdict(reference), sort_keys=True, default=str, allow_nan=False).encode()).hexdigest(),
             "alignment_fingerprint": hashlib.sha256(json.dumps(asdict(project.configuracion_alineacion), sort_keys=True, default=str, allow_nan=False).encode()).hexdigest(),
         }
+
+    def probe_and_capture_reference(self, project_id: str, operation_id: str, *, runtime) -> dict[str, object]:
+        """Probe and persist XY/contact Z in one request, with one physical owner."""
+        expected = self.probe_capture_context(project_id, operation_id)
+        ownership = runtime.physical_ownership
+        try:
+            permit = ownership.acquire(OwnerKind.RUNTIME_MOTION, "probe-and-save-reference")
+        except OwnershipError as error:
+            raise ApplicationError(str(error)) from error
+        try:
+            runtime.confirm_probe(permit=permit, reference_context=expected)
+            observation = runtime.capture_probe_reference_observation(expected_context=expected)
+            position = observation["position"]
+            # No hardware or network IO under the storage lock. Both references
+            # are committed together, only if the project context is unchanged.
+            with storage_lock(self.repository.project_dir(project_id) / "project.json"):
+                ownership.validate(permit)
+                if self.probe_capture_context(project_id, operation_id) != expected:
+                    raise ApplicationError("El contexto del proyecto cambió durante el sondeo; no se guardó la referencia.")
+                project = self._load_project(project_id)
+                operation = project.get_operation(operation_id)
+                setup = project.get_setup(operation.setup_id)
+                reference = CoordinateReference(
+                    x_mm=float(position["x_mm"]), y_mm=float(position["y_mm"]),
+                    z_mm=float(position["z_mm"]), confirmado_en=utc_now(), fuente="MEASURED",
+                    maquina=str(observation["machine_label"]), homed_axes=observation.get("homed_axes"),
+                    posicion_captura=self._captured_position_from_dict(position),
+                    sesion=observation.get("session_id"),
+                )
+                updated = replace(setup, preparacion=replace(
+                    setup.preparacion, origen_trabajo=replace(reference, z_mm=None), referencia_z=reference,
+                    mapa_validado_en=None, compensacion_previsualizada_en=None,
+                    motivo_invalidacion=self._build_invalidation_reason(
+                        setup.preparacion, "Se midió una nueva referencia física X/Y/Z del montaje."),
+                ))
+                self.repository.save_project(project.replace_setup(updated))
+        except OwnershipError as error:
+            raise ApplicationError(str(error)) from error
+        finally:
+            try:
+                ownership.release(permit, quiescent=True)
+            except OwnershipError:
+                # A failed/cancelled emission retains recovery. Close this
+                # producer without claiming that the physical machine stopped.
+                ownership.retire(permit)
+        return self.get_session(project_id, operation_id)
 
     def get_saved_reference_point(self, project_id: str, operation_id: str) -> dict[str, float]:
         """Return only the persisted CNC coordinates for the active reference."""

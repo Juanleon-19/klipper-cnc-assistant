@@ -2177,6 +2177,10 @@ class PhysicalEmissionSafetyTest(unittest.TestCase):
         self.runtime._handle_controller_packet(
             ControllerPacket(direction='RIGHT', joystick_button=False, external_button=False,
                              probe=False, x=900, y=512), ControllerCommand(jog_x=1))
+        worker = self.runtime._manual_thread
+        if worker is not None:
+            worker.join(2)
+            self.assertFalse(worker.is_alive())
 
     def test_stale_position_fresh_arduino_manual_enabled_has_zero_emissions(self):
         self.machine.live_position_updated_at = time.monotonic() - 10

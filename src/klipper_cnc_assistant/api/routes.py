@@ -416,6 +416,12 @@ def build_router() -> APIRouter:
             )
         )
 
+    @router.post("/projects/{project_id}/operations/{operation_id}/reference-session/probe-and-capture", response_model=ReferenceSessionResponse)
+    def probe_and_capture_reference(project_id: str, operation_id: str, request: Request) -> ReferenceSessionResponse:
+        service = request.app.state.reference_session_service
+        return _reference_session_to_response(service.probe_and_capture_reference(
+            project_id, operation_id, runtime=request.app.state.machine_runtime))
+
     @router.post("/projects/{project_id}/operations/{operation_id}/reference-session/physical-z-reference-from-probe", response_model=ReferenceSessionResponse)
     def capture_physical_z_reference_from_probe(project_id: str, operation_id: str, request: Request) -> ReferenceSessionResponse:
         reference_service = request.app.state.reference_session_service

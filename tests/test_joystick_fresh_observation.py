@@ -63,6 +63,13 @@ class JoystickFreshObservationTest(unittest.TestCase):
             ControllerPacket(direction=direction, joystick_button=False,
                              external_button=False, probe=False, x=900, y=512),
             ControllerCommand(jog_x=1 if direction == 'RIGHT' else 0))
+        self.wait_for_jog()
+
+    def wait_for_jog(self):
+        worker = self.runtime._manual_thread
+        if worker is not None:
+            worker.join(2)
+            self.assertFalse(worker.is_alive())
 
     def assert_no_dispatch(self):
         self.assertEqual(self.client.scripts, [])
@@ -104,6 +111,7 @@ class JoystickFreshObservationTest(unittest.TestCase):
             ControllerPacket(direction='DOWN', joystick_button=False,
                              external_button=False, probe=False, x=512, y=100),
             ControllerCommand(jog_y=-1))
+        self.wait_for_jog()
         self.assertEqual(len(self.client.scripts), 1)
         self.assertAlmostEqual(self.runtime._last_movement['current_position'], 10)
         self.assertAlmostEqual(self.runtime._last_movement['target'], 9)

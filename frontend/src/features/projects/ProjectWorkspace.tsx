@@ -1596,10 +1596,9 @@ export function ProjectWorkspace({
   const remeasurePhysicalReference = async () => {
     if (!project || !selectedOperation || !referenceSettingsAllowMovement()) return;
     await withPhysicalReferenceAction(async () => {
-      await api.confirmProbe(project.id, selectedOperation.id);
+      const reference = await api.probeAndCaptureReference(project.id, selectedOperation.id);
       await machine.refreshRuntime();
-      await api.capturePhysicalWorkOrigin(project.id, selectedOperation.id);
-      return await api.capturePhysicalZReferenceFromProbe(project.id, selectedOperation.id);
+      return reference;
     });
   };
 

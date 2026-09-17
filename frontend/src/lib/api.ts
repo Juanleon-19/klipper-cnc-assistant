@@ -303,6 +303,10 @@ export const api = {
     request<ReferenceSession>(`/api/projects/${projectId}/operations/${operationId}/reference-session/physical-z-reference-from-probe`, {
       method: "POST",
     }),
+  probeAndCaptureReference: (projectId: string, operationId: string) =>
+    request<ReferenceSession>(`/api/projects/${projectId}/operations/${operationId}/reference-session/probe-and-capture`, {
+      method: "POST",
+    }),
   goToReferencePoint: (projectId: string, operationId: string) =>
     request<ReferenceMoveResult>("/api/projects/" + projectId + "/operations/" + operationId + "/reference/go-to", { method: "POST" }),
   suggestPhysicalMap: (projectId: string, operationId: string, payload: PhysicalMapPlanPayload) =>

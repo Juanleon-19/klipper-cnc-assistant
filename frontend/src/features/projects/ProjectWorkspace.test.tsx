@@ -66,6 +66,7 @@ const apiMock = vi.hoisted(() => ({
   getMachineSettings: vi.fn(),
   updateMachineSettings: vi.fn(),
   confirmProbe: vi.fn(),
+  probeAndCaptureReference: vi.fn(),
   goToReferencePoint: vi.fn(),
 }));
 
@@ -569,6 +570,7 @@ describe("ProjectWorkspace", () => {
     apiMock.getMachineSettings.mockResolvedValue({ reference_prep_z_mm: 115, reference_prep_z_feed_mm_min: 180, move_total_timeout_s: 180, no_progress_timeout_s: 60, position_tolerance_mm: 0.05, velocity_tolerance_mm_s: 0.02 });
     apiMock.updateMachineSettings.mockResolvedValue({ reference_prep_z_mm: 115, reference_prep_z_feed_mm_min: 180, move_total_timeout_s: 180, no_progress_timeout_s: 60, position_tolerance_mm: 0.05, velocity_tolerance_mm_s: 0.02 });
     apiMock.confirmProbe.mockResolvedValue(physicalMachine.runtime);
+    apiMock.probeAndCaptureReference.mockResolvedValue(referenceSession);
     apiMock.getHeightMap.mockResolvedValue(heightMap);
     apiMock.getReferenceSession.mockResolvedValue(referenceSession);
     apiMock.getPhysicalMap.mockRejectedValue(new Error("No existe mapa físico medido para este montaje y cara."));
@@ -925,10 +927,11 @@ describe("ProjectWorkspace", () => {
 
     fireEvent.click(probeButton);
 
-    await waitFor(() => expect(apiMock.confirmProbe).toHaveBeenCalled());
+    await waitFor(() => expect(apiMock.probeAndCaptureReference).toHaveBeenCalled());
     await waitFor(() => expect(physicalMachine.refreshRuntime).toHaveBeenCalled());
-    await waitFor(() => expect(apiMock.capturePhysicalWorkOrigin).toHaveBeenCalledWith(project.id, project.operaciones[0].id));
-    await waitFor(() => expect(apiMock.capturePhysicalZReferenceFromProbe).toHaveBeenCalledWith(project.id, project.operaciones[0].id));
+    expect(apiMock.probeAndCaptureReference).toHaveBeenCalledWith(project.id, project.operaciones[0].id);
+    expect(apiMock.capturePhysicalWorkOrigin).not.toHaveBeenCalled();
+    expect(apiMock.capturePhysicalZReferenceFromProbe).not.toHaveBeenCalled();
   });
 
   it("permite volver a medir la referencia cuando ya existe una captura previa", async () => {
@@ -949,21 +952,22 @@ describe("ProjectWorkspace", () => {
 
     fireEvent.click(remeasureButton);
 
-    await waitFor(() => expect(apiMock.confirmProbe).toHaveBeenCalled());
+    await waitFor(() => expect(apiMock.probeAndCaptureReference).toHaveBeenCalled());
     await waitFor(() => expect(capturedMachine.refreshRuntime).toHaveBeenCalled());
-    await waitFor(() => expect(apiMock.capturePhysicalWorkOrigin).toHaveBeenCalledWith(project.id, project.operaciones[0].id));
-    await waitFor(() => expect(apiMock.capturePhysicalZReferenceFromProbe).toHaveBeenCalledWith(project.id, project.operaciones[0].id));
+    expect(apiMock.probeAndCaptureReference).toHaveBeenCalledWith(project.id, project.operaciones[0].id);
+    expect(apiMock.capturePhysicalWorkOrigin).not.toHaveBeenCalled();
+    expect(apiMock.capturePhysicalZReferenceFromProbe).not.toHaveBeenCalled();
   });
 
   it("no persiste origen ni referencia Z si probe-confirm falla", async () => {
-    apiMock.confirmProbe.mockRejectedValueOnce(new Error("Timeout esperando confirmación de paso de sonda."));
+    apiMock.probeAndCaptureReference.mockRejectedValueOnce(new Error("Timeout esperando confirmación de paso de sonda."));
     vi.mocked(physicalMachine.refreshRuntime).mockClear();
     renderWorkspace(physicalMachine);
 
     fireEvent.click(screen.getByRole("button", { name: /^Referencia$/i }));
     fireEvent.click(await screen.findByRole("button", { name: /Sondear referencia ahora/i }));
 
-    await waitFor(() => expect(apiMock.confirmProbe).toHaveBeenCalled());
+    await waitFor(() => expect(apiMock.probeAndCaptureReference).toHaveBeenCalled());
     expect(apiMock.capturePhysicalWorkOrigin).not.toHaveBeenCalled();
     expect(apiMock.capturePhysicalZReferenceFromProbe).not.toHaveBeenCalled();
     expect(physicalMachine.refreshRuntime).not.toHaveBeenCalled();

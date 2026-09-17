@@ -83,6 +83,12 @@ STOPPED
 
 Cada intencion cardinal aceptada del joystick adquiere el permiso de movimiento y consulta el estado HTTP de Klipper antes de calcular el destino. El trafico WebSocket en reposo no renueva por si solo una posicion ni el estado `ready`. La consulta reutiliza el descubrimiento existente y no envia G-code. Despues se comprueban cancelacion, sesion Arduino, frescura serial, homing y la autorizacion habitual del frame observado. Una consulta fallida o sin posicion fresca bloquea el jog; un nuevo intento requiere volver al centro. No se amplian las tolerancias de antiguedad ni se habilita el control manual automaticamente.
 
+La lectura serial no espera consultas HTTP ni finalizacion del jog. Un unico worker ejecuta el toque con ownership adquirido antes de arrancar; no existe cola. Los toques durante el movimiento se descartan y se exige otro paquete CENTER al terminar. Direccion y perfil pertenecen al toque aceptado; el cambio posterior de modo no modifica su distancia. La edad del toque tambien se comprueba aunque sigan llegando paquetes Arduino recientes.
+
+### Sondeo y guardado de referencia
+
+`POST /api/projects/{project_id}/operations/{operation_id}/reference-session/probe-and-capture` sondea y guarda X/Y y Z de contacto en una peticion. `ReferenceSessionService` mantiene un permiso raiz mientras `confirm_probe` utiliza un hijo, valida la observacion con los controles existentes y guarda ambas referencias juntas bajo el bloqueo de persistencia. Un cambio de contexto, cancelacion, medicion obsoleta o fallo impide guardar. La respuesta y el refresco del navegador ocurren despues del guardado; no se amplian los tiempos de validez de sondas historicas. Una emision incierta mantiene recuperacion y cierra el productor del permiso raiz.
+
 ## 3. Flujo frontend -> backend
 
 ```text

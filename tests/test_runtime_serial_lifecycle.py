@@ -110,6 +110,9 @@ class RuntimeSerialLifecycleTest(unittest.TestCase):
             checker.join(0.5)
         with patch.object(runtime._mapper, 'map', return_value=ControllerCommand(jog_x=1)), patch.object(runtime, '_manual_move', side_effect=move):
             runtime._handle_controller_packet_from_manager(2, PACKET, 0)
+            worker = runtime._manual_thread
+            if worker is not None:
+                worker.join(1)
         self.assertEqual(acquired, [True])
 
     def test_late_callbacks_and_packets_from_old_manager_epoch_are_ignored(self) -> None:

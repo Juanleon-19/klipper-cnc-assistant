@@ -238,6 +238,7 @@ class MachineRuntime:
         self._mapper = CommandMapper()
         self._jog: JogController | None = None
         self._manual: ManualJogController | None = None
+        self._manual_thread: threading.Thread | None = None
         self._manual_enabled = False
         self._diagnostic_input_only = True
         self._ready_for_jog = False
@@ -1970,23 +1971,54 @@ class MachineRuntime:
                 threading.Thread(target=self._confirm_probe_from_button, daemon=True).start()
         if not diagnostic_only and manual_enabled and _is_cardinal(command):
             with self._lock:
-                can_jog = self._ready_for_jog
+                can_jog = self._ready_for_jog and self._manual_thread is None
+                self._ready_for_jog = False
             if can_jog:
-                self._manual_move(command, serial_session=serial_session)
-                with self._lock:
-                    self._ready_for_jog = False
+                self._start_manual_move(command, serial_session=serial_session)
         elif packet.direction == "CENTER" and not diagnostic_only and manual_enabled:
             with self._lock:
-                self._ready_for_jog = True
+                self._ready_for_jog = self._manual_thread is None
         with self._lock:
             self._previous_command = command
 
-    def _manual_move(self, command: ControllerCommand, *, serial_session=None) -> None:
-        if self._manual is None:
-            return
-        context = None
+    def _start_manual_move(self, command: ControllerCommand, *, serial_session=None) -> None:
+        # Claim ownership before starting the worker, so disconnect/other
+        # operations cannot race a pending intent. Never queue manual moves.
+        with self._lock:
+            if self._manual_thread is not None or not self._manual_enabled or self._diagnostic_input_only:
+                return
+            try:
+                context = self._begin_motion_operation("manual_jog")
+            except (MachineRuntimeError, OwnershipError) as error:
+                self._last_error = str(error)
+                return
+            jog_mode = None if self._manual is None else self._manual.mode
+
+            def run():
+                try:
+                    self._manual_move(command, serial_session=serial_session, context=context, jog_mode=jog_mode)
+                finally:
+                    with self._lock:
+                        self._manual_thread = None
+                        self._ready_for_jog = False  # require a new CENTER packet
+
+            worker = threading.Thread(target=run, name="cnc-manual-jog", daemon=True)
+            self._manual_thread = worker
+            try:
+                worker.start()
+            except Exception:
+                self._manual_thread = None
+                self._finish_operation_context(context)
+                self._movement_lock.release()
+                raise
+
+    def _manual_move(self, command: ControllerCommand, *, serial_session=None, context=None, jog_mode=None) -> None:
         try:
-            context = self._begin_motion_operation("manual_jog")
+            if context is None:
+                context = self._begin_motion_operation("manual_jog")
+            if self._manual is None:
+                raise MachineRuntimeError("Control manual no disponible.")
+            manual = self._manual if jog_mode is None else ManualJogController(self._manual.jog_controller, mode=jog_mode)
             with self._lock:
                 if serial_session is not None and serial_session != (self._connection_manager_epoch, self._manager_session_generation):
                     raise MachineRuntimeError("La sesión Arduino cambió antes del jog.")
@@ -2001,14 +2033,16 @@ class MachineRuntime:
             except Exception as error:
                 raise MachineRuntimeError(f"No se pudo actualizar el estado para el joystick: {error}") from error
             self._raise_if_cancelled()
+            if time.monotonic() - context.started_at > self.config.serial_fresh_timeout_s:
+                raise MachineRuntimeError("El toque del joystick caducó durante la consulta; vuelva al centro.")
             with self._lock:
                 if serial_session is not None and serial_session != (self._connection_manager_epoch, self._manager_session_generation):
                     raise MachineRuntimeError("La sesión Arduino cambió durante la consulta de estado.")
             self._assert_safety_for_motion()
             if command.jog_x:
-                result = self._manual.move("x", command.jog_x, permit=context.permit)
+                result = manual.move("x", command.jog_x, permit=context.permit)
             elif command.jog_y:
-                result = self._manual.move("y", command.jog_y, permit=context.permit)
+                result = manual.move("y", command.jog_y, permit=context.permit)
             else:
                 return
             with self._lock:
