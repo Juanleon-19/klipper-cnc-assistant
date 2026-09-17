@@ -79,6 +79,10 @@ STOPPED
 - Tras cada reconexion el sistema queda en diagnostico con `manual_enabled = false` y `ready_for_jog = false`.
 - `POST /api/machine/reconnect-arduino` fuerza una nueva sesion serial sin reiniciar Moonraker ni mover la maquina.
 
+### Observacion antes del jog manual
+
+Cada intencion cardinal aceptada del joystick adquiere el permiso de movimiento y consulta el estado HTTP de Klipper antes de calcular el destino. El trafico WebSocket en reposo no renueva por si solo una posicion ni el estado `ready`. La consulta reutiliza el descubrimiento existente y no envia G-code. Despues se comprueban cancelacion, sesion Arduino, frescura serial, homing y la autorizacion habitual del frame observado. Una consulta fallida o sin posicion fresca bloquea el jog; un nuevo intento requiere volver al centro. No se amplian las tolerancias de antiguedad ni se habilita el control manual automaticamente.
+
 ## 3. Flujo frontend -> backend
 
 ```text

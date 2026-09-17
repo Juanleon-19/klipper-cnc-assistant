@@ -2180,7 +2180,9 @@ class PhysicalEmissionSafetyTest(unittest.TestCase):
 
     def test_stale_position_fresh_arduino_manual_enabled_has_zero_emissions(self):
         self.machine.live_position_updated_at = time.monotonic() - 10
-        self.cardinal()
+        # An observation attempt that supplies no new frame must still fail.
+        with patch.object(self.runtime, '_refresh_machine'):
+            self.cardinal()
         self.assertLess(time.monotonic() - self.runtime._last_packet_at, 1)
         self.assertTrue(self.runtime._manual_enabled)
         self.assertEqual(len(self.client.scripts), 0)

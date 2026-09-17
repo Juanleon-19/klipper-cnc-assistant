@@ -1990,6 +1990,20 @@ class MachineRuntime:
             with self._lock:
                 if serial_session is not None and serial_session != (self._connection_manager_epoch, self._manager_session_generation):
                     raise MachineRuntimeError("La sesión Arduino cambió antes del jog.")
+            self._assert_safety_for_connection()
+            self._assert_serial_recent()
+            # Idle WebSocket traffic does not prove a fresh position or ready
+            # state. Observe both on this deliberate joystick intent, before
+            # calculating the target; never extend cached frame timestamps.
+            try:
+                self.require_physical_access()
+                self._refresh_machine()
+            except Exception as error:
+                raise MachineRuntimeError(f"No se pudo actualizar el estado para el joystick: {error}") from error
+            self._raise_if_cancelled()
+            with self._lock:
+                if serial_session is not None and serial_session != (self._connection_manager_epoch, self._manager_session_generation):
+                    raise MachineRuntimeError("La sesión Arduino cambió durante la consulta de estado.")
             self._assert_safety_for_motion()
             if command.jog_x:
                 result = self._manual.move("x", command.jog_x, permit=context.permit)
@@ -2003,6 +2017,11 @@ class MachineRuntime:
             context.emitted = True
             self._wait_for_axis(result["axis"], result["target"], "manual_jog", start_position=result["current_position"])
             context.quiescent = True
+            with self._lock:
+                if (self._state is MachineRuntimeState.DEGRADED and self._manual_enabled
+                        and not self._diagnostic_input_only and not context.cancel_event.is_set()):
+                    self._last_error = None
+                    self._state = MachineRuntimeState.WAITING_FOR_XY_REFERENCE
         except (JogError, MachineRuntimeError, OwnershipError, MotionAuthorizationError, MoonrakerError) as error:
             with self._lock:
                 self._last_error = str(error)
