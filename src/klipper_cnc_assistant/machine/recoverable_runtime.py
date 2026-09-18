@@ -183,6 +183,21 @@ class RecoverableMachineRuntime(MachineRuntime):
             self.stop()
             return self.connect()
 
+    def recover_idle_controls(self) -> dict[str, Any]:
+        """Explicit recovery using fresh idle evidence; never sends movement."""
+        self._require_physical_ready()
+        with self._lock:
+            self._manual_enabled = False
+            self._diagnostic_input_only = True
+            self._ready_for_jog = False
+        if not self.clear_motion_recovery_pending():
+            raise MachineRuntimeError("No se pudo confirmar reposo seguro: hay un productor activo, movimiento o telemetría no verificable.")
+        with self._lock:
+            self._state = MachineRuntimeState.DIAGNOSTIC
+            self._last_error = None
+            self._event("info", "Reposo confirmado. Controles recuperados en modo diagnóstico; habilite manualmente la siguiente operación.")
+        return self.snapshot()
+
     def cancel_operation(
         self,
         *,

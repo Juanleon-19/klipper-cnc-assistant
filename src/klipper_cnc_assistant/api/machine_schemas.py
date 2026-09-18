@@ -29,6 +29,8 @@ class MachineRuntimeResponse(BaseModel):
     last_error: str | None
     last_probe_result: dict | None
     active_operation: dict | None = None
+    recovery_pending: bool = False
+    recovery_reason: str | None = None
     initialization_steps: list[dict]
     events: list[dict]
 

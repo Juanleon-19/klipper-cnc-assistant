@@ -1769,16 +1769,18 @@ export function ProjectWorkspace({
       return Number.isFinite(parsed) && parsed >= 0 ? parsed : undefined;
     };
     const parseInteger = (value: string) => {
-      const parsed = Number.parseInt(value, 10);
-      return Number.isFinite(parsed) ? parsed : undefined;
+      const parsed = Number(value);
+      return value.trim() !== "" && Number.isInteger(parsed) ? parsed : undefined;
     };
     const uniformRetreat = parseNonNegative(uniformEdgeRetreatInput) ?? 2;
     const edgeLeft = useUniformEdgeRetreat ? uniformRetreat : (parseNonNegative(edgeRetreatLeftInput) ?? 2);
     const edgeRight = useUniformEdgeRetreat ? uniformRetreat : (parseNonNegative(edgeRetreatRightInput) ?? 2);
     const edgeBottom = useUniformEdgeRetreat ? uniformRetreat : (parseNonNegative(edgeRetreatBottomInput) ?? 2);
     const edgeTop = useUniformEdgeRetreat ? uniformRetreat : (parseNonNegative(edgeRetreatTopInput) ?? 2);
-    const rows = Math.max(2, parseInteger(meshRowsInput) ?? 7);
-    const columns = Math.max(2, parseInteger(meshColumnsInput) ?? 6);
+    const rows = parseInteger(meshRowsInput) ?? 0;
+    const columns = parseInteger(meshColumnsInput) ?? 0;
+    const edgesValid = (useUniformEdgeRetreat ? [uniformEdgeRetreatInput] : [edgeRetreatLeftInput, edgeRetreatRightInput, edgeRetreatBottomInput, edgeRetreatTopInput])
+      .every(value => value.trim() !== "" && parseNonNegative(value) !== undefined);
     const probeWidth = Math.max(0, project.material.ancho_mm - edgeLeft - edgeRight);
     const probeHeight = Math.max(0, project.material.alto_mm - edgeBottom - edgeTop);
     const plannedPoints = rows * columns;
@@ -1808,7 +1810,7 @@ export function ProjectWorkspace({
     const firstPhysicalPoint = executablePhysicalPoints[0] ?? null;
     const lastPhysicalPoint = executablePhysicalPoints[executablePhysicalPoints.length - 1] ?? null;
     const meshConfigValid = probeWidth > 0
-      && probeHeight > 0
+      && probeHeight > 0 && edgesValid && rows >= 2 && columns >= 2
       && safeZ !== undefined
       && Number.isFinite(effectiveProbeStep) && effectiveProbeStep > 0
       && Number.isFinite(effectiveProbeFeed) && effectiveProbeFeed > 0
@@ -2042,26 +2044,26 @@ export function ProjectWorkspace({
                     <div className="metric-box"><span>Puntos totales</span><strong>{meshSuggestion.point_count}</strong></div>
                     <div className="metric-box"><span>Separación X resultante</span><strong>{formatMillimeters(meshSuggestion.dx_mm, 3)}</strong></div>
                     <div className="metric-box"><span>Separación Y resultante</span><strong>{formatMillimeters(meshSuggestion.dy_mm, 3)}</strong></div>
-                    <div className="metric-box"><span>Tiempo estimado</span><strong>{typeof meshSuggestion.estimated_time_s === "number" ? `${meshSuggestion.estimated_time_s.toFixed(1)} s` : "-"}</strong></div>
-                  </div> : <p className="muted">Genere una propuesta antes de aceptarla o previsualizarla.</p>}
+                  </div> : <p className="muted">Genere una propuesta para aplicarla y revisar la cuadrícula.</p>}
                   {meshSuggestion ? <p className="muted">{meshSuggestion.reason}</p> : null}
                   <div className="action-grid action-grid--inline">
-                    <button className="button button--ghost" type="button" disabled={!selectedOperation || suggestionBusy} onClick={async () => {
+                    <button className="button button--ghost" type="button" disabled={!selectedOperation || suggestionBusy || !meshConfigValid} onClick={async () => {
                       if (!selectedOperation) return;
                       setSuggestionBusy(true);
                       setWorkspaceError("");
                       try {
                         const suggestion = await api.suggestPhysicalMap(project.id, selectedOperation.id, { ...physicalPlanPayload, grid_mode: "suggested" });
+                        invalidateMeshPreview();
                         setMeshSuggestion(suggestion);
                         setMeshRowsInput(String(suggestion.rows));
                         setMeshColumnsInput(String(suggestion.columns));
+                        setMeshValidationMessage("Propuesta aplicada. Genere la vista previa para revisar la cuadrícula.");
                       } catch (error) {
                         setWorkspaceError(error instanceof Error ? error.message : "No fue posible generar la propuesta de malla.");
                       } finally {
                         setSuggestionBusy(false);
                       }
                     }}>Ver propuesta</button>
-                    <button className="button" type="button" disabled={!meshSuggestion} onClick={() => { if (!meshSuggestion) return; setMeshRowsInput(String(meshSuggestion.rows)); setMeshColumnsInput(String(meshSuggestion.columns)); setMeshValidationMessage("Propuesta automática aceptada. Regenerar vista previa antes de confirmar sondeo."); }}>Aceptar sugerencia</button>
                   </div>
                 </div>
               )}
@@ -2083,9 +2085,10 @@ export function ProjectWorkspace({
               <div className="info-grid info-grid--double compact-grid">
                 <div className="metric-box"><span>Fuente efectiva</span><strong>{effectiveProfileSource === "map_override" ? "Override del mapa" : "Perfil de referencia"}</strong></div>
                 <div className="metric-box"><span>Paso efectivo</span><strong>{formatMillimeters(Number.isFinite(effectiveProbeStep) ? effectiveProbeStep : null, 3)}</strong></div>
-                <div className="metric-box"><span>Velocidad efectiva</span><strong>{formatMillimeters(Number.isFinite(effectiveProbeFeed) ? effectiveProbeFeed : null, 0)}/min</strong></div>
+                <div className="metric-box"><span>Velocidad programada de descenso</span><strong>{formatMillimeters(Number.isFinite(effectiveProbeFeed) ? effectiveProbeFeed : null, 0)}/min</strong></div>
                 <div className="metric-box"><span>Retracto efectivo</span><strong>{formatMillimeters(Number.isFinite(effectiveProbeRetract) ? effectiveProbeRetract : null, 3)}</strong></div>
               </div>
+              <p className="muted">La velocidad se aplica a cada paso; la duración total incluye confirmar posición, detectar contacto, retraer y trasladarse entre puntos. Un paso mayor reduce el número de comprobaciones, pero también la resolución Z. La Z segura es separación sobre la referencia, no una coordenada absoluta. Cambiar estos campos requiere regenerar la vista previa y armar un mapa nuevo.</p>
               <p className="muted">{probeProfileMode === "machine_reference_profile" ? "La malla hereda exactamente el paso, la velocidad y el retracto de Tomar referencia. Los campos numéricos quedan solo informativos." : "El mapa usa un override explícito. Este modo debe verse como una sustitución deliberada del perfil de referencia."}</p>
             </div>
             <div className="subpanel subpanel--soft">

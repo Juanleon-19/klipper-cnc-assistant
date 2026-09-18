@@ -31,3 +31,9 @@ export async function reconnectRuntime(): Promise<MachineRuntime> {
   }
   return await response.json() as MachineRuntime;
 }
+
+export async function recoverIdleControls(): Promise<MachineRuntime> {
+  const response = await fetch("/api/machine/recover-idle-controls", { method: "POST" });
+  if (!response.ok) throw new Error(await readError(response));
+  return await response.json() as MachineRuntime;
+}

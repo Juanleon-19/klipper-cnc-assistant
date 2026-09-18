@@ -59,6 +59,10 @@ def build_machine_router() -> APIRouter:
     def diagnostic_mode(payload: DiagnosticModeRequest, request: Request) -> MachineRuntimeResponse:
         return MachineRuntimeResponse(**runtime(request).set_diagnostic_mode(payload.enabled))
 
+    @router.post("/recover-idle-controls", response_model=MachineRuntimeResponse)
+    def recover_idle_controls(request: Request) -> MachineRuntimeResponse:
+        return MachineRuntimeResponse(**runtime(request).recover_idle_controls())
+
     @router.post("/initialize", response_model=MachineRuntimeResponse)
     def initialize(payload: MachineInitializationRequest, request: Request) -> MachineRuntimeResponse:
         return MachineRuntimeResponse(**runtime(request).initialize(payload.target_z_mm))

@@ -81,9 +81,13 @@ STOPPED
 
 ### Observacion antes del jog manual
 
-Cada intencion cardinal aceptada del joystick adquiere el permiso de movimiento y consulta el estado HTTP de Klipper antes de calcular el destino. El trafico WebSocket en reposo no renueva por si solo una posicion ni el estado `ready`. La consulta reutiliza el descubrimiento existente y no envia G-code. Despues se comprueban cancelacion, sesion Arduino, frescura serial, homing y la autorizacion habitual del frame observado. Una consulta fallida o sin posicion fresca bloquea el jog; un nuevo intento requiere volver al centro. No se amplian las tolerancias de antiguedad ni se habilita el control manual automaticamente.
+Cada intencion cardinal aceptada del joystick adquiere el permiso de movimiento y valida el frame observado antes de calcular el destino. Si la observacion ya satisface la autorizacion y frescura existentes, se reutiliza; si no, se consulta HTTP y se vuelve a autorizar. El trafico WebSocket en reposo no renueva por si solo una posicion ni el estado `ready`. La consulta reutiliza el descubrimiento existente y no envia G-code. Despues se comprueban cancelacion, sesion Arduino, frescura serial, homing y la autorizacion habitual del frame observado. Una consulta fallida o sin posicion fresca bloquea el jog; un nuevo intento requiere volver al centro. No se amplian las tolerancias de antiguedad ni se habilita el control manual automaticamente.
 
 La lectura serial no espera consultas HTTP ni finalizacion del jog. Un unico worker ejecuta el toque con ownership adquirido antes de arrancar; no existe cola. Los toques durante el movimiento se descartan y se exige otro paquete CENTER al terminar. Direccion y perfil pertenecen al toque aceptado; el cambio posterior de modo no modifica su distancia. La edad del toque tambien se comprueba aunque sigan llegando paquetes Arduino recientes.
+
+La confirmacion de movimiento revisa primero la telemetria y consulta HTTP inmediatamente si falta evidencia, sin la espera inicial fija de 250 ms. Las consultas posteriores conservan el intervalo limitado. Cada paso de sondeo renueva el contexto si ha caducado; no se amplian tolerancias.
+
+`POST /api/machine/recover-idle-controls` permite recuperar un bloqueo tras cancelacion solo mediante la reconciliacion existente: sin productores, hijos ni operaciones activas y con observacion HTTP de reposo. Deshabilita manual antes de reconciliar y deja el runtime en diagnostico. No envia G-code. El API publica `recovery_pending` y `recovery_reason`, y Referencia ofrece la accion explicita.
 
 ### Sondeo y guardado de referencia
 

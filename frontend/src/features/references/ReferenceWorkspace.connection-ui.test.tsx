@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { MachineRuntime, Operation, ReferenceSession } from "../../types";
@@ -78,6 +78,8 @@ function renderReference(options?: {
   machineSettingsHasUnsavedChanges?: boolean;
   machineSettingsRuntimeStatus?: "coherent" | "unconfirmed" | "refresh_failed" | "inconsistent";
   hasReference?: boolean;
+  recoveryPending?: boolean;
+  activeOperation?: Record<string, unknown>;
 }) {
   const connected = options?.connected ?? false;
   const onConnectRuntime = options?.onConnectRuntime ?? vi.fn();
@@ -86,6 +88,8 @@ function renderReference(options?: {
     referencePrepZ: options?.referencePrepZ,
     longToolReferencePrepZ: options?.longToolReferencePrepZ,
   });
+  currentRuntime.recovery_pending = options?.recoveryPending;
+  currentRuntime.active_operation = options?.activeOperation;
   const refreshRuntime = options?.refreshRuntime ?? vi.fn().mockResolvedValue(currentRuntime);
   const consistencyProps = {
     machineSettingsDirty: options?.machineSettingsDirty ?? false,
@@ -163,6 +167,29 @@ describe("ReferenceWorkspace connection and workflow UI", () => {
     vi.useRealTimers();
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
+  });
+
+  it("recupera controles solo mediante verificación explícita de reposo", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: async () => runtime(true) });
+    vi.stubGlobal("fetch", fetchMock);
+    const { refreshRuntime } = renderReference({ connected: true, recoveryPending: true, runtimeState: "CANCELLED" });
+    fireEvent.click(screen.getByRole("button", { name: "Verificar reposo y recuperar controles" }));
+    await waitFor(() => expect(refreshRuntime).toHaveBeenCalled());
+    expect(fetchMock).toHaveBeenCalledWith("/api/machine/recover-idle-controls", { method: "POST" });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("no permite recuperar mientras existe una operación activa", () => {
+    renderReference({ connected: true, recoveryPending: true, activeOperation: { operation_type: "mesh" } });
+    expect(screen.getByRole("button", { name: "Verificar reposo y recuperar controles" })).toBeDisabled();
+  });
+
+  it("muestra el rechazo del backend sin simular recuperación", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: false, json: async () => ({ detail: "La máquina sigue en movimiento" }) }));
+    const { refreshRuntime } = renderReference({ connected: true, recoveryPending: true });
+    fireEvent.click(screen.getByRole("button", { name: "Verificar reposo y recuperar controles" }));
+    expect(await screen.findByText("La máquina sigue en movimiento")).toBeInTheDocument();
+    expect(refreshRuntime).not.toHaveBeenCalled();
   });
 
   it("muestra el estado general de conexión en rojo o verde", () => {

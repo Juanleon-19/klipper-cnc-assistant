@@ -1465,7 +1465,7 @@ describe("ProjectWorkspace", () => {
     expect(await screen.findByText(/Heatmap mock · 4 puntos · medido/i)).toBeInTheDocument();
   });
 
-  it("muestra propuesta automática, permite aceptarla y reiniciar solo el mapa", async () => {
+  it("aplica la propuesta automática sin un segundo botón redundante y permite reiniciar solo el mapa", async () => {
     const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
     renderWorkspace(physicalMachine);
     fireEvent.click(screen.getByRole("button", { name: /Mapa de alturas/i }));
@@ -1476,8 +1476,8 @@ describe("ProjectWorkspace", () => {
     expect(await screen.findByText(/Filas sugeridas/i)).toBeInTheDocument();
     expect(screen.getByText(/Se ajusta a la separación objetivo/i)).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: /Aceptar sugerencia/i }));
-    expect(screen.getByText(/Propuesta automática aceptada/i)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Aceptar sugerencia/i })).not.toBeInTheDocument();
+    expect(screen.getByText(/Propuesta aplicada/i)).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: /Generar vista previa de malla/i }));
     await waitFor(() => expect(apiMock.previewPhysicalMap).toHaveBeenLastCalledWith(
       "proj_1",
@@ -1491,6 +1491,23 @@ describe("ProjectWorkspace", () => {
     await waitFor(() => expect(apiMock.resetSetupMap).toHaveBeenCalledWith("proj_1", "setup-main"));
     expect(confirmSpy).toHaveBeenCalledWith(expect.stringContaining("conservará origen X/Y"));
     confirmSpy.mockRestore();
+  });
+
+  it("rechaza filas fraccionarias o vacías y retiros inválidos sin sustituir valores", async () => {
+    renderWorkspace(physicalMachine);
+    fireEvent.click(screen.getByRole("button", { name: /Mapa de alturas/i }));
+    await screen.findByText(/Mapa medido físicamente/i);
+    const preview = screen.getByRole("button", { name: /Generar vista previa de malla/i });
+    for (const value of ["", "1", "2.5", "3abc"]) {
+      fireEvent.change(screen.getByLabelText(/^Filas$/i), { target: { value } });
+      expect(preview).toBeDisabled();
+    }
+    fireEvent.change(screen.getByLabelText(/^Filas$/i), { target: { value: "3" } });
+    fireEvent.change(screen.getByLabelText(/Retiro uniforme/i), { target: { value: "-2" } });
+    expect(preview).toBeDisabled();
+    fireEvent.change(screen.getByLabelText(/Retiro uniforme/i), { target: { value: "2" } });
+    expect(preview).toBeEnabled();
+    expect(apiMock.previewPhysicalMap).not.toHaveBeenCalled();
   });
 
   it("alinea el editor override con los valores enviados", async () => {

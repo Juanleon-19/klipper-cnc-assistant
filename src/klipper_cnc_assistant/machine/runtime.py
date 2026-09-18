@@ -1569,7 +1569,7 @@ class MachineRuntime:
             probe_state = self.get_live_probe_state(require_fresh=True)
             if probe_state["filtered_triggered"]:
                 break
-            step_context = self._motion_context("probe_step")
+            step_context = self._fresh_motion_context("probe_step")
             current_z = step_context.frame.position[2]
             remaining = current_z - machine.z_limits.minimum
             if remaining <= profile.settle_tolerance_mm:
@@ -1702,6 +1702,15 @@ class MachineRuntime:
         return self._motion_authorizer().require_context(
             self._operation_permit(), action,
             MotionRequirements(frame, homed_axes, self.config.telemetry_fresh_timeout_s))
+
+    def _fresh_motion_context(self, action):
+        """Use verified fresh observations first; query only when needed."""
+        try:
+            return self._motion_context(action)
+        except MotionAuthorizationError:
+            self._refresh_machine()
+            self._raise_if_cancelled()
+            return self._motion_context(action)
 
     def reconcile_physical_ownership(self) -> bool:
         """Explicit reconciliation, only after local producers have relinquished leases.
@@ -2029,7 +2038,7 @@ class MachineRuntime:
             # calculating the target; never extend cached frame timestamps.
             try:
                 self.require_physical_access()
-                self._refresh_machine()
+                self._fresh_motion_context("manual_jog")
             except Exception as error:
                 raise MachineRuntimeError(f"No se pudo actualizar el estado para el joystick: {error}") from error
             self._raise_if_cancelled()
@@ -2867,17 +2876,17 @@ class MachineRuntime:
         if self._machine is None:
             raise MachineRuntimeError("No hay telemetría de máquina.")
         start = time.monotonic()
-        last_refresh = start
+        last_refresh = start - 0.25
         probe_step = label == "paso de sonda"
         while time.monotonic() - start <= self.config.move_timeout_s:
             self._raise_if_cancelled()
             self._assert_safety_for_connection()
-            now = time.monotonic()
-            if now - last_refresh >= 0.25 or self._telemetry_is_stale(now):
-                self._refresh_machine_best_effort()
-                last_refresh = now
             snapshot = self._machine.get_motion_snapshot()
             if self._frame_is_stale(snapshot.get("live_position_age_s")) or self._frame_is_stale(snapshot.get("velocity_age_s")):
+                if time.monotonic() - last_refresh >= 0.25:
+                    self._refresh_machine_best_effort()
+                    last_refresh = time.monotonic()
+                    continue
                 time.sleep(0.05)
                 continue
             position = float(snapshot[axis])
@@ -2892,6 +2901,10 @@ class MachineRuntime:
                 if probe_triggered and velocity <= self.config.velocity_tolerance_mm_s and moved_enough:
                     self._clear_resolved_transport_timeout(label)
                     return
+            if time.monotonic() - last_refresh >= 0.25:
+                self._refresh_machine_best_effort()
+                last_refresh = time.monotonic()
+                continue
             time.sleep(0.05)
         self._refresh_machine_best_effort()
         snapshot = self._machine.get_motion_snapshot()

@@ -4,7 +4,7 @@ import { StatusBadge } from "../../components/StatusBadge";
 import { formatMillimeters } from "../../lib/format";
 import type { HeightMap, MachineRuntime, Operation, ReferenceMoveResult, ReferenceSession, ReferenceStep, CapturedPosition } from "../../types";
 import type { MachineContextValue } from "../system/MachineContext";
-import { reconnectRuntime } from "../system/runtimeApi";
+import { reconnectRuntime, recoverIdleControls } from "../system/runtimeApi";
 
 type InputState = { x_mm: string; y_mm: string };
 type ZInputState = { x_mm: string; y_mm: string; z_mm: string };
@@ -183,6 +183,20 @@ export function ReferenceWorkspace({
   const [showRuntimeRecovery, setShowRuntimeRecovery] = useState(false);
   const [reconnectingRuntime, setReconnectingRuntime] = useState(false);
   const [runtimeReconnectError, setRuntimeReconnectError] = useState("");
+  const [recoveringControls, setRecoveringControls] = useState(false);
+  const handleRecoverControls = async () => {
+    if (recoveringControls) return;
+    setRecoveringControls(true);
+    setRuntimeReconnectError("");
+    try {
+      await recoverIdleControls();
+      await machine.refreshRuntime();
+    } catch (error) {
+      setRuntimeReconnectError(error instanceof Error ? error.message : "No se pudo verificar el reposo.");
+    } finally {
+      setRecoveringControls(false);
+    }
+  };
 
   useEffect(() => {
     if (runtimeConnected) {
@@ -266,6 +280,10 @@ export function ReferenceWorkspace({
               </button>
             ) : null}
           </div>
+          {machine.runtime?.recovery_pending ? <div className="alert alert--warning">
+            <p>Hay una recuperación pendiente. Verificar reposo libera los controles solo si terminaron los movimientos y Klipper confirma reposo. No mueve la máquina ni habilita el joystick.</p>
+            <button className="button" type="button" disabled={recoveringControls || Boolean(activeOperation) || referenceBusy} onClick={() => void handleRecoverControls()}>{recoveringControls ? "Verificando reposo…" : "Verificar reposo y recuperar controles"}</button>
+          </div> : null}
           {connectAttemptStarted && !runtimeConnected && !showRuntimeRecovery ? <p className="muted">Esperando conexión. Si no queda lista en 10 s aparecerá la recuperación del runtime.</p> : null}
           {showRuntimeRecovery && !runtimeConnected ? <div className="alert alert--warning">La conexión no quedó lista después de 10 s. Puede intentar una reconexión completa del runtime sin reiniciar Klipper ni el servicio.</div> : null}
           {runtimeReconnectError ? <div className="alert alert--error">{runtimeReconnectError}</div> : null}
