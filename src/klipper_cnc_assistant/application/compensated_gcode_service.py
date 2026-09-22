@@ -17,6 +17,7 @@ from klipper_cnc_assistant.application.adaptive_compensation import (
 from klipper_cnc_assistant.application.errors import ApplicationError, NotFoundError
 from klipper_cnc_assistant.domain import CompensationMode, OperacionPCB, ProjectValidationError
 from klipper_cnc_assistant.gcode import analyze_gcode_text
+from klipper_cnc_assistant.gcode.analysis_cache import analysis_is_current
 from klipper_cnc_assistant.heightmap import HeightGrid, HeightMap, HeightSample, ProbeRegion, SampleQuality, interpolate_height
 from klipper_cnc_assistant.heightmap.coverage import DOMAIN_TOLERANCE_MM, build_coverage_report, segment_uses_surface_map
 from klipper_cnc_assistant.storage import JsonProjectRepository
@@ -123,8 +124,9 @@ class CompensatedGCodeService:
         if not operation.archivo_gcode:
             raise ApplicationError("La operación no tiene archivo G-code original asociado.")
 
-        original = self.repository.read_project_file(project_id, operation.archivo_gcode)
-        operation = replace(operation, analisis=analyze_gcode_text(original, material=project.material))
+        original, source_sha256 = self.repository.read_gcode_source(project_id, operation.archivo_gcode)
+        if not analysis_is_current(operation, original, source_sha256=source_sha256):
+            operation = replace(operation, analisis=analyze_gcode_text(original, material=project.material))
         self._validate_legacy_analysis(operation)
         physical_map = self.physical_map_service.get_active(project_id, operation_id)
         self._validate_map_for_operation(physical_map, operation, require_tool_reference=require_tool_reference)
@@ -295,8 +297,9 @@ class CompensatedGCodeService:
         operation = project.get_operation(operation_id)
         if operation.analisis is None or not operation.archivo_gcode:
             raise ApplicationError("La operación requiere análisis y archivo original para auditar compensación.")
-        original = self.repository.read_project_file(project_id, operation.archivo_gcode)
-        operation = replace(operation, analisis=analyze_gcode_text(original, material=project.material))
+        original, source_sha256 = self.repository.read_gcode_source(project_id, operation.archivo_gcode)
+        if not analysis_is_current(operation, original, source_sha256=source_sha256):
+            operation = replace(operation, analisis=analyze_gcode_text(original, material=project.material))
         self._validate_legacy_analysis(operation)
         physical_map = self.physical_map_service.get_active(project_id, operation_id)
         self._validate_map_for_operation(physical_map, operation, require_tool_reference=False)

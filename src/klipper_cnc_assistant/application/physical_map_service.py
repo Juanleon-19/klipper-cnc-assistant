@@ -7,6 +7,8 @@ import threading
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import Any
+from copy import deepcopy
+from klipper_cnc_assistant.machine.physical_reference import require_current_reference, captured_reference_map, initial_map_binding
 
 from klipper_cnc_assistant.application.errors import ApplicationError, NotFoundError
 from klipper_cnc_assistant.domain import CapturedPosition, CoordinateReference, OperationPreparation, OperacionPCB, PreparationState, ProjectValidationError
@@ -394,8 +396,9 @@ class PhysicalMapService:
         project_id: str,
         operation_id: str,
         config: PhysicalMeshConfig | None = None,
+        project=None,
     ) -> dict[str, Any]:
-        project = self._load_project(project_id)
+        project = project if project is not None else self._load_project(project_id)
         operation = project.get_operation(operation_id)
         selected = config or PhysicalMeshConfig(grid_mode="suggested")
         region = self._material_inner_region(project, selected)
@@ -436,13 +439,14 @@ class PhysicalMapService:
         machine_origin_x: float | None = None,
         machine_origin_y: float | None = None,
         reference_z: float | None = None,
+        project=None,
     ) -> dict[str, Any]:
-        project = self._load_project(project_id)
+        project = project if project is not None else self._load_project(project_id)
         operation = project.get_operation(operation_id)
         operations = self._operations_for_setup_face(project, operation) or (operation,)
         selected_config = config or PhysicalMeshConfig()
         if selected_config.grid_mode == "suggested":
-            suggestion = self.suggest_mesh_config(project_id=project_id, operation_id=operation_id, config=selected_config)
+            suggestion = self.suggest_mesh_config(project_id=project_id, operation_id=operation_id, config=selected_config, project=project)
             selected_config = replace(selected_config, rows=int(suggestion["rows"]), columns=int(suggestion["columns"]))
         region = self._material_inner_region(project, selected_config)
         grid = self._grid_for_region(region, selected_config.rows, selected_config.columns)
@@ -523,8 +527,10 @@ class PhysicalMapService:
         operation_id: str,
         config: PhysicalMeshConfig | None = None,
     ) -> dict[str, Any]:
-        context = self._saved_preview_context(project_id, operation_id)
+        project = self._load_project(project_id)
+        context = self._saved_preview_context(project_id, operation_id, project=project)
         return self.preview_mesh(
+            project=project,
             project_id=project_id,
             operation_id=operation_id,
             config=config,
@@ -539,9 +545,12 @@ class PhysicalMapService:
         project_id: str,
         operation_id: str,
         config: PhysicalMeshConfig | None = None,
+        runtime=None,
     ) -> dict[str, Any]:
-        context = self._saved_reference_context(project_id, operation_id)
+        project = self._load_project(project_id)
+        context = self._saved_reference_context(project_id, operation_id, project=project)
         return self.capture_reference_and_plan(
+            project=project, runtime=runtime,
             project_id=project_id,
             operation_id=operation_id,
             machine_origin_x=context["machine_origin_x"],
@@ -567,12 +576,13 @@ class PhysicalMapService:
         machine_label: str | None,
         session_id: str | None,
         config: PhysicalMeshConfig | None = None,
+        project=None, runtime=None,
     ) -> dict[str, Any]:
-        project = self._load_project(project_id)
+        project = project if project is not None else self._load_project(project_id)
         operation = project.get_operation(operation_id)
         selected_config = config or PhysicalMeshConfig()
         if selected_config.grid_mode == "suggested":
-            suggestion = self.suggest_mesh_config(project_id=project_id, operation_id=operation_id, config=selected_config)
+            suggestion = self.suggest_mesh_config(project_id=project_id, operation_id=operation_id, config=selected_config, project=project)
             selected_config = replace(selected_config, rows=int(suggestion["rows"]), columns=int(suggestion["columns"]))
 
         existing = self._latest_surface_map(project_id, operation)
@@ -589,6 +599,7 @@ class PhysicalMapService:
                 machine_label=machine_label,
                 session_id=session_id,
             )
+            self._bind_captured_reference(payload, project, operation, runtime)
             payload["updated_at"] = _iso_now()
             self._save(project_id, str(payload["map_id"]), payload)
             return payload
@@ -640,12 +651,13 @@ class PhysicalMapService:
         )
         if previous_partial_message:
             payload["configuration_change_warning"] = previous_partial_message
+        self._bind_captured_reference(payload, project, operation, runtime)
         self._save(project_id, map_id, payload)
-        self._mark_setup_map_active(project_id, operation.setup_id, map_id)
+        self._mark_setup_map_active(project_id, operation.setup_id, map_id, project=project)
         return payload
 
-    def get_active(self, project_id: str, operation_id: str) -> dict[str, Any]:
-        project = self._load_project(project_id)
+    def get_active(self, project_id: str, operation_id: str, *, project=None) -> dict[str, Any]:
+        project = project if project is not None else self._load_project(project_id)
         operation = project.get_operation(operation_id)
         setup = project.get_setup(operation.setup_id)
         if setup.active_map_id:
@@ -1807,6 +1819,11 @@ class PhysicalMapService:
                 ),
                 sesion=reference.get("session_id") or payload.get("session_id"),
             )
+        evidence = setup.preparacion.physical_reference
+        canonical = (evidence or {}).get("reference") or {}
+        if reference and canonical.get("physical_reference_token") == reference.get("physical_reference_token") and canonical.get("physical_reference_token"):
+            origin = setup.preparacion.origen_trabajo
+            z_reference = setup.preparacion.referencia_z
         updated_setup = replace(
             setup,
             active_reference_id=None if reference is None else str(reference.get("installation_id") or reference.get("tool_id") or "measured"),
@@ -1824,7 +1841,7 @@ class PhysicalMapService:
                 motivo_invalidacion=None,
             ),
         )
-        self.repository.save_project(project.replace_setup(updated_setup))
+        self.repository.save_setup(project, updated_setup)
 
     def _serialize_height_map(self, height_map: HeightMap) -> dict[str, Any]:
         return {
@@ -1942,8 +1959,8 @@ class PhysicalMapService:
             "session_id": session_id,
         }
 
-    def _saved_reference_context(self, project_id: str, operation_id: str) -> dict[str, Any]:
-        project = self._load_project(project_id)
+    def _saved_reference_context(self, project_id: str, operation_id: str, *, project=None) -> dict[str, Any]:
+        project = project if project is not None else self._load_project(project_id)
         operation = project.get_operation(operation_id)
         setup = project.get_setup(operation.setup_id)
         origin = setup.preparacion.origen_trabajo
@@ -1967,8 +1984,8 @@ class PhysicalMapService:
             "session_id": session_id,
         }
 
-    def _saved_preview_context(self, project_id: str, operation_id: str) -> dict[str, Any]:
-        project = self._load_project(project_id)
+    def _saved_preview_context(self, project_id: str, operation_id: str, *, project=None) -> dict[str, Any]:
+        project = project if project is not None else self._load_project(project_id)
         operation = project.get_operation(operation_id)
         setup = project.get_setup(operation.setup_id)
         origin = setup.preparacion.origen_trabajo
@@ -1978,6 +1995,20 @@ class PhysicalMapService:
           "machine_origin_y": None if origin is None else float(origin.y_mm),
           "reference_z": None if z_reference is None or z_reference.z_mm is None else float(z_reference.z_mm),
         }
+
+    def _bind_captured_reference(self, payload, project, operation, runtime):
+        evidence = project.get_setup(operation.setup_id).preparacion.physical_reference
+        if evidence is None:
+            return  # Legacy numeric references remain readable, never executable.
+        capture = captured_reference_map(project, operation, evidence)
+        token = require_current_reference(self.repository, runtime, project.id, operation.id, capture,
+                                          project=project, capture_only=True)
+        payload["tool_references"] = {**payload.get("tool_references", {}),
+                                      token["tool_id"]: deepcopy(evidence["reference"])}
+        payload["reference_probe_config"] = deepcopy(evidence["probe_config"])
+        payload["initial_reference_binding"] = initial_map_binding(payload, token)
+        require_current_reference(self.repository, runtime, project.id, operation.id, payload,
+                                  project=project, expected_token=token)
 
     def _with_tool_reference(self, payload: dict[str, Any], **kwargs) -> dict[str, Any]:
         updated = dict(payload)
@@ -2238,8 +2269,8 @@ class PhysicalMapService:
         archived["status"] = "ARCHIVED" if archived.get("status") not in {"MESH_COMPLETE"} else archived.get("status")
         self._save(project_id, str(archived["map_id"]), archived)
 
-    def _mark_setup_map_active(self, project_id: str, setup_id: str, map_id: str) -> None:
-        project = self._load_project(project_id)
+    def _mark_setup_map_active(self, project_id: str, setup_id: str, map_id: str, *, project=None) -> None:
+        project = project if project is not None else self._load_project(project_id)
         setup = project.get_setup(setup_id)
         now = utc_now()
         updated_setup = replace(
@@ -2256,7 +2287,7 @@ class PhysicalMapService:
                 motivo_invalidacion=None,
             ),
         )
-        self.repository.save_project(project.replace_setup(updated_setup))
+        self.repository.save_setup(project, updated_setup)
 
     def _save(self, project_id: str, map_id: str, payload: dict[str, Any]) -> None:
         with self._io_lock:

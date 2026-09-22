@@ -18,10 +18,11 @@ def _fingerprint(value: Any) -> str:
     return hashlib.sha256(json.dumps(value, sort_keys=True, default=str, allow_nan=False).encode()).hexdigest()
 
 
-def reference_context(repository, runtime, project_id, operation_id, physical_map, installation_id=None):
+def reference_context(repository, runtime, project_id, operation_id, physical_map, installation_id=None,
+                      *, project=None, token_version=1):
     if runtime is None or not callable(getattr(runtime, 'current_physical_session_id', None)):
         raise PhysicalReferenceError('No se puede verificar la sesión física de la referencia.')
-    project = repository.load_project(project_id)
+    project = project if project is not None else repository.load_project(project_id)
     operation = project.get_operation(operation_id)
     setup = project.get_setup(operation.setup_id)
     if (physical_map.get('project_id') != project_id or physical_map.get('setup_id') != setup.id
@@ -44,7 +45,10 @@ def reference_context(repository, runtime, project_id, operation_id, physical_ma
     klipper = snapshot.get('klipper') or {}
     relevant['machine'] = {name: klipper.get(name) for name in
                            ('limits', 'max_velocity', 'max_z_velocity', 'max_accel')}
-    relevant['probe_config'] = physical_map.get('probe_config')
+    # V1 measures against an existing map. V2 is captured BEFORE a map exists:
+    # protect the actual measurement profile, and bind acquisition settings
+    # separately when arming. Never rewrite a measurement token to fit a map.
+    relevant['probe_config'] = physical_map.get('reference_probe_config' if token_version == 2 else 'probe_config')
     relevant['placement_alignment'] = asdict(project.configuracion_alineacion)
     tool_id = operation.tool_id or (operation.herramienta or 'sin-herramienta').strip().lower().replace(' ', '-')
     reference = (physical_map.get('tool_references') or {}).get(tool_id) or {}
@@ -77,11 +81,11 @@ class PhysicalReferenceToken:
     version: int = 1
 
     @classmethod
-    def measured(cls, context, position):
+    def measured(cls, context, position, *, measured_at=None, version=1):
         coordinates = {axis: float(position[axis]) for axis in ('x_mm', 'y_mm', 'z_mm')}
         if not all(math.isfinite(value) for value in coordinates.values()):
             raise PhysicalReferenceError('La medición de referencia no es finita.')
-        return cls(context, uuid4().hex, datetime.now(timezone.utc).isoformat(), coordinates)
+        return cls(context, uuid4().hex, measured_at or datetime.now(timezone.utc).isoformat(), coordinates, version)
 
     def payload(self):
         # Context fields are explicit in persisted evidence for audit/readability.
@@ -91,14 +95,29 @@ class PhysicalReferenceToken:
 
 
 def require_current_reference(repository, runtime, project_id, operation_id, physical_map,
-                              *, installation_id=None, expected_token=None):
-    operation = repository.load_project(project_id).get_operation(operation_id)
+                              *, installation_id=None, expected_token=None, project=None,
+                              capture_only=False):
+    project = project if project is not None else repository.load_project(project_id)
+    operation = project.get_operation(operation_id)
     tool_id = operation.tool_id or (operation.herramienta or 'sin-herramienta').strip().lower().replace(' ', '-')
     reference = (physical_map.get('tool_references') or {}).get(tool_id)
     token = reference.get('physical_reference_token') if isinstance(reference, dict) else None
-    if not isinstance(token, dict) or not reference.get('valid') or type(token.get('version')) is not int or token.get('version') != 1:
-        raise PhysicalReferenceError('La referencia de herramienta requiere una medición con token de sesión física vigente.')
-    context = reference_context(repository, runtime, project_id, operation_id, physical_map, installation_id)
+    if not isinstance(token, dict) or not reference.get('valid') or type(token.get('version')) is not int or token.get('version') not in (1, 2):
+        raise PhysicalReferenceError('Referencia Z sin evidencia de sesión física vigente; mida de nuevo la herramienta seleccionada.')
+    if token['version'] == 2:
+        canonical = project.get_setup(operation.setup_id).preparacion.physical_reference
+        if not canonical or canonical.get('reference') != reference:
+            raise PhysicalReferenceError('La evidencia de referencia no coincide con la medición canónica de la herramienta; mida de nuevo.')
+        if physical_map.get('reference_probe_config') != canonical.get('probe_config'):
+            raise PhysicalReferenceError('El perfil de la medición de referencia cambió; mida de nuevo.')
+        if not capture_only and physical_map.get('initial_reference_binding') != initial_map_binding(physical_map, token):
+            raise PhysicalReferenceError('La referencia no está vinculada al mapa y perfil de sondeo vigentes; vuelva a armar el mapa.')
+    elif capture_only:
+        raise PhysicalReferenceError('La captura inicial no contiene evidencia canónica de sesión.')
+    context = reference_context(repository, runtime, project_id, operation_id, physical_map, installation_id,
+                                project=project, token_version=token['version'])
+    if token.get('physical_session_id') != context['physical_session_id']:
+        raise PhysicalReferenceError('La referencia Z pertenece a otra sesión física; mida de nuevo.')
     if any(token.get(key) != value for key, value in context.items()):
         raise PhysicalReferenceError('La sesión o el contexto físico de la referencia de herramienta cambió; mida de nuevo.')
     if not token.get('reference_revision') or not token.get('measured_at'):
@@ -121,3 +140,20 @@ def require_current_reference(repository, runtime, project_id, operation_id, phy
     if expected_token is not None and token != expected_token:
         raise PhysicalReferenceError('La medición de herramienta cambió durante la preparación de ejecución.')
     return token
+
+
+def initial_map_binding(physical_map, token):
+    """Auditable map attachment; no change of tool, measurement or token fields."""
+    return {'reference_revision': token['reference_revision'], 'token_sha256': _fingerprint(token),
+            'tool_id': token['tool_id'], 'map_id': physical_map.get('map_id'),
+            'probe_config_sha256': _fingerprint(physical_map.get('probe_config'))}
+
+
+def captured_reference_map(project, operation, evidence):
+    setup = project.get_setup(operation.setup_id)
+    reference = evidence['reference']
+    return {'project_id': project.id, 'setup_id': setup.id, 'face': str(operation.cara),
+            'placement_revision': setup.placement_revision,
+            'machine_origin_x': reference['reference_x'], 'machine_origin_y': reference['reference_y'],
+            'reference_probe_config': evidence['probe_config'],
+            'tool_references': {reference['tool_id']: reference}}

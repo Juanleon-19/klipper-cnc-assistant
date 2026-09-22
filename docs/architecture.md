@@ -285,3 +285,39 @@ Restricciones activas:
 
 El runtime simulated no ejecuta impresión Moonraker ni probe productivo. La
 preparación simulada y los tests con fakes no equivalen a validación física.
+
+### Continuidad de referencia inicial y planes reutilizables (2026-09-20)
+
+La captura combinada de sonda persiste coordenadas, instante observado y evidencia
+canónica en `OperationPreparation.physical_reference`. El token inicial v2 nace
+únicamente de esa observación, bajo ownership y comprobación del contexto antes y
+después del sondeo. Protege sesión física/ownership, proyecto, montaje, cara,
+herramienta/perfil, instalación, placement, referencias activas, XYZ e instante.
+
+El perfil efectivo utilizado para medir se conserva como `reference_probe_config`.
+Al armar la malla, `initial_reference_binding` vincula el hash del token original
+con el mapa y su configuración de adquisición; no reescribe el token ni cambia
+su herramienta. La guardia comprueba además la igualdad con la evidencia canónica.
+Los tokens v1 de mediciones sobre mapas existentes mantienen su contrato anterior.
+Finalizar la malla conserva los metadatos originales de captura cuando la evidencia
+es la misma. Una Z histórica sin token no se transforma en autoridad de ejecución.
+
+`JobService` reutiliza planes por fingerprint de contenido: proyecto/revisión,
+setup/placement, operaciones/orden/configuración, archivos originales SHA256,
+versión de análisis/compensador, mapa completo, referencias/token, artefactos y
+configuración/sesiones del runtime. Una lectura coincidente no reconstruye el
+plan; un cambio durante la construcción impide publicarlo. Las cachés internas
+se limitan a ocho entradas, protegidas por el lock del servicio y copiadas al
+entregarlas. La caché de metadatos retiene solo montajes y rutas/identidades de
+operaciones, nunca los grafos de análisis; verifica bytes/hash en cada lectura.
+Start/resume/JIT siguen validando la evidencia actual y el token esperado.
+
+Los helpers de plan reciben el proyecto ya resuelto. `save_setup` conserva los
+análisis JSON y aplica CAS estricto con revisión bajo lock y escritura durable.
+El SHA256 se calcula sobre los bytes originales, incluidos finales CRLF; el
+parser recibe el mismo texto normalizado que antes. El análisis persistido se
+reutiliza solo si archivo real SHA256 y versión siguen
+vigentes; una subida invalida el análisis y un cambio de material también.
+El frontend comparte únicamente lecturas concurrentes idénticas de plan/live;
+no almacena respuestas resueltas ni reduce la frecuencia de telemetría. Las
+mutaciones impiden compartir una lectura anterior a la modificación.

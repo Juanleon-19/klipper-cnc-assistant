@@ -524,6 +524,7 @@ def build_router() -> APIRouter:
             project_id=project_id,
             operation_id=operation_id,
             config=config,
+            runtime=request.app.state.machine_runtime,
         )
         response_plan = dict(plan)
         response_plan["arm_backend_duration_ms"] = round((perf_counter() - started_at) * 1000.0, 3)

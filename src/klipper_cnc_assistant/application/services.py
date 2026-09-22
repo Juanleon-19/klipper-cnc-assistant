@@ -26,6 +26,7 @@ from klipper_cnc_assistant.domain import (
     PROJECT_SCHEMA_VERSION,
 )
 from klipper_cnc_assistant.gcode import analyze_gcode_text
+from klipper_cnc_assistant.gcode.analysis_cache import analysis_is_current
 from klipper_cnc_assistant.storage import JsonProjectRepository
 
 from .errors import ApplicationError, NotFoundError
@@ -381,10 +382,12 @@ class ProjectService:
             raise ApplicationError(
                 "La operacion no tiene un archivo G-code cargado."
             )
-        content = self.repository.read_project_file(
+        content, source_sha256 = self.repository.read_gcode_source(
             project_id,
             operation.archivo_gcode,
         )
+        if analysis_is_current(operation, content, source_sha256=source_sha256):
+            return operation
         analysis = analyze_gcode_text(
             content,
             material=project.material,

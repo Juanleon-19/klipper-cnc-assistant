@@ -164,7 +164,22 @@ function translateFastApiDetail(detail: unknown, structuredErrors?: unknown): { 
   return { message: "Solicitud inválida: el backend no entregó detalle de campo. Revise los valores enviados y vuelva a intentar.", fieldErrors: {} };
 }
 
+// Share only concurrent plan/live reads. Settled results are never cached.
+const pendingExecutionReads = new Map<string, Promise<unknown>>();
+
+function executionRead<T>(url: string): Promise<T> {
+  const pending = pendingExecutionReads.get(url);
+  if (pending) return pending as Promise<T>;
+  const result = request<T>(url).finally(() => {
+    if (pendingExecutionReads.get(url) === result) pendingExecutionReads.delete(url);
+  });
+  pendingExecutionReads.set(url, result);
+  return result;
+}
+
 async function request<T>(input: RequestInfo, init?: RequestInit): Promise<T> {
+  // A read after a mutation must not join a read of the previous state.
+  if (init?.method && init.method !== "GET") pendingExecutionReads.clear();
   const response = await fetch(input, {
     headers: {
       ...(init?.body instanceof FormData ? {} : { "Content-Type": "application/json" }),
@@ -409,13 +424,13 @@ export const api = {
   generatedFileUrl: (projectId: string, relativePath: string) =>
     `/api/projects/${projectId}/generated/${relativePath}`,
   getJobPlan: (projectId: string, setupId: string, face: string) =>
-    request<JobPlan>(`/api/projects/${projectId}/job-plan?setup_id=${encodeURIComponent(setupId)}&face=${encodeURIComponent(face)}`),
+    executionRead<JobPlan>(`/api/projects/${projectId}/job-plan?setup_id=${encodeURIComponent(setupId)}&face=${encodeURIComponent(face)}`),
   createJobPlan: (projectId: string, setupId: string, face: string) =>
     request<JobPlan>(`/api/projects/${projectId}/job-plan`, { method: "POST", body: JSON.stringify({ setup_id: setupId, face }) }),
   generateProjectCompensation: (projectId: string, setupId: string, face: string) =>
     request<JobPlan>(`/api/projects/${projectId}/job-plan/generate`, { method: "POST", body: JSON.stringify({ setup_id: setupId, face }) }),
   getLiveExecution: (projectId: string, setupId: string, face: string) =>
-    request<LiveExecutionSnapshot>(`/api/projects/${projectId}/execution/live?setup_id=${encodeURIComponent(setupId)}&face=${encodeURIComponent(face)}`),
+    executionRead<LiveExecutionSnapshot>(`/api/projects/${projectId}/execution/live?setup_id=${encodeURIComponent(setupId)}&face=${encodeURIComponent(face)}`),
   getJobRun: (projectId: string, setupId: string, face: string) =>
     request<JobRun | null>(`/api/projects/${projectId}/job-run?setup_id=${encodeURIComponent(setupId)}&face=${encodeURIComponent(face)}`),
   prepareJobRun: (projectId: string, setupId: string, face: string) =>

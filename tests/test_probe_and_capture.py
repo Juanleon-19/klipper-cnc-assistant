@@ -114,6 +114,27 @@ class ProbeAndCaptureTest(unittest.TestCase):
         self.assertEqual(self.saved().origen_trabajo.x_mm, 70)
         self.assertIsNone(self.saved().referencia_z)
 
+    def test_session_change_during_probe_does_not_mint_evidence(self):
+        def changed(**kwargs):
+            result = self.measure(**kwargs)
+            self.runtime.current_physical_session_id = lambda: 'new-session'
+            return result
+        self.runtime._perform_probe_descent.side_effect = changed
+        response = self.fixture.client.post(self.url + '/probe-and-capture')
+        self.assertEqual(response.status_code, 400, response.text)
+        self.assertIsNone(self.saved().physical_reference)
+
+    def test_configuration_change_during_probe_does_not_mint_evidence(self):
+        def changed(**kwargs):
+            result = self.measure(**kwargs)
+            from dataclasses import replace
+            self.runtime.config = replace(self.runtime.config, probe_step_mm=.17)
+            return result
+        self.runtime._perform_probe_descent.side_effect = changed
+        response = self.fixture.client.post(self.url + '/probe-and-capture')
+        self.assertEqual(response.status_code, 400, response.text)
+        self.assertIsNone(self.saved().physical_reference)
+
     def test_persistence_failure_cannot_partially_save_xy(self):
         with patch.object(self.service.repository, 'save_project', side_effect=OSError('disk full')):
             with self.assertRaisesRegex(OSError, 'disk full'):

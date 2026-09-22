@@ -5,15 +5,18 @@ import hashlib
 import json
 from typing import Any
 from datetime import datetime, timezone
+from uuid import uuid4
 
 from klipper_cnc_assistant.domain import CapturedPosition, CoordinateReference, PreparationState, ProjectValidationError
 from klipper_cnc_assistant.heightmap.compensation import build_compensation_preview
 from klipper_cnc_assistant.gcode import analyze_gcode_text
+from klipper_cnc_assistant.gcode.analysis_cache import analysis_is_current
 from klipper_cnc_assistant.heightmap.transform import compensation_tool_key, measured_reference_z
 from klipper_cnc_assistant.heightmap.coverage import DOMAIN_TOLERANCE_MM, build_coverage_report
 from klipper_cnc_assistant.storage import JsonProjectRepository
 from klipper_cnc_assistant.storage.safe_persistence import storage_lock
 from klipper_cnc_assistant.machine.physical_ownership import OwnerKind, OwnershipError
+from klipper_cnc_assistant.machine.physical_reference import PhysicalReferenceToken, reference_context, captured_reference_map
 
 from .errors import ApplicationError, NotFoundError
 from .heightmap_service import HeightMapService
@@ -229,6 +232,15 @@ class ReferenceSessionService:
         except OwnershipError as error:
             raise ApplicationError(str(error)) from error
         try:
+            runtime.refresh_observed_state()
+            project_before = self._load_project(project_id)
+            operation_before = project_before.get_operation(operation_id)
+            probe_profile = runtime.effective_probe_profile_payload()
+            context_before = reference_context(self.repository, runtime, project_id, operation_id, {
+                "project_id": project_id, "setup_id": operation_before.setup_id, "face": str(operation_before.cara),
+                "placement_revision": project_before.get_setup(operation_before.setup_id).placement_revision,
+                "reference_probe_config": probe_profile,
+            }, project=project_before, token_version=2)
             runtime.confirm_probe(permit=permit, reference_context=expected)
             observation = runtime.capture_probe_reference_observation(expected_context=expected)
             position = observation["position"]
@@ -243,17 +255,40 @@ class ReferenceSessionService:
                 setup = project.get_setup(operation.setup_id)
                 reference = CoordinateReference(
                     x_mm=float(position["x_mm"]), y_mm=float(position["y_mm"]),
-                    z_mm=float(position["z_mm"]), confirmado_en=utc_now(), fuente="MEASURED",
+                    z_mm=float(position["z_mm"]), confirmado_en=datetime.fromisoformat(observation["measured_at"]), fuente="MEASURED",
                     maquina=str(observation["machine_label"]), homed_axes=observation.get("homed_axes"),
                     posicion_captura=self._captured_position_from_dict(position),
                     sesion=observation.get("session_id"),
                 )
-                updated = replace(setup, preparacion=replace(
+                installation = uuid4().hex
+                updated = replace(setup, active_reference_id=installation, preparacion=replace(
                     setup.preparacion, origen_trabajo=replace(reference, z_mm=None), referencia_z=reference,
                     mapa_validado_en=None, compensacion_previsualizada_en=None,
                     motivo_invalidacion=self._build_invalidation_reason(
                         setup.preparacion, "Se midió una nueva referencia física X/Y/Z del montaje."),
                 ))
+                updated_project = project.replace_setup(updated)
+                entry = {
+                    "setup_id": setup.id, "tool_id": compensation_tool_key(operation.tool_id, operation.herramienta),
+                    "tool_name": operation.herramienta, "installation_id": installation,
+                    "calibration_id": f"calibration/{installation}", "installation_session_id": observation["session_id"],
+                    "reference_x": reference.x_mm, "reference_y": reference.y_mm, "reference_z": reference.z_mm,
+                    "tool_reference_z": reference.z_mm, "measured_at": observation["measured_at"],
+                    "reference_point_id": "surface-map-origin", "probe_method": "conductive_probe",
+                    "source": "MEASURED", "valid": True, "homed_axes": observation.get("homed_axes"),
+                    "machine_label": observation["machine_label"], "session_id": observation["session_id"],
+                }
+                evidence = {"reference": entry, "probe_config": probe_profile}
+                context = reference_context(self.repository, runtime, project_id, operation_id,
+                    captured_reference_map(updated_project, operation, evidence), installation,
+                    project=updated_project, token_version=2)
+                for key in ("physical_session_id", "ownership_session_id", "physical_config_fingerprint"):
+                    if context[key] != context_before[key]:
+                        raise ApplicationError("La sesión o configuración física cambió durante la medición; mida de nuevo.")
+                entry["physical_reference_token"] = PhysicalReferenceToken.measured(
+                    context, position, measured_at=observation["measured_at"], version=2).payload()
+                updated = replace(updated, preparacion=replace(updated.preparacion, physical_reference=evidence))
+                ownership.validate(permit)
                 self.repository.save_project(project.replace_setup(updated))
         except OwnershipError as error:
             raise ApplicationError(str(error)) from error
@@ -344,7 +379,9 @@ class ReferenceSessionService:
                 raise ApplicationError(str(error)) from error
         analysis = operation.analisis
         if operation.archivo_gcode:
-            analysis = analyze_gcode_text(self.repository.read_project_file(project_id, operation.archivo_gcode), material=project.material)
+            original, source_sha256 = self.repository.read_gcode_source(project_id, operation.archivo_gcode)
+            if not analysis_is_current(operation, original, source_sha256=source_sha256):
+                analysis = analyze_gcode_text(original, material=project.material)
         if analysis.analisis_incompleto or analysis.tiene_errores_criticos:
             raise ApplicationError("Previsualización bloqueada. " + " ".join(i.mensaje for i in analysis.incidencias))
         preview = build_compensation_preview(

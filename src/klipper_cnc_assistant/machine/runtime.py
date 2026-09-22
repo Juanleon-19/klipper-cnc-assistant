@@ -2864,6 +2864,7 @@ class MachineRuntime:
         self._assert_finite_position(position)
         return {
             "position": position,
+            "measured_at": last_probe.captured_at if use_last_probe else None,
             "session_id": current_session,
             "homed_axes": homed_axes,
             "machine_label": str(self.config.moonraker_url or "physical"),

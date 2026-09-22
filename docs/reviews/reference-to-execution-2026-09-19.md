@@ -1,5 +1,8 @@
 # Revisión del recorrido referencia → mapa → ejecución
 
+Estado histórico; la corrección y las mediciones posteriores están en
+[el informe de cierre](reference-to-execution-fix-2026-09-21.md).
+
 Fecha local: 2026-09-19. Código revisado: `6bebfd70eadea78f7d72a9919e6ce2d3c96c917f`.
 
 Resultado: **la medición de mapa funciona; la transición normal a ejecución tiene un bloqueo reproducible**. Esta revisión no cambia código de producto, configuración, referencias ni mapas reales. No reinicia servicios y no autoriza movimiento.

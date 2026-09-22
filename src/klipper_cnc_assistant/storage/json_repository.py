@@ -8,7 +8,7 @@ from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
 
-from .safe_persistence import atomic_json, merge_snapshot, remember_snapshot, storage_lock, forget_snapshots
+from .safe_persistence import atomic_json, merge_snapshot, remember_snapshot, storage_lock, forget_snapshots, PersistenceConflict
 
 from klipper_cnc_assistant.domain import (
     AgujeroAlineacion,
@@ -122,6 +122,30 @@ class JsonProjectRepository:
         """Explicit compatible normalization, using the safe write authority."""
         return self.save_project(self.load_project(project_id))
 
+    def save_setup(self, project: ProyectoPCB, setup: MontajePCB) -> None:
+        """CAS update of one setup, preserving large analysis payloads verbatim.
+
+        A resolved project is required; concurrent edits always require reload.
+        This does not serialize or overwrite operations from a stale snapshot.
+        """
+        path = self.project_dir(project.id) / "project.json"
+        with storage_lock(path):
+            current = json.loads(path.read_text(encoding="utf-8"))
+            if current.get("storage_revision", 0) != project.storage_revision:
+                raise PersistenceConflict("El proyecto cambió; recargue antes de guardar el montaje.")
+            if not any(item["id"] == setup.id for item in current.get("montajes", [])):
+                raise PersistenceConflict("El montaje ya no existe.")
+            proposed = dict(current)
+            proposed["montajes"] = [self._serialize_setup(setup) if item["id"] == setup.id else item
+                                    for item in current["montajes"]]
+            proposed["actualizado_en"] = proposed["updated_at"] = datetime.now().astimezone().isoformat()
+            # Strict CAS was checked under the same storage lock. No historical
+            # merge or deep copy of the unchanged operation analyses is needed.
+            saved = proposed
+            saved["storage_revision"] = current.get("storage_revision", 0) + 1
+            atomic_json(path, saved, durable=True)
+            remember_snapshot(path, saved)
+
     def _needs_project_migration(self, payload: dict) -> bool:
         return (
             payload.get("version_esquema") != PROJECT_SCHEMA_VERSION
@@ -203,6 +227,16 @@ class JsonProjectRepository:
     ) -> str:
         target = self._resolve_project_file(project_id, relative_path)
         return target.read_text(encoding="utf-8")
+
+    def read_gcode_source(self, project_id: str, relative_path: str) -> tuple[str, str]:
+        """One source read: normalized parser text plus SHA256 of original bytes.
+
+        Preserve the upload identity for CRLF/CR files without changing the text
+        convention used by existing generators and artifact fingerprints.
+        """
+        raw = self._resolve_project_file(project_id, relative_path).read_bytes()
+        text = raw.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
+        return text, hashlib.sha256(raw).hexdigest()
 
     def save_height_map_payload(
         self,
@@ -387,6 +421,7 @@ class JsonProjectRepository:
 
     def _serialize_preparation(self, preparation: OperationPreparation) -> dict:
         return {
+            "physical_reference": preparation.physical_reference,
             "origen_trabajo": self._serialize_reference(preparation.origen_trabajo),
             "referencia_z": self._serialize_reference(preparation.referencia_z),
             "region_sondeable_configurada_en": None if preparation.region_sondeable_configurada_en is None else preparation.region_sondeable_configurada_en.isoformat(),
@@ -636,6 +671,7 @@ class JsonProjectRepository:
         if payload is None:
             return OperationPreparation()
         return OperationPreparation(
+            physical_reference=payload.get("physical_reference"),
             origen_trabajo=self._deserialize_reference(payload.get("origen_trabajo")),
             referencia_z=self._deserialize_reference(payload.get("referencia_z")),
             region_sondeable_configurada_en=self._parse_datetime(payload.get("region_sondeable_configurada_en")),

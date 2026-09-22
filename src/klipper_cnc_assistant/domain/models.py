@@ -197,6 +197,8 @@ class OperationPreparation:
     mapa_validado_en: datetime | None = None
     compensacion_previsualizada_en: datetime | None = None
     motivo_invalidacion: str | None = None
+    # Canonical evidence minted only by the live probe-and-capture transaction.
+    physical_reference: dict | None = None
 
 
 @dataclass(frozen=True)
@@ -607,6 +609,8 @@ class ProyectoPCB:
             self,
             nombre=nombre,
             material=material,
+            operaciones=(tuple(replace(op, analisis=None) for op in self.operaciones)
+                         if material != self.material else self.operaciones),
             configuracion_alineacion=configuracion_alineacion,
             actualizado_en=utc_now(),
         )

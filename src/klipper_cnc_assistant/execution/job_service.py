@@ -6,7 +6,9 @@ import math
 import threading
 import time
 import traceback
-from dataclasses import dataclass
+from copy import deepcopy
+from collections import OrderedDict
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -274,6 +276,8 @@ class JobService:
         self._threads: dict[tuple[str, str, str], threading.Thread] = {}
         self._physical_leases = {}
         self._standby_observations = {}
+        self._plan_cache = OrderedDict()
+        self._project_dependency_cache = OrderedDict()
         self.remote_standby_grace_s = 2.0
         self.run_store = JobRunStore()
 
@@ -296,7 +300,7 @@ class JobService:
 
     def get_plan(self, *, project_id: str, setup_id: str, face: str) -> dict[str, Any]:
         context = self._context(project_id, setup_id, face)
-        return self._build_plan(context)
+        return self._resolved_plan(context, publish=False)
 
     def create_plan(self, *, project_id: str, setup_id: str, face: str) -> dict[str, Any]:
         context = self._context(project_id, setup_id, face)
@@ -1586,12 +1590,12 @@ class JobService:
         add(
             "referencia_inicial",
             bool(initial and initial.get("reference_status") == "LISTA"),
-            "La herramienta inicial tiene una referencia Z vigente." if initial and initial.get("reference_status") == "LISTA" else "Falta referencia Z de la herramienta inicial.",
+            "La herramienta inicial tiene una referencia Z vigente." if initial and initial.get("reference_status") == "LISTA" else str((initial or {}).get("reference_error") or "La herramienta inicial requiere una referencia física vigente."),
         )
         return checks
 
-    def _build_plan(self, context: JobContext, generated_results: dict[str, dict[str, Any]] | None = None) -> dict[str, Any]:
-        project = self._load_project(context.project_id)
+    def _build_plan(self, context: JobContext, generated_results: dict[str, dict[str, Any]] | None = None, *, project=None) -> dict[str, Any]:
+        project = project if project is not None else self._load_project(context.project_id)
         setup = project.get_setup(context.setup_id)
         operations = sorted(
             [item for item in project.operations_for_setup(context.setup_id) if str(item.cara) == str(context.face)],
@@ -1599,9 +1603,16 @@ class JobService:
         )
         if not operations:
             raise ApplicationError("No existen operaciones activas para este montaje/cara.")
-        active_map = self._load_active_map(context.project_id, operations[0].id)
+        from klipper_cnc_assistant.gcode import analyze_gcode_text
+        from klipper_cnc_assistant.gcode.analysis_cache import analysis_is_current
+        for index, operation in enumerate(operations):
+            if operation.archivo_gcode and operation.analisis is not None:
+                original, source_sha256 = self.repository.read_gcode_source(context.project_id, operation.archivo_gcode)
+                if not analysis_is_current(operation, original, source_sha256=source_sha256):
+                    operations[index] = replace(operation, analisis=analyze_gcode_text(original, material=project.material))
+        active_map = self._load_active_map(context.project_id, operations[0].id, project=project)
         coverage_by_operation = self._coverage_by_operation(active_map, operations)
-        generated_by_operation = self._latest_generated_by_operation(context.project_id, operations, active_map)
+        generated_by_operation = self._latest_generated_by_operation(context.project_id, operations, active_map, project=project)
         if generated_results:
             generated_by_operation.update({key: value for key, value in generated_results.items() if "relative_path" in value})
         operation_rows: list[dict[str, Any]] = []
@@ -1621,7 +1632,7 @@ class JobService:
             generated = generated_by_operation.get(operation.id)
             generated_metadata = generated.get("metadata") if isinstance(generated, dict) else None
             coverage = coverage_by_operation.get(operation.id)
-            reference_status = self._reference_status(active_map, operation, binding)
+            reference_status = self._reference_status(active_map, operation, binding, project=project)
             calibration = self._tool_installation_calibration(active_map, operation, binding)
             blocking_reasons: list[str] = []
             original_time_estimate: dict[str, Any] | None = None
@@ -1664,6 +1675,7 @@ class JobService:
                     "coverage_status": "VALIDA" if coverage is None or coverage["sufficient"] else "FUERA_DE_DOMINIO",
                     "coverage_detail": None if coverage is None or coverage["sufficient"] else blocking_reasons[-1],
                     "reference_status": reference_status,
+                    "reference_error": self._reference_error(active_map, operation, binding, project=project) if reference_status != "LISTA" else None,
                     "tool_installation_calibration": calibration,
                     "generated_file": None if generated is None else generated["relative_path"],
                     "generated_file_name": None if generated is None else Path(str(generated["relative_path"])).name,
@@ -1857,12 +1869,22 @@ class JobService:
             }
         return result
 
-    def _reference_status(self, active_map: dict[str, Any] | None, operation: OperacionPCB, initial_reference_binding: dict[str, Any] | None = None) -> str:
+    def _reference_error(self, active_map, operation, initial_reference_binding=None, *, project=None):
+        if active_map is None:
+            return "Falta un mapa físico activo."
         try:
-            require_current_reference(self.repository, self.runtime, active_map["project_id"], operation.id, active_map)
-            return "LISTA"
-        except (PhysicalReferenceError, TypeError, KeyError):
-            return "REQUIERE_REFERENCIA"
+            entry = self._reference_entry(active_map, operation, initial_reference_binding)
+            token = None if entry is None else entry.get("physical_reference_token")
+            if not token:
+                raise PhysicalReferenceError("Referencia Z medida pero sin evidencia de sesión vigente para esta herramienta; mida de nuevo.")
+            require_current_reference(self.repository, self.runtime, active_map["project_id"], operation.id,
+                                      active_map, project=project, expected_token=token)
+        except PhysicalReferenceError as error:
+            return str(error)
+        return None
+
+    def _reference_status(self, active_map, operation, initial_reference_binding=None, *, project=None):
+        return "LISTA" if self._reference_error(active_map, operation, initial_reference_binding, project=project) is None else "REQUIERE_REFERENCIA"
 
     def _require_operation_reference(self, context, operation, *, physical_map=None, expected_token=None):
         if operation.get('remote_file') and not operation.get('physical_reference_token'):
@@ -1939,53 +1961,32 @@ class JobService:
             "physical_reference_token": reference.get("physical_reference_token"),
         }
 
-    def _reference_entry(self, active_map: dict[str, Any] | None, operation: OperacionPCB, initial_reference_binding: dict[str, Any] | None = None) -> dict[str, Any] | None:
+    def _reference_entry(self, active_map, operation, initial_reference_binding=None):
         if active_map is None:
             return None
-        operation_tool_key = _tool_key(operation)
-        references = active_map.get("tool_references") or {}
-        reference = references.get(operation_tool_key)
-        if initial_reference_binding is not None:
-            source_tool_key = initial_reference_binding.get("source_tool_key")
-            rebound_tool_key = initial_reference_binding.get("tool_key")
-            if operation_tool_key == rebound_tool_key:
-                fallback = initial_reference_binding.get("reference")
-                if isinstance(fallback, dict) and fallback.get("valid"):
-                    return fallback
-            elif operation_tool_key == source_tool_key:
+        key = _tool_key(operation)
+        entry = (active_map.get("tool_references") or {}).get(key)
+        if initial_reference_binding is not None and initial_reference_binding.get("tool_key") == key:
+            # A binding can select an identical canonical entry, never retarget it.
+            if (initial_reference_binding.get("source_tool_key") != key
+                    or initial_reference_binding.get("reference") != entry):
                 return None
-        if isinstance(reference, dict) and reference.get("valid"):
-            return reference
-        return reference if isinstance(reference, dict) else None
+        return entry if isinstance(entry, dict) else None
 
-    def _initial_reference_binding(self, active_map: dict[str, Any] | None, setup: Any, operations: list[OperacionPCB]) -> dict[str, Any] | None:
+    def _initial_reference_binding(self, active_map, setup, operations):
         if active_map is None or not operations:
             return None
-        first_tool_key = _tool_key(operations[0])
-        references = active_map.get("tool_references") or {}
-        direct = references.get(first_tool_key)
-        if isinstance(direct, dict) and direct.get("valid"):
+        key = _tool_key(operations[0])
+        entry = (active_map.get("tool_references") or {}).get(key)
+        if not isinstance(entry, dict) or not entry.get("valid"):
             return None
-        valid_references = [reference for reference in references.values() if isinstance(reference, dict) and reference.get("valid")]
-        if len(valid_references) != 1:
+        token = entry.get("physical_reference_token")
+        if not isinstance(token, dict) or token.get("tool_id") != key:
             return None
-        active_reference_id = str(getattr(setup, "active_reference_id", "") or "")
-        reference = valid_references[0]
-        if active_reference_id:
-            reference_ids = {
-                str(reference.get("installation_id") or ""),
-                str(reference.get("calibration_id") or ""),
-                str(reference.get("installation_session_id") or ""),
-            }
-            if active_reference_id not in reference_ids:
-                return None
-        return {
-            "tool_key": first_tool_key,
-            "reference": reference,
-            "source_tool_key": next((key for key, value in references.items() if value is reference), None),
-            "source_tool_id": reference.get("tool_id"),
-            "source_tool_name": reference.get("tool_name"),
-        }
+        if setup.active_reference_id not in (None, entry.get("installation_id")):
+            return None
+        return {"tool_key": key, "source_tool_key": key, "reference": entry,
+                "reference_revision": token.get("reference_revision")}
 
     def _generated_payload_for_operation(self, plan: dict[str, Any], operation_id: str) -> dict[str, Any] | None:
         row = next((item for item in plan["operations"] if item["operation_id"] == operation_id), None)
@@ -2002,6 +2003,7 @@ class JobService:
         project_id: str,
         operations: list[OperacionPCB],
         active_map: dict[str, Any] | None,
+        *, project=None,
     ) -> dict[str, dict[str, Any]]:
         """Return only artifacts bound to the current source, map and tool Z.
 
@@ -2029,7 +2031,7 @@ class JobService:
                     continue
                 if metadata.get("executable") is False:
                     continue
-                if not self._generated_artifact_is_current(project_id, operation, active_map, file_path, metadata):
+                if not self._generated_artifact_is_current(project_id, operation, active_map, file_path, metadata, project=project):
                     continue
                 results[operation.id] = {
                     "relative_path": self._relative_to_project(project_id, file_path),
@@ -2048,12 +2050,13 @@ class JobService:
         active_map: dict[str, Any] | None,
         file_path: Path,
         metadata: dict[str, Any],
+        *, project=None,
     ) -> bool:
         if active_map is None or metadata.get("operation_id") != operation.id:
             return False
         try:
             require_current_reference(self.repository, self.runtime, project_id, operation.id, active_map,
-                                      expected_token=metadata.get('physical_reference_token'))
+                                      expected_token=metadata.get('physical_reference_token'), project=project)
             if not metadata.get('physical_reference_token'):
                 return False
         except PhysicalReferenceError:
@@ -2083,7 +2086,7 @@ class JobService:
             actual_z = (metadata.get("reference_frame") or {}).get("surface_reference_z_mm")
             if actual_z is None or abs(float(actual_z) - float(reference["reference_z"])) > 1e-9:
                 return False
-        setup = self.repository.load_project(project_id).get_setup(operation.setup_id)
+        setup = (project if project is not None else self.repository.load_project(project_id)).get_setup(operation.setup_id)
         current_fingerprint = self.compensated_gcode_service._build_artifact_fingerprint(
             operation_id=operation.id,
             original_hash=hashlib.sha256(original.encode("utf-8")).hexdigest(),
@@ -2098,9 +2101,9 @@ class JobService:
             return False
         return True
 
-    def _load_active_map(self, project_id: str, operation_id: str) -> dict[str, Any] | None:
+    def _load_active_map(self, project_id: str, operation_id: str, *, project=None) -> dict[str, Any] | None:
         try:
-            return self.physical_map_service.get_active(project_id, operation_id)
+            return self.physical_map_service.get_active(project_id, operation_id, project=project)
         except Exception:
             return None
 
@@ -2188,9 +2191,8 @@ class JobService:
         return JobContext(project_id=project_id, setup_id=setup_id, face=normalized_face)
 
     def _validate_execution_target(self, context: JobContext) -> None:
-        project_file = self._project_dir(context.project_id) / "project.json"
         try:
-            payload = json.loads(project_file.read_text(encoding="utf-8"))
+            _, payload = self._project_dependency_metadata(context.project_id)
         except FileNotFoundError as error:
             raise NotFoundError(f"El proyecto '{context.project_id}' no existe.") from error
         setups = payload.get("montajes") if isinstance(payload, dict) else None
@@ -2365,13 +2367,111 @@ class JobService:
         return math.sqrt(sum(component * component for component in numeric)) if numeric else None
 
     def _load_or_build_plan(self, context: JobContext) -> dict[str, Any]:
-        plan = self._load_plan(context)
-        if plan is not None:
-            refreshed = self._build_plan(context)
-            self._write_manifest(context, refreshed)
-            self._save_plan(context, refreshed)
-            return refreshed
-        return self.create_plan(project_id=context.project_id, setup_id=context.setup_id, face=context.face)
+        return self._resolved_plan(context, publish=True)
+
+    def _project_dependency_metadata(self, project_id):
+        """Hash fresh bytes on every read; reuse only compact, verified metadata.
+
+        Avoid rehydrating a large analysis merely to verify setup existence or
+        plan dependencies. No mtime trust and no retained G-code/analysis graph.
+        """
+        path = self._project_dir(project_id) / "project.json"
+        content = path.read_bytes()
+        digest = hashlib.sha256(content).hexdigest()
+        with self._lock:
+            cached = self._project_dependency_cache.get(project_id)
+            if cached is not None and cached[0] == digest:
+                self._project_dependency_cache.move_to_end(project_id)
+                return digest, deepcopy(cached[1])
+        raw = json.loads(content)
+        metadata = {"storage_revision": raw.get("storage_revision", 0),
+                    "montajes": raw.get("montajes"),
+                    "operaciones": [{k: op.get(k) for k in ("id", "setup_id", "cara", "archivo_gcode")}
+                                    for op in raw.get("operaciones", [])]}
+        with self._lock:
+            self._project_dependency_cache[project_id] = (digest, metadata)
+            self._project_dependency_cache.move_to_end(project_id)
+            while len(self._project_dependency_cache) > 8:
+                self._project_dependency_cache.popitem(last=False)
+        return digest, deepcopy(metadata)
+
+    def _plan_dependencies(self, context):
+        """Content identity, never mtime: includes source, map, evidence and artifacts."""
+        from klipper_cnc_assistant.gcode import CURRENT_ANALYSIS_VERSION
+        root = self._project_dir(context.project_id)
+        project_digest, raw = self._project_dependency_metadata(context.project_id)
+        setup = next((s for s in raw["montajes"] if s["id"] == context.setup_id), None)
+        if setup is None:
+            raise NotFoundError("El montaje ya no existe.")
+        dependencies = {"version": 1, "project_content": project_digest,
+                        "storage_revision": raw.get("storage_revision", 0), "face": context.face,
+                        "setup": setup, "analysis_version": CURRENT_ANALYSIS_VERSION,
+                        "algorithms": [CompensatedGCodeService.LEGACY_ALGORITHM_VERSION,
+                                       CompensatedGCodeService.ADAPTIVE_ALGORITHM_VERSION], "files": {}}
+        for op in raw["operaciones"]:
+            if op.get("setup_id") != context.setup_id or str(op["cara"]) != context.face:
+                continue
+            path = op.get("archivo_gcode")
+            if path:
+                try:
+                    _, dependencies["files"][path] = self.repository.read_gcode_source(context.project_id, path)
+                except OSError:
+                    dependencies["files"][path] = None
+        map_id = setup.get("active_map_id")
+        if map_id:
+            try:
+                payload = self.repository.load_height_map_payload(context.project_id, map_id)
+                dependencies["map"] = payload
+            except FileNotFoundError:
+                dependencies["map"] = None
+        else:
+            # Legacy fallback discovery participates in identity as well.
+            dependencies["maps"] = {str(p.relative_to(root)): hashlib.sha256(p.read_bytes()).hexdigest()
+                                    for p in sorted((root / "maps").glob("**/height_map.json"))}
+        generated = root / "generated" / "compensated"
+        dependencies["artifacts"] = {p.name: hashlib.sha256(p.read_bytes()).hexdigest()
+                                     for p in sorted(generated.glob("*")) if p.is_file() and p.suffix in {".gcode", ".json"}}
+        config = self.runtime.config
+        dependencies["config"] = {k: getattr(config, k) for k in dir(config)
+                                  if not k.startswith("_") and not callable(getattr(config, k))}
+        snapshot = self.runtime.snapshot()
+        dependencies["machine"] = {k: snapshot.get("klipper", {}).get(k)
+                                    for k in ("limits", "max_velocity", "max_z_velocity", "max_accel")}
+        session = getattr(self.runtime, "current_physical_session_id", None)
+        dependencies["physical_session"] = session() if callable(session) else None
+        dependencies["ownership_session"] = self.runtime.physical_ownership.session
+        return hashlib.sha256(json.dumps(dependencies, sort_keys=True, default=str, allow_nan=False).encode()).hexdigest()
+
+    @staticmethod
+    def _plan_digest(plan):
+        return hashlib.sha256(json.dumps({k: v for k, v in plan.items()
+            if k not in {"plan_content_hash", "generation_id", "manifest_path"}},
+            sort_keys=True, default=str, allow_nan=False).encode()).hexdigest()
+
+    def _resolved_plan(self, context, *, publish):
+        fingerprint = self._plan_dependencies(context)
+        key = (context.project_id, context.setup_id, context.face)
+        with self._lock:
+            cached = deepcopy(self._plan_cache.get(key))
+        if cached is None or cached.get("dependency_fingerprint") != fingerprint:
+            cached = self._load_plan(context)
+        if (cached is not None and cached.get("dependency_fingerprint") == fingerprint
+                and cached.get("plan_content_hash") == self._plan_digest(cached)):
+            plan = cached
+        else:
+            plan = self._build_plan(context)
+            if fingerprint != self._plan_dependencies(context):
+                raise ApplicationError("El contexto cambió durante la preparación del plan; repita la solicitud.")
+            plan["dependency_fingerprint"] = fingerprint
+            plan["plan_content_hash"] = self._plan_digest(plan)
+        if publish and not plan.get("generation_id"):
+            self._save_plan(context, plan)
+        with self._lock:
+            self._plan_cache[key] = deepcopy(plan)
+            self._plan_cache.move_to_end(key)
+            while len(self._plan_cache) > 8:
+                self._plan_cache.popitem(last=False)
+        return plan
 
     def _project_dir(self, project_id: str) -> Path:
         return self.repository.project_dir(project_id)
@@ -2404,7 +2504,9 @@ class JobService:
         )
 
     def _load_plan(self, context: JobContext) -> dict[str, Any] | None:
-        path = self._plan_file(context)
+        path = self._project_dir(context.project_id) / "reports" / "jobs" / context.setup_id / _safe_face(context.face) / "job_plan.json"
+        if not path.exists():
+            return None
         with storage_lock(path):
             if not path.exists():
                 return None
