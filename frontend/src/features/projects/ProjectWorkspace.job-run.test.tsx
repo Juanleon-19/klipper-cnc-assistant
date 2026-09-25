@@ -1,4 +1,5 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { readyExecution } from "../../test/execution-fixtures";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { HeightMap, JobPlan, JobRun, LiveExecutionSnapshot, Project, ReferenceSession } from "../../types";
@@ -13,6 +14,7 @@ const apiMock = vi.hoisted(() => ({
   getMachineSettings: vi.fn(),
   updateMachineSettings: vi.fn(),
   getJobPlan: vi.fn(),
+  inspectExecution: vi.fn(),
   getLiveExecution: vi.fn(),
   prepareJobRun: vi.fn(),
   startJobRun: vi.fn(),
@@ -344,6 +346,7 @@ describe("ProjectWorkspace job run flow", () => {
       velocity_tolerance_mm_s: 0.02,
     });
     apiMock.getJobPlan.mockResolvedValue(jobPlan);
+    apiMock.inspectExecution.mockResolvedValue({ plan: jobPlan, readiness: readyExecution() });
     apiMock.getLiveExecution.mockResolvedValue(liveExecution);
     apiMock.prepareJobRun.mockResolvedValue(jobRun);
     apiMock.startJobRun.mockResolvedValue({ ...jobRun, state: "JOB_STARTING" });
@@ -391,4 +394,38 @@ describe("ProjectWorkspace job run flow", () => {
     await waitFor(() => expect(apiMock.prepareJobRun).toHaveBeenCalledTimes(1));
     expect(apiMock.prepareJobRun).toHaveBeenCalledWith("proj_1", "setup-main", "superior");
   });
+  it("inspecciona sin preparar y separa cinco coberturas de una referencia inválida", async () => {
+    const plan = { ...jobPlan, operations: Array.from({ length: 5 }, (_, i) => ({ ...jobPlan.operations[0], operation_id: `op_${i + 1}` })), summary: { ...jobPlan.summary, operations_total: 5, operations_ready: 5 } };
+    apiMock.inspectExecution.mockResolvedValue({ plan, readiness: readyExecution({
+      can_start: false,
+      reference: { valid: false, status: "SESIÓN ANTERIOR", code: "REFERENCE_SESSION_CHANGED", message: "Referencia medida en una sesión física anterior." },
+      blocking_reasons: [{ code: "REFERENCE_SESSION_CHANGED", category: "tool", message: "Referencia medida en una sesión física anterior.", action: "Vuelva a medir Z con la herramienta 3 mm instalada." }],
+    }) });
+    renderWorkspace();
+    await screen.findAllByText("SESIÓN ANTERIOR");
+    expect(screen.getByText("NO PUEDE INICIAR")).toBeInTheDocument();
+    expect(screen.getByText("Con cobertura").parentElement).toHaveTextContent("5");
+    expect(screen.getByText("Bloqueos de archivo/geometría").parentElement).toHaveTextContent("0");
+    const initialCalls = apiMock.inspectExecution.mock.calls.length;
+    fireEvent.click(screen.getByRole("button", { name: /Actualizar inspección/i }));
+    await waitFor(() => expect(apiMock.inspectExecution.mock.calls.length).toBeGreaterThan(initialCalls));
+    expect(apiMock.prepareJobRun).not.toHaveBeenCalled();
+    expect(apiMock.startJobRun).not.toHaveBeenCalled();
+  });
+
+  it("actualiza las filas B,B con la referencia vigente sin reconstruir el plan", async () => {
+    const plan = { ...jobPlan, operations: ["A", "A", "B", "B"].map((tool, i) => ({ ...jobPlan.operations[0], operation_id: `op_${i + 1}`, name: `${tool}${i + 1}`, tool_key: tool, reference_display: "Se medirá después del cambio" })) };
+    apiMock.inspectExecution.mockResolvedValue({ plan, readiness: readyExecution() });
+    apiMock.getLiveExecution.mockResolvedValue({ ...liveExecution, readiness: readyExecution({
+      evaluated_at: "2026-09-24T00:00:00Z", can_start: false, can_prepare: false,
+      current_operation: { operation_id: "op_3", index: 2, total: 4, name: "B3", tool: "B", installation_id: "B", reference_revision: "ref-B" },
+    }) });
+    renderWorkspace();
+    const b1 = await screen.findByRole("row", { name: /B3/ });
+    const b2 = screen.getByRole("row", { name: /B4/ });
+    await waitFor(() => expect(within(b1).getByText("LISTA")).toBeInTheDocument());
+    expect(within(b2).getByText("LISTA")).toBeInTheDocument();
+    expect(apiMock.prepareJobRun).not.toHaveBeenCalled();
+  });
+
 });

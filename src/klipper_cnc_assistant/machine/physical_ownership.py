@@ -130,6 +130,21 @@ class PhysicalMachineCoordinator:
             self._revision += 1
             del self._permits[permit.token]
 
+    def complete_quiescent(self, permit, *, expected_revision, quiescent):
+        """End a successful workflow, revoking its lease, not the physical epoch.
+
+        Recovery reconciliation is deliberately a different operation. A stale
+        idle observation, child, dispatch, cancellation or uncertainty cannot
+        use this path to preserve reference evidence.
+        """
+        with self._lock:
+            self._validate(permit)
+            if (not quiescent or expected_revision != self._revision
+                    or permit != self._root or len(self._permits) != 1
+                    or self._dispatching):
+                raise OwnershipError('Cierre normal sin quiescencia exclusiva vigente.')
+            self.release(permit, quiescent=True)
+
     def retire(self, permit):
         """Root workflow declares that it will produce no more physical actions."""
         with self._lock:

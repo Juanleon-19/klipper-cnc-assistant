@@ -46,7 +46,7 @@ class FinalWorkflowApiTest(unittest.TestCase):
     def test_api_multi_tool_workflow_requires_human_continue_after_probe(self):
         self.assertIsNone(self.current())
         self.post('/job-run/prepare')
-        self.post('/job-run/start')
+        self.post('/job-run/start', spindle_prepared=True)
         self.join()
         self.assertEqual(self.current()['state'], 'SPINDLE_STOP_REQUIRED')
         for index in (2, 3):
@@ -85,7 +85,7 @@ class FinalWorkflowApiTest(unittest.TestCase):
             return result
         self.adapter.start_file = printing
         self.post('/job-run/prepare')
-        self.post('/job-run/start')
+        self.post('/job-run/start', spindle_prepared=True)
         self.assertTrue(entered.wait(5))
 
     def test_api_pause_resume_and_cancel_existing_correct_print(self):
@@ -121,7 +121,7 @@ class FinalWorkflowApiTest(unittest.TestCase):
             return generate(*args, **kwargs)
         with patch.object(self.fixture.compensated_service, 'generate', side_effect=jit):
             self.post('/job-run/prepare')
-            self.post('/job-run/start')
+            self.post('/job-run/start', spindle_prepared=True)
             try:
                 self.assertTrue(entered.wait(5))
                 self.post('/job-run/action', action='cancel')

@@ -25,6 +25,12 @@ class FakeWorkflowOwnership:
     def current_physical_session_id(self):
         return f"test-runtime#serial-{self.reference_serial_generation}"
 
+    def complete_physical_workflow(self, permit):
+        ownership = self.physical_ownership.snapshot()
+        self.physical_ownership.complete_quiescent(permit,
+            expected_revision=ownership['revision'], quiescent=True)
+        return True
+
     def reconcile_physical_ownership(self):
         if getattr(self, 'movement_lock', False):
             return False

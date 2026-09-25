@@ -548,11 +548,19 @@ class MeshExecutionService:
                 )
             self.motion_ownership_snapshot(runtime=runtime, project_id=project_id, map_id=map_id)
             owner = runtime.physical_ownership.snapshot()
-            runtime.physical_ownership.retire(self._physical_leases[key])
-            if not owner['recovery_pending'] and runtime.reconcile_physical_ownership():
+            permit = self._physical_leases[key]
+            completed = (payload or {}).get('status') == 'MESH_COMPLETE'
+            if (completed and not owner['recovery_pending']
+                    and runtime.complete_physical_workflow(permit)):
                 self._physical_leases.pop(key, None)
             else:
-                runtime.physical_ownership.enter_recovery('MESH finalizado con recuperación física pendiente.')
+                runtime.physical_ownership.retire(permit)
+                # Recovery rotates the physical epoch; only successful normal
+                # completion above may preserve the captured reference.
+                if not owner['recovery_pending'] and runtime.reconcile_physical_ownership():
+                    self._physical_leases.pop(key, None)
+                else:
+                    runtime.physical_ownership.enter_recovery('MESH finalizado con recuperación física pendiente.')
             self._log_transition("MESH_WORKER_END", project_id, map_id, execution=execution)
 
     def _probe_one_point(self, project_id: str, map_id: str, runtime: Any, point: dict[str, Any], *, probe_config: dict[str, Any] | None = None) -> None:

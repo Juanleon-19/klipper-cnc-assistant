@@ -701,6 +701,7 @@ export type JobOperationPlan = {
   coverage_status: string;
   coverage_detail: string | null;
   reference_status: string;
+  reference_display?: string;
   generated_file: string | null;
   generated_file_name: string | null;
   generated_metadata_path?: string | null;
@@ -717,6 +718,25 @@ export type JobOperationPlan = {
   blocking: boolean;
   blocking_reasons: string[];
 };
+
+export type ExecutionReadiness = {
+  can_start: boolean;
+  conditions_ready: boolean;
+  can_prepare: boolean;
+  blocking_reasons: { code: string; category: string; message: string; action: string }[];
+  checks: { name: string; ok: boolean; detail: string }[];
+  evaluated_at: string;
+  physical_session_id: string;
+  ownership_session_id: string;
+  run_id: string | null;
+  run_revision?: number | null;
+  current_operation: { operation_id: string | null; index: number | null; total: number; name: string | null; tool: string; installation_id?: string | null; reference_revision?: string | null };
+  reference: { valid: boolean; code: string; status: string; message: string };
+  map_ready: boolean;
+  geometry: { covered: number; blocked: number };
+};
+
+export type ExecutionDiagnostic = { plan: JobPlan; readiness: ExecutionReadiness };
 
 export type JobPlan = {
   schema_version: string;
@@ -790,6 +810,7 @@ export type JobRunEvent = {
 };
 
 export type JobRun = {
+  readiness?: ExecutionReadiness;
   schema_version: string;
   run_id: string;
   plan_id: string;
@@ -896,6 +917,8 @@ export type StaleRunArchiveResult = {
 };
 
 export type LiveExecutionSnapshot = {
+  readiness?: ExecutionReadiness;
+  recovery?: { code: string; message: string; action: string } | null;
   moonraker: {
     connected: boolean;
     klipper_state: string | null;

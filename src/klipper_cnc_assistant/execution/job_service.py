@@ -32,6 +32,7 @@ from klipper_cnc_assistant.storage.safe_persistence import (
     validate_generation, read_artifact_metadata, PersistenceConflict,
 )
 from .print_identity import PrintIdentity, PrintIdentityError
+from .readiness import PREPARABLE_STATES, evaluate_readiness, reference_candidate
 
 
 JOB_PLAN_SCHEMA = "job-plan-v1"
@@ -341,43 +342,41 @@ class JobService:
 
     def prepare_run(self, *, project_id: str, setup_id: str, face: str) -> dict[str, Any]:
         context = self._context(project_id, setup_id, face)
-        current = self._load_run(context)
+        current = self.run_store.load(self._existing_run_file(context))
+        if current is not None and (current.get('state') not in PREPARABLE_STATES or current.get('started_at')):
+            raise ApplicationError(f"No se puede preparar desde {current.get('state')}; el JobRun se conserva.")
         plan = self._load_or_build_plan(context)
-        checks = self._build_run_checks(context, plan)
-        ready = all(check["ok"] for check in checks)
-        run = self._base_run(context, plan) if current is None or current.get("state") in (RUN_TERMINAL_STATES | RUN_REFRESHABLE_IDLE_STATES) else current
-        run["checks"] = checks
-        run["state"] = "JOB_READY" if ready else "JOB_VALIDATING"
-        run["ready"] = ready
-        run["next_action"] = "Iniciar trabajo" if ready else "Resolver bloqueos"
-        run["available_actions"] = ["start"] if ready else []
-        run["updated_at"] = _iso_now()
-        if run is not current:
-            saved = self.run_store.create(self._run_file(context), run, previous=current)
-            run.update(revision=saved['revision'], cancellation_epoch=saved['cancellation_epoch'])
-        else:
-            self._save_run(context, run)
+        run = self._base_run(context, plan)
+        readiness = self._execution_readiness(context, plan, run)
+        ready = readiness['conditions_ready']
+        run.update(checks=readiness['checks'], state='JOB_READY' if ready else 'JOB_VALIDATING',
+                   ready=ready, next_action='Iniciar trabajo' if ready else 'Resolver bloqueos',
+                   available_actions=['start'] if ready else [], updated_at=_iso_now())
+        run['readiness'] = self._execution_readiness(context, plan, run)
+        saved = self.run_store.create(self._run_file(context), run, previous=current)
+        run.update(revision=saved['revision'], cancellation_epoch=saved['cancellation_epoch'])
         return run
 
-    def start_run(self, *, project_id: str, setup_id: str, face: str) -> dict[str, Any]:
+    def start_run(self, *, project_id: str, setup_id: str, face: str, spindle_prepared: bool = False) -> dict[str, Any]:
         context = self._context(project_id, setup_id, face)
         with self._lock:
             current = self._load_run(context)
         if current is None:
             raise ApplicationError("Prepare explícitamente un JobRun antes de iniciar.")
+        if spindle_prepared is not True:
+            raise ApplicationError("Confirme explícitamente que el spindle está preparado antes de iniciar.")
         recovered = self._recover_active_print_if_possible(context, current)
         if recovered is not None:
             self._start_worker(context)
             return recovered
-        if current.get("state") == "JOB_VALIDATING":
-            current["checks"] = self._build_run_checks(context, self._load_or_build_plan(context))
-            current["ready"] = all(check["ok"] for check in current["checks"])
-            current["state"] = "JOB_READY" if current["ready"] else "JOB_VALIDATING"
-            self._save_run(context, current)
-            if not current["ready"]:
-                raise ApplicationError("El trabajo no está listo para iniciar. Revise el preflight general.")
-        if current.get("state") != "JOB_READY":
+        if current.get('state') not in {'JOB_VALIDATING', 'JOB_READY'} or current.get('started_at'):
             raise ApplicationError("JOB_ACTIVE_CONFLICT")
+        readiness = self._execution_readiness(context, self._resolved_plan(context, publish=False), current)
+        current.update(readiness=readiness, checks=readiness['checks'], ready=readiness['can_start'],
+                       state='JOB_READY' if readiness['can_start'] else 'JOB_VALIDATING')
+        self._save_run(context, current)
+        if not readiness['can_start']:
+            raise ApplicationError('El trabajo no está listo para iniciar. ' + '; '.join(item['message'] for item in readiness['blocking_reasons']))
         prepared = current
         if not prepared.get("ready"):
             raise ApplicationError("El trabajo no está listo para iniciar. Revise el preflight general.")
@@ -519,8 +518,17 @@ class JobService:
                     return self._no_active_execution_snapshot()
                 # Return current domain state; never a stale RUNNING after cancel.
                 run = latest
+        assessment = self.inspect_execution(project_id=project_id, setup_id=setup_id, face=face)['readiness']
+        # Fresh presentation of the persisted run; do not save derived checks.
+        run = deepcopy(run)
+        run['readiness'] = assessment
+        run['checks'] = assessment['checks']
+        run['ready'] = assessment['can_start']
+        recovery = self._recovery_diagnostic(run, status, assessment, worker_alive)
         return {
             "has_active_run": True,
+            "readiness": assessment,
+            "recovery": recovery,
             "moonraker": {
                 "connected": bool(status.get("connected", True)),
                 "klipper_state": status.get("klipper_state"),
@@ -592,6 +600,31 @@ class JobService:
             "job_run": run,
             "eta": eta,
         }
+
+    def _recovery_diagnostic(self, run, status, assessment, worker_alive):
+        reference = assessment['reference']
+        if run.get('started_at') and not reference['valid']:
+            return {'code': reference['code'], 'message': reference['message'],
+                    'action': 'Revise la sesión y la referencia de la instalación actual.'}
+        operation = self._diagnostic_operation(run)
+        expected, observed = self._normalize_filename(operation.get('remote_file')), self._normalize_filename(status.get('filename'))
+        if str(status.get('print_state')) in {'printing', 'paused'} and expected != observed:
+            return {'code': 'PRINT_IDENTITY_MISMATCH', 'message': 'El archivo remoto no coincide con este trabajo.',
+                    'action': 'Identifique la impresión remota antes de cualquier recuperación.'}
+        if run.get('state') == 'RECOVERY_REQUIRED' and str(status.get('print_state')) == 'standby' and expected:
+            return {'code': 'MOONRAKER_STANDBY', 'message': 'Moonraker en standby contradice la ejecución esperada.',
+                    'action': 'Revise el archivo y el estado remoto; no reinicie automáticamente.'}
+        if run.get('last_transition_error'):
+            return {'code': 'TOOL_TRANSITION_FAILED', 'message': str(run['last_transition_error'].get('message', 'Falló la transición de herramienta.')),
+                    'action': 'Revise la transición y la posición antes de recuperarla.'}
+        if run.get('state') in RUN_ACTIVE_STATES and not worker_alive:
+            return {'code': 'SUPERVISOR_MISSING', 'message': 'El supervisor de ejecución no está activo.',
+                    'action': 'Revise la identidad y el estado de Moonraker antes de recuperar.'}
+        if run.get('state') == 'RECOVERY_REQUIRED':
+            return run.get('recovery_reason') or {'code': 'RECOVERY_REQUIRED',
+                'message': run.get('next_action') or 'Se requiere recuperación explícita.',
+                'action': 'Revise el diagnóstico de ejecución.'}
+        return None
 
     def _no_active_execution_snapshot(self) -> dict[str, Any]:
         """Represent normal JobRun absence without creating or probing anything."""
@@ -1206,12 +1239,12 @@ class JobService:
         finally:
             current = self._load_run(context)
             if current is None or (current.get('run_id') == run_id and current.get('state') in RUN_TERMINAL_STATES):
-                if permit is not None:
-                    self.runtime.physical_ownership.retire(permit)
-                if current is not None and current.get('state') == 'JOB_COMPLETE':
-                    if self.runtime.reconcile_physical_ownership():
-                        self._physical_leases.pop(key, None)
+                if (permit is not None and current is not None and current.get('state') == 'JOB_COMPLETE'
+                        and self.runtime.complete_physical_workflow(permit)):
+                    self._physical_leases.pop(key, None)
                 else:
+                    if permit is not None:
+                        self.runtime.physical_ownership.retire(permit)
                     self.runtime.physical_ownership.enter_recovery('JOB terminado sin cierre físico confirmado.')
             with self._lock:
                 existing = self._threads.get(key)
@@ -1236,15 +1269,20 @@ class JobService:
         if previous and previous["tool_key"] != operation["tool_key"] and previous["execution_status"] == "COMPLETED" and current_tool_key != operation["tool_key"]:
             self._handle_tool_change_required(context, run, operation_index=index)
             return
-        if operation["reference_status"] != "LISTA":
-            run["state"] = "TOOL_CHANGE_CONFIRMED" if index > 0 else "JOB_VALIDATING"
-            run["current_operation_index"] = index - 1 if index > 0 else 0
-            run["current_operation_id"] = previous["operation_id"] if previous else operation["operation_id"]
-            run["next_action"] = "Medir referencia de herramienta" if index > 0 else "Mida la referencia Z inicial"
-            run["available_actions"] = ["measure-reference", "cancel"]
-            self._append_event(run, "warning", f"La operación {operation['name']} requiere una referencia Z vigente antes de ejecutar.")
+        candidate = reference_candidate(run, index)
+        try:
+            token = self._require_operation_reference(context, candidate)
+        except ApplicationError as error:
+            operation['reference_status'] = 'REQUIERE_REFERENCIA'
+            run['state'] = 'RECOVERY_REQUIRED' if run.get('started_at') else 'JOB_VALIDATING'
+            run['recovery_reason'] = {'code': 'REFERENCE_INVALID', 'message': str(error),
+                                      'action': 'Verifique la instalación y su referencia antes de continuar.'}
+            run['next_action'] = str(error)
+            run['available_actions'] = ['cancel']
             self._save_run(context, run)
             return
+        operation.update(installation_revision=token['installation_id'], physical_reference_token=token,
+                         reference_status='LISTA')
         adapter = self._motion_adapter(context)
         self._require_spindle_confirmation(context, run, "prepared", index)
         reference_token = self._require_operation_reference(context, operation)
@@ -1564,35 +1602,37 @@ class JobService:
             self._append_event(run, "error", f"Falló la transición segura de herramienta: {safe_error}")
             self._save_run(context, run)
 
-    def _build_run_checks(self, context: JobContext, plan: dict[str, Any]) -> list[dict[str, Any]]:
-        snapshot = self.runtime.snapshot()
-        checks: list[dict[str, Any]] = []
+    def _execution_readiness(self, context, plan, run=None):
+        return evaluate_readiness(plan, run, self.runtime.snapshot(),
+                                  self.runtime.physical_ownership.snapshot(),
+                                  self.runtime.current_physical_session_id())
 
-        def add(name: str, ok: bool, detail: str, failure: str | None = None) -> None:
-            checks.append({"name": name, "ok": ok, "detail": detail if ok or failure is None else failure})
+    def inspect_execution(self, *, project_id, setup_id, face):
+        """No workflow, store writes, remote commands or ownership acquisition."""
+        context = self._context(project_id, setup_id, face)
+        plan = self._resolved_plan(context, publish=False)
+        run = self.run_store.load(self._existing_run_file(context))
+        readiness = self._execution_readiness(context, plan, run)
+        # Presentation only; the cached/published plan remains immutable.
+        current_id = readiness['current_operation']['operation_id']
+        seen_current = False
+        after_change = False
+        previous_key = None
+        for row in plan['operations']:
+            if row['operation_id'] == current_id:
+                seen_current = True
+                row['reference_display'] = readiness['reference']['status']
+            elif seen_current:
+                after_change = after_change or row['tool_key'] != previous_key
+                row['reference_display'] = ('Se medirá después del cambio' if after_change
+                                            else row['reference_diagnostic']['status'])
+            else:
+                row['reference_display'] = row['reference_diagnostic']['status']
+            previous_key = row['tool_key']
+        return {'plan': plan, 'readiness': readiness}
 
-        add("modo_fisico", snapshot.get("mode") == "PHYSICAL", "MACHINE_MODE=physical requerido para ejecutar.")
-        add("runtime_conectado", bool(snapshot.get("moonraker", {}).get("http_connected")), "Moonraker HTTP conectado.", "Sin conexión HTTP con Moonraker. Revise el diagnóstico de conexión.")
-        add("websocket", bool(snapshot.get("moonraker", {}).get("websocket_connected")), "Telemetría WebSocket conectada.", "Telemetría WebSocket desconectada. Revise el diagnóstico de conexión.")
-        add("klipper_ready", bool(snapshot.get("klipper", {}).get("ready")), "Klipper listo para ejecución.", "Klipper no está listo para ejecutar. Revise su estado en el diagnóstico.")
-        homed_axes = str(snapshot.get("klipper", {}).get("homed_axes") or "")
-        add("homing", set("xyz").issubset(set(homed_axes)), f"Homing actual: {homed_axes or 'pendiente'}.")
-        add("mapa_activo", bool(plan.get("active_map")), "Mapa físico activo del montaje.", "Falta un mapa físico activo para este montaje.")
-        add("plan_generado", len(plan.get("operations", [])) > 0, "Plan multioperación generado.", "Falta generar el plan de operaciones.")
-        blocked_operations = [item for item in plan["operations"] if item["blocking"]]
-        add("operaciones_bloqueadas", not blocked_operations, "Todas las operaciones activas están compensables y cubiertas por el mapa.", "Hay operaciones bloqueadas. Revise sus archivos, referencias y cobertura del mapa.")
-        add(
-            "compensacion_jit",
-            True,
-            "La compensación Legacy se generará justo antes de cada operación usando la referencia Z vigente.",
-        )
-        initial = plan["operations"][0] if plan["operations"] else None
-        add(
-            "referencia_inicial",
-            bool(initial and initial.get("reference_status") == "LISTA"),
-            "La herramienta inicial tiene una referencia Z vigente." if initial and initial.get("reference_status") == "LISTA" else str((initial or {}).get("reference_error") or "La herramienta inicial requiere una referencia física vigente."),
-        )
-        return checks
+    def _build_run_checks(self, context, plan):
+        return self._execution_readiness(context, plan)['checks']
 
     def _build_plan(self, context: JobContext, generated_results: dict[str, dict[str, Any]] | None = None, *, project=None) -> dict[str, Any]:
         project = project if project is not None else self._load_project(context.project_id)
@@ -1605,10 +1645,16 @@ class JobService:
             raise ApplicationError("No existen operaciones activas para este montaje/cara.")
         from klipper_cnc_assistant.gcode import analyze_gcode_text
         from klipper_cnc_assistant.gcode.analysis_cache import analysis_is_current
+        missing_sources = set()
         for index, operation in enumerate(operations):
-            if operation.archivo_gcode and operation.analisis is not None:
-                original, source_sha256 = self.repository.read_gcode_source(context.project_id, operation.archivo_gcode)
-                if not analysis_is_current(operation, original, source_sha256=source_sha256):
+            if operation.archivo_gcode:
+                try:
+                    original, source_sha256 = self.repository.read_gcode_source(context.project_id, operation.archivo_gcode)
+                except OSError:
+                    missing_sources.add(operation.id)
+                    operations[index] = replace(operation, analisis=None)
+                    continue
+                if operation.analisis is not None and not analysis_is_current(operation, original, source_sha256=source_sha256):
                     operations[index] = replace(operation, analisis=analyze_gcode_text(original, material=project.material))
         active_map = self._load_active_map(context.project_id, operations[0].id, project=project)
         coverage_by_operation = self._coverage_by_operation(active_map, operations)
@@ -1632,16 +1678,29 @@ class JobService:
             generated = generated_by_operation.get(operation.id)
             generated_metadata = generated.get("metadata") if isinstance(generated, dict) else None
             coverage = coverage_by_operation.get(operation.id)
-            reference_status = self._reference_status(active_map, operation, binding, project=project)
+            reference_diagnostic = self._reference_diagnostic(active_map, operation, binding, project=project)
+            reference_status = 'LISTA' if reference_diagnostic['valid'] else 'REQUIERE_REFERENCIA'
             calibration = self._tool_installation_calibration(active_map, operation, binding)
             blocking_reasons: list[str] = []
             original_time_estimate: dict[str, Any] | None = None
-            if operation.archivo_gcode is None:
+            if operation.archivo_gcode is None or operation.id in missing_sources:
                 blocking_reasons.append("Falta G-code original.")
             if operation.analisis is None:
                 blocking_reasons.append("Falta análisis G-code.")
+            if operation.analisis is not None:
+                try:
+                    self.compensated_gcode_service._validate_legacy_analysis(operation)
+                except ApplicationError as error:
+                    blocking_reasons.append(str(error))
             if active_map is None:
                 blocking_reasons.append("Falta mapa físico activo.")
+            else:
+                try:
+                    self.compensated_gcode_service._validate_map_for_operation(active_map, operation, require_tool_reference=False)
+                except ApplicationError as error:
+                    blocking_reasons.append(str(error))
+                if (active_map.get('validation') or {}).get('status') != 'VALID':
+                    blocking_reasons.append('Mapa sin validación vigente.')
             if coverage is not None and not coverage["sufficient"]:
                 first = coverage["issues"][0] if coverage["issues"] else None
                 blocking_reasons.append(
@@ -1671,11 +1730,12 @@ class JobService:
                         None if active_map is None else active_map.get("probe_config")
                     ),
                     "tool_changed": tool_changed,
-                    "map_status": "LISTO" if active_map is not None else "PENDIENTE",
+                    "map_status": "LISTO" if active_map and active_map.get("status") == "MESH_COMPLETE" and (active_map.get("validation") or {}).get("status") == "VALID" else "PENDIENTE",
                     "coverage_status": "VALIDA" if coverage is None or coverage["sufficient"] else "FUERA_DE_DOMINIO",
                     "coverage_detail": None if coverage is None or coverage["sufficient"] else blocking_reasons[-1],
                     "reference_status": reference_status,
-                    "reference_error": self._reference_error(active_map, operation, binding, project=project) if reference_status != "LISTA" else None,
+                    "reference_error": None if reference_diagnostic["valid"] else reference_diagnostic["message"],
+                    "reference_diagnostic": reference_diagnostic,
                     "tool_installation_calibration": calibration,
                     "generated_file": None if generated is None else generated["relative_path"],
                     "generated_file_name": None if generated is None else Path(str(generated["relative_path"])).name,
@@ -1869,19 +1929,25 @@ class JobService:
             }
         return result
 
-    def _reference_error(self, active_map, operation, initial_reference_binding=None, *, project=None):
-        if active_map is None:
-            return "Falta un mapa físico activo."
+    def _reference_diagnostic(self, active_map, operation, initial_reference_binding=None, *, project=None):
         try:
+            if active_map is None:
+                raise PhysicalReferenceError('Falta un mapa físico activo.', 'REFERENCE_MEASUREMENT_REQUIRED')
             entry = self._reference_entry(active_map, operation, initial_reference_binding)
-            token = None if entry is None else entry.get("physical_reference_token")
+            token = None if entry is None else entry.get('physical_reference_token')
             if not token:
-                raise PhysicalReferenceError("Referencia Z medida pero sin evidencia de sesión vigente para esta herramienta; mida de nuevo.")
-            require_current_reference(self.repository, self.runtime, active_map["project_id"], operation.id,
+                raise PhysicalReferenceError('Se requiere una medición con evidencia vigente para esta herramienta.', 'REFERENCE_MEASUREMENT_REQUIRED')
+            require_current_reference(self.repository, self.runtime, active_map['project_id'], operation.id,
                                       active_map, project=project, expected_token=token)
         except PhysicalReferenceError as error:
-            return str(error)
-        return None
+            status = {'REFERENCE_SESSION_CHANGED': 'SESIÓN ANTERIOR',
+                      'REFERENCE_MEASUREMENT_REQUIRED': 'REQUIERE MEDICIÓN'}.get(error.code, 'CONTEXTO CAMBIÓ')
+            return {'valid': False, 'code': error.code, 'status': status, 'message': str(error)}
+        return {'valid': True, 'code': 'REFERENCE_VALID', 'status': 'LISTA', 'message': 'Referencia vigente de la herramienta actual.'}
+
+    def _reference_error(self, active_map, operation, initial_reference_binding=None, *, project=None):
+        result = self._reference_diagnostic(active_map, operation, initial_reference_binding, project=project)
+        return None if result['valid'] else result['message']
 
     def _reference_status(self, active_map, operation, initial_reference_binding=None, *, project=None):
         return "LISTA" if self._reference_error(active_map, operation, initial_reference_binding, project=project) is None else "REQUIERE_REFERENCIA"
@@ -1906,7 +1972,7 @@ class JobService:
         index = self._next_pending_operation_index(run) if next_pending else int(run['current_operation_index'])
         if index is None:
             raise ApplicationError('No existe una operación pendiente con referencia ejecutable.')
-        return self._require_operation_reference(context, run['operations'][index])
+        return self._require_operation_reference(context, reference_candidate(run, index))
 
     def _spindle_confirmation_context(self, context, operation):
         physical_map = self.physical_map_service.get_active(context.project_id, operation['operation_id'])
@@ -2403,7 +2469,7 @@ class JobService:
         setup = next((s for s in raw["montajes"] if s["id"] == context.setup_id), None)
         if setup is None:
             raise NotFoundError("El montaje ya no existe.")
-        dependencies = {"version": 1, "project_content": project_digest,
+        dependencies = {"version": 2, "project_content": project_digest,
                         "storage_revision": raw.get("storage_revision", 0), "face": context.face,
                         "setup": setup, "analysis_version": CURRENT_ANALYSIS_VERSION,
                         "algorithms": [CompensatedGCodeService.LEGACY_ALGORITHM_VERSION,
@@ -2440,6 +2506,7 @@ class JobService:
         session = getattr(self.runtime, "current_physical_session_id", None)
         dependencies["physical_session"] = session() if callable(session) else None
         dependencies["ownership_session"] = self.runtime.physical_ownership.session
+        dependencies["reference_recovery_pending"] = self.runtime.physical_ownership.snapshot()["recovery_pending"]
         return hashlib.sha256(json.dumps(dependencies, sort_keys=True, default=str, allow_nan=False).encode()).hexdigest()
 
     @staticmethod

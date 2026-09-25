@@ -11,7 +11,9 @@ from uuid import uuid4
 
 
 class PhysicalReferenceError(ValueError):
-    pass
+    def __init__(self, message, code="REFERENCE_CONTEXT_CHANGED"):
+        super().__init__(message)
+        self.code = code
 
 
 def _fingerprint(value: Any) -> str:
@@ -103,7 +105,7 @@ def require_current_reference(repository, runtime, project_id, operation_id, phy
     reference = (physical_map.get('tool_references') or {}).get(tool_id)
     token = reference.get('physical_reference_token') if isinstance(reference, dict) else None
     if not isinstance(token, dict) or not reference.get('valid') or type(token.get('version')) is not int or token.get('version') not in (1, 2):
-        raise PhysicalReferenceError('Referencia Z sin evidencia de sesión física vigente; mida de nuevo la herramienta seleccionada.')
+        raise PhysicalReferenceError('Referencia Z sin evidencia de sesión física vigente; mida de nuevo la herramienta seleccionada.', 'REFERENCE_MEASUREMENT_REQUIRED')
     if token['version'] == 2:
         canonical = project.get_setup(operation.setup_id).preparacion.physical_reference
         if not canonical or canonical.get('reference') != reference:
@@ -117,7 +119,9 @@ def require_current_reference(repository, runtime, project_id, operation_id, phy
     context = reference_context(repository, runtime, project_id, operation_id, physical_map, installation_id,
                                 project=project, token_version=token['version'])
     if token.get('physical_session_id') != context['physical_session_id']:
-        raise PhysicalReferenceError('La referencia Z pertenece a otra sesión física; mida de nuevo.')
+        raise PhysicalReferenceError('La referencia Z pertenece a otra sesión física; mida de nuevo.', 'REFERENCE_SESSION_CHANGED')
+    if runtime.physical_ownership.snapshot()['recovery_pending']:
+        raise PhysicalReferenceError('La referencia no puede autorizar ejecución durante recuperación física.', 'REFERENCE_RECOVERY_REQUIRED')
     if any(token.get(key) != value for key, value in context.items()):
         raise PhysicalReferenceError('La sesión o el contexto físico de la referencia de herramienta cambió; mida de nuevo.')
     if not token.get('reference_revision') or not token.get('measured_at'):

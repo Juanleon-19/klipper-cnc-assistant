@@ -17,6 +17,7 @@ import type {
   ExecutionPreflight,
   JobHistoryEntry,
   JobPlan,
+  ExecutionDiagnostic,
   JobRun,
   LiveExecutionSnapshot,
   StaleRunArchiveResult,
@@ -423,6 +424,8 @@ export const api = {
     }),
   generatedFileUrl: (projectId: string, relativePath: string) =>
     `/api/projects/${projectId}/generated/${relativePath}`,
+  inspectExecution: (projectId: string, setupId: string, face: string) =>
+    executionRead<ExecutionDiagnostic>(`/api/projects/${projectId}/execution/diagnostic?setup_id=${encodeURIComponent(setupId)}&face=${encodeURIComponent(face)}`),
   getJobPlan: (projectId: string, setupId: string, face: string) =>
     executionRead<JobPlan>(`/api/projects/${projectId}/job-plan?setup_id=${encodeURIComponent(setupId)}&face=${encodeURIComponent(face)}`),
   createJobPlan: (projectId: string, setupId: string, face: string) =>
@@ -435,8 +438,8 @@ export const api = {
     request<JobRun | null>(`/api/projects/${projectId}/job-run?setup_id=${encodeURIComponent(setupId)}&face=${encodeURIComponent(face)}`),
   prepareJobRun: (projectId: string, setupId: string, face: string) =>
     request<JobRun>(`/api/projects/${projectId}/job-run/prepare`, { method: "POST", body: JSON.stringify({ setup_id: setupId, face }) }),
-  startJobRun: (projectId: string, setupId: string, face: string) =>
-    request<JobRun>(`/api/projects/${projectId}/job-run/start`, { method: "POST", body: JSON.stringify({ setup_id: setupId, face }) }),
+  startJobRun: (projectId: string, setupId: string, face: string, spindlePrepared: boolean) =>
+    request<JobRun>(`/api/projects/${projectId}/job-run/start`, { method: "POST", body: JSON.stringify({ setup_id: setupId, face, spindle_prepared: spindlePrepared }) }),
   archiveStaleJobRun: (projectId: string, setupId: string, face: string) =>
     request<StaleRunArchiveResult>(`/api/projects/${projectId}/job-run/archive-stale`, { method: "POST", body: JSON.stringify({ setup_id: setupId, face }) }),
   runJobAction: (projectId: string, setupId: string, face: string, action: string) =>

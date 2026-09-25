@@ -639,10 +639,12 @@ class ApiTest(unittest.TestCase):
                 self.entered.set()
                 if progress_callback is not None:
                     progress_callback("POINT_MOVE_XY", {"x_mm": point.get("x_machine"), "y_mm": point.get("y_machine")})
-                self.release.wait(1.0)
+                if not self.release.wait(10.0):
+                    raise AssertionError("Pause test did not release its fake probe barrier")
                 return {"z_measured": 9.95, "duration_s": 0.01}
 
         runtime = BlockingRuntime()
+        self.addCleanup(runtime.release.set)
         self.app.state.mesh_execution_service.start_all(project_id=project_id, map_id=plan["map_id"], runtime=runtime)
         self.assertTrue(runtime.entered.wait(1.0))
 

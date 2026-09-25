@@ -1,3 +1,4 @@
+import { readyExecution } from "../../test/execution-fixtures";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -50,6 +51,7 @@ const apiMock = vi.hoisted(() => ({
   cancelPhysicalMap: vi.fn(),
   generateCompensatedGCode: vi.fn(),
   getJobPlan: vi.fn(),
+  inspectExecution: vi.fn(),
   createJobPlan: vi.fn(),
   generateProjectCompensation: vi.fn(),
   getJobRun: vi.fn(),
@@ -665,6 +667,7 @@ describe("ProjectWorkspace", () => {
     apiMock.resetSetupPreparation.mockResolvedValue({ ...project.montajes[0], placement_revision: "placement-2", preparation_status: "sin_iniciar" });
     apiMock.generatedFileUrl.mockImplementation((_projectId: string, relativePath: string) => `/api/projects/proj_1/generated/${relativePath}`);
     apiMock.getJobPlan.mockResolvedValue(jobPlan);
+    apiMock.inspectExecution.mockResolvedValue({ plan: jobPlan, readiness: readyExecution() });
     apiMock.createJobPlan.mockResolvedValue(jobPlan);
     apiMock.generateProjectCompensation.mockResolvedValue(jobPlan);
     apiMock.generateCompensatedGCode.mockResolvedValue(generatedCompensation);
@@ -1049,7 +1052,7 @@ describe("ProjectWorkspace", () => {
     fireEvent.change(longToolInput, { target: { value: "130" } });
     fireEvent.click(screen.getByRole("button", { name: /^Ejecución$/i }));
 
-    expect(screen.getByText(/Hay cambios de configuración de máquina sin guardar/i)).toBeInTheDocument();
+    expect(screen.getAllByText(/Hay cambios de configuración de máquina sin guardar/i).length).toBeGreaterThan(0);
     expect(screen.getByRole("button", { name: "Preparar trabajo" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Iniciar trabajo" })).toBeDisabled();
     expect(apiMock.prepareJobRun).not.toHaveBeenCalled();
@@ -1062,7 +1065,7 @@ describe("ProjectWorkspace", () => {
 
     fireEvent.click(screen.getByRole("button", { name: /^Ejecución$/i }));
 
-    expect(await screen.findByText(/La configuración guardada no está confirmada de forma coherente en runtime/i)).toBeInTheDocument();
+    expect((await screen.findAllByText(/La configuración guardada no está confirmada de forma coherente en runtime/i)).length).toBeGreaterThan(0);
     expect(screen.getByRole("button", { name: "Preparar trabajo" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Iniciar trabajo" })).toBeDisabled();
   });
@@ -2073,7 +2076,8 @@ describe("ProjectWorkspace", () => {
     expect(apiMock.generateProjectCompensation).not.toHaveBeenCalled();
 
     fireEvent.click(screen.getByRole("button", { name: /Actualizar inspección/i }));
-    await waitFor(() => expect(apiMock.prepareJobRun).toHaveBeenCalledWith(project.id, project.montajes[0].id, "superior"));
+    await waitFor(() => expect(apiMock.inspectExecution).toHaveBeenCalledWith(project.id, project.montajes[0].id, "superior"));
+    expect(apiMock.prepareJobRun).not.toHaveBeenCalled();
     expect(screen.getAllByRole("button", { name: "Iniciar trabajo" })).toHaveLength(1);
   });
 

@@ -1,16 +1,18 @@
+import { useState } from "react";
 import type { ApiError } from "../../lib/api";
 import { formatDate, formatFileSize } from "../../lib/format";
-import type { JobRunConflictDetail, JobRunEvent, JobRunOperation, LiveExecutionSnapshot } from "../../types";
+import type { ExecutionReadiness, JobRunConflictDetail, JobRunEvent, JobRunOperation, LiveExecutionSnapshot } from "../../types";
 import { StatusBadge } from "../../components/StatusBadge";
 
 type ExecutionConsoleProps = {
   snapshot: LiveExecutionSnapshot | null;
+  readiness?: ExecutionReadiness | null;
   error: ApiError | null;
   busy: boolean;
   settingsBlocked?: boolean;
   settingsBlockReason?: string;
   onPrepare: () => void | Promise<void>;
-  onStart: () => void | Promise<void>;
+  onStart: (spindlePrepared: boolean) => void | Promise<void>;
   onAction: (action: string) => void | Promise<void>;
   onArchiveStale: () => void | Promise<void>;
 };
@@ -166,17 +168,23 @@ function currentOperationLabel(snapshot: LiveExecutionSnapshot | null): string {
   return `Operación ${index} de ${snapshot.run.total_operations}`;
 }
 
-export function ExecutionConsole({ snapshot, error, busy, settingsBlocked = false, settingsBlockReason = "", onPrepare, onStart, onAction, onArchiveStale }: ExecutionConsoleProps) {
+export function ExecutionConsole({ snapshot, readiness: suppliedReadiness, error, busy, settingsBlocked = false, settingsBlockReason = "", onPrepare, onStart, onAction, onArchiveStale }: ExecutionConsoleProps) {
   const jobRun = snapshot?.job_run ?? null;
+  const readiness = suppliedReadiness ?? snapshot?.readiness ?? null;
+  const confirmationKey = JSON.stringify([readiness?.run_id, readiness?.physical_session_id, readiness?.ownership_session_id, readiness?.current_operation.installation_id, readiness?.current_operation.reference_revision]);
+  const [confirmedContext, setConfirmedContext] = useState<string | null>(null);
+  const spindlePrepared = confirmedContext === confirmationKey;
+  const canStart = readiness?.can_start === true && !settingsBlocked && !error;
+
   const actions = (snapshot?.run.available_actions ?? jobRun?.available_actions ?? []).filter((action, index, list) => list.indexOf(action) === index);
   const events = dedupeEvents(snapshot?.events ?? []);
   const conflictDetail = isConflictDetail(error?.detail) ? error.detail : null;
   const showArchiveStale = canArchiveStale(snapshot, conflictDetail);
-  const showStart = STARTABLE_STATES.has(snapshot?.run.status ?? "") || actions.includes("start");
+  const showStart = readiness?.can_start === true || STARTABLE_STATES.has(snapshot?.run.status ?? "") || actions.includes("start");
   const extraActions = actions.filter((action) => action !== "start");
   const operationPercent = percent(snapshot?.operation.progress ?? 0);
   const overallPercent = percent(snapshot?.run.overall_progress ?? 0);
-  const filename = snapshot?.moonraker.filename || snapshot?.operation.expected_remote_file || "pendiente";
+  const filename = snapshot?.moonraker.filename || snapshot?.operation.expected_remote_file || "Se generará al iniciar";
   const desync = snapshot?.synchronization.ok === false;
   const runStatus = snapshot?.run.status ?? snapshot?.operation.execution_status ?? "JOB_DRAFT";
   const showSpindleStopRequired = runStatus === "SPINDLE_STOP_REQUIRED";
@@ -191,26 +199,64 @@ export function ExecutionConsole({ snapshot, error, busy, settingsBlocked = fals
   const transitionTool = snapshot?.transition.tool ?? snapshot?.transition.required_tool ?? snapshot?.operation.tool ?? "pendiente";
   const automaticFlowDescription = AUTOMATIC_FLOW_DESCRIPTIONS[runStatus] ?? null;
   const automaticFlowStepIndex = AUTOMATIC_FLOW_STEPS.findIndex((step) => step.state === runStatus);
-  const checks = jobRun?.checks ?? [];
+  const checks = readiness?.checks ?? [];
   const failedChecks = checks.filter((check) => !check.ok);
-  const showPreflightSummary = runStatus === "JOB_READY" || runStatus === "JOB_VALIDATING" || checks.length > 0;
-  const readinessTitle = runStatus === "JOB_READY" ? "Trabajo listo para iniciar" : "Trabajo no listo";
-  const readinessDetail = runStatus === "JOB_READY"
-    ? "Todos los checks requeridos están aprobados."
-    : failedChecks.length > 0
-      ? "Revise y resuelva los checks fallidos antes de iniciar."
-      : "El trabajo sigue en validación. Revise el estado actual antes de iniciar.";
+  const showPreflightSummary = true;
+  const readinessTitle = canStart ? "PUEDE INICIAR" : "NO PUEDE INICIAR";
+  const readinessDetail = settingsBlocked ? settingsBlockReason : error?.message ?? readiness?.blocking_reasons[0]?.message
+    ?? (canStart ? "Confirme que el spindle está preparado antes de iniciar." : "Actualice el diagnóstico para verificar el estado actual.");
 
   return (
     <article className="panel execution-console-v2" aria-label="Consola de ejecución en vivo v2">
       <div className="section-heading section-heading--stacked execution-console-v2__heading">
         <div>
           <p className="eyebrow">2. CONSOLA DE EJECUCIÓN EN VIVO — V2</p>
-          <h3>{currentOperationLabel(snapshot)}</h3>
-          <p className="execution-console-v2__subtitle">{snapshot?.operation.name ?? "Sin operación activa"} · Herramienta {snapshot?.operation.tool ?? "pendiente"}</p>
+          <h3>{readiness?.current_operation.index != null ? `Operación ${readiness.current_operation.index + 1} de ${readiness.current_operation.total}` : currentOperationLabel(snapshot)}</h3>
+          <p className="execution-console-v2__subtitle">{readiness?.current_operation.name ?? snapshot?.operation.name ?? "Sin operación activa"} · Herramienta {readiness?.current_operation.tool ?? snapshot?.operation.tool ?? "pendiente"}</p>
         </div>
         <StatusBadge tone={executionTone(runStatus)}>{snapshot?.run.status ?? "JOB_DRAFT"}</StatusBadge>
       </div>
+
+      {showPreflightSummary ? (
+        <section className="execution-panel" aria-label="Preparación del trabajo">
+          <div className="section-heading"><h4>Preparación del trabajo</h4></div>
+          <div className={`alert ${canStart ? "alert--success" : "alert--warning"}`}>
+            <strong>{readinessTitle}</strong>
+            <p>{readinessDetail}</p>
+            <p>{readiness?.blocking_reasons[0]?.action}</p>
+          </div>
+          <div className="info-grid info-grid--double compact-grid">
+            <div className="metric-box"><span>Mapa</span><strong>{readiness?.map_ready ? "LISTO" : "PENDIENTE"}</strong></div>
+            <div className="metric-box"><span>Referencia herramienta actual</span><strong>{readiness?.reference.status ?? "SIN VERIFICAR"}</strong></div>
+            <div className="metric-box"><span>Operaciones</span><strong>{jobRun?.summary.operations_total ?? snapshot?.run.total_operations ?? 0}</strong></div>
+            <div className="metric-box"><span>Cambios de herramienta</span><strong>{jobRun?.summary.tool_changes_required ?? 0}</strong></div>
+          </div>
+          <p className="muted">La compensación Legacy se genera automáticamente justo antes de cada operación usando la referencia Z vigente.</p>
+          {checks.length ? (
+            <div className="stack gap-sm">
+              {[...checks].sort((a, b) => Number(a.ok) - Number(b.ok)).map((check) => (
+                <div className="subpanel subpanel--soft" key={`${check.name}:${check.ok ? "ok" : "fail"}`}>
+                  <strong>{check.ok ? "OK" : "FALLA"} · {preflightCheckLabel(check.name)}</strong>
+                  <p>{check.detail}</p>
+                  <p className="muted mono-text">{check.name}</p>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <p className="muted">Todavía no hay checks persistidos para esta ejecución.</p>
+          )}
+          {failedChecks.length ? (
+            <div className="alert alert--warning">
+              <strong>Bloqueos que debes resolver</strong>
+              <ul>
+                {failedChecks.map((check) => (
+                  <li key={`blocker:${check.name}`}>{check.detail}</li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
+        </section>
+      ) : null}
 
       {desync ? <div className="alert alert--danger"><strong>DESINCRONIZACIÓN:</strong> Moonraker está ejecutando el archivo, pero JobRun no lo está siguiendo.</div> : null}
       {settingsBlocked ? <div className="alert alert--warning"><strong>Ejecución bloqueada por configuración</strong><p>{settingsBlockReason}</p></div> : null}
@@ -235,8 +281,9 @@ export function ExecutionConsole({ snapshot, error, busy, settingsBlocked = fals
       ) : null}
       {showRecoveryRequired ? (
         <div className="alert alert--danger">
-          <strong>Transición de herramienta detenida</strong>
-          <p>Causa: {snapshot?.transition.last_error?.message ?? "La transición segura no pudo completarse."}</p>
+          <strong>Recuperación requerida</strong>
+          <p>Causa: {snapshot?.recovery?.message ?? snapshot?.transition.last_error?.message ?? snapshot?.run.next_action ?? "Revise el diagnóstico de ejecución."}</p>
+          <p>{snapshot?.recovery?.action}</p>
         </div>
       ) : null}
 
@@ -293,45 +340,6 @@ export function ExecutionConsole({ snapshot, error, busy, settingsBlocked = fals
         </section>
       ) : null}
 
-      {showPreflightSummary ? (
-        <section className="execution-panel" aria-label="Preparación del trabajo">
-          <div className="section-heading"><h4>Preparación del trabajo</h4></div>
-          <div className={`alert ${runStatus === "JOB_READY" ? "alert--success" : "alert--warning"}`}>
-            <strong>{readinessTitle}</strong>
-            <p>{readinessDetail}</p>
-          </div>
-          <div className="info-grid info-grid--double compact-grid">
-            <div className="metric-box"><span>Mapa</span><strong>{jobRun?.active_map_id ? "LISTO" : "PENDIENTE"}</strong></div>
-            <div className="metric-box"><span>Referencia inicial</span><strong>{checks.find((check) => check.name === "referencia_inicial")?.ok ? "LISTA" : "PENDIENTE"}</strong></div>
-            <div className="metric-box"><span>Operaciones</span><strong>{jobRun?.summary.operations_total ?? snapshot?.run.total_operations ?? 0}</strong></div>
-            <div className="metric-box"><span>Cambios de herramienta</span><strong>{jobRun?.summary.tool_changes_required ?? 0}</strong></div>
-          </div>
-          <p className="muted">La compensación Legacy se genera automáticamente justo antes de cada operación usando la referencia Z vigente.</p>
-          {checks.length ? (
-            <div className="stack gap-sm">
-              {checks.map((check) => (
-                <div className="subpanel subpanel--soft" key={`${check.name}:${check.ok ? "ok" : "fail"}`}>
-                  <strong>{check.ok ? "OK" : "FALLA"} · {preflightCheckLabel(check.name)}</strong>
-                  <p>{check.detail}</p>
-                  <p className="muted mono-text">{check.name}</p>
-                </div>
-              ))}
-            </div>
-          ) : (
-            <p className="muted">Todavía no hay checks persistidos para esta ejecución.</p>
-          )}
-          {failedChecks.length ? (
-            <div className="alert alert--warning">
-              <strong>Bloqueos que debes resolver</strong>
-              <ul>
-                {failedChecks.map((check) => (
-                  <li key={`blocker:${check.name}`}>{check.detail}</li>
-                ))}
-              </ul>
-            </div>
-          ) : null}
-        </section>
-      ) : null}
 
       {error ? (
         <section className="execution-panel">
@@ -391,8 +399,16 @@ export function ExecutionConsole({ snapshot, error, busy, settingsBlocked = fals
       </section>
 
       <div className="action-grid execution-console-v2__actions">
-        <button className="button button--ghost" type="button" disabled={busy || settingsBlocked} onClick={() => void onPrepare()}>Preparar trabajo</button>
-        {showStart ? <button className="button" type="button" disabled={busy || settingsBlocked || snapshot?.run.status === "OPERATION_RUNNING"} onClick={() => void onStart()}>Iniciar trabajo</button> : null}
+        <button className="button button--ghost" type="button" disabled={busy || settingsBlocked || readiness?.can_prepare !== true} onClick={() => void onPrepare()}>Preparar trabajo</button>
+        {showStart ? <>
+          <label className="spindle-confirmation">
+            <input type="checkbox" checked={spindlePrepared} disabled={busy || !canStart}
+              onChange={(event) => setConfirmedContext(event.target.checked ? confirmationKey : null)} />
+            Confirmo que el spindle está preparado
+          </label>
+          <button className="button" type="button" disabled={busy || !canStart || !spindlePrepared}
+            onClick={() => { setConfirmedContext(null); void onStart(true); }}>Iniciar trabajo</button>
+        </> : null}
         {extraActions.map((action) => (
           <button
             key={action}

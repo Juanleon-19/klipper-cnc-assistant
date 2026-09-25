@@ -9,6 +9,7 @@ from tests.physical_fakes import FakeWorkflowOwnership, measure_test_tool_refere
 from pathlib import Path
 
 from klipper_cnc_assistant.application import CompensatedGCodeService, PhysicalMapService, ProjectService, ReferenceSessionService
+from klipper_cnc_assistant.application.errors import ApplicationError
 from klipper_cnc_assistant.execution import JobService, MoonrakerJobAdapter
 from klipper_cnc_assistant.application.services import MachineSessionService
 from klipper_cnc_assistant.application.physical_map_service import PhysicalMeshConfig
@@ -36,6 +37,7 @@ class FakeRuntime(FakeWorkflowOwnership):
             "moonraker": {"http_connected": True, "websocket_connected": True, "telemetry_state": "LIVE", "url": "http://moonraker.local"},
             "klipper": {"ready": True, "homed_axes": "xyz"},
             "started_at": "runtime-session",
+            "safety": {"telemetry_recent": True},
         }
         self.refresh_observed_state_calls = 0
 
@@ -387,8 +389,8 @@ class JobServiceTest(unittest.TestCase):
         self.job_service.generate_project_compensation(project_id=self.project_id, setup_id=self.setup_id, face='superior')
         self.job_service.prepare_run(project_id=self.project_id, setup_id=self.setup_id, face='superior')
         self.runtime.physical_ownership.acquire(OwnerKind.MESH, 'mesh-between-points')
-        with self.assertRaises(OwnershipError):
-            self.job_service.start_run(project_id=self.project_id, setup_id=self.setup_id, face='superior')
+        with self.assertRaises(ApplicationError):
+            self.job_service.start_run(spindle_prepared=True, project_id=self.project_id, setup_id=self.setup_id, face='superior')
         self.assertEqual(self.adapter.uploads, [])
         self.assertEqual(self.job_service._threads, {})
 
@@ -413,7 +415,7 @@ class JobServiceTest(unittest.TestCase):
         self.job_service.generate_project_compensation(project_id=self.project_id, setup_id=self.setup_id, face="superior")
 
         self.job_service.prepare_run(project_id=self.project_id, setup_id=self.setup_id, face="superior")
-        self.job_service.start_run(project_id=self.project_id, setup_id=self.setup_id, face="superior")
+        self.job_service.start_run(spindle_prepared=True, project_id=self.project_id, setup_id=self.setup_id, face="superior")
         self.job_service._threads[(self.project_id, self.setup_id, "superior")].join(timeout=5)  # type: ignore[attr-defined]
         run = self.job_service.get_run(project_id=self.project_id, setup_id=self.setup_id, face="superior")
 
@@ -428,7 +430,7 @@ class JobServiceTest(unittest.TestCase):
     def test_confirm_spindle_stopped_rejects_active_print(self) -> None:
         self.job_service.generate_project_compensation(project_id=self.project_id, setup_id=self.setup_id, face="superior")
         self.job_service.prepare_run(project_id=self.project_id, setup_id=self.setup_id, face="superior")
-        self.job_service.start_run(project_id=self.project_id, setup_id=self.setup_id, face="superior")
+        self.job_service.start_run(spindle_prepared=True, project_id=self.project_id, setup_id=self.setup_id, face="superior")
         self.job_service._threads[(self.project_id, self.setup_id, "superior")].join(timeout=5)  # type: ignore[attr-defined]
         self.adapter.status_sequence = [{"state": "printing", "is_active": True}]
 
@@ -443,7 +445,7 @@ class JobServiceTest(unittest.TestCase):
     def test_confirm_spindle_stopped_rejects_missing_homing(self) -> None:
         self.job_service.generate_project_compensation(project_id=self.project_id, setup_id=self.setup_id, face="superior")
         self.job_service.prepare_run(project_id=self.project_id, setup_id=self.setup_id, face="superior")
-        self.job_service.start_run(project_id=self.project_id, setup_id=self.setup_id, face="superior")
+        self.job_service.start_run(spindle_prepared=True, project_id=self.project_id, setup_id=self.setup_id, face="superior")
         self.job_service._threads[(self.project_id, self.setup_id, "superior")].join(timeout=5)  # type: ignore[attr-defined]
         self.runtime.snapshot_payload["klipper"]["homed_axes"] = "xy"
 
@@ -458,7 +460,7 @@ class JobServiceTest(unittest.TestCase):
     def test_confirm_spindle_stopped_moves_z_before_xy_and_enters_tool_change_required(self) -> None:
         self.job_service.generate_project_compensation(project_id=self.project_id, setup_id=self.setup_id, face="superior")
         self.job_service.prepare_run(project_id=self.project_id, setup_id=self.setup_id, face="superior")
-        self.job_service.start_run(project_id=self.project_id, setup_id=self.setup_id, face="superior")
+        self.job_service.start_run(spindle_prepared=True, project_id=self.project_id, setup_id=self.setup_id, face="superior")
         self.job_service._threads[(self.project_id, self.setup_id, "superior")].join(timeout=5)  # type: ignore[attr-defined]
 
         self.job_service.run_action(project_id=self.project_id, setup_id=self.setup_id, face="superior", action="confirm-spindle-stopped")
@@ -635,7 +637,7 @@ class JobServiceTest(unittest.TestCase):
         self.assertTrue(all(item["generated_file"] is None for item in initial_plan["operations"]))
 
         self.job_service.prepare_run(project_id=self.project_id, setup_id=self.setup_id, face="superior")
-        self.job_service.start_run(project_id=self.project_id, setup_id=self.setup_id, face="superior")
+        self.job_service.start_run(spindle_prepared=True, project_id=self.project_id, setup_id=self.setup_id, face="superior")
         self.job_service._threads[(self.project_id, self.setup_id, "superior")].join(timeout=5)  # type: ignore[attr-defined]
         run = self.job_service.get_run(project_id=self.project_id, setup_id=self.setup_id, face="superior")
         self.assertEqual(run["state"], "SPINDLE_STOP_REQUIRED")
@@ -756,7 +758,7 @@ class JobServiceTest(unittest.TestCase):
 
         self.adapter.move_to_tool_change_position = fail_once  # type: ignore[assignment]
         self.job_service.prepare_run(project_id=self.project_id, setup_id=self.setup_id, face="superior")
-        self.job_service.start_run(project_id=self.project_id, setup_id=self.setup_id, face="superior")
+        self.job_service.start_run(spindle_prepared=True, project_id=self.project_id, setup_id=self.setup_id, face="superior")
         self.job_service._threads[(self.project_id, self.setup_id, "superior")].join(timeout=5)  # type: ignore[attr-defined]
         self.job_service.run_action(project_id=self.project_id, setup_id=self.setup_id, face="superior", action="confirm-spindle-stopped")
         self.job_service._threads[(self.project_id, self.setup_id, "superior")].join(timeout=5)  # type: ignore[attr-defined]
@@ -826,6 +828,11 @@ class JobServiceTest(unittest.TestCase):
             original["run_id"],
         )
 
+        with self.assertRaises(ApplicationError):
+            self.job_service.prepare_run(project_id=self.project_id, setup_id=self.setup_id, face='superior')
+        # Starting a new job after cancellation is an explicit safe reset,
+        # not an overwrite of the cancelled execution by prepare.
+        self.job_service.reset_runs_for_preparation(project_id=self.project_id, setup_id=self.setup_id)
         prepared = self.job_service.prepare_run(
             project_id=self.project_id,
             setup_id=self.setup_id,
@@ -942,7 +949,7 @@ class JobServiceTest(unittest.TestCase):
             return result
         self.adapter.start_file = start_then_print
         self.job_service.prepare_run(project_id=self.project_id, setup_id=self.setup_id, face="superior")
-        self.job_service.start_run(project_id=self.project_id, setup_id=self.setup_id, face="superior")
+        self.job_service.start_run(spindle_prepared=True, project_id=self.project_id, setup_id=self.setup_id, face="superior")
         time.sleep(0.7)
         context = self.job_service._context(self.project_id, self.setup_id, "superior")
         persisted = json.loads(self.job_service._run_file(context).read_text(encoding="utf-8"))
@@ -980,7 +987,7 @@ class JobServiceTest(unittest.TestCase):
             {"state": "complete", "progress": 1.0, "is_active": False},
         ]
         self.job_service.prepare_run(project_id=self.project_id, setup_id=self.setup_id, face="superior")
-        self.job_service.start_run(project_id=self.project_id, setup_id=self.setup_id, face="superior")
+        self.job_service.start_run(spindle_prepared=True, project_id=self.project_id, setup_id=self.setup_id, face="superior")
         time.sleep(0.7)
         context = self.job_service._context(self.project_id, self.setup_id, "superior")
         persisted = json.loads(self.job_service._run_file(context).read_text(encoding="utf-8"))
@@ -1196,7 +1203,7 @@ class JobServiceTest(unittest.TestCase):
             self.adapter.print_status = boom
         self.adapter.start_file = start_then_fail
         self.job_service.prepare_run(project_id=self.project_id, setup_id=self.setup_id, face="superior")
-        self.job_service.start_run(project_id=self.project_id, setup_id=self.setup_id, face="superior")
+        self.job_service.start_run(spindle_prepared=True, project_id=self.project_id, setup_id=self.setup_id, face="superior")
         self.job_service._threads[(self.project_id, self.setup_id, "superior")].join(timeout=5)  # type: ignore[attr-defined]
         context = self.job_service._context(self.project_id, self.setup_id, "superior")
         persisted = json.loads(self.job_service._run_file(context).read_text(encoding="utf-8"))
@@ -1217,7 +1224,7 @@ class JobServiceTest(unittest.TestCase):
             {"state": "printing", "filename": expected, "progress": 0.553, "is_active": True},
         ]
 
-        recovered = self.job_service.start_run(project_id=self.project_id, setup_id=self.setup_id, face="superior")
+        recovered = self.job_service.start_run(spindle_prepared=True, project_id=self.project_id, setup_id=self.setup_id, face="superior")
         time.sleep(0.7)
         persisted = json.loads(self.job_service._run_file(context).read_text(encoding="utf-8"))
 
@@ -1254,7 +1261,7 @@ class JobServiceTest(unittest.TestCase):
             {"state": "complete", "filename": expected, "progress": 1.0, "is_active": False},
         ]
 
-        self.job_service.start_run(project_id=self.project_id, setup_id=self.setup_id, face="superior")
+        self.job_service.start_run(spindle_prepared=True, project_id=self.project_id, setup_id=self.setup_id, face="superior")
         self.job_service._threads[(self.project_id, self.setup_id, "superior")].join(timeout=5)  # type: ignore[attr-defined]
         persisted = json.loads(self.job_service._run_file(context).read_text(encoding="utf-8"))
 
@@ -1276,7 +1283,7 @@ class JobServiceTest(unittest.TestCase):
         ]
 
         with self.assertRaisesRegex(Exception, "JOB_ACTIVE_CONFLICT"):
-            self.job_service.start_run(project_id=self.project_id, setup_id=self.setup_id, face="superior")
+            self.job_service.start_run(spindle_prepared=True, project_id=self.project_id, setup_id=self.setup_id, face="superior")
 
         persisted = json.loads(self.job_service._run_file(context).read_text(encoding="utf-8"))
         self.assertEqual(self.adapter.uploads, [])
@@ -1294,10 +1301,11 @@ class JobServiceTest(unittest.TestCase):
             "moonraker": {"http_connected": True, "websocket_connected": True, "telemetry_state": "LIVE", "url": "http://moonraker.local"},
             "klipper": {"ready": True, "homed_axes": "xy"},
             "started_at": "runtime-session",
+            "safety": {"telemetry_recent": True},
         }
 
         with self.assertRaisesRegex(Exception, "El trabajo no está listo para iniciar"):
-            self.job_service.start_run(project_id=self.project_id, setup_id=self.setup_id, face="superior")
+            self.job_service.start_run(spindle_prepared=True, project_id=self.project_id, setup_id=self.setup_id, face="superior")
 
         persisted = json.loads(self.job_service._run_file(context).read_text(encoding="utf-8"))
         self.assertEqual(persisted["state"], "JOB_VALIDATING")

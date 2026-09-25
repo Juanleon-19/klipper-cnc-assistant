@@ -119,7 +119,7 @@ class FinalReadAndRunTest(unittest.TestCase):
         self.service.history(**self.args)
         self.assertEqual(self.tree(), before)
         with self.assertRaises(ApplicationError):
-            self.service.start_run(**self.args)
+            self.service.start_run(spindle_prepared=True, **self.args)
         self.assertEqual(self.tree(), before)
         self.assertIsNotNone(self.service.prepare_run(**self.args))
         self.assertIsNotNone(self.service.get_run(**self.args))

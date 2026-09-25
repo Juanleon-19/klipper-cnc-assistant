@@ -266,7 +266,7 @@ class PhysicalReferenceTokenTest(unittest.TestCase):
         self.runtime.reference_serial_generation += 1
         with patch.object(self.service, '_start_worker') as worker:
             with self.assertRaises(ApplicationError):
-                self.service.start_run(**self.args)
+                self.service.start_run(spindle_prepared=True, **self.args)
         worker.assert_not_called()
         self.assertEqual(self.adapter.started, [])
 

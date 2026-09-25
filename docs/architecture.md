@@ -321,3 +321,44 @@ vigentes; una subida invalida el análisis y un cambio de material también.
 El frontend comparte únicamente lecturas concurrentes idénticas de plan/live;
 no almacena respuestas resueltas ni reduce la frecuencia de telemetría. Las
 mutaciones impiden compartir una lectura anterior a la modificación.
+
+### Cierre normal, referencia física y readiness de Ejecución
+
+El permiso de un workflow y la época de evidencia física son distintos.
+`PhysicalMachineCoordinator.complete_quiescent` revoca el permiso exclusivo
+con una observación ociosa reciente y revisión CAS coincidente, conservando la
+sesión de ownership. `MachineRuntime.complete_physical_workflow` verifica acceso,
+sesión física, Klipper ready, archivo inactivo y velocidad finita/cero antes del
+cierre. El worker MESH usa esta vía exclusivamente al terminar normalmente;
+cancelación, incertidumbre y recovery conservan su vía invalidante. El token de
+referencia permanece inmutable y su comparación de sesiones sigue obligatoria.
+
+El mapa pertenece a setup + face + surface + placement; la herramienta de
+adquisición es trazabilidad. Cada instalación aporta su propio Zref:
+`Z_final = Zref_instalación + map_delta + Z_programmed`. Las operaciones
+consecutivas de la misma herramienta reutilizan la evidencia exacta de la
+instalación anterior completada, verificándola de nuevo antes del JIT. Cambiar
+herramienta exige instalación y medición nuevas, sin adquirir otro mapa.
+
+`execution/readiness.py` concentra la evaluación de geometría, runtime y
+referencia de la operación pendiente actual. Preparación, consola en vivo y
+`GET /api/projects/{project_id}/execution/diagnostic` consumen esa evaluación.
+El diagnóstico no escribe runs, revisiones, planes ni artifacts, ni adquiere
+ownership; reutiliza el plan cacheado mientras sus dependencias sean vigentes.
+Readiness informa, no autoriza movimiento: MotionAuthorizer, PrintIdentity,
+spindle proof y los guards finales permanecen obligatorios.
+
+`prepare_run` solo acepta ausencia de run o JOB_DRAFT/JOB_VALIDATING/JOB_READY
+sin inicio previo. Rechaza estados activos, recovery y terminales sin alterar
+el run. Para repetir un trabajo terminal se requiere el reset explícito de
+preparación existente. `start` requiere `spindle_prepared: true`; el frontend
+ofrece una confirmación humana explícita asociada al run, las sesiones y la
+instalación/referencia observada. El backend conserva la prueba de spindle
+vinculada al contexto y la revalida antes de emitir.
+
+La UI separa cobertura/bloqueos geométricos de la referencia actual, muestra
+la causa y acción de bloqueo, y presenta las referencias futuras como pendientes
+del cambio. Una falla de lectura del estado deshabilita inicio. Recovery informa
+su causa (sesión/referencia, identidad remota, standby, supervisor o transición).
+Tras reiniciar runtime se requiere nueva captura Z: no hay migración ni
+reactivación de evidencia histórica.

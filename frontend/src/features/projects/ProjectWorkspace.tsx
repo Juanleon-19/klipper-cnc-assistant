@@ -26,6 +26,7 @@ import type {
   Bounds,
   OperationAnalysis,
   JobPlan,
+  ExecutionReadiness,
   LiveExecutionSnapshot,
   MachineRuntime,
   ReferenceMoveResult,
@@ -594,6 +595,8 @@ export function ProjectWorkspace({
   const [showAllTrajectoryOperations, setShowAllTrajectoryOperations] = useState(false);
   const [meshValidationMessage, setMeshValidationMessage] = useState("");
   const [meshPreviewFingerprint, setMeshPreviewFingerprint] = useState<string | null>(null);
+  const [liveExecutionUnavailable, setLiveExecutionUnavailable] = useState(false);
+  const [executionReadiness, setExecutionReadiness] = useState<ExecutionReadiness | null>(null);
   const [jobPlan, setJobPlan] = useState<JobPlan | null>(null);
   const [liveExecution, setLiveExecution] = useState<LiveExecutionSnapshot | null>(null);
   const [machineSettingsInput, setMachineSettingsInput] = useState<MachineSettingsInput>(() => machineSettingsToInput(DEFAULT_MACHINE_SETTINGS));
@@ -828,21 +831,24 @@ export function ProjectWorkspace({
   useEffect(() => {
     if (!project || !selectedSetup || !activeJobFace) {
       setJobPlan(null);
+      setExecutionReadiness(null);
       setLiveExecution(null);
       return;
     }
     let cancelled = false;
     const loadJobState = async () => {
       try {
-        const plan = await api.getJobPlan(project.id, selectedSetup.id, activeJobFace);
+        const diagnostic = await api.inspectExecution(project.id, selectedSetup.id, activeJobFace);
         if (cancelled) {
           return;
         }
-        setJobPlan(plan);
+        setJobPlan(diagnostic.plan);
+        setExecutionReadiness(diagnostic.readiness);
         setExecutionError(null);
       } catch {
         if (!cancelled) {
           setJobPlan(null);
+          setExecutionReadiness(null);
         }
       }
     };
@@ -867,8 +873,9 @@ export function ProjectWorkspace({
           return;
         }
         setLiveExecution(live);
+        setLiveExecutionUnavailable(false);
       } catch {
-        // conserve last visible state
+        if (!cancelled) setLiveExecutionUnavailable(true);
       } finally {
         inFlight = false;
       }
@@ -2215,6 +2222,7 @@ export function ProjectWorkspace({
       setHeightMap(null);
       setMeshSuggestion(null);
       setJobPlan(null);
+      setExecutionReadiness(null);
       setLiveExecution(null);
       setExecutionError(null);
       setWorkspaceError("");
@@ -2237,11 +2245,12 @@ export function ProjectWorkspace({
     if (!project || !selectedSetup || !activeJobFace) {
       return;
     }
-    const [plan, live] = await Promise.all([
-      api.getJobPlan(project.id, selectedSetup.id, activeJobFace),
+    const [diagnostic, live] = await Promise.all([
+      api.inspectExecution(project.id, selectedSetup.id, activeJobFace),
       api.getLiveExecution(project.id, selectedSetup.id, activeJobFace),
     ]);
-    setJobPlan(plan);
+    setJobPlan(diagnostic.plan);
+    setExecutionReadiness(diagnostic.readiness);
     setLiveExecution(live);
     setExecutionError(null);
   };
@@ -2291,7 +2300,7 @@ export function ProjectWorkspace({
     }
   };
 
-  const startJobRun = async () => {
+  const startJobRun = async (spindlePrepared: boolean) => {
     if (startJobInFlight.current || !project || !selectedSetup || !activeJobFace) {
       return;
     }
@@ -2303,7 +2312,7 @@ export function ProjectWorkspace({
     setReferenceBusy(true);
     setWorkspaceError("");
     try {
-      await api.startJobRun(project.id, selectedSetup.id, activeJobFace);
+      await api.startJobRun(project.id, selectedSetup.id, activeJobFace, spindlePrepared);
       await refreshJobState();
     } catch (error) {
       setExecutionError(error instanceof ApiError ? error : null);
@@ -2355,6 +2364,35 @@ export function ProjectWorkspace({
     }
   };
 
+  const refreshExecutionInspection = async () => {
+    if (!project || !selectedSetup || !activeJobFace) return;
+    setReferenceBusy(true);
+    try {
+      const diagnostic = await api.inspectExecution(project.id, selectedSetup.id, activeJobFace);
+      setJobPlan(diagnostic.plan);
+      setExecutionReadiness(diagnostic.readiness);
+      setExecutionError(null);
+    } catch (error) {
+      setExecutionReadiness(null);
+      setExecutionError(error instanceof ApiError ? error : null);
+      setWorkspaceError(error instanceof Error ? error.message : "No fue posible actualizar el diagnóstico.");
+    } finally {
+      setReferenceBusy(false);
+    }
+  };
+
+  const currentExecutionReadiness = liveExecution?.readiness && (!executionReadiness || liveExecution.readiness.evaluated_at > executionReadiness.evaluated_at) ? liveExecution.readiness : executionReadiness;
+  const referencePresentation = (operationId: string) => {
+    const rows = jobPlan?.operations ?? [];
+    const index = rows.findIndex((row) => row.operation_id === operationId);
+    const current = rows.findIndex((row) => row.operation_id === currentExecutionReadiness?.current_operation.operation_id);
+    if (current >= 0 && index >= current) {
+      const sameInstallationSequence = rows.slice(current, index + 1).every((row) => row.tool_key === rows[current].tool_key);
+      return sameInstallationSequence ? currentExecutionReadiness?.reference.status : "Se medirá después del cambio";
+    }
+    return rows[index]?.reference_display ?? rows[index]?.reference_status ?? "pendiente";
+  };
+
   const renderJobCompensationPanel = () => {
     if (!selectedSetup || !activeJobFace) {
       return null;
@@ -2372,7 +2410,7 @@ export function ProjectWorkspace({
             <h3>Artefacto Legacy de diagnóstico — {translateFace(activeJobFace)}</h3>
           </div>
           <div className="toolbar-inline">
-            <button className="button button--ghost" type="button" disabled={compensationControlsBusy || executionSettingsBlocked} onClick={() => void prepareJobRun()}>Actualizar inspección</button>
+            <button className="button button--ghost" type="button" disabled={compensationControlsBusy || executionSettingsBlocked} onClick={() => void refreshExecutionInspection()}>Actualizar inspección</button>
             <button className="button" type="button" disabled={compensationControlsBusy || !selectedOperation} onClick={() => void generateSelectedLegacyCompensation()}>
               {compensationBusy ? "Generando artefacto…" : "Generar artefacto Legacy de inspección"}
             </button>
@@ -2384,7 +2422,7 @@ export function ProjectWorkspace({
               <div className="metric-box"><span>Operación seleccionada</span><strong>{selectedOperation.nombre}</strong></div>
               <div className="metric-box"><span>Método de producción</span><strong>Legacy</strong></div>
               <div className="metric-box"><span>Mapa</span><strong>{selectedPlanOperation?.map_status ?? "pendiente"}</strong></div>
-              <div className="metric-box"><span>Referencia Z</span><strong>{selectedPlanOperation?.reference_status ?? "pendiente"}</strong></div>
+              <div className="metric-box"><span>Referencia Z</span><strong>{referencePresentation(selectedOperation.id)}</strong></div>
               <div className="metric-box"><span>Archivo compensado</span><strong>{selectedPlanOperation?.generated_file_name ?? "Se generará al ejecutar"}</strong></div>
             </div>
             <p className="muted">La ejecución genera una compensación Legacy nueva únicamente para la operación que va a ejecutarse. Un cambio de herramienta conserva el mapa, mide la nueva Z y solo después genera la siguiente operación pendiente.</p>
@@ -2394,11 +2432,11 @@ export function ProjectWorkspace({
           <>
             <div className="info-grid info-grid--double compact-grid">
               <div className="metric-box"><span>Operaciones</span><strong>{jobPlan.summary.operations_total}</strong></div>
-              <div className="metric-box"><span>Listas</span><strong>{jobPlan.summary.operations_ready}</strong></div>
+              <div className="metric-box"><span>Con cobertura</span><strong>{jobPlan.operations.filter((item) => item.coverage_status === "VALIDA").length}</strong></div>
               <div className="metric-box"><span>Archivos ya generados</span><strong>{jobPlan.summary.generated_files}</strong></div>
               <div className="metric-box"><span>Cambios de herramienta</span><strong>{jobPlan.summary.tool_changes}</strong></div>
               <div className="metric-box"><span>Herramientas distintas</span><strong>{jobPlan.summary.distinct_tools}</strong></div>
-              <div className="metric-box"><span>Bloqueadas</span><strong>{jobPlan.summary.blocked_operations}</strong></div>
+              <div className="metric-box"><span>Bloqueos de archivo/geometría</span><strong>{jobPlan.summary.blocked_operations}</strong></div>
             </div>
             <div className="table-scroll">
               <table className="data-table">
@@ -2410,7 +2448,7 @@ export function ProjectWorkspace({
                       <td><strong>{item.name}</strong>{item.blocking_reasons.length > 0 ? <div className="muted">{item.blocking_reasons[0]}</div> : null}</td>
                       <td>{item.tool_name}</td>
                       <td>{item.map_status}</td>
-                      <td>{item.reference_status}</td>
+                      <td>{referencePresentation(item.operation_id)}</td>
                       <td>{item.generated_file_name ?? "se generará al ejecutar"}</td>
                     </tr>
                   ))}
@@ -2430,7 +2468,8 @@ export function ProjectWorkspace({
     return (
       <ExecutionConsole
         snapshot={liveExecution}
-        error={executionError}
+        readiness={currentExecutionReadiness}
+        error={liveExecutionUnavailable ? new ApiError("No se pudo actualizar el estado de ejecución. Reintente la inspección.", 503) : executionError}
         busy={referenceBusy || compensationBusy}
         settingsBlocked={executionSettingsBlocked}
         settingsBlockReason={executionSettingsBlockReason}

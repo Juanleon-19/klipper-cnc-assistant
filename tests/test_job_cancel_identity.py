@@ -93,6 +93,8 @@ class JobCancelIdentityTest(unittest.TestCase):
 
     def test_D_old_callback_cannot_modify_new_run(self):
         self.service.run_action(**self.args, action='cancel')
+        self.adapter.state = 'standby'  # explicit fake idle proof for preparation reset
+        self.service.reset_runs_for_preparation(project_id=self.args['project_id'], setup_id=self.args['setup_id'])
         newer = self.service.prepare_run(**self.args)
         self.assertNotEqual(newer['run_id'], self.run['run_id'])
         before = self.path.read_bytes()
@@ -120,14 +122,12 @@ class JobCancelIdentityTest(unittest.TestCase):
             self.service.run_action(**self.args, action='pause')
             self.service.run_action(**self.args, action='cancel')
         self.assertEqual(self.adapter.pause_calls + self.adapter.cancel_calls, 0)
-        newer = self.service.prepare_run(**self.args)
-        # A new isolated owner simulates an explicit, reconciled next session.
-        from klipper_cnc_assistant.machine.physical_ownership import PhysicalMachineCoordinator
-        self.fixture.runtime.physical_ownership = PhysicalMachineCoordinator()
-        self.service._physical_leases.clear()
+        self.adapter.state = 'standby'  # explicit fake idle proof for preparation reset
+        self.service.reset_runs_for_preparation(project_id=self.args['project_id'], setup_id=self.args['setup_id'])
+        self.service.prepare_run(**self.args)
         with patch.object(self.adapter, 'print_status', side_effect=RuntimeError('offline')):
             with self.assertRaises(Exception):
-                self.service._execute_next_operation(self.context, newer)
+                self.service.start_run(**self.args, spindle_prepared=True)
         self.assertEqual(self.adapter.started, [])
         self.assertEqual(self.adapter.uploads, [])
 
@@ -192,11 +192,11 @@ class JobCancelIdentityTest(unittest.TestCase):
             self.assertEqual(self.load()['state'], 'RECOVERY_REQUIRED')
 
     def test_cancel_during_preflight_cannot_create_replacement(self):
-        original = self.service._build_run_checks
+        original = self.service._execution_readiness
         def checks(*args):
             self.service.run_action(**self.args, action='cancel')
             return original(*args)
-        with patch.object(self.service, '_build_run_checks', side_effect=checks):
+        with patch.object(self.service, '_execution_readiness', side_effect=checks):
             with self.assertRaises(JobRunConflict):
                 self.service.prepare_run(**self.args)
         self.assertEqual(self.load()['run_id'], self.run['run_id'])

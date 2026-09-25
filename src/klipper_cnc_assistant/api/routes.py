@@ -795,14 +795,18 @@ def build_router() -> APIRouter:
     def get_job_run(project_id: str, setup_id: str, face: str, request: Request) -> dict[str, object] | None:
         return request.app.state.job_service.get_run(project_id=project_id, setup_id=setup_id, face=face)
 
+    @router.get("/projects/{project_id}/execution/diagnostic", response_model=dict[str, object])
+    def execution_diagnostic(project_id: str, setup_id: str, face: str, request: Request):
+        return request.app.state.job_service.inspect_execution(project_id=project_id, setup_id=setup_id, face=face)
+
     @router.post("/projects/{project_id}/job-run/prepare", response_model=dict[str, object])
     def prepare_job_run(project_id: str, payload: dict[str, str], request: Request) -> dict[str, object]:
         return request.app.state.job_service.prepare_run(project_id=project_id, setup_id=str(payload["setup_id"]), face=str(payload["face"]))
 
     @router.post("/projects/{project_id}/job-run/start", response_model=dict[str, object])
-    def start_job_run(project_id: str, payload: dict[str, str], request: Request) -> dict[str, object]:
+    def start_job_run(project_id: str, payload: dict[str, object], request: Request) -> dict[str, object]:
         try:
-            return request.app.state.job_service.start_run(project_id=project_id, setup_id=str(payload["setup_id"]), face=str(payload["face"]))
+            return request.app.state.job_service.start_run(project_id=project_id, setup_id=str(payload["setup_id"]), face=str(payload["face"]), spindle_prepared=payload.get("spindle_prepared") is True)
         except ApplicationError as error:
             if str(error) == "JOB_ACTIVE_CONFLICT":
                 detail = request.app.state.job_service.describe_run_conflict(project_id=project_id, setup_id=str(payload["setup_id"]), face=str(payload["face"]))

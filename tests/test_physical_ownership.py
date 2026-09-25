@@ -68,3 +68,33 @@ class PhysicalOwnershipTest(unittest.TestCase):
         with self.assertRaises(OwnershipError):
             coordinator.reconcile_quiescent(expected_session=coordinator.session, quiescent=True)
         coordinator.end_dispatch(permit)
+
+
+class WorkflowCompletionTest(unittest.TestCase):
+    def test_normal_completion_preserves_epoch_but_revokes_old_lease(self):
+        c = PhysicalMachineCoordinator()
+        lease = c.acquire(OwnerKind.MESH, 'mesh')
+        epoch = c.session
+        c.complete_quiescent(lease, expected_revision=c.snapshot()['revision'], quiescent=True)
+        self.assertEqual(c.session, epoch)
+        self.assertEqual(c.snapshot()['kind'], 'IDLE')
+        with self.assertRaises(OwnershipError):
+            c.validate(lease)
+        replacement = c.acquire(OwnerKind.JOB_EXECUTION, 'job')
+        self.assertEqual(replacement.session, epoch)
+        self.assertNotEqual(replacement.token, lease.token)
+
+    def test_normal_completion_rejects_uncertainty_cancel_children_dispatch_and_stale_observation(self):
+        for cause in ('recovery', 'cancel', 'child', 'dispatch', 'stale', 'not_idle'):
+            with self.subTest(cause=cause):
+                c = PhysicalMachineCoordinator()
+                lease = c.acquire(OwnerKind.MESH, 'mesh')
+                revision = c.snapshot()['revision']
+                if cause == 'recovery': c.enter_recovery('uncertain')
+                if cause == 'cancel': c.request_cancel(lease)
+                if cause == 'child': c.delegate(lease, 'child')
+                if cause == 'dispatch': c.begin_dispatch(lease)
+                if cause == 'stale': revision -= 1
+                with self.assertRaises(OwnershipError):
+                    c.complete_quiescent(lease, expected_revision=revision, quiescent=cause != 'not_idle')
+                self.assertTrue(c.snapshot()['active'])

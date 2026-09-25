@@ -1712,6 +1712,32 @@ class MachineRuntime:
             self._raise_if_cancelled()
             return self._motion_context(action)
 
+    def complete_physical_workflow(self, permit) -> bool:
+        """Fresh idle proof closes only this lease; never rewrites a reference."""
+        ownership = self.physical_ownership.snapshot()
+        session = self.current_physical_session_id()
+        if (self._active_operation is not None or self._movement_lock.locked()
+                or ownership['children'] or ownership['recovery_pending']):
+            return False
+        try:
+            self.require_physical_access()
+            if self._client is None:
+                return False
+            status = self._client.query_objects({'webhooks': ['state'], 'print_stats': ['state'],
+                'virtual_sdcard': ['is_active'], 'motion_report': ['live_velocity']})
+            velocity = float(status['motion_report']['live_velocity'])
+            idle = (status['webhooks']['state'] == 'ready'
+                    and status['print_stats']['state'] in {'standby', 'complete'}
+                    and status['virtual_sdcard']['is_active'] is False
+                    and math.isfinite(velocity) and abs(velocity) <= self.config.velocity_tolerance_mm_s)
+            if self.current_physical_session_id() != session:
+                return False
+            self.physical_ownership.complete_quiescent(permit,
+                expected_revision=ownership['revision'], quiescent=idle)
+            return True
+        except Exception:
+            return False
+
     def reconcile_physical_ownership(self) -> bool:
         """Explicit reconciliation, only after local producers have relinquished leases.
 

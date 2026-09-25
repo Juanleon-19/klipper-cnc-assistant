@@ -43,17 +43,20 @@ class ReferenceExecutionHandoffTest(unittest.TestCase):
         response = self.fixture.client.post(base + '/plan-from-reference', json=config)
         self.assertEqual(response.status_code, 200, response.text)
         self.map = response.json()['payload']
+        self.complete_mesh()
+        self.map = self.maps.get_active(self.project_id, self.operation_id)
+        self.assertEqual(self.map['status'], 'MESH_COMPLETE')
+        self.assertEqual(self.map['validation']['status'], 'VALID')
+        self.args = dict(project_id=self.project_id, setup_id=self.setup_id, face='superior')
+        self.context = self.job._context(**self.args)
+
+    def complete_mesh(self):
         for point in self.map['points']:
             if point['status'] == 'MEASURED':
                 continue
             self.maps.record_point(project_id=self.project_id, map_id=self.map['map_id'],
                                    point_index=point['index'], z_measured=30.0,
                                    attempts=1, duration_s=.01)
-        self.map = self.maps.get_active(self.project_id, self.operation_id)
-        self.assertEqual(self.map['status'], 'MESH_COMPLETE')
-        self.assertEqual(self.map['validation']['status'], 'VALID')
-        self.args = dict(project_id=self.project_id, setup_id=self.setup_id, face='superior')
-        self.context = self.job._context(**self.args)
 
     def current(self):
         return require_current_reference(self.repo, self.runtime, self.project_id,
@@ -74,7 +77,7 @@ class ReferenceExecutionHandoffTest(unittest.TestCase):
         self.assertNotIn('Falta referencia Z', self.reference_check(run)['detail'])
         with patch.object(self.job, '_start_worker') as worker:
             with self.assertRaises(ApplicationError):
-                self.job.start_run(**self.args)
+                self.job.start_run(spindle_prepared=True, **self.args)
         worker.assert_not_called()
         self.assertEqual(self.adapter.uploads, [])
         self.assertEqual(self.adapter.started, [])
@@ -88,7 +91,7 @@ class ReferenceExecutionHandoffTest(unittest.TestCase):
         self.assertTrue(self.reference_check(run)['ok'], run['checks'])
         self.assertEqual(run['state'], 'JOB_READY', run['checks'])
         with patch.object(self.job, '_start_worker'):
-            started = self.job.start_run(**self.args)
+            started = self.job.start_run(spindle_prepared=True, **self.args)
         self.assertEqual(started['state'], 'JOB_STARTING')
         self.job._execute_next_operation(self.context, started)
         self.assertEqual(len(self.adapter.started), 1)
@@ -115,7 +118,7 @@ class ReferenceExecutionHandoffTest(unittest.TestCase):
         self.runtime.current_physical_session_id = lambda: 'restarted-session'
         with patch.object(self.job, '_start_worker') as worker:
             with self.assertRaises(ApplicationError):
-                self.job.start_run(**self.args)
+                self.job.start_run(spindle_prepared=True, **self.args)
         worker.assert_not_called()
         self.assertEqual(self.adapter.started, [])
 
@@ -151,3 +154,70 @@ class ReferenceExecutionHandoffTest(unittest.TestCase):
         self.repo.save_project(project.replace_setup(replace(setup,
             preparacion=replace(setup.preparacion, physical_reference=None))))
         self.assert_blocked()
+
+
+class RealMeshWorkerHandoffTest(ReferenceExecutionHandoffTest):
+    """Same negative contracts, with the REAL worker and finally, not record_point shortcuts."""
+    def complete_mesh(self):
+        import threading
+        from klipper_cnc_assistant.execution.mesh_execution_service import MeshExecutionService
+        pending = sum(p['status'] != 'MEASURED' for p in self.map['points'])
+        owner_before = self.runtime.physical_ownership.session
+        session_before = self.runtime.current_physical_session_id()
+        probes = []
+        mesh = MeshExecutionService(self.maps)
+        def measure(point, *, permit, **kwargs):
+            self.runtime.physical_ownership.validate(permit)
+            probes.append(point['index'])
+            self.runtime._machine.update_motion(live_position=(point['x_machine'], point['y_machine'], 31), live_velocity=0)
+            return {'z_measured': 30.0, 'duration_s': .001}
+        finished = threading.Event()
+        original = mesh._run
+        def worker(*args):
+            try:
+                return original(*args)
+            finally:
+                finished.set()
+        with patch.object(self.runtime, 'probe_mesh_point', side_effect=measure), \
+             patch.object(self.runtime, 'refresh_observed_state', side_effect=self.runtime.snapshot), \
+             patch.object(mesh, '_run', side_effect=worker):
+            mesh.start_all(project_id=self.project_id, map_id=self.map['map_id'], runtime=self.runtime)
+            self.assertTrue(finished.wait(10), 'mesh worker did not finish')
+        self.assertEqual(len(probes), pending)
+        self.assertEqual(self.runtime._perform_probe_descent.call_count, 1)
+        self.assertEqual(self.runtime.current_physical_session_id(), session_before)
+        self.assertEqual(self.runtime.physical_ownership.session, owner_before)
+        self.assertEqual(self.runtime.physical_ownership.snapshot()['kind'], 'IDLE')
+        self.assertFalse(mesh._physical_leases)
+        actual = self.maps.get_active(self.project_id, self.operation_id)
+        self.assertEqual(actual['tool_references'][self.tool]['physical_reference_token'], self.token)
+        self.assertEqual(actual['tool_references'][self.tool]['installation_id'], self.token['installation_id'])
+
+
+    def test_api_diagnostic_prepare_explicit_start_and_jit_after_real_mesh(self):
+        base = f'/api/projects/{self.project_id}'
+        client = self.fixture.client
+        params = dict(setup_id=self.setup_id, face='superior')
+        path = self.job._existing_run_file(self.context)
+        diagnostic = client.get(base + '/execution/diagnostic', params=params)
+        self.assertEqual(diagnostic.status_code, 200, diagnostic.text)
+        self.assertFalse(path.exists())
+        self.assertTrue(diagnostic.json()['readiness']['conditions_ready'])
+        prepared = client.post(base + '/job-run/prepare', json=params)
+        self.assertEqual(prepared.status_code, 200, prepared.text)
+        self.assertEqual(prepared.json()['state'], 'JOB_READY')
+        before = path.read_bytes()
+        self.assertEqual(client.get(base + '/execution/diagnostic', params=params).status_code, 200)
+        self.assertEqual(path.read_bytes(), before)
+        refused = client.post(base + '/job-run/start', json=params)
+        self.assertEqual(refused.status_code, 400, refused.text)
+        self.assertEqual(path.read_bytes(), before)
+        with patch.object(self.job, '_start_worker'):
+            response = client.post(base + '/job-run/start', json={**params, 'spindle_prepared': True})
+        self.assertEqual(response.status_code, 200, response.text)
+        run = response.json()
+        self.job._execute_next_operation(self.context, run)
+        self.assertEqual(len(self.adapter.started), 1)
+        self.assertEqual(run['operations'][0]['physical_reference_token'], self.token)
+        self.assertEqual(self.runtime._perform_probe_descent.call_count, 1)
+        self.assertEqual(self.capture.client.scripts, [])

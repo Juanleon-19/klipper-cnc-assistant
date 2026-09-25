@@ -54,13 +54,17 @@ class ProductReviewValidationTest(unittest.TestCase):
 
     def test_failed_preflight_messages_describe_missing_conditions(self):
         # Exercise the same function used by live/prepare, without starting runtime.
-        runtime=SimpleNamespace(snapshot=lambda:{'mode':'SIMULATED','moonraker':{},'klipper':{}})
-        service=SimpleNamespace(runtime=runtime)
-        checks=JobService._build_run_checks(service,None,{'operations':[{'blocking':True}]})
-        details={c['name']:c for c in checks}
-        for name,expected in [('runtime_conectado','Sin conexión'),('websocket','desconectada'),
-                              ('klipper_ready','no está listo'),('mapa_activo','Falta'),('operaciones_bloqueadas','bloqueadas')]:
-            self.assertFalse(details[name]['ok']);self.assertIn(expected,details[name]['detail'])
+        from klipper_cnc_assistant.execution.readiness import evaluate_readiness
+        result = evaluate_readiness({'operations': [{'operation_id': 'op', 'name': 'Operation', 'blocking': True,
+            'blocking_reasons': ['Archivo ausente']}]}, None, {'mode': 'SIMULATED'}, {}, 'fake')
+        details = {c['name']: c for c in result['checks']}
+        for name, expected in [('runtime_conectado', 'HTTP'), ('websocket', 'WebSocket'),
+                               ('klipper_ready', 'Klipper'), ('mapa_activo', 'mapa único'),
+                               ('operaciones_bloqueadas', 'Archivo ausente')]:
+            self.assertFalse(details[name]['ok'])
+            self.assertIn(expected, details[name]['detail'])
+        self.assertTrue(all(r['action'] for r in result['blocking_reasons']))
+
 
 
 if __name__=='__main__':unittest.main()

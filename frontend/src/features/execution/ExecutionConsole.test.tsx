@@ -1,3 +1,4 @@
+import { readyExecution } from "../../test/execution-fixtures";
 import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
@@ -175,7 +176,7 @@ describe("ExecutionConsole", () => {
       />,
     );
 
-    expect(screen.getByText("Transición de herramienta detenida")).toBeInTheDocument();
+    expect(screen.getByText("Recuperación requerida")).toBeInTheDocument();
     expect(screen.getAllByText(/Causa: No se confirmó la posición segura\./i).length).toBeGreaterThan(0);
     expect(screen.queryByText(/Traceback \(most recent call last\)/i)).toBeNull();
     expect(screen.getByText("Herramienta larga")).toBeInTheDocument();
@@ -200,6 +201,15 @@ describe("ExecutionConsole", () => {
   it("muestra checks aprobados, fallidos y sus detalles cuando el trabajo no está listo", () => {
     render(
       <ExecutionConsole
+        readiness={readyExecution({ can_start: false, conditions_ready: false,
+          blocking_reasons: [{ code: "REFERENCE_SESSION_CHANGED", category: "tool", message: "Referencia medida en una sesión física anterior.", action: "Mida Z con la herramienta 3 mm instalada." }],
+          reference: { valid: false, code: "REFERENCE_SESSION_CHANGED", status: "SESIÓN ANTERIOR", message: "Referencia medida en una sesión física anterior." },
+          checks: [
+            { name: "modo_fisico", ok: true, detail: "MACHINE_MODE=physical" },
+            { name: "homing", ok: false, detail: "Homing actual: pendiente." },
+            { name: "mapa_activo", ok: true, detail: "Mapa válido." },
+            { name: "referencia_inicial", ok: false, detail: "Referencia medida en una sesión física anterior." },
+          ] })}
         snapshot={{
           ...baseSnapshot,
           run: { ...baseSnapshot.run, status: "JOB_VALIDATING", available_actions: [] },
@@ -226,19 +236,20 @@ describe("ExecutionConsole", () => {
     );
 
     expect(screen.getByText(/Preparación del trabajo/i)).toBeInTheDocument();
-    expect(screen.getByText(/Trabajo no listo/i)).toBeInTheDocument();
+    expect(screen.getByText(/NO PUEDE INICIAR/i)).toBeInTheDocument();
     expect(screen.getByText(/OK · Modo físico/i)).toBeInTheDocument();
     expect(screen.getByText(/OK · Mapa físico/i)).toBeInTheDocument();
     expect(screen.getByText(/FALLA · Homing XYZ/i)).toBeInTheDocument();
     expect(screen.getByText(/FALLA · Referencia inicial/i)).toBeInTheDocument();
     expect(screen.getAllByText(/Homing actual: pendiente\./i).length).toBeGreaterThan(0);
-    expect(screen.getAllByText(/Falta referencia Z de la herramienta inicial\./i).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/Referencia medida en una sesión física anterior\./i).length).toBeGreaterThan(0);
     expect(screen.getByText(/Bloqueos que debes resolver/i)).toBeInTheDocument();
   });
 
   it("muestra el estado listo cuando todos los checks están OK", () => {
     render(
       <ExecutionConsole
+        readiness={readyExecution()}
         snapshot={{
           ...baseSnapshot,
           run: { ...baseSnapshot.run, status: "JOB_READY", available_actions: ["start"] },
@@ -262,7 +273,7 @@ describe("ExecutionConsole", () => {
       />,
     );
 
-    expect(screen.getByText(/Trabajo listo para iniciar/i)).toBeInTheDocument();
+    expect(screen.getByText(/^PUEDE INICIAR$/i)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Iniciar trabajo" })).toBeInTheDocument();
     expect(screen.queryByText(/Bloqueos que debes resolver/i)).toBeNull();
   });
@@ -292,7 +303,7 @@ describe("ExecutionConsole", () => {
       />,
     );
 
-    expect(screen.getByText(/Hay cambios de configuración de máquina sin guardar/i)).toBeInTheDocument();
+    expect(screen.getAllByText(/Hay cambios de configuración de máquina sin guardar/i).length).toBeGreaterThan(0);
     expect(screen.getByRole("button", { name: "Preparar trabajo" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Iniciar trabajo" })).toBeDisabled();
     fireEvent.click(screen.getByRole("button", { name: "Preparar trabajo" }));
@@ -329,6 +340,7 @@ describe("ExecutionConsole", () => {
     const onPrepare = vi.fn();
     const { rerender } = render(
       <ExecutionConsole
+        readiness={readyExecution({ can_start: false, can_prepare: true })}
         snapshot={{
           ...baseSnapshot,
           run: { ...baseSnapshot.run, status: "JOB_VALIDATING", available_actions: [] },
@@ -347,6 +359,7 @@ describe("ExecutionConsole", () => {
 
     rerender(
       <ExecutionConsole
+        readiness={readyExecution({ can_start: false, can_prepare: true })}
         snapshot={{
           ...baseSnapshot,
           run: { ...baseSnapshot.run, status: "JOB_VALIDATING", available_actions: [] },
@@ -675,8 +688,63 @@ describe("ExecutionConsole", () => {
     );
 
     expect(screen.getByText(/Errores de ejecución/i)).toBeInTheDocument();
-    expect(screen.getByText(/JOB_ACTIVE_CONFLICT/i)).toBeInTheDocument();
+    expect(screen.getByText("JOB_ACTIVE_CONFLICT")).toBeInTheDocument();
     expect(screen.getByText(/job-run\/setup-main\/superior\/20260722-040230/i)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /Cerrar ejecución obsoleta/i })).toBeInTheDocument();
   });
+});
+
+describe("Autoridad de ejecución y confirmación humana", () => {
+  const props = { error: null, busy: false, onPrepare: vi.fn(), onStart: vi.fn(), onAction: vi.fn(), onArchiveStale: vi.fn() };
+  const readySnapshot = { ...baseSnapshot, run: { ...baseSnapshot.run, status: "JOB_READY", available_actions: ["start"] } };
+
+  it("bloquea un JOB_READY antiguo cuando la evaluación actual invalida la referencia", () => {
+    render(<ExecutionConsole {...props} snapshot={readySnapshot} readiness={readyExecution({
+      can_start: false, conditions_ready: false,
+      reference: { valid: false, code: "REFERENCE_SESSION_CHANGED", status: "SESIÓN ANTERIOR", message: "Referencia medida en una sesión física anterior." },
+      blocking_reasons: [{ code: "REFERENCE_SESSION_CHANGED", category: "tool", message: "Referencia medida en una sesión física anterior.", action: "Mida Z con la herramienta 3 mm instalada." }],
+    })} />);
+    expect(screen.getByText("NO PUEDE INICIAR")).toBeInTheDocument();
+    expect(screen.getByText("SESIÓN ANTERIOR")).toBeInTheDocument();
+    expect(screen.getByText("Mida Z con la herramienta 3 mm instalada.")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Iniciar trabajo" })).toBeDisabled();
+  });
+
+  it("requiere checkbox explícito y lo invalida cuando cambia la sesión o medición", () => {
+    const onStart = vi.fn();
+    const { rerender } = render(<ExecutionConsole {...props} onStart={onStart} snapshot={readySnapshot} readiness={readyExecution()} />);
+    const button = screen.getByRole("button", { name: "Iniciar trabajo" });
+    expect(button).toBeDisabled();
+    fireEvent.click(screen.getByRole("checkbox", { name: "Confirmo que el spindle está preparado" }));
+    expect(button).toBeEnabled();
+    rerender(<ExecutionConsole {...props} onStart={onStart} snapshot={readySnapshot} readiness={readyExecution({ physical_session_id: "new-session" })} />);
+    expect(button).toBeDisabled();
+    fireEvent.click(screen.getByRole("checkbox", { name: "Confirmo que el spindle está preparado" }));
+    fireEvent.click(button);
+    expect(onStart).toHaveBeenCalledWith(true);
+    expect(button).toBeDisabled();
+  });
+
+  it("no habilita Preparar durante ejecución aunque falte el diagnóstico", () => {
+    render(<ExecutionConsole {...props} snapshot={baseSnapshot} />);
+    expect(screen.getByRole("button", { name: "Preparar trabajo" })).toBeDisabled();
+  });
+
+  it("presenta la causa específica de recovery y no presupone cambio de herramienta", () => {
+    render(<ExecutionConsole {...props} snapshot={{ ...baseSnapshot,
+      run: { ...baseSnapshot.run, status: "RECOVERY_REQUIRED" },
+      recovery: { code: "PRINT_IDENTITY_MISMATCH", message: "El archivo remoto no coincide con este trabajo.", action: "Identifique la impresión remota." },
+    }} />);
+    expect(screen.getByText(/El archivo remoto no coincide/)).toBeInTheDocument();
+    expect(screen.queryByText("Transición de herramienta detenida")).not.toBeInTheDocument();
+  });
+  it("permite iniciar cuando readiness se recupera aunque el run persista VALIDATING", () => {
+    render(<ExecutionConsole snapshot={{ ...baseSnapshot, run: { ...baseSnapshot.run, status: "JOB_VALIDATING", available_actions: [] } }} readiness={readyExecution()} error={null} busy={false} onPrepare={vi.fn()} onStart={vi.fn()} onAction={vi.fn()} onArchiveStale={vi.fn()} />);
+    expect(screen.getByText("PUEDE INICIAR")).toBeInTheDocument();
+    const start = screen.getByRole("button", { name: "Iniciar trabajo" });
+    expect(start).toBeDisabled();
+    fireEvent.click(screen.getByRole("checkbox", { name: "Confirmo que el spindle está preparado" }));
+    expect(start).toBeEnabled();
+  });
+
 });
