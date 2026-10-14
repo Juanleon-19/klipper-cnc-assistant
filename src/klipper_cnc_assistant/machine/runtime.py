@@ -1960,6 +1960,7 @@ class MachineRuntime:
                 "last_error": self._last_error,
                 "last_probe_result": None if self._last_probe_result is None else self._last_probe_result.__dict__,
                 "active_operation": self._active_operation_snapshot(),
+                "physical_owner": self.physical_ownership.snapshot(),
                 "initialization_steps": [step.__dict__ for step in self._initialization_steps],
                 "events": [event.__dict__ for event in self._events[-30:]],
             }

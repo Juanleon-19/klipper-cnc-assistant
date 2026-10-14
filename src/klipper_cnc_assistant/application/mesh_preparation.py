@@ -1,16 +1,18 @@
 """Non-motion preview/coverage/arming protocol. Motion guards remain mandatory."""
+from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import asdict
 from datetime import datetime, timezone
 import hashlib
 import json
 import math
+import sys
 from threading import RLock
 
 from .errors import ApplicationError
 from ..gcode.analysis_cache import analysis_is_current
-from ..heightmap.coverage import build_coverage_report
-from ..machine.physical_ownership import OwnerKind
+from ..heightmap.coverage import build_coverage_report, segment_uses_surface_map
+from ..machine.physical_ownership import OwnerKind, OwnershipError
 from ..machine.physical_reference import captured_reference_map, require_current_reference
 from ..storage.safe_persistence import atomic_json
 
@@ -88,7 +90,7 @@ class MeshPreparationService:
             if point.get('status') != 'EXCLUDED':
                 point.update(z_measured=0.0, delta_z=0.0, status='MEASURED')
         height_map = self.maps.height_map_from_payload(self.maps._height_map_payload_from_points(hypothetical))
-        coverage = build_coverage_report(height_map=height_map, operations=tuple(analyses), include_all_segments=True)
+        coverage = build_coverage_report(height_map=height_map, operations=tuple(analyses))
         for item in coverage.issues:
             if not item.numerical_only:
                 issue('TOOLPATH_OUTSIDE_SUPPORT', item.reason,
@@ -121,7 +123,7 @@ class MeshPreparationService:
                 issue('SAFE_Z_OUTSIDE_LIMITS', 'Z de contacto + separación segura fuera del recorrido Z.', 'Ajuste la separación segura dentro de los límites físicos.')
         return {'coverage_valid': not issues, 'validated_at': datetime.now(timezone.utc).isoformat(),
                 'mesh_fingerprint': digest(dependencies), 'operations_checked': len(operations),
-                'segments_checked': sum(len(a.segmentos_vista_previa) for _, _, a in analyses),
+                'segments_checked': sum(segment_uses_surface_map(segment) for _, _, a in analyses for segment in a.segmentos_vista_previa),
                 'blocking_issues': issues[:200], 'warnings': warnings}
 
     def validate(self, *, project_id, operation_id, config, runtime, preview_fingerprint):
@@ -168,38 +170,71 @@ class MeshPreparationService:
                       'Use Modificar y rehacer malla para conservar la referencia vigente y descartar muestras incompatibles.')
         except (ValueError, TypeError, KeyError, AttributeError) as error:
             block('REFERENCE_INVALID', str(error), 'Verifique sesión e instalación; capture una nueva Z solo si la referencia no sigue vigente.')
-        return {'can_arm': not reasons, 'blocking_reasons': reasons, 'mesh_fingerprint': payload['mesh_fingerprint']}
+        return {'ownership_revision': owner['revision'], 'can_arm': not reasons, 'blocking_reasons': reasons, 'mesh_fingerprint': payload['mesh_fingerprint']}
+
+    @contextmanager
+    def _preparation_lease(self, runtime, *, revision, action):
+        coordinator = runtime.physical_ownership
+        message = (f'El estado físico cambió durante {action}. '
+                   'Verifique reposo/recuperación y vuelva a intentar.')
+        try:
+            permit = coordinator.acquire(OwnerKind.MESH, 'mesh-preparation', expected_revision=revision)
+        except OwnershipError as error:
+            raise ApplicationError(message) from error
+        try:
+            yield permit
+            coordinator.validate(permit)
+        except (OwnershipError, ValueError) as error:
+            raise ApplicationError(f"{message} {error}") from error
+        finally:
+            previous_error = sys.exception()
+            try:
+                coordinator.release(permit, quiescent=True)
+            except OwnershipError as error:
+                # This producer is finished. Never free someone else's lease,
+                # reconcile physical uncertainty or mask an earlier exception.
+                recovery = coordinator.snapshot()
+                try:
+                    coordinator.retire(permit)
+                except OwnershipError:
+                    pass
+                coordinator.enter_recovery(recovery.get('reason') or 'No se pudo cerrar la preparación de malla; verifique reposo y recupere controles.')
+                if previous_error is None:
+                    raise ApplicationError(message) from error
 
     def arm(self, *, project_id, operation_id, config, runtime, preview_fingerprint):
         with self.lock:
             result = self.readiness(project_id=project_id, operation_id=operation_id, config=config, runtime=runtime, preview_fingerprint=preview_fingerprint)
             if not result['can_arm']:
                 raise ApplicationError('; '.join(r['message'] + ' ' + r['action'] for r in result['blocking_reasons']))
-            # Reserve the shared coordinator against concurrent motion/reset.
-            # This preparation lease never dispatches a physical command.
-            permit = runtime.physical_ownership.acquire(OwnerKind.MESH, 'mesh-preparation')
+            payload = None
             try:
-                payload = self.maps.plan_from_saved_reference(project_id=project_id, operation_id=operation_id, config=config, runtime=runtime)
-                payload['operation_id'] = operation_id
-                current = digest(self.dependencies(payload, runtime))
-                if current != preview_fingerprint:
-                    raise ApplicationError('El contexto cambió al armar. Regenere vista previa y validación; no se autoriza inicio.')
-                payload['mesh_fingerprint'] = current
-                payload['preflight_validation'] = self._record(payload)
-                payload['armed_reference_token'] = deepcopy(require_current_reference(self.repository, runtime, project_id, operation_id, payload))
-                payload['armed'] = True
-                self.maps._save(project_id, payload['map_id'], payload)
+                with self._preparation_lease(runtime, revision=result['ownership_revision'], action='el armado') as permit:
+                    payload = self.maps.plan_from_saved_reference(project_id=project_id, operation_id=operation_id, config=config, runtime=runtime)
+                    payload['operation_id'] = operation_id
+                    current = digest(self.dependencies(payload, runtime))
+                    if current != preview_fingerprint:
+                        raise ApplicationError('El contexto cambió al armar. Regenere vista previa y validación; no se autoriza inicio.')
+                    payload['mesh_fingerprint'] = current
+                    payload['preflight_validation'] = self._record(payload)
+                    payload['armed_reference_token'] = deepcopy(require_current_reference(self.repository, runtime, project_id, operation_id, payload))
+                    runtime.physical_ownership.validate(permit)
+                    payload['armed'] = True
+                    self.maps._save(project_id, payload['map_id'], payload)
                 return payload
-            finally:
-                runtime.physical_ownership.release(permit, quiescent=True)
+            except Exception:
+                if payload is not None:
+                    # Lease release failed or context changed after planning.
+                    # Keep recipe/evidence for inspection, never an armed result.
+                    self.maps.disarm(project_id=project_id, map_id=payload['map_id'])
+                raise
 
     def rebuild(self, *, project_id, map_id, runtime):
         with self.lock:
-            permit = runtime.physical_ownership.acquire(OwnerKind.MESH, 'mesh-rebuild')
-            try:
+            revision = runtime.physical_ownership.snapshot()['revision']
+            with self._preparation_lease(runtime, revision=revision, action='la reconstrucción') as permit:
+                runtime.physical_ownership.validate(permit)
                 return self.maps.repeat_measurement(project_id=project_id, map_id=map_id, runtime=runtime)
-            finally:
-                runtime.physical_ownership.release(permit, quiescent=True)
 
     def require_armed(self, payload, runtime):
         proof = payload.get('preflight_validation') or {}

@@ -389,7 +389,9 @@ describe("ProjectWorkspace job run flow", () => {
   it("lanza exactamente una petición al pulsar Preparar trabajo", async () => {
     renderWorkspace();
 
-    fireEvent.click(await screen.findByRole("button", { name: /Preparar trabajo/i }));
+    const prepare = await screen.findByRole("button", { name: /Preparar trabajo/i });
+    await waitFor(() => expect(prepare).toBeEnabled());
+    fireEvent.click(prepare);
 
     await waitFor(() => expect(apiMock.prepareJobRun).toHaveBeenCalledTimes(1));
     expect(apiMock.prepareJobRun).toHaveBeenCalledWith("proj_1", "setup-main", "superior");

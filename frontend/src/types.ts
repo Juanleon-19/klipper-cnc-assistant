@@ -494,6 +494,7 @@ export type MachineRuntime = {
   last_error: string | null;
   last_probe_result: Record<string, unknown> | null;
   active_operation?: Record<string, unknown> | null;
+  physical_owner?: { kind?: string; owner_id?: string | null; revision?: number; session?: string };
   recovery_pending?: boolean;
   recovery_reason?: string | null;
   initialization_steps: Array<Record<string, unknown>>;

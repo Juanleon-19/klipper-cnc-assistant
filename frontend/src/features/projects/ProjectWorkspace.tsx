@@ -2219,7 +2219,7 @@ export function ProjectWorkspace({
             {meshPreview && !previewCurrent ? <MeshNotice severity="WARNING">Vista previa obsoleta; regenere y valide cobertura.</MeshNotice> : null}
             {meshValidationMessage && (!meshPreview || previewCurrent) ? <MeshNotice severity={meshMessageSeverity}>{meshValidationMessage}</MeshNotice> : null}
             {meshCoverage?.blocking_issues.map((issue, index) => <MeshNotice key={index} severity="ERROR">{issue.operation_name ? `${issue.operation_name}: ` : ""}{issue.reason} {issue.recommended_action}</MeshNotice>)}
-            {selectedOperation && meshPreview ? <MeshArmInspection projectId={project.id} operationId={selectedOperation.id} recipe={physicalPlanPayload} fingerprint={physicalPlanPayload.preview_fingerprint} runtimeRevision={JSON.stringify([runtime?.recovery_pending, runtime?.moonraker?.http_connected, runtime?.moonraker?.websocket_connected, runtime?.klipper?.ready, meshCoverage?.validated_at])} /> : null}
+            {selectedOperation && meshPreview ? <MeshArmInspection projectId={project.id} operationId={selectedOperation.id} recipe={physicalPlanPayload} fingerprint={physicalPlanPayload.preview_fingerprint} runtime={runtime} validation={meshCoverage} /> : null}
             <div className="action-grid">
               <button className="button" type="button" disabled={previewBusy || armMeshBusy || !selectedOperation || !meshConfigValid} onClick={() => void requestMeshPreview()}>{previewBusy ? "Generando vista previa…" : "1. Generar vista previa de malla"}</button>
               {previewBusy ? <button className="button button--ghost" type="button" onClick={() => clearMeshPreview("Generación de vista previa cancelada.")}>Cancelar generación</button> : null}

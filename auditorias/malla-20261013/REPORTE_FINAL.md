@@ -29,11 +29,11 @@ GENERAL_PROFILE_READONLY_EXPLAINED = YES
 MESSAGE_SEVERITY = PASS
 FLOW_GUIDE = PASS
 
-BACKEND_TESTS = 658/658 PASS
-FRONTEND_TESTS = 154/154 PASS (17 archivos)
+BACKEND_TESTS = 671/671 PASS
+FRONTEND_TESTS = 165/165 PASS (18 archivos)
 LINT = PASS
 BUILD = PASS
-API_E2E = 19/19 PASS
+API_E2E = 29/29 PASS
 BROWSER_E2E = PASS (Firefox, 1440 y 390 px)
 GIT_DIFF_CHECK = PASS
 
@@ -43,7 +43,7 @@ GIT_STATUS = se verifica limpio después del commit de cierre
 PRODUCTION_MODIFIED = NO
 PHYSICAL_COMMANDS = NO
 SERVICES_RESTARTED = NO
-PUSH = NO
+PUSH = YES (solo rama del PR #25; sin merge)
 MERGE = NO
 READY_FOR_DEPLOY_AND_PHYSICAL_MESH_RETEST = YES
 ```
@@ -52,7 +52,7 @@ READY_FOR_DEPLOY_AND_PHYSICAL_MESH_RETEST = YES
 
 | Contrato | Implementación y prueba |
 |---|---|
-| Validación real | `MeshPreparationService.evaluate` llama a `build_coverage_report`, incluyendo segmentos XY completos. Pruebas de trayectoria fuera, exclusión rectangular/circular entre vértices, análisis faltante/obsoleto y Z segura fuera de límites. |
+| Validación real | `MeshPreparationService.evaluate` llama a `build_coverage_report`, incluyendo segmentos completos que requieren compensación de superficie. Pruebas de trayectoria fuera, exclusión rectangular/circular entre vértices, análisis faltante/obsoleto y Z segura fuera de límites. |
 | Gate persistido | Preview, validación y mapa deben compartir fingerprint de geometría, fuentes/operaciones, placement, origen, Z, perfil y límites observados. Arm/start y cada punto verifican contexto. Pruebas de arm sin validación, configuración cambiada, archivo cambiado y geometría persistida alterada. |
 | Recovery en ARM | Evaluación read-only con razón y acción antes del clic; el armado vuelve a comprobar y reserva ownership. Pruebas HTTP de recovery/owner activo; el navegador comprueba el bloqueo visible. No se modifica ni se revive el token. |
 | Pausa/reanudación | Thread y finally reales; termina el punto comprometido, pausa antes del siguiente y reanuda sin repetir medidos. Pruebas durante/entre puntos y pausa concurrente con progreso. Sesión cambiada y recovery siguen bloqueando. |
@@ -116,3 +116,86 @@ caducaba durante esperas deliberadas. No se omitieron tests para obtener PASS.
   demuestra contacto/retracto real ni autoriza movimientos.
 - Producción conserva HEAD `7b72a8b43ed8df3772e43923c844fdf970b2abbc` y sus elementos
   locales preexistentes `AGENTS.md`, `.codex/` y `graphify-out/`, sin modificación.
+
+## CORRECCIONES_AUDITORIA_EXTERNA
+
+PR #25; revisión sobre el HEAD auditado
+`38fe161979f3bb15e33c76fd7ff5a8a48dd0094b`, en la misma rama
+`fix/mesh-workflow-stabilization-20261012`. Esta sección actualiza los resultados
+anteriores y corrige la semántica descrita en la auditoría inicial.
+
+1. **Paridad de cobertura.** El preflight usa `build_coverage_report` con su filtro
+   normal `segment_uses_surface_map`, igual que compensación/JIT. Un G0 fuera del
+   mapa no bloquea ARM si no requiere compensación; los segmentos compensados se
+   comprueban completos contra dominio, exclusiones y celdas sin soporte. El
+   contador `segments_checked` cuenta esos segmentos. Los límites Klipper de los
+   puntos de sondeo y la Z segura siguen siendo una comprobación separada. No se
+   añadió una autorización de viajes G-code ni se relajaron los guards físicos.
+2. **Carreras de ownership.** ARM conserva la revisión observada en readiness y
+   REBUILD captura la revisión antes de adquirir; ambos usan `expected_revision`.
+   Una carrera devuelve HTTP 400 accionable sin iniciar planificación/movimiento.
+   Si el contexto cambia después de planificar, el resultado queda desarmado. Un
+   fallo de release retira solamente el productor propio y conserva recuperación,
+   su causa previa y las evidencias; no reconcilia ni libera otro owner. El error
+   original tiene prioridad sobre el de cleanup. El coordinador no se modificó.
+3. **Último retry.** Al agotar objetivos se comprueban las muestras reales. Si todas
+   están medidas/excluidas se completa mediante la finalización y validación normal;
+   con pendientes se pausa. No se seleccionan pendientes durante retry. Un fallo
+   nuevo pausa y no avanza al siguiente pendiente. La cancelación conserva prioridad.
+4. **Inspección advisory.** Cambios de recuperación, operación activa, owner/revisión,
+   estado runtime, Klipper, conexión, validación o fingerprint invalidan inmediatamente
+   el assessment mostrado y disparan una nueva consulta. Respuestas tardías se
+   descartan. El snapshot/API expone el owner existente en solo lectura; no duplica
+   autoridad ni altera la política de frescura. La UI no autoriza ARM por sí sola.
+
+Pruebas añadidas: paridad G0/corte, celda sin soporte, cambio de owner entre readiness
+y acquire, revisión que cambió aunque vuelva a estar libre, recovery durante ARM,
+cleanup con/sin excepción anterior, carreras y cleanup de REBUILD, snapshot de owner
+read-only, retry final/con pendientes/con fallo y refresco de inspección en diez
+cambios distintos más respuesta tardía. Se conservan los negativos de dominio y
+exclusión y el resto de regresiones existentes.
+
+Evidencia de esta revisión: `/tmp/kca-mesh-reaudit/`. Focalizados backend: 41/41;
+inspección UI: 11/11. Backend completo: 671/671 (322.174 s); frontend completo:
+165/165 en 18 archivos; API E2E: 29/29; browser E2E: PASS en 1440 y 390 px.
+Lint, build y git diff --check: PASS. Ninguna prueba utiliza hardware real.
+Logs: `focused-final.log`, `frontend-focused.log`, `backend.log`,
+`frontend-final.log`, `lint-final.log`, `build.log`, `api-e2e.log`,
+`browser-e2e.log`; capturas y resultado de navegador en `browser/`.
+
+Durante la suite completa se corrigió también una carrera del test histórico de
+Preparar trabajo: espera a que el botón esté habilitado tras la inspección antes
+del clic. No cambió el comportamiento de Ejecución ni se omitió la prueba.
+
+
+```text
+EXECUTION_COVERAGE_PARITY = PASS
+RAPID_OUTSIDE_MAP_ALLOWED_WHEN_UNCOMPENSATED = PASS
+CUT_OUTSIDE_MAP_BLOCKED = PASS
+OWNERSHIP_RACE_RETURNS_CONTROLLED_ERROR = PASS
+OWNERSHIP_RACE_NO_PARTIAL_ARM = PASS
+OWNERSHIP_CLEANUP_FAIL_CLOSED = PASS
+FINAL_RETRY_AUTO_COMPLETES = PASS
+RETRY_WITH_PENDING_REMAINS_PAUSED = PASS
+ARM_INSPECTION_REFRESHED_ON_OWNERSHIP_CHANGE = PASS
+BACKEND_TESTS = 671/671 PASS
+FRONTEND_TESTS = 165/165 PASS
+LINT = PASS
+BUILD = PASS
+API_E2E = 29/29 PASS
+BROWSER_E2E = PASS
+GIT_DIFF_CHECK = PASS
+NEW_BLOCKERS = []
+NEW_HEAD = hash exacto del commit de este reporte en la entrega final y PR #25
+PR_NUMBER = 25
+PRODUCTION_MODIFIED = NO
+MAIN_MODIFIED = NO
+PHYSICAL_COMMANDS = NO
+SERVICES_RESTARTED = NO
+READY_FOR_EXTERNAL_REAUDIT = YES
+```
+
+La publicación autorizada actualiza exclusivamente la rama del PR #25. No se
+crea otro PR, no se integra main y no se despliega. Los resultados anteriores
+658/658, 154/154 y API 19/19 corresponden al HEAD inicialmente auditado; los
+resultados vigentes son los de esta sección.

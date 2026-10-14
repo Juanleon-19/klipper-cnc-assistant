@@ -248,3 +248,49 @@ class MeshWorkflowStatesTest(unittest.TestCase):
         self.release.set()
         self.assertEqual(self.wait()['status'], 'MESH_PAUSED')
         self.assertEqual(len(self.probes), 1)
+
+    def test_retry_last_failed_point_completes_and_finalizes_map(self):
+        payload = self.get()
+        pending = [p for p in payload['points'] if p['status'] == 'PENDING']
+        for p in pending[:-1]:
+            self.maps.record_point(**self.args, point_index=p['index'], z_measured=30.)
+        self.maps.mark_point_failed(**self.args, point_index=pending[-1]['index'], error='fake failure')
+        self.mesh.retry_failed(**self.args, runtime=self.runtime)
+        final = self.wait()
+        self.assertEqual(self.probes, [pending[-1]['index']])
+        self.assertEqual(final['status'], 'MESH_COMPLETE')
+        self.assertEqual(final['map_ready_state'], 'MAP_READY')
+        self.assertEqual(final['validation']['status'], 'VALID')
+        self.assertEqual(final['execution']['retry_result']['recovered'], 1)
+
+    def test_retry_failure_never_advances_pending_points(self):
+        payload = self.get()
+        target = next(p for p in payload['points'] if p['status'] == 'PENDING')
+        self.maps.mark_point_failed(**self.args, point_index=target['index'], error='fake failure')
+        with patch.object(self.runtime, 'probe_mesh_point', side_effect=ValueError('fake repeated failure')) as probe:
+            self.mesh.retry_failed(**self.args, runtime=self.runtime)
+            final = self.wait()
+        self.assertEqual(probe.call_count, 1)
+        self.assertEqual(final['status'], 'MESH_PAUSED')
+        self.assertEqual(final['execution']['retry_result']['recovered'], 0)
+        self.assertTrue(any(p['status'] == 'PENDING' for p in final['points']))
+
+    def test_retry_finalizes_intermediate_status_when_all_samples_are_measured(self):
+        payload = self.get()
+        pending = [p for p in payload['points'] if p['status'] == 'PENDING']
+        for p in pending[:-1]:
+            self.maps.record_point(**self.args, point_index=p['index'], z_measured=30.)
+        self.maps.mark_point_failed(**self.args, point_index=pending[-1]['index'], error='fake failure')
+        original = self.maps.record_point
+        def delayed_status(**kwargs):
+            result = original(**kwargs)
+            result['status'] = 'MESH_PROBING'
+            result.pop('validation', None)
+            result.pop('map_ready_state', None)
+            self.maps._save(self.args['project_id'], self.args['map_id'], result)
+            return result
+        with patch.object(self.maps, 'record_point', side_effect=delayed_status):
+            self.mesh.retry_failed(**self.args, runtime=self.runtime)
+            final = self.wait()
+        self.assertEqual(final['status'], 'MESH_COMPLETE')
+        self.assertEqual(final['validation']['status'], 'VALID')

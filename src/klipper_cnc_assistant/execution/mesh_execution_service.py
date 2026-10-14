@@ -522,6 +522,7 @@ class MeshExecutionService:
                                       and p['index'] not in attempted_indices
                                       and p['status'] in {'FAILED', 'RETRY_REQUIRED'}), None)
                         if point is None:
+                            latest = self.physical_map_service.complete_if_measured(project_id=project_id, map_id=map_id)
                             recovered = sum(p['status'] == 'MEASURED' for p in latest['points'] if p['index'] in targets)
                             self.physical_map_service.mark_status(project_id=project_id, map_id=map_id,
                                 status='MESH_COMPLETE' if latest['status'] == 'MESH_COMPLETE' else 'MESH_PAUSED',

@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import type { MachineRuntime } from "../../types";
 import { api, type PhysicalMapPlanPayload } from "../../lib/api";
 
 export type MeshSeverity = "SUCCESS" | "INFO" | "WARNING" | "ERROR";
@@ -15,21 +16,28 @@ export function MeshNotice({ severity, children }: { severity: MeshSeverity; chi
 }
 
 /** Advisory only. Arm and start independently recheck backend safety guards. */
-export function MeshArmInspection({ projectId, operationId, recipe, fingerprint, runtimeRevision }: {
-  projectId: string; operationId: string; recipe: PhysicalMapPlanPayload; fingerprint?: string; runtimeRevision: string;
+export function MeshArmInspection({ projectId, operationId, recipe, fingerprint, runtime, validation }: {
+  projectId: string; operationId: string; recipe: PhysicalMapPlanPayload; fingerprint?: string; runtime?: MachineRuntime | null; validation?: MeshCoverage | null;
 }) {
-  const [assessment, setAssessment] = useState<MeshArmReadiness | null>(null);
-  const [error, setError] = useState("");
   const body = JSON.stringify({ ...recipe, preview_fingerprint: fingerprint });
+  // Exclude ages/progress: only changes to prerequisites need a new inspection.
+  const requestKey = JSON.stringify([body, projectId, operationId,
+    runtime?.recovery_pending, runtime?.active_operation, runtime?.physical_owner,
+    runtime?.state, runtime?.klipper?.ready, runtime?.moonraker?.http_connected,
+    runtime?.moonraker?.websocket_connected, runtime?.moonraker?.telemetry_state,
+    validation?.validated_at, validation?.mesh_fingerprint, validation?.coverage_valid]);
+  const [response, setResponse] = useState<{ key: string; assessment: MeshArmReadiness | null; error: string } | null>(null);
+  const assessment = response?.key === requestKey ? response.assessment : null;
+  const error = response?.key === requestKey ? response.error : "";
   useEffect(() => {
     let current = true;
     const timer = window.setTimeout(() => {
       void api.inspectMeshArm(projectId, operationId, JSON.parse(body)).then(result => {
-        if (current) { setAssessment(result); setError(""); }
-      }).catch((cause: unknown) => { if (current) { setAssessment(null); setError(cause instanceof Error ? cause.message : "No se pudo verificar el armado."); } });
+        if (current) setResponse({ key: requestKey, assessment: result, error: "" });
+      }).catch((cause: unknown) => { if (current) setResponse({ key: requestKey, assessment: null, error: cause instanceof Error ? cause.message : "No se pudo verificar el armado." }); });
     }, 250);
     return () => { current = false; window.clearTimeout(timer); };
-  }, [body, projectId, operationId, runtimeRevision]);
+  }, [body, projectId, operationId, requestKey]);
   return <div aria-label="Requisitos para armar">
     <strong>{assessment?.can_arm && !error ? "SE PUEDE ARMAR" : "NO SE PUEDE ARMAR"}</strong>
     {error ? <MeshNotice severity="ERROR">{error} Actualice la inspección antes de continuar.</MeshNotice> : null}

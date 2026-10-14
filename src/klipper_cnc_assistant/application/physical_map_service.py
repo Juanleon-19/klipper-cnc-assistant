@@ -893,6 +893,30 @@ class PhysicalMapService:
         return payload
 
     @_serialized_map_update
+    def disarm(self, *, project_id: str, map_id: str) -> None:
+        payload = self.get_by_id(project_id, map_id)
+        payload['armed'] = False
+        self._save(project_id, map_id, payload)
+
+    @_serialized_map_update
+    def complete_if_measured(self, *, project_id: str, map_id: str) -> dict[str, Any]:
+        """Retry exhaustion uses measurements, not a possibly intermediate status."""
+        payload = self.get_by_id(project_id, map_id)
+        if (payload.get('status') in {'CANCELLED', 'MESH_COMPLETE'}
+                or (payload.get('execution') or {}).get('cancel_requested')
+                or not payload.get('points')
+                or not all(p.get('status') in {'MEASURED', 'EXCLUDED'} for p in payload['points'])):
+            return payload
+        payload.update(status='MESH_COMPLETE', completed_at=_iso_now(), updated_at=_iso_now())
+        payload['height_map'] = self._height_map_payload_from_points(payload)
+        payload = self._set_execution_state(payload, worker_active=False, point_state='MESH_COMPLETE',
+            last_event='Todos los puntos ejecutables están medidos; malla completa.',
+            metadata={'phase': 'complete', 'pause_requested': False, 'pause_reason': None})
+        payload = self._finalize_completed_map(project_id, payload)
+        self._save(project_id, map_id, payload)
+        return payload
+
+    @_serialized_map_update
     def mark_status(
         self,
         *,
