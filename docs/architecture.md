@@ -362,3 +362,23 @@ del cambio. Una falla de lectura del estado deshabilita inicio. Recovery informa
 su causa (sesión/referencia, identidad remota, standby, supervisor o transición).
 Tras reiniciar runtime se requiere nueva captura Z: no hay migración ni
 reactivación de evidencia histórica.
+
+### Observación de Ejecución tras reposo (2026-10-14)
+
+Readiness reutiliza el snapshot cuando `safety.telemetry_recent` es verdadero.
+Si está vencido, el runtime físico conserva HTTP disponible y no hay recovery,
+owner incompatible, operación física activa ni estado desconectado/error, realiza
+una sola `refresh_observed_state()` y evalúa su respuesta. No reconecta transportes,
+no prepara JobRun ni escribe proyectos. El diagnóstico puede realizar observación
+HTTP read-only del estado físico. La UI existente presenta los motivos y acciones
+estructurados; no se necesita otro botón para mantener fresca una máquina quieta.
+
+La observación HTTP valida posición live y velocidad finitas/presentes antes de
+publicar timestamps. Klipper no ready, homing vacío, lectura fallida o recovery
+siguen bloqueando; un fallo HTTP no puede quedar oculto por una actualización WS
+concurrente. Ownership se vuelve a consultar después de la lectura. No se alteran
+referencias ni sesiones y no se amplía ningún timeout.
+
+Este resultado es únicamente diagnóstico. `MoonrakerJobAdapter._dispatch` sigue
+haciendo `_refresh_machine → require_context → revalidate → send` para start y
+resume, conservando además la revalidación posterior al último callback.

@@ -1830,7 +1830,7 @@ class MachineRuntime:
     def refresh_observed_state(self) -> dict[str, Any]:
         """Refresh Klipper state over HTTP; this never sends G-code."""
         self._require_physical_ready()
-        self._refresh_machine()
+        self._refresh_machine(require_valid_observation=True)
         return self.snapshot()
 
     def capture_current_position(self) -> dict[str, float]:
@@ -2169,7 +2169,7 @@ class MachineRuntime:
         if not self._machine.is_homed:
             raise MachineRuntimeError("Falta homing de ejes antes de autorizar movimiento.")
 
-    def _refresh_machine(self) -> None:
+    def _refresh_machine(self, *, require_valid_observation=False) -> None:
         if self._client is None:
             raise MachineRuntimeError("Moonraker no está conectado.")
         try:
@@ -2183,6 +2183,16 @@ class MachineRuntime:
             else:
                 klippy_state = "ready"
             refreshed = self._discovery(self._client)
+            if require_valid_observation:
+                # Validate this HTTP response before publishing its timestamps.
+                # Missing live data must not inherit a previous position/velocity.
+                if (refreshed.live_position is None
+                        or refreshed.live_position_updated_at is None
+                        or refreshed.live_velocity_updated_at is None
+                        or not all(math.isfinite(v) for v in (
+                            *refreshed.live_position.as_tuple(), refreshed.live_velocity))
+                        or refreshed.live_velocity < 0):
+                    raise MachineRuntimeError('Observación HTTP sin posición/velocidad válida.')
         except Exception as error:
             with self._lock:
                 self._last_http_error = str(error)

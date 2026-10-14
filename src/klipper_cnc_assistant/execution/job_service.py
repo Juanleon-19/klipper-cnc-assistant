@@ -32,7 +32,7 @@ from klipper_cnc_assistant.storage.safe_persistence import (
     validate_generation, read_artifact_metadata, PersistenceConflict,
 )
 from .print_identity import PrintIdentity, PrintIdentityError
-from .readiness import PREPARABLE_STATES, evaluate_readiness, reference_candidate
+from .readiness import PREPARABLE_STATES, ownership_compatible, evaluate_readiness, reference_candidate
 
 
 JOB_PLAN_SCHEMA = "job-plan-v1"
@@ -1603,12 +1603,34 @@ class JobService:
             self._save_run(context, run)
 
     def _execution_readiness(self, context, plan, run=None):
-        return evaluate_readiness(plan, run, self.runtime.snapshot(),
+        snapshot = self.runtime.snapshot()
+        ownership = self.runtime.physical_ownership.snapshot()
+        observation_failed = False
+        if ((snapshot.get('safety') or {}).get('telemetry_recent') is not True
+                and snapshot.get('mode') == 'PHYSICAL'
+                and (snapshot.get('moonraker') or {}).get('http_connected')
+                and snapshot.get('state') not in {'DISCONNECTED', 'ERROR', 'STOPPED'}
+                and not snapshot.get('recovery_pending')
+                and not ownership.get('recovery_pending')
+                and ownership_compatible(plan, ownership)
+                and not snapshot.get('active_operation')):
+            try:
+                snapshot = self.runtime.refresh_observed_state()
+            except Exception:
+                # Preserve current Klipper/recovery evidence; a concurrent WS
+                # update must not hide a failed HTTP observation.
+                snapshot = self.runtime.snapshot()
+                observation_failed = True
+        return evaluate_readiness(plan, run, snapshot,
                                   self.runtime.physical_ownership.snapshot(),
-                                  self.runtime.current_physical_session_id())
+                                  self.runtime.current_physical_session_id(),
+                                  observation_failed=observation_failed)
 
     def inspect_execution(self, *, project_id, setup_id, face):
-        """No workflow, store writes, remote commands or ownership acquisition."""
+        """No workflow, store writes, physical commands or ownership acquisition.
+
+        Puede realizar observación HTTP read-only del estado físico.
+        """
         context = self._context(project_id, setup_id, face)
         plan = self._resolved_plan(context, publish=False)
         run = self.run_store.load(self._existing_run_file(context))

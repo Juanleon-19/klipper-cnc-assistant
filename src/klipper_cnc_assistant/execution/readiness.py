@@ -27,7 +27,13 @@ def reference_candidate(run, index):
     return operation
 
 
-def evaluate_readiness(plan, run, snapshot, ownership, physical_session):
+def ownership_compatible(plan, ownership):
+    return not ownership.get('active') or (
+        ownership.get('kind') == 'JOB_EXECUTION' and ownership.get('owner_id') == '/'.join(
+            str(plan.get(k)) for k in ('project_id', 'setup_id', 'face')))
+
+
+def evaluate_readiness(plan, run, snapshot, ownership, physical_session, *, observation_failed=False):
     checks, blockers = [], []
 
     def check(name, ok, message, action, category, code=None):
@@ -45,8 +51,11 @@ def evaluate_readiness(plan, run, snapshot, ownership, physical_session):
     check('websocket', moon.get('websocket_connected'), 'La telemetría WebSocket debe estar conectada.',
           'Restablezca la conexión de telemetría.', 'runtime')
     fresh = (snapshot.get('safety') or {}).get('telemetry_recent') is True
-    check('telemetria_vigente', fresh, 'Se requiere una observación de posición vigente.',
-          'Actualice la observación de la máquina y revise la telemetría.', 'runtime')
+    check('telemetria_vigente', fresh and not observation_failed,
+          ('No fue posible obtener una observación actual de la máquina. '
+           'No se pudo confirmar la posición actual de Moonraker.' if observation_failed
+           else 'Se requiere una observación de posición vigente.'),
+          'Revise la conexión Moonraker/Klipper y vuelva a actualizar el estado.', 'runtime')
     check('klipper_ready', klipper.get('ready'), 'Klipper debe estar listo para ejecutar.',
           'Resuelva el estado de Klipper antes de ejecutar.', 'runtime')
     check('homing', set('xyz').issubset(set(klipper.get('homed_axes') or '')),
@@ -54,9 +63,7 @@ def evaluate_readiness(plan, run, snapshot, ownership, physical_session):
     recovery = bool(ownership.get('recovery_pending') or snapshot.get('recovery_pending'))
     check('recuperacion_fisica', not recovery, ownership.get('reason') or 'No debe existir recuperación física pendiente.',
           'Revise y resuelva la recuperación física antes de continuar.', 'runtime', 'PHYSICAL_RECOVERY_REQUIRED')
-    owns_job = ownership.get('kind') == 'JOB_EXECUTION' and ownership.get('owner_id') == '/'.join(
-        str(plan.get(k)) for k in ('project_id', 'setup_id', 'face'))
-    check('ownership_compatible', not ownership.get('active') or owns_job,
+    check('ownership_compatible', ownership_compatible(plan, ownership),
           'Otro workflow conserva el control físico.', 'Espere su cierre o resuelva su recuperación.', 'runtime')
     operations = plan.get('operations') or []
     active_map = plan.get('active_map') or {}
