@@ -37,9 +37,13 @@ class ReferenceExecutionHandoffTest(unittest.TestCase):
         self.token = self.canonical['reference']['physical_reference_token']
         self.tool = self.token['tool_id']
         base = f'/api/projects/{self.project_id}/operations/{self.operation_id}/physical-map'
-        config = dict(grid_mode='manual', rows=2, columns=2, margin_mm=0,
+        config = dict(grid_mode='manual', rows=2, columns=2, margin_mm=0, safe_z_mm=5,
                       edge_margin_left_mm=0, edge_margin_right_mm=0,
                       edge_margin_bottom_mm=0, edge_margin_top_mm=0)
+        preview = self.fixture.client.post(base + '/preview', json=config).json()['payload']
+        config['preview_fingerprint'] = preview['mesh_fingerprint']
+        validated = self.fixture.client.post(base + '/validate', json=config)
+        self.assertTrue(validated.json()['coverage_valid'], validated.text)
         response = self.fixture.client.post(base + '/plan-from-reference', json=config)
         self.assertEqual(response.status_code, 200, response.text)
         self.map = response.json()['payload']

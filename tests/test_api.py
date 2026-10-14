@@ -321,7 +321,7 @@ class ApiTest(unittest.TestCase):
         self.assertEqual(payload["analysis_version"], payload["current_analysis_version"])
         self.assertFalse(payload["analisis_desactualizado"])
 
-    def test_plan_from_reference_uses_saved_reference_without_new_capture_and_persists_exact_parameters(self) -> None:
+    def test_legacy_reference_cannot_arm_but_preview_preserves_exact_parameters(self) -> None:
         project_id = self._create_project()
         operation_id = self._create_operation(project_id)
         self._upload_and_analyze_operation(project_id, operation_id)
@@ -392,16 +392,15 @@ class ApiTest(unittest.TestCase):
 
         response = self.client.post(f"/api/projects/{project_id}/operations/{operation_id}/physical-map/plan-from-reference", json=payload)
 
-        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.status_code, 400)
+        response = self.client.post(f"/api/projects/{project_id}/operations/{operation_id}/physical-map/preview", json=payload)
+        self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual(calls["capture"], 0)
         measured = response.json()["payload"]
-        self.assertEqual(measured["status"], "MESH_PLANNED")
-        self.assertFalse(measured["execution"]["worker_active"])
+        self.assertEqual(measured["status"], "MESH_PREVIEW")
         self.assertEqual(measured["rows"], 3)
         self.assertEqual(measured["columns"], 4)
         self.assertEqual(measured["point_count"], 12)
-        self.assertGreaterEqual(measured["arm_backend_duration_ms"], 0)
-        self.assertEqual(measured["arm_point_count"], 12)
         self.assertEqual(measured["mesh_config"]["edge_margin_left_mm"], 1.5)
         self.assertEqual(measured["mesh_config"]["edge_margin_right_mm"], 2.5)
         self.assertEqual(measured["mesh_config"]["edge_margin_bottom_mm"], 3.5)
@@ -447,7 +446,7 @@ class ApiTest(unittest.TestCase):
         self.assertEqual(measured["grid"]["dx_mm"], preview["grid"]["dx_mm"])
         self.assertEqual(measured["grid"]["dy_mm"], preview["grid"]["dy_mm"])
         self.assertEqual(measured["local_region"], preview["local_region"])
-        self.assertEqual(measured["points"][1]["x_local"], preview["points"][0]["x_local"])
+        self.assertEqual(measured["points"][0]["x_local"], preview["points"][0]["x_local"])
         self.assertEqual(measured["points"][-1]["y_local"], preview["points"][-1]["y_local"])
 
     def test_preview_endpoint_is_pure_and_does_not_persist_physical_map(self) -> None:
@@ -644,9 +643,12 @@ class ApiTest(unittest.TestCase):
                 return {"z_measured": 9.95, "duration_s": 0.01}
 
         runtime = BlockingRuntime()
+        self.addCleanup(lambda: self.app.state.mesh_execution_service.wait_until_idle(timeout_s=5.0))
         self.addCleanup(runtime.release.set)
+        # Pause endpoint unit fixture. Real arming is covered in test_mesh_workflow_states.
+        self.app.state.physical_map_service.preparation.require_armed = lambda payload, runtime: None
         self.app.state.mesh_execution_service.start_all(project_id=project_id, map_id=plan["map_id"], runtime=runtime)
-        self.assertTrue(runtime.entered.wait(1.0))
+        self.assertTrue(runtime.entered.wait(5.0))
 
         first = self.client.post(f"/api/projects/{project_id}/physical-maps/{plan['map_id']}/pause")
         second = self.client.post(f"/api/projects/{project_id}/physical-maps/{plan['map_id']}/pause")

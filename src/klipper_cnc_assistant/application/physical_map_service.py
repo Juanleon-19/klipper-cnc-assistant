@@ -8,6 +8,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import Any
 from copy import deepcopy
+from functools import wraps
 from klipper_cnc_assistant.machine.physical_reference import require_current_reference, captured_reference_map, initial_map_binding
 
 from klipper_cnc_assistant.application.errors import ApplicationError, NotFoundError
@@ -23,6 +24,20 @@ from klipper_cnc_assistant.heightmap import (
 )
 from klipper_cnc_assistant.heightmap.coverage import DOMAIN_TOLERANCE_MM, build_coverage_report
 from klipper_cnc_assistant.storage import JsonProjectRepository
+
+
+def _serialized_map_update(method):
+    """Keep local worker progress and operator intents in one read/write unit.
+
+    Uses the existing reentrant I/O lock (same order as _load/_save); repository
+    revisions/CAS remain authoritative for other writers. No motion/network work
+    is called by the decorated mutations.
+    """
+    @wraps(method)
+    def update(self, *args, **kwargs):
+        with self._io_lock:
+            return method(self, *args, **kwargs)
+    return update
 
 
 def utc_now() -> datetime:
@@ -389,6 +404,8 @@ class PhysicalMapService:
     def __init__(self, repository: JsonProjectRepository) -> None:
         self.repository = repository
         self._io_lock = threading.RLock()
+        from .mesh_preparation import MeshPreparationService
+        self.preparation = MeshPreparationService(self)
 
     def suggest_mesh_config(
         self,
@@ -599,7 +616,17 @@ class PhysicalMapService:
                 machine_label=machine_label,
                 session_id=session_id,
             )
+            if payload.get("status") == "REPROBE_CONFIRMATION":
+                # A rebuilt grid has no reusable surface samples. Bind the
+                # currently valid capture, without probing/reissuing its token.
+                payload["reference_z"] = reference_z
+                payload["acquisition_reference_z"] = reference_z
+                payload["probe_config"]["reference_z_mm"] = reference_z
+                payload["points"] = self._apply_captured_reference_point(payload["points"], reference_z=reference_z)
+                payload["height_map"] = self._height_map_payload_from_points(payload)
             self._bind_captured_reference(payload, project, operation, runtime)
+            if payload.get("status") == "REPROBE_CONFIRMATION":
+                payload["status"] = "MESH_PLANNED"
             payload["updated_at"] = _iso_now()
             self._save(project_id, str(payload["map_id"]), payload)
             return payload
@@ -710,6 +737,7 @@ class PhysicalMapService:
                 return point
         raise ApplicationError("La malla no tiene puntos pendientes.")
 
+    @_serialized_map_update
     def retry_failed_point(self, *, project_id: str, map_id: str, point_index: int) -> dict[str, Any]:
         payload = self.get_by_id(project_id, map_id)
         point = dict(payload["points"][point_index])
@@ -727,6 +755,7 @@ class PhysicalMapService:
         self._save(project_id, map_id, payload)
         return payload
 
+    @_serialized_map_update
     def skip_failed_point(self, *, project_id: str, map_id: str, point_index: int) -> dict[str, Any]:
         payload = self.get_by_id(project_id, map_id)
         point = dict(payload["points"][point_index])
@@ -742,6 +771,7 @@ class PhysicalMapService:
         self._save(project_id, map_id, payload)
         return payload
 
+    @_serialized_map_update
     def record_point(
         self,
         *,
@@ -862,6 +892,7 @@ class PhysicalMapService:
         self._save(project_id, map_id, payload)
         return payload
 
+    @_serialized_map_update
     def mark_status(
         self,
         *,
@@ -874,6 +905,10 @@ class PhysicalMapService:
         metadata: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         payload = self.get_by_id(project_id, map_id)
+        if payload.get("status") == "CANCELLED" and status != "CANCELLED":
+            return payload
+        if payload.get("status") == "MESH_COMPLETE" and status not in {"MESH_COMPLETE", "CANCELLED"}:
+            return payload
         previous_execution = dict(payload.get("execution") or {})
         metadata = dict(metadata or {})
         if status in {"MESH_PAUSED", "CANCELLED"} and "last_error" not in metadata:
@@ -901,6 +936,7 @@ class PhysicalMapService:
         self._save(project_id, map_id, payload)
         return payload
 
+    @_serialized_map_update
     def mark_point_failed(self, *, project_id: str, map_id: str, point_index: int, error: str) -> dict[str, Any]:
         payload = self.get_by_id(project_id, map_id)
         points = payload["points"]
@@ -928,6 +964,7 @@ class PhysicalMapService:
         self._save(project_id, map_id, payload)
         return payload
 
+    @_serialized_map_update
     def update_execution_state(
         self,
         *,
@@ -1313,33 +1350,21 @@ class PhysicalMapService:
         return None
 
     def _rectangular_exclusion_zones(self, exclusions: tuple[PhysicalExclusion, ...]) -> tuple[ExclusionZone, ...]:
-        return tuple(
-            ExclusionZone(
-                id=exclusion.id,
-                nombre=exclusion.name,
-                min_x_mm=float(exclusion.x_min_mm),
-                min_y_mm=float(exclusion.y_min_mm),
-                max_x_mm=float(exclusion.x_max_mm),
-                max_y_mm=float(exclusion.y_max_mm),
-            )
-            for exclusion in exclusions
-            if exclusion.enabled and exclusion.shape == "rectangle"
-        )
+        # Retained method name for callers; both geometries share execution coverage.
+        zones = []
+        for e in exclusions:
+            if not e.enabled:
+                continue
+            if e.shape == "circle":
+                zones.append(ExclusionZone(e.id, e.name, e.center_x_mm - e.radius_mm,
+                    e.center_y_mm - e.radius_mm, e.center_x_mm + e.radius_mm,
+                    e.center_y_mm + e.radius_mm, e.shape, e.center_x_mm, e.center_y_mm, e.radius_mm))
+            else:
+                zones.append(ExclusionZone(e.id, e.name, e.x_min_mm, e.y_min_mm, e.x_max_mm, e.y_max_mm))
+        return tuple(zones)
 
     def _rectangular_exclusion_zones_from_payload(self, exclusions: list[dict[str, Any]]) -> tuple[ExclusionZone, ...]:
-        zones: list[ExclusionZone] = []
-        for exclusion in exclusions:
-            if not exclusion.get("enabled", True) or exclusion.get("shape") != "rectangle":
-                continue
-            zones.append(ExclusionZone(
-                id=str(exclusion.get("id") or "exclusion"),
-                nombre=str(exclusion.get("name") or exclusion.get("nombre") or "Exclusión"),
-                min_x_mm=float(exclusion.get("x_min_mm")),
-                min_y_mm=float(exclusion.get("y_min_mm")),
-                max_x_mm=float(exclusion.get("x_max_mm")),
-                max_y_mm=float(exclusion.get("y_max_mm")),
-            ))
-        return tuple(zones)
+        return self._rectangular_exclusion_zones(tuple(PhysicalExclusion(**item) for item in exclusions))
 
     def _estimate_serpentine_distance(self, samples: list[HeightSample], origin_x: float, origin_y: float) -> float:
         total = 0.0
@@ -1727,6 +1752,8 @@ class PhysicalMapService:
                     min_y_mm=float(zone.get("min_y_mm")),
                     max_x_mm=float(zone.get("max_x_mm")),
                     max_y_mm=float(zone.get("max_y_mm")),
+                    shape=zone.get("shape", "rectangle"), center_x_mm=zone.get("center_x_mm"),
+                    center_y_mm=zone.get("center_y_mm"), radius_mm=zone.get("radius_mm"),
                 )
                 for zone in payload.get("exclusion_zones") or []
             ),
@@ -1875,6 +1902,18 @@ class PhysicalMapService:
         return f"measured/{self._map_prefix(setup_id, operation)}/{stamp}_x{origin_x:.3f}_y{origin_y:.3f}_r{config.rows}_c{config.columns}_e{config.edge_margin_left_mm:.3f}-{config.edge_margin_right_mm:.3f}-{config.edge_margin_bottom_mm:.3f}-{config.edge_margin_top_mm:.3f}"
 
     def _latest_surface_map(self, project_id: str, operation: OperacionPCB) -> dict[str, Any] | None:
+        # The active pointer also resolves nested repeat versions without scanning
+        # all historical artifacts on every preparation/read.
+        project = self._load_project(project_id)
+        active_id = project.get_setup(operation.setup_id).active_map_id
+        if active_id:
+            try:
+                active = self.get_by_id(project_id, active_id)
+                if (active.get("schema_version") == "surface-map-v2" and active.get("setup_id") == operation.setup_id and active.get("face") == operation.cara
+                        and active.get("archived_at") is None and active.get("status") != "ARCHIVED"):
+                    return active
+            except (ApplicationError, OSError):
+                pass
         maps_dir = self.repository.project_dir(project_id) / "maps" / "measured" / self._map_prefix(operation.setup_id, operation)
         if not maps_dir.exists():
             return None
@@ -2080,7 +2119,7 @@ class PhysicalMapService:
         return migrated
 
 
-    def repeat_measurement(self, *, project_id: str, map_id: str) -> dict[str, Any]:
+    def repeat_measurement(self, *, project_id: str, map_id: str, runtime=None) -> dict[str, Any]:
         active = self.get_by_id(project_id, map_id)
         if active.get("archived_at") is not None:
             raise ApplicationError("No se puede repetir una medición archivada.")
@@ -2093,13 +2132,14 @@ class PhysicalMapService:
             grid_mode=str(config_payload.get("grid_mode") or active.get("grid_mode") or "manual"),
             rows=int(config_payload.get("rows") or active.get("rows") or 2),
             columns=int(config_payload.get("columns") or active.get("columns") or 2),
-            edge_margin_left_mm=float(config_payload.get("edge_margin_left_mm") or active.get("edge_margins", {}).get("left_mm") or 2.0),
-            edge_margin_right_mm=float(config_payload.get("edge_margin_right_mm") or active.get("edge_margins", {}).get("right_mm") or 2.0),
-            edge_margin_bottom_mm=float(config_payload.get("edge_margin_bottom_mm") or active.get("edge_margins", {}).get("bottom_mm") or 2.0),
-            edge_margin_top_mm=float(config_payload.get("edge_margin_top_mm") or active.get("edge_margins", {}).get("top_mm") or 2.0),
+            edge_margin_left_mm=float(config_payload.get("edge_margin_left_mm", active.get("edge_margins", {}).get("left_mm", 2.0))),
+            edge_margin_right_mm=float(config_payload.get("edge_margin_right_mm", active.get("edge_margins", {}).get("right_mm", 2.0))),
+            edge_margin_bottom_mm=float(config_payload.get("edge_margin_bottom_mm", active.get("edge_margins", {}).get("bottom_mm", 2.0))),
+            edge_margin_top_mm=float(config_payload.get("edge_margin_top_mm", active.get("edge_margins", {}).get("top_mm", 2.0))),
             exclusions=tuple(PhysicalExclusion(**item) for item in active.get("exclusions", [])),
             max_spacing_mm=float(config_payload.get("max_spacing_mm") or 10.0),
             margin_mm=float(config_payload.get("margin_mm") or 0.0),
+            probe_profile_source=probe_payload.get("source", probe_payload.get("probe_profile_source")),
             safe_z_mm=probe_payload.get("safe_z_mm"),
             probe_step_mm=probe_payload.get("probe_step_mm"),
             probe_feed_mm_min=probe_payload.get("probe_feed_mm_min"),
@@ -2144,9 +2184,18 @@ class PhysicalMapService:
         )
         payload["version"] = next_version
         payload["replaces"] = active.get("map_id")
+        payload["armed"] = False
+        payload["reference_preserved"] = False
+        if runtime is not None:
+            try:
+                self._bind_captured_reference(payload, project, operation, runtime)
+                payload["reference_preserved"] = bool(project.get_setup(operation.setup_id).preparacion.physical_reference)
+            except (ValueError, ApplicationError):
+                payload["tool_references"] = {}
+        payload["message"] = "Mapa anterior archivado. Genere vista previa, valide cobertura y arme la nueva versión."
+
         payload["map_ready_state"] = None
         payload["validation"] = None
-        payload["message"] = "El mapa cambió. Debe volver a validar la cobertura y regenerar el G-code compensado."
         self._archive_payload(project_id, active, replaced_by=new_map_id)
         self._save(project_id, new_map_id, payload)
         self._mark_setup_map_active(project_id, operation.setup_id, new_map_id)

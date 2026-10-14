@@ -81,6 +81,9 @@ def _zone_from_mapping(payload: dict[str, object], index: int) -> ExclusionZone:
         min_y_mm=float(payload.get("min_y_mm", 0.0)),
         max_x_mm=float(payload.get("max_x_mm", 0.0)),
         max_y_mm=float(payload.get("max_y_mm", 0.0)),
+        shape=str(payload.get("shape", "rectangle")),
+        center_x_mm=payload.get("center_x_mm"), center_y_mm=payload.get("center_y_mm"),
+        radius_mm=payload.get("radius_mm"),
     )
 
 

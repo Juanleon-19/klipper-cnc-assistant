@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Circle, Layer, Line, Rect, Stage, Text } from "react-konva";
 
 import { formatCoordinate, formatMillimeters } from "../../lib/format";
-import type { HeightMap, HeightMapSample, HeightMapSurfacePoint, Material, PhysicalMapExclusion, PhysicalMeshPoint, ProbeRegion } from "../../types";
+import type { HeightMap, HeightMapSample, HeightMapSurfacePoint, Material, PhysicalMapExclusion, PhysicalMeshPoint, PreviewSegment, ProbeRegion } from "../../types";
 import { useMeasuredViewport } from "../viewer/useMeasuredViewport";
 import {
   buildGridTicks,
@@ -27,6 +27,9 @@ type HeightMapHeatmapProps = {
   coordinateMode?: "local" | "machine";
   machineOrigin?: { x_mm: number; y_mm: number } | null;
   previewMessage?: string | null;
+  toolpaths?: Array<{ operationId: string; segments: PreviewSegment[] }>;
+  coverageValid?: boolean;
+  conflict?: { operationId?: string; segment?: number };
 };
 
 type DragState = {
@@ -65,7 +68,7 @@ function findExtreme(samples: HeightMapSample[], direction: "min" | "max") {
     .sort((left, right) => (direction === "min" ? (left.z_mm ?? 0) - (right.z_mm ?? 0) : (right.z_mm ?? 0) - (left.z_mm ?? 0)))[0] ?? null;
 }
 
-export function HeightMapHeatmap({ material, heightMap, mode, meshPoints = [], exclusions = [], probeRegion = null, coordinateMode = "local", machineOrigin = null, previewMessage = null }: HeightMapHeatmapProps) {
+export function HeightMapHeatmap({ material, heightMap, mode, meshPoints = [], exclusions = [], probeRegion = null, coordinateMode = "local", machineOrigin = null, previewMessage = null, toolpaths = [], coverageValid, conflict }: HeightMapHeatmapProps) {
   const fullscreenRef = useRef<HTMLDivElement | null>(null);
   const dragRef = useRef<DragState | null>(null);
   const [stageNode, setStageNode] = useState<HTMLDivElement | null>(null);
@@ -132,6 +135,13 @@ export function HeightMapHeatmap({ material, heightMap, mode, meshPoints = [], e
   const offsetX = coordinateMode === "machine" ? machineOrigin?.x_mm ?? 0 : 0;
   const offsetY = coordinateMode === "machine" ? machineOrigin?.y_mm ?? 0 : 0;
   const world = (x: number, y: number) => ({ x: x + offsetX, y: y + offsetY });
+  const projectedToolpaths = useMemo(() => toolpaths.flatMap(path => path.segments.map((segment, index) => ({
+    operationId: path.operationId, index,
+    points: (segment.puntos?.length ? segment.puntos : [segment.desde, segment.hasta]).flatMap(point => {
+      const position = worldToScreen({ x: point.x_mm + offsetX, y: point.y_mm + offsetY }, transform);
+      return [position.x, position.y];
+    }),
+  }))), [toolpaths, offsetX, offsetY, transform]);
   const visibleExclusions = exclusions.length > 0 ? exclusions : (heightMap?.exclusion_zones ?? []).map((zone) => ({ id: zone.id, name: zone.nombre, shape: "rectangle" as const, enabled: true, x_min_mm: zone.min_x_mm, x_max_mm: zone.max_x_mm, y_min_mm: zone.min_y_mm, y_max_mm: zone.max_y_mm }));
 
   const toggleFullscreen = async () => {
@@ -342,13 +352,16 @@ export function HeightMapHeatmap({ material, heightMap, mode, meshPoints = [], e
                         y={topRight.y}
                         width={Math.max(1, topRight.x - bottomLeft.x)}
                         height={Math.max(1, bottomLeft.y - topRight.y)}
-                        stroke="#f6cf73"
+                        stroke={coverageValid === true ? "#39bb76" : coverageValid === false ? "#ec6868" : "#f6cf73"}
                         strokeWidth={2}
                       />
                     );
                   })()
                 : null}
 
+              {projectedToolpaths.map(path => <Line key={`${path.operationId}/${path.index}`} points={path.points}
+                stroke={conflict?.operationId === path.operationId && conflict.segment === path.index ? "#ff4545" : "#8cceff"}
+                strokeWidth={conflict?.operationId === path.operationId && conflict.segment === path.index ? 4 : 1} listening={false} />)}
               {layers.exclusions
                 ? visibleExclusions.filter((zone) => zone.enabled).map((zone) => {
                     if (zone.shape === "circle") {

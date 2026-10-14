@@ -516,6 +516,12 @@ ul {
   color: #ffd2d2;
 }
 
+/* Explicit severities: modifiers must override the historical red base alert. */
+.alert--success { border-color: #34865b; background: #15382c; color: #b5efcc; }
+.alert--info { border-color: #376887; background: #162f43; color: #bfdef5; }
+.alert--warning { border-color: #967336; background: #3c311a; color: #f4dfa7; }
+.alert--danger, .alert--error { border-color: #a34f54; background: #421f26; color: #ffd2d2; }
+
 .status-badge {
   display: inline-flex;
   align-items: center;

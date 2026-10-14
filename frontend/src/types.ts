@@ -572,6 +572,8 @@ export type PhysicalMapProbeConfig = {
 };
 
 export type PhysicalMapExecution = Record<string, unknown> & {
+  last_error?: string | null;
+  retry_result?: { requested: number; recovered: number; failed_indices: number[] };
   worker_active?: boolean;
   phase?: string;
   point_state?: string;
@@ -583,6 +585,7 @@ export type PhysicalMapExecution = Record<string, unknown> & {
 };
 
 export type PhysicalMapPayload = Record<string, unknown> & {
+  validation?: { status?: string };
   map_id?: string | null;
   preview_id?: string;
   preview_version?: string;

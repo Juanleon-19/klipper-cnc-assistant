@@ -18,6 +18,9 @@ function deferred<T>() {
 }
 
 const apiMock = vi.hoisted(() => ({
+  validateMeshCoverage: vi.fn(),
+  inspectMeshArm: vi.fn(),
+  retryFailedMeshPoints: vi.fn(),
   getHeightMap: vi.fn(),
   getReferenceSession: vi.fn(),
   updateHeightMapSample: vi.fn(),
@@ -569,6 +572,8 @@ describe("ProjectWorkspace", () => {
 
   beforeEach(() => {
     Object.values(apiMock).forEach((fn) => fn.mockReset());
+    apiMock.validateMeshCoverage.mockResolvedValue({ coverage_valid: true, validated_at: "now", mesh_fingerprint: "validated", operations_checked: 1, segments_checked: 2, blocking_issues: [], warnings: [] });
+    apiMock.inspectMeshArm.mockResolvedValue({ can_arm: true, blocking_reasons: [] });
     apiMock.getMachineSettings.mockResolvedValue({ reference_prep_z_mm: 115, reference_prep_z_feed_mm_min: 180, move_total_timeout_s: 180, no_progress_timeout_s: 60, position_tolerance_mm: 0.05, velocity_tolerance_mm_s: 0.02 });
     apiMock.updateMachineSettings.mockResolvedValue({ reference_prep_z_mm: 115, reference_prep_z_feed_mm_min: 180, move_total_timeout_s: 180, no_progress_timeout_s: 60, position_tolerance_mm: 0.05, velocity_tolerance_mm_s: 0.02 });
     apiMock.confirmProbe.mockResolvedValue(physicalMachine.runtime);
@@ -582,6 +587,7 @@ describe("ProjectWorkspace", () => {
       payload: {
         map_id: "measured/manual-2x2",
         status: "MESH_PLANNED",
+        armed: true,
         source: "MEASURED",
         operation_ids: ["op_1"],
         placement_revision: "placement-1",
@@ -1196,6 +1202,7 @@ describe("ProjectWorkspace", () => {
       payload: {
         map_id: "measured/test",
         status: "MESH_PLANNED",
+        armed: true,
         source: "MEASURED",
         point_count: 2,
         grid: { rows: 1, columns: 2, dx_mm: 5, dy_mm: 0 },
@@ -1350,6 +1357,7 @@ describe("ProjectWorkspace", () => {
     const plannedMap = {
       map_id: "measured/manual-2x2",
       status: "MESH_PLANNED",
+      armed: true,
       source: "MEASURED",
       point_count: 4,
       grid_mode: "manual",
@@ -1518,7 +1526,7 @@ describe("ProjectWorkspace", () => {
     fireEvent.click(screen.getByRole("button", { name: /Mapa de alturas/i }));
     expect(await screen.findByText(/Mapa medido físicamente/i)).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: /Override del mapa/i }));
+    fireEvent.click(screen.getByRole("button", { name: /Personalizar para esta malla/i }));
     fireEvent.change(screen.getByLabelText(/Paso de sonda/i), { target: { value: "0.03" } });
     fireEvent.change(screen.getByLabelText(/Velocidad de sonda/i), { target: { value: "75" } });
     fireEvent.change(screen.getByLabelText(/Retracto \(mm\)/i), { target: { value: "0.8" } });
@@ -1664,6 +1672,8 @@ describe("ProjectWorkspace", () => {
     fireEvent.change(screen.getByLabelText(/^Columnas$/i), { target: { value: "2" } });
     fireEvent.click(screen.getByRole("button", { name: /Generar vista previa de malla/i }));
     expect(await screen.findByText(/Vista previa generada/i)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /^2\. Validar límites$/i }));
+    await waitFor(() => expect(screen.getByRole("button", { name: /^3\. Armar sondeo$/i })).toBeEnabled());
     fireEvent.click(screen.getByRole("button", { name: /^3\. Armar sondeo$/i }));
 
     await waitFor(() => expect(apiMock.planPhysicalMapFromReference).toHaveBeenCalledWith(
@@ -1721,6 +1731,7 @@ describe("ProjectWorkspace", () => {
       payload: {
         map_id: "measured/reference-coincident",
         status: "MESH_PLANNED",
+        armed: true,
         source: "MEASURED",
         operation_ids: ["op_1"],
         placement_revision: "placement-1",
@@ -1771,6 +1782,8 @@ describe("ProjectWorkspace", () => {
     fireEvent.click(screen.getByRole("button", { name: /Generar vista previa de malla/i }));
     expect(await screen.findByText(/Vista previa generada/i)).toBeInTheDocument();
 
+    fireEvent.click(screen.getByRole("button", { name: /^2\. Validar límites$/i }));
+    await waitFor(() => expect(screen.getByRole("button", { name: /^3\. Armar sondeo$/i })).toBeEnabled());
     fireEvent.click(screen.getByRole("button", { name: /^3\. Armar sondeo$/i }));
 
     await waitFor(() => expect(apiMock.planPhysicalMapFromReference).toHaveBeenCalledWith(
@@ -1796,6 +1809,7 @@ describe("ProjectWorkspace", () => {
       payload: {
         map_id: "measured/rows-mismatch",
         status: "MESH_PLANNED",
+        armed: true,
         source: "MEASURED",
         operation_ids: ["op_1"],
         placement_revision: "placement-1",
@@ -1844,6 +1858,8 @@ describe("ProjectWorkspace", () => {
     fireEvent.click(screen.getByRole("button", { name: /Generar vista previa de malla/i }));
     expect(await screen.findByText(/Vista previa generada/i)).toBeInTheDocument();
 
+    fireEvent.click(screen.getByRole("button", { name: /^2\. Validar límites$/i }));
+    await waitFor(() => expect(screen.getByRole("button", { name: /^3\. Armar sondeo$/i })).toBeEnabled());
     fireEvent.click(screen.getByRole("button", { name: /^3\. Armar sondeo$/i }));
 
     expect(await screen.findByText((content) => content.includes("difiere de la vista previa") && content.includes("filas"))).toBeInTheDocument();
@@ -2161,7 +2177,7 @@ describe("ProjectWorkspace", () => {
     fireEvent.click(screen.getByRole("button", { name: /^Ejecución$/i }));
 
     await screen.findByText(/Artefacto Legacy de diagnóstico/i);
-    expect(screen.getByText("Referencia Z", { selector: "span" }).parentElement).toHaveTextContent("REQUIERE_REFERENCIA");
+    expect(screen.getByText("Referencia Z", { selector: "span" }).parentElement).toHaveTextContent("Se medirá después del cambio");
     expect(screen.getByText("Archivo compensado", { selector: "span" }).parentElement).toHaveTextContent("002_taladrado_08_compensado.nc");
   });
 
@@ -2178,6 +2194,8 @@ describe("ProjectWorkspace", () => {
     fireEvent.click(screen.getByRole("button", { name: /Generar vista previa de malla/i }));
     await waitFor(() => expect(apiMock.previewPhysicalMap).toHaveBeenCalledTimes(1));
 
+    fireEvent.click(screen.getByRole("button", { name: /^2\. Validar límites$/i }));
+    await waitFor(() => expect(screen.getByRole("button", { name: /^3\. Armar sondeo$/i })).toBeEnabled());
     const armButton = await screen.findByRole("button", { name: /^3\. Armar sondeo$/i });
     await waitFor(() => expect(armButton).toBeEnabled());
     fireEvent.click(armButton);
@@ -2193,6 +2211,7 @@ describe("ProjectWorkspace", () => {
         payload: {
           map_id: "measured/manual-2x2",
           status: "MESH_PLANNED",
+        armed: true,
           source: "MEASURED",
           point_count: 4,
           mesh_configuration_fingerprint: "fingerprint/manual-2x2/config",
@@ -2222,6 +2241,8 @@ describe("ProjectWorkspace", () => {
     fireEvent.change(screen.getByLabelText(/^Columnas$/i), { target: { value: "2" } });
     fireEvent.click(screen.getByRole("button", { name: /Generar vista previa de malla/i }));
     await waitFor(() => expect(apiMock.previewPhysicalMap).toHaveBeenCalledTimes(1));
+    fireEvent.click(screen.getByRole("button", { name: /^2\. Validar límites$/i }));
+    await waitFor(() => expect(screen.getByRole("button", { name: /^3\. Armar sondeo$/i })).toBeEnabled());
     fireEvent.click(await screen.findByRole("button", { name: /^3\. Armar sondeo$/i }));
 
     await act(async () => {
@@ -2284,6 +2305,65 @@ describe("ProjectWorkspace", () => {
     expect(await screen.findByText(/Fallo controlado de compensación/i)).toBeInTheDocument();
     await waitFor(() => expect(screen.getByRole("button", { name: /Generar artefacto Legacy de inspección/i })).toBeEnabled());
     expect(apiMock.generateCompensatedGCode).toHaveBeenCalledTimes(1);
+  });
+
+  it("exige cobertura backend, muestra bloqueo concreto e invalida al cambiar filas", async () => {
+    apiMock.validateMeshCoverage.mockResolvedValueOnce({ coverage_valid: false, validated_at: "now", mesh_fingerprint: "bad", operations_checked: 1, segments_checked: 2, blocking_issues: [{ code: "OUTSIDE", reason: "Segmento fuera de la región.", recommended_action: "Reduzca el margen." }], warnings: [] });
+    apiMock.inspectMeshArm.mockResolvedValue({ can_arm: false, blocking_reasons: [{ code: "RECOVERY", message: "Recuperación física pendiente.", action: "Primero verifique reposo y recupere controles." }] });
+    renderWorkspace(physicalMachine);
+    fireEvent.click(screen.getByRole("button", { name: /Mapa de alturas/i }));
+    await screen.findByText(/Mapa medido físicamente/i);
+    fireEvent.click(screen.getByRole("button", { name: /Generar vista previa de malla/i }));
+    await waitFor(() => expect(screen.getByRole("button", { name: /Validar límites/i })).toBeEnabled());
+    expect(screen.getByRole("button", { name: /^3\. Armar sondeo$/i })).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: /Validar límites/i }));
+    expect(await screen.findByText(/Segmento fuera de la región/)).toHaveAttribute("data-severity", "ERROR");
+    expect(await screen.findByText(/Primero verifique reposo/)).toBeInTheDocument();
+    expect(apiMock.planPhysicalMapFromReference).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: /Validar límites/i }));
+    expect(await screen.findByText(/Cobertura válida:/)).toHaveAttribute("data-severity", "SUCCESS");
+    fireEvent.change(screen.getByLabelText(/^Filas$/i), { target: { value: "4" } });
+    expect(screen.getByRole("button", { name: /^3\. Armar sondeo$/i })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /Validar límites/i })).toBeDisabled();
+  });
+
+  it("limpia solo preview conservando receta sin llamar a ningún reset", async () => {
+    renderWorkspace(physicalMachine);
+    fireEvent.click(screen.getByRole("button", { name: /Mapa de alturas/i }));
+    await screen.findByText(/Mapa medido físicamente/i);
+    expect(screen.getByRole("button", { name: /Limpiar vista previa/i })).toBeDisabled();
+    fireEvent.change(screen.getByLabelText(/^Filas$/i), { target: { value: "4" } });
+    fireEvent.click(screen.getByRole("button", { name: /Generar vista previa de malla/i }));
+    await waitFor(() => expect(screen.getByRole("button", { name: /Limpiar vista previa/i })).toBeEnabled());
+    fireEvent.click(screen.getByRole("button", { name: /Limpiar vista previa/i }));
+    expect(screen.getByRole("button", { name: /Limpiar vista previa/i })).toBeDisabled();
+    expect(screen.getByLabelText(/^Filas$/i)).toHaveValue("4");
+    expect(screen.getByText(/Vista previa limpia/)).toHaveAttribute("data-severity", "INFO");
+    expect(apiMock.resetSetupMap).not.toHaveBeenCalled();
+    expect(apiMock.resetSetupReference).not.toHaveBeenCalled();
+    expect(apiMock.resetSetupPreparation).not.toHaveBeenCalled();
+  });
+
+  it("cambiar receta durante el armado exige repetir el flujo y no habilita iniciar", async () => {
+    const originalResponse = await apiMock.planPhysicalMapFromReference();
+    apiMock.planPhysicalMapFromReference.mockClear();
+    const pending = deferred<typeof originalResponse>();
+    apiMock.planPhysicalMapFromReference.mockReturnValueOnce(pending.promise);
+    renderWorkspace(physicalMachine);
+    fireEvent.click(screen.getByRole("button", { name: /Mapa de alturas/i }));
+    await screen.findByText(/Mapa medido físicamente/i);
+    fireEvent.change(screen.getByLabelText(/^Filas$/i), { target: { value: "2" } });
+    fireEvent.change(screen.getByLabelText(/^Columnas$/i), { target: { value: "2" } });
+    fireEvent.click(screen.getByRole("button", { name: /Generar vista previa de malla/i }));
+    await waitFor(() => expect(screen.getByRole("button", { name: /Validar límites/i })).toBeEnabled());
+    fireEvent.click(screen.getByRole("button", { name: /Validar límites/i }));
+    await waitFor(() => expect(screen.getByRole("button", { name: /^3\. Armar sondeo$/i })).toBeEnabled());
+    fireEvent.click(screen.getByRole("button", { name: /^3\. Armar sondeo$/i }));
+    fireEvent.change(screen.getByLabelText(/^Filas$/i), { target: { value: "4" } });
+    await act(async () => pending.resolve(originalResponse));
+    expect(await screen.findByText(/La configuración cambió durante el armado/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /^4\. Iniciar sondeo automático$/i })).toBeDisabled();
+    expect(apiMock.executeAllPhysicalMapPoints).not.toHaveBeenCalled();
   });
 
 });

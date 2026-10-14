@@ -27,6 +27,8 @@ class UnifiedMeshProbeTest(unittest.TestCase):
             homed_axes='xyz', machine_label='test', session_id='session',
             config=PhysicalMeshConfig(grid_mode='manual', rows=2, columns=2),
         )
+        # Isolate worker mechanics; canonical arming is exercised by the API/worker E2E tests.
+        self.maps.preparation.require_armed = Mock()
         self.worker = MeshExecutionService(self.maps)
         self.runtime = physical_fixtures.StatefulMeshRuntime()
         self.args = dict(project_id=self.project.id, map_id=self.plan['map_id'], runtime=self.runtime)
@@ -65,6 +67,7 @@ class UnifiedMeshProbeTest(unittest.TestCase):
         for point in pending[:-1]:
             self.maps.record_point(project_id=self.project.id, map_id=self.plan['map_id'],
                                    point_index=point['index'], z_measured=1.5)
+        self.maps.mark_status(project_id=self.project.id, map_id=self.plan["map_id"], status="MESH_PAUSED", worker_active=False)
         self.worker.start_next(**self.args)
         self.assertTrue(self.worker.wait_until_idle(timeout_s=3))
         self.assertEqual(len(self.runtime.calls), 1)
@@ -85,8 +88,8 @@ class UnifiedMeshProbeTest(unittest.TestCase):
             runtime.release.set()
         self.assertTrue(self.worker.wait_until_idle(timeout_s=3))
         self.assertEqual(self.payload()['status'], 'CANCELLED')
-        self.assertGreaterEqual(runtime.cancel_calls, 1)
-        self.assertEqual(runtime.calls, [])
+        self.assertEqual(runtime.cancel_calls, 0)
+        self.assertEqual(len(runtime.calls), 1)
 
     def test_F_recovery_blocks_next_and_all_identically(self):
         self.runtime.physical_ownership.enter_recovery('cleanup pending')

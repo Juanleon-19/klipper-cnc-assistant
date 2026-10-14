@@ -470,66 +470,33 @@ def build_router() -> APIRouter:
         )
 
 
+    def mesh_arguments(project_id, operation_id, payload, request):
+        values = payload.model_dump(exclude={'preview_fingerprint'})
+        values['exclusions'] = tuple(PhysicalExclusion(**v) for v in values['exclusions'])
+        return dict(project_id=project_id, operation_id=operation_id,
+                    config=PhysicalMeshConfig(**values), runtime=request.app.state.machine_runtime)
+
     @router.post("/projects/{project_id}/operations/{operation_id}/physical-map/preview", response_model=PhysicalMapResponse)
-    def preview_physical_map(project_id: str, operation_id: str, payload: PhysicalMapPlanRequest, request: Request) -> PhysicalMapResponse:
-        service = request.app.state.physical_map_service
-        started_at = perf_counter()
-        plan = service.preview_mesh_from_saved_reference(
-            project_id=project_id,
-            operation_id=operation_id,
-            config=PhysicalMeshConfig(
-                grid_mode=payload.grid_mode,
-                rows=payload.rows,
-                columns=payload.columns,
-                edge_margin_left_mm=payload.edge_margin_left_mm,
-                edge_margin_right_mm=payload.edge_margin_right_mm,
-                edge_margin_bottom_mm=payload.edge_margin_bottom_mm,
-                edge_margin_top_mm=payload.edge_margin_top_mm,
-                exclusions=tuple(PhysicalExclusion(**exclusion.model_dump()) for exclusion in payload.exclusions),
-                max_spacing_mm=payload.max_spacing_mm,
-                margin_mm=payload.margin_mm,
-                safe_z_mm=payload.safe_z_mm,
-                probe_profile_source=payload.probe_profile_source,
-                probe_step_mm=payload.probe_step_mm,
-                probe_feed_mm_min=payload.probe_feed_mm_min,
-                retract_mm=payload.retract_mm,
-            ),
-        )
-        plan["preview_backend_duration_ms"] = round((perf_counter() - started_at) * 1000.0, 3)
-        plan["preview_point_count"] = int(plan.get("point_count") or 0)
-        return _physical_map_response(request, plan)
+    def preview_physical_map(project_id: str, operation_id: str, payload: PhysicalMapPlanRequest, request: Request):
+        result = request.app.state.physical_map_service.preparation.preview(**mesh_arguments(project_id, operation_id, payload, request))
+        return _physical_map_response(request, result)
+
+    @router.post("/projects/{project_id}/operations/{operation_id}/physical-map/validate", response_model=dict)
+    def validate_physical_map(project_id: str, operation_id: str, payload: PhysicalMapPlanRequest, request: Request):
+        return request.app.state.physical_map_service.preparation.validate(
+            **mesh_arguments(project_id, operation_id, payload, request), preview_fingerprint=payload.preview_fingerprint)
+
+    @router.post("/projects/{project_id}/operations/{operation_id}/physical-map/arm-readiness", response_model=dict)
+    def physical_map_arm_readiness(project_id: str, operation_id: str, payload: PhysicalMapPlanRequest, request: Request):
+        # Read-only assessment; this POST carries the unsaved preview recipe.
+        return request.app.state.physical_map_service.preparation.readiness(
+            **mesh_arguments(project_id, operation_id, payload, request), preview_fingerprint=payload.preview_fingerprint)
 
     @router.post("/projects/{project_id}/operations/{operation_id}/physical-map/plan-from-reference", response_model=PhysicalMapResponse)
-    def plan_physical_map_from_reference(project_id: str, operation_id: str, payload: PhysicalMapPlanRequest, request: Request) -> PhysicalMapResponse:
-        physical_map_service = request.app.state.physical_map_service
-        config = PhysicalMeshConfig(
-            grid_mode=payload.grid_mode,
-            rows=payload.rows,
-            columns=payload.columns,
-            edge_margin_left_mm=payload.edge_margin_left_mm,
-            edge_margin_right_mm=payload.edge_margin_right_mm,
-            edge_margin_bottom_mm=payload.edge_margin_bottom_mm,
-            edge_margin_top_mm=payload.edge_margin_top_mm,
-            exclusions=tuple(PhysicalExclusion(**exclusion.model_dump()) for exclusion in payload.exclusions),
-            max_spacing_mm=payload.max_spacing_mm,
-            margin_mm=payload.margin_mm,
-            safe_z_mm=payload.safe_z_mm,
-            probe_profile_source=payload.probe_profile_source,
-            probe_step_mm=payload.probe_step_mm,
-            probe_feed_mm_min=payload.probe_feed_mm_min,
-            retract_mm=payload.retract_mm,
-        )
-        started_at = perf_counter()
-        plan = physical_map_service.plan_from_saved_reference(
-            project_id=project_id,
-            operation_id=operation_id,
-            config=config,
-            runtime=request.app.state.machine_runtime,
-        )
-        response_plan = dict(plan)
-        response_plan["arm_backend_duration_ms"] = round((perf_counter() - started_at) * 1000.0, 3)
-        response_plan["arm_point_count"] = int(response_plan.get("point_count") or len(response_plan.get("points") or []))
-        return _physical_map_response(request, response_plan)
+    def plan_physical_map_from_reference(project_id: str, operation_id: str, payload: PhysicalMapPlanRequest, request: Request):
+        result = request.app.state.physical_map_service.preparation.arm(
+            **mesh_arguments(project_id, operation_id, payload, request), preview_fingerprint=payload.preview_fingerprint)
+        return _physical_map_response(request, result)
 
     @router.get("/projects/{project_id}/operations/{operation_id}/physical-map", response_model=PhysicalMapResponse)
     def get_physical_map(project_id: str, operation_id: str, request: Request) -> PhysicalMapResponse:
@@ -544,7 +511,7 @@ def build_router() -> APIRouter:
     @router.post("/projects/{project_id}/physical-maps/{map_id:path}/repeat", response_model=PhysicalMapResponse)
     def repeat_physical_map(project_id: str, map_id: str, request: Request) -> PhysicalMapResponse:
         _reject_active_motion(request)
-        payload = request.app.state.physical_map_service.repeat_measurement(project_id=project_id, map_id=map_id)
+        payload = request.app.state.physical_map_service.preparation.rebuild(project_id=project_id, map_id=map_id, runtime=request.app.state.machine_runtime)
         return _physical_map_response(request, payload)
 
     @router.post("/projects/{project_id}/physical-maps/{map_id:path}/execute-next", response_model=PhysicalMapResponse)
@@ -588,10 +555,14 @@ def build_router() -> APIRouter:
     def retry_physical_map_point(project_id: str, map_id: str, point_index: int, request: Request) -> PhysicalMapResponse:
         _reject_active_motion(request)
         runtime = request.app.state.machine_runtime
-        readiness = runtime.mesh_retry_readiness()
-        request.app.state.physical_map_service.retry_failed_point(project_id, map_id, point_index)
-        payload = request.app.state.mesh_execution_service.start_all(project_id=project_id, map_id=map_id, runtime=runtime)
-        payload.update({"retry_accepted": True, "worker_started": True, "point_index": point_index, **readiness})
+        payload = request.app.state.mesh_execution_service.retry_failed(
+            project_id=project_id, map_id=map_id, runtime=runtime, point_index=point_index)
+        return _physical_map_response(request, payload)
+
+    @router.post("/projects/{project_id}/physical-maps/{map_id:path}/retry-failed", response_model=PhysicalMapResponse)
+    def retry_failed_physical_points(project_id: str, map_id: str, request: Request):
+        payload = request.app.state.mesh_execution_service.retry_failed(
+            project_id=project_id, map_id=map_id, runtime=request.app.state.machine_runtime)
         return _physical_map_response(request, payload)
 
     @router.post("/projects/{project_id}/physical-maps/{map_id:path}/points/{point_index}/skip", response_model=PhysicalMapResponse)

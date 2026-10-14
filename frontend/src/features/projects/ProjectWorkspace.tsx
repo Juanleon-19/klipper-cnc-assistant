@@ -1,3 +1,4 @@
+import { MeshArmInspection, MeshNotice, type MeshCoverage, type MeshSeverity } from "../height-map/MeshWorkflow";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { useMachineStatus } from "../system/MachineContext";
@@ -594,6 +595,10 @@ export function ProjectWorkspace({
   const [pointFilter, setPointFilter] = useState<"ALL" | "PENDING" | "MEASURED" | "EXCLUDED" | "FAILED">("ALL");
   const [showAllTrajectoryOperations, setShowAllTrajectoryOperations] = useState(false);
   const [meshValidationMessage, setMeshValidationMessage] = useState("");
+  const [meshMessageSeverity, setMeshMessageSeverity] = useState<MeshSeverity>("INFO");
+  const [meshCoverage, setMeshCoverage] = useState<MeshCoverage | null>(null);
+  const [coverageBusy, setCoverageBusy] = useState(false);
+  const [meshRecipeDirty, setMeshRecipeDirty] = useState(false);
   const [meshPreviewFingerprint, setMeshPreviewFingerprint] = useState<string | null>(null);
   const [liveExecutionUnavailable, setLiveExecutionUnavailable] = useState(false);
   const [executionReadiness, setExecutionReadiness] = useState<ExecutionReadiness | null>(null);
@@ -666,6 +671,11 @@ export function ProjectWorkspace({
     [project, selectedOperationId]
   );
 
+  const meshToolpaths = useMemo(() => (project?.operaciones ?? [])
+    .filter(op => op.setup_id === selectedOperation?.setup_id && op.cara === selectedOperation?.cara && op.analisis)
+    .map(op => ({ operationId: op.id, segments: op.analisis!.segmentos_vista_previa })),
+    [project?.operaciones, selectedOperation?.setup_id, selectedOperation?.cara]);
+
   const selectedSetup = useMemo(
     () => project?.montajes.find((setup) => setup.id === selectedSetupId) ?? project?.montajes[0] ?? null,
     [project, selectedSetupId]
@@ -703,6 +713,17 @@ export function ProjectWorkspace({
     }
     onProjectStateChange({ ...project, current_setup_id: selectedSetupId });
   }, [onProjectStateChange, project, selectedSetupId]);
+
+  useEffect(() => {
+    meshPreviewAbortRef.current?.abort();
+    meshPreviewRequestIdRef.current += 1;
+    setPreviewBusy(false);
+    setMeshPreview(null);
+    setMeshPreviewFingerprint(null);
+    setMeshCoverage(null);
+    setMeshValidationMessage("");
+    setMeshRecipeDirty(false);
+  }, [project?.id, selectedOperation?.id]);
 
   useEffect(() => {
     if (!project || !selectedOperation) {
@@ -788,7 +809,8 @@ export function ProjectWorkspace({
           setHeightMap(measured);
           setReferenceSession(refreshedReference);
           setActiveMapTab("mapa2d");
-          setMeshValidationMessage("Malla completada. Cobertura validada automáticamente; la compensación ya puede generarse si no existen otros bloqueos.");
+          setMeshMessageSeverity(nextMap?.validation?.status === "VALID" ? "SUCCESS" : "WARNING");
+          setMeshValidationMessage(nextMap?.validation?.status === "VALID" ? "Mapa completado. Cobertura válida." : "Medición completada. Revise la cobertura antes de ejecutar.");
           void api.getPhysicalMapHistory(project.id, selectedOperation.id).then((history) => {
             if (!cancelled) {
               setPhysicalMapHistory(history);
@@ -1700,6 +1722,8 @@ export function ProjectWorkspace({
   };
 
   const clearMeshPreview = (message: string) => {
+    setMeshCoverage(null);
+    setMeshMessageSeverity("INFO");
     meshPreviewAbortRef.current?.abort();
     meshPreviewAbortRef.current = null;
     meshPreviewRequestIdRef.current += 1;
@@ -1710,6 +1734,9 @@ export function ProjectWorkspace({
   };
 
   const invalidateMeshPreview = (message?: string) => {
+    setMeshRecipeDirty(true);
+    setMeshCoverage(null);
+    setMeshMessageSeverity("WARNING");
     meshPreviewAbortRef.current?.abort();
     meshPreviewAbortRef.current = null;
     meshPreviewRequestIdRef.current += 1;
@@ -1719,7 +1746,7 @@ export function ProjectWorkspace({
     setMeshSuggestion(null);
     setMeshValidationMessage(message ?? (physicalMap?.points?.some((point) => point.status === "MEASURED")
       ? "Existe una medición parcial. Cambiar la cuadrícula creará una nueva versión de malla. Los puntos medidos anteriores se conservarán en el historial, pero no pertenecerán a la nueva cuadrícula."
-      : ""));
+      : "Vista previa obsoleta; regenere y valide cobertura."));
   };
 
   const withPhysicalMapAction = async (action: () => Promise<PhysicalMapPayload | null>, options?: { clearPreview?: boolean }) => {
@@ -1745,7 +1772,8 @@ export function ProjectWorkspace({
         setReferenceSession(refreshedReference);
         setMapSource("MEASURED");
         setActiveMapTab("mapa2d");
-        setMeshValidationMessage("Malla completada. Cobertura validada automáticamente; la compensación ya puede generarse si no existen otros bloqueos.");
+        setMeshMessageSeverity(nextMap?.validation?.status === "VALID" ? "SUCCESS" : "WARNING");
+          setMeshValidationMessage(nextMap?.validation?.status === "VALID" ? "Mapa completado. Cobertura válida." : "Medición completada. Revise la cobertura antes de ejecutar.");
       } else if (project && selectedOperation) {
         void api.getReferenceSession(project.id, selectedOperation.id).then(setReferenceSession).catch(() => undefined);
         if (result) {
@@ -1830,6 +1858,7 @@ export function ProjectWorkspace({
       return point.status === pointFilter;
     });
     const physicalPlanPayload = {
+      preview_fingerprint: typeof meshPreview?.mesh_fingerprint === "string" ? meshPreview.mesh_fingerprint : undefined,
       grid_mode: gridDefinitionMode,
       rows,
       columns,
@@ -1864,14 +1893,15 @@ export function ProjectWorkspace({
       effectiveProbeStep,
       effectiveProbeFeed,
       effectiveProbeRetract,
-    }) : null;
+    }) + JSON.stringify(project.operaciones.filter(op => op.setup_id === selectedOperation.setup_id && op.cara === selectedOperation.cara).map(op => [op.id, op.archivo_gcode, op.sha256, op.analisis?.analysis_version])) : null;
+    const previewCurrent = Boolean(meshPreview && meshPreviewFingerprint === currentMeshFingerprint);
     const visibleStatus = String(visibleMesh?.status ?? visibleMesh?.map_ready_state ?? "sin mapa medido");
     const previewRequestDurationMs = typeof meshPreview?.preview_request_duration_ms === "number" ? meshPreview.preview_request_duration_ms : null;
     const previewBackendDurationMs = typeof meshPreview?.preview_backend_duration_ms === "number" ? meshPreview.preview_backend_duration_ms : null;
     const armRequestDurationMs = typeof physicalMap?.arm_request_duration_ms === "number" ? physicalMap.arm_request_duration_ms : null;
     const armBackendDurationMs = typeof physicalMap?.arm_backend_duration_ms === "number" ? physicalMap.arm_backend_duration_ms : null;
     const physicalMapCancelled = physicalMap?.status === "CANCELLED";
-    const startMapDisabled = armMeshBusy || mapActionBusy || !physicalMapId || !physicalMap || Boolean(meshPreview) || isPhysicalMapReady(physicalMap) || physicalMapCancelled;
+    const startMapDisabled = !physicalMap?.armed || meshRecipeDirty || Boolean(physicalMap?.execution?.worker_active) || armMeshBusy || mapActionBusy || !physicalMapId || !physicalMap || Boolean(meshPreview) || isPhysicalMapReady(physicalMap) || physicalMapCancelled;
     const requestMeshPreview = async () => {
       if (!selectedOperation || !currentMeshFingerprint) {
         return;
@@ -1881,6 +1911,8 @@ export function ProjectWorkspace({
       meshPreviewAbortRef.current = controller;
       const requestId = meshPreviewRequestIdRef.current + 1;
       meshPreviewRequestIdRef.current = requestId;
+      setMeshCoverage(null);
+      setMeshMessageSeverity("INFO");
       setPreviewBusy(true);
       setWorkspaceError("");
       const startedAt = performance.now();
@@ -1896,6 +1928,7 @@ export function ProjectWorkspace({
           return;
         }
         setMeshPreview(payload);
+        setMeshMessageSeverity(payload.configuration_change_warning ? "WARNING" : "SUCCESS");
         setMeshPreviewFingerprint(currentMeshFingerprint);
         setActiveMapTab("mapa2d");
         const total = payload.point_count ?? rows * columns;
@@ -1907,6 +1940,7 @@ export function ProjectWorkspace({
         );
       } catch (error) {
         if (isAbortError(error)) {
+          setMeshMessageSeverity("INFO");
           setMeshValidationMessage("Generación de vista previa cancelada.");
           return;
         }
@@ -1918,20 +1952,42 @@ export function ProjectWorkspace({
         }
       }
     };
+    const validateMeshCoverage = async () => {
+      if (!selectedOperation || !meshPreview) return;
+      const requestId = meshPreviewRequestIdRef.current;
+      setCoverageBusy(true);
+      try {
+        const result = await api.validateMeshCoverage(project.id, selectedOperation.id, physicalPlanPayload);
+        if (requestId !== meshPreviewRequestIdRef.current) return;
+        setMeshCoverage(result);
+        setMeshMessageSeverity(result.coverage_valid ? "SUCCESS" : "ERROR");
+        setMeshValidationMessage(result.coverage_valid ? `Cobertura válida: ${result.operations_checked} operaciones, ${result.segments_checked} segmentos.` : "Cobertura inválida. Corrija los problemas indicados antes de armar.");
+      } catch (error) {
+        if (requestId === meshPreviewRequestIdRef.current) {
+          setMeshMessageSeverity("ERROR");
+          setMeshValidationMessage(error instanceof Error ? error.message : "No fue posible validar cobertura.");
+        }
+      } finally { setCoverageBusy(false); }
+    };
     const armMeshPreview = async () => {
-      if (armMeshInFlight.current || !selectedOperation || !meshPreview || !currentMeshFingerprint || !physicalReady) {
+      if (armMeshInFlight.current || !selectedOperation || !meshPreview || !currentMeshFingerprint || !physicalReady || !meshCoverage?.coverage_valid) {
+        setMeshMessageSeverity("ERROR");
+        setMeshValidationMessage("No se puede armar: complete la referencia vigente, genere preview y valide cobertura.");
         return;
       }
       if (meshPreviewFingerprint !== currentMeshFingerprint) {
+        setMeshMessageSeverity("WARNING");
         setMeshValidationMessage("La configuración cambió después de la preview. Regénere la vista previa antes de armar.");
         return;
       }
+      const requestId = meshPreviewRequestIdRef.current;
       armMeshInFlight.current = true;
       setArmMeshBusy(true);
       const startedAt = performance.now();
       try {
         await withPhysicalMapAction(async () => {
           const response = await api.planPhysicalMapFromReference(project.id, selectedOperation.id, physicalPlanPayload);
+          if (requestId !== meshPreviewRequestIdRef.current) throw new Error("La configuración cambió durante el armado. Regenere la preview y valide antes de iniciar.");
           const persisted: PhysicalMapPayload = {
             ...response.payload,
             arm_request_duration_ms: Number((performance.now() - startedAt).toFixed(3)),
@@ -1941,6 +1997,8 @@ export function ProjectWorkspace({
             throw new Error(buildPreviewMismatchMessage(comparison.differingFields));
           }
           setActiveMapTab("mapa2d");
+          setMeshRecipeDirty(false);
+          setMeshMessageSeverity("SUCCESS");
           setMeshValidationMessage("Sondeo armado. El mapa persistido coincide con la vista previa actual y queda listo para iniciar.");
           return persisted;
         }, { clearPreview: true });
@@ -1964,9 +2022,11 @@ export function ProjectWorkspace({
       const next: PhysicalMapExclusion = newExclusionShape === "rectangle"
         ? { id: `exclusion-${Date.now()}`, name: "Nueva zona", shape: "rectangle", enabled: true, x_min_mm: edgeLeft, x_max_mm: Math.min(project.material.ancho_mm - edgeRight, edgeLeft + 5), y_min_mm: edgeBottom, y_max_mm: Math.min(project.material.alto_mm - edgeTop, edgeBottom + 5) }
         : { id: `exclusion-${Date.now()}`, name: "Nueva zona", shape: "circle", enabled: true, center_x_mm: project.material.ancho_mm / 2, center_y_mm: project.material.alto_mm / 2, radius_mm: 3 };
+      invalidateMeshPreview();
       setMeshExclusions((current) => [...current, next]);
     };
     const updateExclusion = (id: string, patch: Partial<PhysicalMapExclusion>) => {
+      invalidateMeshPreview();
       setMeshExclusions((current) => current.map((item) => item.id === id ? { ...item, ...patch } : item));
     };
     const formatPointStatus = (status: string) => ({ PENDING: "Pendiente", MOVING: "Moviendo", PROBING: "Sondeando", MEASURED: "Medido", EXCLUDED: "Excluido", FAILED: "Fallido", RETRY_REQUIRED: "Reintento" }[status] ?? status);
@@ -2064,6 +2124,7 @@ export function ProjectWorkspace({
                         setMeshSuggestion(suggestion);
                         setMeshRowsInput(String(suggestion.rows));
                         setMeshColumnsInput(String(suggestion.columns));
+                        setMeshMessageSeverity("INFO");
                         setMeshValidationMessage("Propuesta aplicada. Genere la vista previa para revisar la cuadrícula.");
                       } catch (error) {
                         setWorkspaceError(error instanceof Error ? error.message : "No fue posible generar la propuesta de malla.");
@@ -2079,24 +2140,25 @@ export function ProjectWorkspace({
               <div className="section-heading section-heading--stacked">
                 <div><p className="eyebrow">Perfil de sondeo</p><h4>Contrato efectivo de descenso</h4></div>
                 <div className="map-segmented" aria-label="Perfil de sondeo">
-                  <button className={`map-segment-button${probeProfileMode === "machine_reference_profile" ? " map-segment-button--active" : ""}`} type="button" onClick={() => { setProbeProfileMode("machine_reference_profile"); invalidateMeshPreview(); }}>Heredar referencia</button>
-                  <button className={`map-segment-button${probeProfileMode === "map_override" ? " map-segment-button--active" : ""}`} type="button" onClick={() => { setProbeProfileMode("map_override"); invalidateMeshPreview(); }}>Override del mapa</button>
+                  <button className={`map-segment-button${probeProfileMode === "machine_reference_profile" ? " map-segment-button--active" : ""}`} type="button" onClick={() => { setProbeProfileMode("machine_reference_profile"); invalidateMeshPreview(); }}>Usar parámetros generales</button>
+                  <button className={`map-segment-button${probeProfileMode === "map_override" ? " map-segment-button--active" : ""}`} type="button" onClick={() => { setProbeProfileMode("map_override"); invalidateMeshPreview(); }}>Personalizar para esta malla</button>
                 </div>
               </div>
               <div className="form-grid form-grid--dense">
-                <label>Z segura de traslado (mm)<input value={safeZInput} inputMode="decimal" onChange={(event) => { setSafeZInput(event.target.value); invalidateMeshPreview(); }} /></label>
-                <label>Paso de sonda (mm)<input value={displayProbeStepInput} inputMode="decimal" disabled={effectiveProfileSource === "machine_reference_profile"} onChange={(event) => { setProbeStepInput(event.target.value); invalidateMeshPreview(); }} /></label>
-                <label>Velocidad de sonda (mm/min)<input value={displayProbeFeedInput} inputMode="decimal" disabled={effectiveProfileSource === "machine_reference_profile"} onChange={(event) => { setProbeSpeedInput(event.target.value); invalidateMeshPreview(); }} /></label>
-                <label>Retracto (mm)<input value={displayProbeRetractInput} inputMode="decimal" disabled={effectiveProfileSource === "machine_reference_profile"} onChange={(event) => { setProbeRetractInput(event.target.value); invalidateMeshPreview(); }} /></label>
+                <label title="Separación vertical usada para desplazarse entre puntos sin tocar la superficie. No es la Z de contacto.">Z segura de traslado (mm)<input value={safeZInput} inputMode="decimal" onChange={(event) => { setSafeZInput(event.target.value); invalidateMeshPreview(); }} /><small className="muted">Separación vertical usada para desplazarse entre puntos sin tocar la superficie. No es la Z de contacto.</small></label>
+                <label title="Incremento vertical de cada búsqueda de contacto. Menor = más resolución y más tiempo.">Paso de sonda (mm)<input value={displayProbeStepInput} inputMode="decimal" disabled={effectiveProfileSource === "machine_reference_profile"} onChange={(event) => { setProbeStepInput(event.target.value); invalidateMeshPreview(); }} /><small className="muted">Incremento vertical de cada búsqueda de contacto. Menor = más resolución y más tiempo.</small></label>
+                <label title="Velocidad de descenso durante la medición. No modifica el avance XY del G-code.">Velocidad de sonda (mm/min)<input value={displayProbeFeedInput} inputMode="decimal" disabled={effectiveProfileSource === "machine_reference_profile"} onChange={(event) => { setProbeSpeedInput(event.target.value); invalidateMeshPreview(); }} /><small className="muted">Velocidad de descenso durante la medición. No modifica el avance XY del G-code.</small></label>
+                <label title="Distancia que sube después del contacto para liberar la sonda antes del siguiente traslado.">Retracto (mm)<input value={displayProbeRetractInput} inputMode="decimal" disabled={effectiveProfileSource === "machine_reference_profile"} onChange={(event) => { setProbeRetractInput(event.target.value); invalidateMeshPreview(); }} /><small className="muted">Distancia que sube después del contacto para liberar la sonda antes del siguiente traslado.</small></label>
               </div>
               <div className="info-grid info-grid--double compact-grid">
-                <div className="metric-box"><span>Fuente efectiva</span><strong>{effectiveProfileSource === "map_override" ? "Override del mapa" : "Perfil de referencia"}</strong></div>
+                <div className="metric-box"><span>Fuente efectiva</span><strong>{effectiveProfileSource === "map_override" ? "Personalizar para esta malla" : "Perfil de referencia"}</strong></div>
                 <div className="metric-box"><span>Paso efectivo</span><strong>{formatMillimeters(Number.isFinite(effectiveProbeStep) ? effectiveProbeStep : null, 3)}</strong></div>
                 <div className="metric-box"><span>Velocidad programada de descenso</span><strong>{formatMillimeters(Number.isFinite(effectiveProbeFeed) ? effectiveProbeFeed : null, 0)}/min</strong></div>
                 <div className="metric-box"><span>Retracto efectivo</span><strong>{formatMillimeters(Number.isFinite(effectiveProbeRetract) ? effectiveProbeRetract : null, 3)}</strong></div>
               </div>
               <p className="muted">La velocidad se aplica a cada paso; la duración total incluye confirmar posición, detectar contacto, retraer y trasladarse entre puntos. Un paso mayor reduce el número de comprobaciones, pero también la resolución Z. La Z segura es separación sobre la referencia, no una coordenada absoluta. Cambiar estos campos requiere regenerar la vista previa y armar un mapa nuevo.</p>
-              <p className="muted">{probeProfileMode === "machine_reference_profile" ? "La malla hereda exactamente el paso, la velocidad y el retracto de Tomar referencia. Los campos numéricos quedan solo informativos." : "El mapa usa un override explícito. Este modo debe verse como una sustitución deliberada del perfil de referencia."}</p>
+              <p className="muted">{probeProfileMode === "machine_reference_profile" ? "Estos valores vienen de la configuración general de la máquina. Seleccione Personalizar para esta malla para editarlos." : "Los valores personalizados se aplican únicamente a esta malla."}</p>
+              {probeProfileMode === "map_override" ? <button className="button button--ghost" onClick={() => { setProbeProfileMode("machine_reference_profile"); invalidateMeshPreview(); setMeshMessageSeverity("INFO"); setMeshValidationMessage("Usando parámetros generales."); }}>Restaurar parámetros generales</button> : null}
             </div>
             <div className="subpanel subpanel--soft">
               <div className="section-heading"><h4>Retiro del borde del material</h4><label className="inline-check"><input type="checkbox" checked={useUniformEdgeRetreat} onChange={(event) => { setUseUniformEdgeRetreat(event.target.checked); invalidateMeshPreview(); }} /> Usar el mismo retiro en todos los bordes</label></div>
@@ -2139,7 +2201,7 @@ export function ProjectWorkspace({
               <div className="metric-box"><span>Separación X</span><strong>{formatMillimeters(visibleMesh?.grid?.dx_mm ?? (columns > 1 ? probeWidth / (columns - 1) : null), 3)}</strong></div>
               <div className="metric-box"><span>Separación Y</span><strong>{formatMillimeters(visibleMesh?.grid?.dy_mm ?? (rows > 1 ? probeHeight / (rows - 1) : null), 3)}</strong></div>
               <div className="metric-box"><span>Z segura</span><strong>{formatMillimeters(safeZ, 3)}</strong></div>
-              <div className="metric-box"><span>Perfil efectivo</span><strong>{effectiveProfileSource === "map_override" ? "Override del mapa" : "Perfil de referencia"}</strong></div>
+              <div className="metric-box"><span>Perfil efectivo</span><strong>{effectiveProfileSource === "map_override" ? "Personalizar para esta malla" : "Perfil de referencia"}</strong></div>
               <div className="metric-box"><span>Paso / velocidad</span><strong>{formatMillimeters(Number.isFinite(effectiveProbeStep) ? effectiveProbeStep : null, 3)} · {formatMillimeters(Number.isFinite(effectiveProbeFeed) ? effectiveProbeFeed : null, 0)}/min</strong></div>
               <div className="metric-box"><span>Retracto</span><strong>{formatMillimeters(Number.isFinite(effectiveProbeRetract) ? effectiveProbeRetract : null, 3)}</strong></div>
               <div className="metric-box"><span>Primer punto</span><strong>{firstPhysicalPoint ? `X ${formatMillimeters(firstPhysicalPoint.x_local, 3)} · Y ${formatMillimeters(firstPhysicalPoint.y_local, 3)}` : "Pendiente de preview"}</strong></div>
@@ -2151,24 +2213,37 @@ export function ProjectWorkspace({
             </div>
             {probeWidth <= 0 || probeHeight <= 0 ? <div className="alert alert--warning">El retiro de los bordes deja una región de sondeo inválida. Reduzca los valores o revise las dimensiones del material.</div> : null}
             {!meshConfigValid ? <div className="alert alert--warning">La configuración de malla es inválida. Revise filas, columnas, límites, separación objetivo y parámetros de sonda antes de continuar.</div> : null}
-            {meshProbeStateMessage ? <div className="alert alert--info">{meshProbeStateMessage}{stepCounter !== null ? ` · pasos ${stepCounter}` : ""}{persistenceCount !== null ? ` · persistencias ${persistenceCount}` : ""}</div> : null}
-            {meshValidationMessage ? <div className="alert alert--info">{meshValidationMessage}</div> : null}
+            {meshProbeStateMessage ? <MeshNotice severity={physicalMap?.execution?.last_error ? "ERROR" : physicalMap?.status === "MESH_COMPLETE" ? "SUCCESS" : ["MESH_PAUSED", "CANCELLED"].includes(String(physicalMap?.status)) ? "WARNING" : "INFO"}>{physicalMap?.execution?.point_state === "MESH_PAUSING" ? "Pausando; se completará el punto actual." : physicalMap?.status === "MESH_PAUSED" ? "Sondeo pausado." : physicalMap?.status === "CANCELLED" ? "Malla cancelada por el operador. Puede modificar y rehacer malla." : meshProbeStateMessage}{stepCounter !== null ? ` · pasos ${stepCounter}` : ""}{persistenceCount !== null ? ` · persistencias ${persistenceCount}` : ""}{physicalMap?.execution?.last_error ? ` ${physicalMap.execution.last_error}` : ""}</MeshNotice> : null}
+            {physicalMap?.execution?.retry_result ? <MeshNotice severity={physicalMap.execution.retry_result.failed_indices.length ? "WARNING" : "SUCCESS"}>{physicalMap.execution.retry_result.recovered}/{physicalMap.execution.retry_result.requested} recuperados.{physicalMap.execution.retry_result.failed_indices.length ? ` Siguen fallando: puntos ${physicalMap.execution.retry_result.failed_indices.map(i => `#${i}`).join(", ")}.` : ""}</MeshNotice> : null}
+            <p aria-label="Guía de malla">CONFIGURAR → 1 Vista previa → 2 Validar cobertura → 3 Armar → 4 Medir</p>
+            {meshPreview && !previewCurrent ? <MeshNotice severity="WARNING">Vista previa obsoleta; regenere y valide cobertura.</MeshNotice> : null}
+            {meshValidationMessage && (!meshPreview || previewCurrent) ? <MeshNotice severity={meshMessageSeverity}>{meshValidationMessage}</MeshNotice> : null}
+            {meshCoverage?.blocking_issues.map((issue, index) => <MeshNotice key={index} severity="ERROR">{issue.operation_name ? `${issue.operation_name}: ` : ""}{issue.reason} {issue.recommended_action}</MeshNotice>)}
+            {selectedOperation && meshPreview ? <MeshArmInspection projectId={project.id} operationId={selectedOperation.id} recipe={physicalPlanPayload} fingerprint={physicalPlanPayload.preview_fingerprint} runtimeRevision={JSON.stringify([runtime?.recovery_pending, runtime?.moonraker?.http_connected, runtime?.moonraker?.websocket_connected, runtime?.klipper?.ready, meshCoverage?.validated_at])} /> : null}
             <div className="action-grid">
               <button className="button" type="button" disabled={previewBusy || armMeshBusy || !selectedOperation || !meshConfigValid} onClick={() => void requestMeshPreview()}>{previewBusy ? "Generando vista previa…" : "1. Generar vista previa de malla"}</button>
               {previewBusy ? <button className="button button--ghost" type="button" onClick={() => clearMeshPreview("Generación de vista previa cancelada.")}>Cancelar generación</button> : null}
-              <button className="button" type="button" disabled={armMeshBusy || !meshPreview} onClick={() => setMeshValidationMessage(physicalFailedPoints > 0 ? `La malla tiene ${physicalFailedPoints} punto(s) fallidos o pendientes de reintento.` : "Cobertura geométrica revisada. No se extrapola fuera de la región interior ni sobre exclusiones.")}>2. Validar límites</button>
-              <button className="button" type="button" disabled={armMeshBusy || mapActionBusy || !meshPreview || !physicalReady || meshPreviewFingerprint !== currentMeshFingerprint || physicalMap?.status === "MESH_COMPLETE"} onClick={() => void armMeshPreview()}>{armMeshBusy ? "Armando sondeo…" : "3. Armar sondeo"}</button>
-              <button className="button" type="button" disabled={startMapDisabled} onClick={() => void withPhysicalMapAction(async () => (await api.executeAllPhysicalMapPoints(project.id, physicalMapId)).payload)}>{mapActionBusy && !armMeshBusy ? "Iniciando sondeo…" : "4. Iniciar sondeo automático"}</button>
-              <button className="button button--ghost" type="button" disabled={!physicalMapId} onClick={() => void withPhysicalMapAction(async () => {
+              <button className="button" type="button" disabled={coverageBusy || armMeshBusy || !meshPreview} onClick={() => void validateMeshCoverage()}>{coverageBusy ? "Validando cobertura…" : "2. Validar límites"}</button>
+              <button className="button" type="button" disabled={!previewCurrent || coverageBusy || !meshCoverage?.coverage_valid || armMeshBusy || mapActionBusy || !meshPreview || !physicalReady || meshPreviewFingerprint !== currentMeshFingerprint} onClick={() => void armMeshPreview()}>{armMeshBusy ? "Armando sondeo…" : "3. Armar sondeo"}</button>
+              <button className="button" type="button" disabled={startMapDisabled} onClick={() => { setMeshValidationMessage(""); void withPhysicalMapAction(async () => (await api.executeAllPhysicalMapPoints(project.id, physicalMapId)).payload); }}>{mapActionBusy && !armMeshBusy ? "Iniciando sondeo…" : "4. Iniciar sondeo automático"}</button>
+            </div>
+            <h4>REHACER</h4>
+            <p>Limpiar preview borra solamente la vista previa no guardada; conserva mapa guardado, referencia y receta.</p>
+            <div className="action-grid">
+              <button className="button button--ghost button--danger" type="button" disabled={referenceBusy || mapActionBusy || Boolean(physicalMap?.execution?.worker_active)} onClick={() => void resetPreparation("reference")}>Reiniciar referencia y malla</button>
+              <button className="button button--ghost" type="button" disabled={mapActionBusy || !physicalMapId || Boolean(physicalMap?.execution?.worker_active)} onClick={() => void withPhysicalMapAction(async () => {
                 if (!physicalMapId) return null;
                 const result = await api.repeatPhysicalMap(project.id, physicalMapId);
-                setActiveMapTab("mapa2d"); setMeshValidationMessage("Mapa anterior archivado. Nueva versión vacía generada con punto #0 X0/Y0 y todos los nodos pendientes. Confirme antes de mover."); return result.payload;
-              })} title="Conserva origen X/Y y receta; archiva el mapa actual y vuelve a medir referencia y nodos.">Repetir medición completa</button>
+                clearMeshPreview("Mapa anterior archivado. La nueva malla requiere preview, validar cobertura y armar. La referencia se conserva únicamente si sigue vigente."); setMeshRecipeDirty(true); setActiveMapTab("configuracion"); return result.payload;
+              })} title="Archiva el mapa y conserva receta y origen. Reutiliza Z únicamente si sigue válida.">Modificar y rehacer malla</button>
               <button className="button button--ghost" type="button" disabled={armMeshBusy || (!meshPreview && !previewBusy)} onClick={() => clearMeshPreview("Vista previa limpia. La configuración, la referencia y los mapas persistidos se conservaron.")}>Limpiar vista previa</button>
-              <button className="button button--ghost" type="button" disabled={mapActionBusy || !physicalMapId} onClick={() => void withPhysicalMapAction(async () => (await api.pausePhysicalMap(project.id, physicalMapId)).payload)}>Pausar</button>
-              <button className="button button--ghost" type="button" disabled={mapActionBusy || !physicalMapId} onClick={() => void withPhysicalMapAction(async () => (await api.resumePhysicalMap(project.id, physicalMapId)).payload)}>Reanudar</button>
-              <button className="button button--ghost" type="button" disabled={mapActionBusy || !physicalMapId || physicalFailedPoints === 0} onClick={() => void withPhysicalMapAction(async () => (await api.executeAllPhysicalMapPoints(project.id, physicalMapId)).payload)}>Reintentar puntos fallidos</button>
-              <button className="button button--ghost button--danger" type="button" disabled={mapActionBusy || !physicalMapId} onClick={() => void withPhysicalMapAction(async () => (await api.cancelPhysicalMap(project.id, physicalMapId)).payload)}>Cancelar</button>
+            </div>
+            <h4>Control del sondeo</h4>
+            <div className="action-grid">
+              <button className="button button--ghost" type="button" disabled={mapActionBusy || !physicalMapId || physicalMap?.status !== "MESH_PROBING"} onClick={() => void withPhysicalMapAction(async () => (await api.pausePhysicalMap(project.id, physicalMapId)).payload)}>Pausar</button>
+              <button className="button button--ghost" type="button" disabled={meshRecipeDirty || mapActionBusy || !physicalMapId || physicalMap?.status !== "MESH_PAUSED" || Boolean(physicalMap?.execution?.worker_active)} onClick={() => void withPhysicalMapAction(async () => (await api.resumePhysicalMap(project.id, physicalMapId)).payload)}>Reanudar</button>
+              <button className="button button--ghost" type="button" disabled={meshRecipeDirty || mapActionBusy || !physicalMapId || physicalFailedPoints === 0 || Boolean(physicalMap?.execution?.worker_active) || physicalMap?.status === "CANCELLED"} onClick={() => void withPhysicalMapAction(async () => (await api.retryFailedMeshPoints(project.id, physicalMapId)).payload)}>Reintentar {physicalFailedPoints} puntos fallidos</button>
+              <button className="button button--ghost button--danger" type="button" disabled={mapActionBusy || !physicalMapId || ["MESH_COMPLETE", "CANCELLED"].includes(String(physicalMap?.status))} onClick={() => void withPhysicalMapAction(async () => (await api.cancelPhysicalMap(project.id, physicalMapId)).payload)}>Cancelar</button>
             </div>
           </article>
         ) : null}
@@ -2177,7 +2252,7 @@ export function ProjectWorkspace({
           <article className="panel"><div className="section-heading section-heading--stacked"><div><p className="eyebrow">Métricas</p><h3>Alturas de la superficie</h3></div><StatusBadge tone={heightMap.etiqueta_simulada ? "warning" : "success"}>{heightMap.etiqueta_simulada ? "SIMULADO" : "MEASURED"}</StatusBadge></div><div className="info-grid info-grid--double compact-grid"><div className="metric-box"><span>Z mínima</span><strong>{formatMillimeters(heightMap.estadisticas.altura_min_mm, 4)}</strong></div><div className="metric-box"><span>Z máxima</span><strong>{formatMillimeters(heightMap.estadisticas.altura_max_mm, 4)}</strong></div><div className="metric-box"><span>Rango</span><strong>{formatMillimeters(heightMap.estadisticas.rango_alturas_mm, 4)}</strong></div><div className="metric-box"><span>Valor de referencia</span><strong>{formatMillimeters(heightMap.estadisticas.valor_referencia_mm, 4)}</strong></div><div className="metric-box"><span>RMS</span><strong>{formatMillimeters(heightMap.estadisticas.desviacion_rms_respecto_plano_mm, 4)}</strong></div><div className="metric-box"><span>Residuo máximo</span><strong>{formatMillimeters(heightMap.estadisticas.residuo_maximo_mm, 4)}</strong></div></div></article>
         ) : null}
 
-        {activeMapTab === "mapa2d" && (heightMap || visibleMesh) ? <HeightMapHeatmap material={project.material} heightMap={heightMap} mode={heightMode} meshPoints={visibleMesh?.points ?? visibleMesh?.local_points ?? []} exclusions={visibleMesh?.exclusions ?? meshExclusions} probeRegion={visibleMesh?.local_region ?? visibleMesh?.probe_region ?? heightMap?.probe_region ?? null} coordinateMode={coordinateMode} machineOrigin={typeof visibleMesh?.machine_origin_x === "number" && typeof visibleMesh?.machine_origin_y === "number" ? { x_mm: visibleMesh.machine_origin_x, y_mm: visibleMesh.machine_origin_y } : null} previewMessage={visibleMesh?.warnings?.[0] ?? null} /> : null}
+        {activeMapTab === "mapa2d" && (heightMap || visibleMesh) ? <HeightMapHeatmap toolpaths={meshToolpaths} coverageValid={previewCurrent ? meshCoverage?.coverage_valid : undefined} conflict={{ operationId: meshCoverage?.blocking_issues[0]?.operation_id, segment: meshCoverage?.blocking_issues[0]?.segment }} material={project.material} heightMap={heightMap} mode={heightMode} meshPoints={visibleMesh?.points ?? visibleMesh?.local_points ?? []} exclusions={visibleMesh?.exclusions ?? meshExclusions} probeRegion={visibleMesh?.local_region ?? visibleMesh?.probe_region ?? heightMap?.probe_region ?? null} coordinateMode={coordinateMode} machineOrigin={typeof visibleMesh?.machine_origin_x === "number" && typeof visibleMesh?.machine_origin_y === "number" ? { x_mm: visibleMesh.machine_origin_x, y_mm: visibleMesh.machine_origin_y } : null} previewMessage={visibleMesh?.warnings?.[0] ?? null} /> : null}
         {activeMapTab === "superficie3d" && heightMap ? <HeightMapSurface3D heightMap={heightMap} mode={heightMode} /> : null}
         {activeMapTab === "superficie3d" && !heightMap && isPhysicalMapReady(physicalMap) ? <article className="panel empty-state"><p>Cargando superficie 3D del mapa medido...</p></article> : null}
         {activeMapTab === "puntos" ? (
@@ -2231,7 +2306,8 @@ export function ProjectWorkspace({
       if (selectedOperation) {
         setReferenceSession(await api.getReferenceSession(project.id, selectedOperation.id));
       }
-      setMeshValidationMessage(scope === "map" ? "Mapa activo reiniciado. G-codes y operaciones siguen presentes. Genere la vista previa para volver a medir." : "Preparación reiniciada. Arduino desconectado; G-codes, operaciones y receta de malla siguen presentes.");
+      setMeshMessageSeverity("INFO");
+      setMeshValidationMessage(scope === "map" ? "Mapa activo reiniciado. G-codes y operaciones siguen presentes. Genere la vista previa para volver a medir." : "Referencias y mapa invalidados. G-codes, operaciones y receta se conservan; complete de nuevo la referencia antes de medir.");
     } catch (error) {
       setWorkspaceError(error instanceof Error ? error.message : "No fue posible reiniciar la preparación.");
     } finally {

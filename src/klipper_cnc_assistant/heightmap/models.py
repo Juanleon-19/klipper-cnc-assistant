@@ -45,7 +45,14 @@ class ExclusionZone:
     max_x_mm: float
     max_y_mm: float
 
+    shape: str = "rectangle"
+    center_x_mm: float | None = None
+    center_y_mm: float | None = None
+    radius_mm: float | None = None
+
     def contains(self, x_mm: float, y_mm: float) -> bool:
+        if self.shape == "circle":
+            return (x_mm - self.center_x_mm) ** 2 + (y_mm - self.center_y_mm) ** 2 <= self.radius_mm ** 2
         return self.min_x_mm <= x_mm <= self.max_x_mm and self.min_y_mm <= y_mm <= self.max_y_mm
 
 

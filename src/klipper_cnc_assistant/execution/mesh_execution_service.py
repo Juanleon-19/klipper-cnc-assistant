@@ -81,6 +81,8 @@ class MeshExecutionService:
         self._probe_threads: dict[tuple[str, str], ProbeThreadOwnership] = {}
         self._cancel_requests: dict[tuple[str, str], threading.Event] = {}
         self._physical_leases = {}
+        self._pause_requests = set()
+        self._retry_targets = {}
 
     def start_all(self, *, project_id: str, map_id: str, runtime: Any) -> dict[str, Any]:
         return self._start(project_id=project_id, map_id=map_id, runtime=runtime, point_budget=None)
@@ -88,13 +90,24 @@ class MeshExecutionService:
     def start_next(self, *, project_id: str, map_id: str, runtime: Any) -> dict[str, Any]:
         return self._start(project_id=project_id, map_id=map_id, runtime=runtime, point_budget=1)
 
-    def _start(self, *, project_id: str, map_id: str, runtime: Any, point_budget: int | None) -> dict[str, Any]:
+    def retry_failed(self, *, project_id, map_id, runtime, point_index=None):
+        payload = self.physical_map_service.get_by_id(project_id, map_id)
+        indices = tuple(int(p['index']) for p in payload['points']
+                        if p['status'] in {'FAILED', 'RETRY_REQUIRED'}
+                        and (point_index is None or int(p['index']) == point_index))
+        if not indices:
+            raise ApplicationError('No hay puntos fallidos seleccionados para reintentar.')
+        return self._start(project_id=project_id, map_id=map_id, runtime=runtime,
+                           point_budget=None, retry_indices=indices)
+
+    def _start(self, *, project_id: str, map_id: str, runtime: Any, point_budget: int | None, retry_indices=None) -> dict[str, Any]:
         guard = self.motion_ownership_snapshot(runtime=runtime, project_id=project_id, map_id=map_id)
         if not guard["can_start_motion"]:
             raise ApplicationError(str(guard["reason"]))
         payload = self.physical_map_service.validate_resume_context(project_id=project_id, map_id=map_id)
-        if payload.get("status") in {"CANCELLED", "MESH_COMPLETE"}:
+        if payload.get("status") not in {"MESH_PLANNED", "MESH_READY", "MESH_PAUSED"}:
             raise ApplicationError("La malla no está en un estado ejecutable.")
+        self.physical_map_service.preparation.require_armed(payload, runtime)
         key = (project_id, map_id)
         with self._lock:
             self._prune_dead_threads_locked()
@@ -105,6 +118,8 @@ class MeshExecutionService:
                 raise ApplicationError("Ya hay una operación física de malla en curso.")
             permit = runtime.physical_ownership.acquire(OwnerKind.MESH, f"{project_id}/{map_id}")
             self._physical_leases[key] = permit
+            self._pause_requests.discard(key)
+            self._retry_targets[key] = retry_indices
             cancel_request = self._cancel_requests.get(key)
             if cancel_request is None:
                 cancel_request = threading.Event()
@@ -139,6 +154,7 @@ class MeshExecutionService:
         key = (project_id, map_id)
         worker_alive = False
         with self._lock:
+            self._pause_requests.add(key)
             self._prune_dead_threads_locked()
             thread = self._threads.get(key)
             worker_alive = bool(thread and thread.is_alive())
@@ -161,7 +177,9 @@ class MeshExecutionService:
         )
 
     def resume(self, *, project_id: str, map_id: str, runtime: Any) -> dict[str, Any]:
-        self.physical_map_service.validate_resume_context(project_id=project_id, map_id=map_id)
+        payload = self.physical_map_service.validate_resume_context(project_id=project_id, map_id=map_id)
+        if payload.get("status") != "MESH_PAUSED":
+            raise ApplicationError("Solo se puede reanudar una malla pausada.")
         key = (project_id, map_id)
         with self._lock:
             self._prune_dead_threads_locked()
@@ -182,7 +200,7 @@ class MeshExecutionService:
             thread = self._threads.get(key)
             worker_alive = bool(thread and thread.is_alive())
         payload = self.physical_map_service.get_by_id(project_id, map_id)
-        if payload.get("status") == "CANCELLED":
+        if payload.get("status") in {"CANCELLED", "MESH_COMPLETE"}:
             return payload
         if not worker_alive:
             return self.physical_map_service.mark_status(
@@ -214,10 +232,8 @@ class MeshExecutionService:
                 "last_progress_at": (payload.get("execution") or {}).get("last_progress_at") or _iso_now(),
             },
         )
-        try:
-            runtime.cancel_operation()
-        except Exception:
-            pass
+        # Voluntary cancel finishes the already committed point safely. The
+        # watchdog/emergency paths retain runtime cancellation for uncertainty.
         return updated
 
     def reconcile_map_state(self, *, project_id: str, map_id: str, runtime: Any | None = None) -> dict[str, Any]:
@@ -400,6 +416,7 @@ class MeshExecutionService:
     def _run(self, project_id: str, map_id: str, runtime: Any, point_budget: int | None = None) -> None:
         key = (project_id, map_id)
         attempted_points = 0
+        attempted_indices = set()
         with self._lock:
             self._cancel_requests.setdefault(key, threading.Event())
             if key not in self._physical_leases:
@@ -496,7 +513,23 @@ class MeshExecutionService:
                     self._log_transition("POINT_FAILED", project_id, map_id, execution=execution, error=str(error))
                     return
                 try:
-                    point = self.physical_map_service.next_pending_point(project_id, map_id)
+                    targets = self._retry_targets.get(key)
+                    if targets is None:
+                        point = self.physical_map_service.next_pending_point(project_id, map_id)
+                    else:
+                        latest = self.physical_map_service.get_by_id(project_id, map_id)
+                        point = next((p for p in latest['points'] if p['index'] in targets
+                                      and p['index'] not in attempted_indices
+                                      and p['status'] in {'FAILED', 'RETRY_REQUIRED'}), None)
+                        if point is None:
+                            recovered = sum(p['status'] == 'MEASURED' for p in latest['points'] if p['index'] in targets)
+                            self.physical_map_service.mark_status(project_id=project_id, map_id=map_id,
+                                status='MESH_COMPLETE' if latest['status'] == 'MESH_COMPLETE' else 'MESH_PAUSED',
+                                worker_active=False, point_state='MESH_COMPLETE' if latest['status'] == 'MESH_COMPLETE' else 'MESH_PAUSED',
+                                last_event=f'{recovered}/{len(targets)} puntos fallidos recuperados.',
+                                metadata={'retry_result': {'requested': len(targets), 'recovered': recovered,
+                                    'failed_indices': [p['index'] for p in latest['points'] if p['index'] in targets and p['status'] != 'MEASURED']}})
+                            return
                 except ApplicationError:
                     final_payload = self.physical_map_service.get_by_id(project_id, map_id)
                     final_status = str(final_payload.get("status") or "MESH_READY")
@@ -513,9 +546,20 @@ class MeshExecutionService:
                     )
                     self._log_transition("MESH_COMPLETE", project_id, map_id, execution=final_payload.get("execution") or {})
                     return
+                # Commit boundary: pause/cancel before this lock prevents the
+                # next point; after it the current point completes and retracts.
+                with self._lock:
+                    if key in self._pause_requests or self._cancel_requests[key].is_set():
+                        continue
+                self.physical_map_service.preparation.require_armed(payload, runtime)
+                if self._retry_targets.get(key) is not None:
+                    self.physical_map_service.update_execution_state(project_id=project_id, map_id=map_id,
+                        worker_active=True, point_state="POINT_RETRY", point_index=int(point["index"]),
+                        last_event=f"Reintento explícito del punto #{point['index']}.")
                 self._log_transition("POINT_START", project_id, map_id, point_index=int(point["index"]), target=point, execution=execution)
                 self._probe_one_point(project_id, map_id, runtime, point, probe_config=payload.get("probe_config"))
                 attempted_points += 1
+                attempted_indices.add(point["index"])
         finally:
             if sys.exception() is not None:
                 runtime.physical_ownership.enter_recovery('Worker MESH falló; quiescencia no confirmada.')
@@ -528,6 +572,14 @@ class MeshExecutionService:
                 payload = self.physical_map_service.get_by_id(project_id, map_id)
             except Exception:
                 payload = None
+            targets = self._retry_targets.pop(key, None)
+            self._pause_requests.discard(key)
+            if payload and targets is not None:
+                recovered = sum(p['status'] == 'MEASURED' for p in payload['points'] if p['index'] in targets)
+                self.physical_map_service.update_execution_state(project_id=project_id, map_id=map_id,
+                    last_event=f'{recovered}/{len(targets)} puntos fallidos recuperados.',
+                    metadata={'retry_result': {'requested': len(targets), 'recovered': recovered,
+                        'failed_indices': [p['index'] for p in payload['points'] if p['index'] in targets and p['status'] != 'MEASURED']}})
             execution = (payload or {}).get("execution") or {}
             if payload and (payload.get("status") == "MESH_PROBING" or execution.get("worker_active")):
                 self.physical_map_service.mark_status(
@@ -549,14 +601,15 @@ class MeshExecutionService:
             self.motion_ownership_snapshot(runtime=runtime, project_id=project_id, map_id=map_id)
             owner = runtime.physical_ownership.snapshot()
             permit = self._physical_leases[key]
-            completed = (payload or {}).get('status') == 'MESH_COMPLETE'
+            completed = ((payload or {}).get('status') in {'MESH_COMPLETE', 'MESH_PAUSED', 'CANCELLED'}
+                         and not execution.get('last_error') and sys.exception() is None)
             if (completed and not owner['recovery_pending']
                     and runtime.complete_physical_workflow(permit)):
                 self._physical_leases.pop(key, None)
             else:
                 runtime.physical_ownership.retire(permit)
-                # Recovery rotates the physical epoch; only successful normal
-                # completion above may preserve the captured reference.
+                # Uncertainty still invalidates the physical epoch; an observed
+                # normal pause/cancel boundary is not a change of installation.
                 if not owner['recovery_pending'] and runtime.reconcile_physical_ownership():
                     self._physical_leases.pop(key, None)
                 else:

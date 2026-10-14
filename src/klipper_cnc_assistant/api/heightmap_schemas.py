@@ -146,6 +146,7 @@ class PhysicalMapExclusionRequest(BaseModel):
 
 
 class PhysicalMapPlanRequest(BaseModel):
+    preview_fingerprint: str | None = None
     grid_mode: str = "manual"
     rows: int = Field(default=7, ge=2)
     columns: int = Field(default=6, ge=2)

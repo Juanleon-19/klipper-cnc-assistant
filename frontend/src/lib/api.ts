@@ -1,3 +1,4 @@
+import type { MeshCoverage, MeshArmReadiness } from "../features/height-map/MeshWorkflow";
 import type {
   CompensationAudit,
   CompensationPreview,
@@ -51,6 +52,7 @@ export type OperationUpdateInput = {
 };
 
 export type PhysicalMapPlanPayload = {
+  preview_fingerprint?: string;
   grid_mode?: "manual" | "suggested";
   rows?: number;
   columns?: number;
@@ -336,6 +338,12 @@ export const api = {
       body: JSON.stringify(payload),
       signal: options?.signal,
     }),
+  validateMeshCoverage: (projectId: string, operationId: string, payload: PhysicalMapPlanPayload) =>
+    request<MeshCoverage>(`/api/projects/${projectId}/operations/${operationId}/physical-map/validate`, { method: "POST", body: JSON.stringify(payload) }),
+  inspectMeshArm: (projectId: string, operationId: string, payload: PhysicalMapPlanPayload) =>
+    request<MeshArmReadiness>(`/api/projects/${projectId}/operations/${operationId}/physical-map/arm-readiness`, { method: "POST", body: JSON.stringify(payload) }),
+  retryFailedMeshPoints: (projectId: string, mapId: string) =>
+    request<PhysicalMapResponse>(`/api/projects/${projectId}/physical-maps/${mapId}/retry-failed`, { method: "POST" }),
   planPhysicalMapFromReference: (projectId: string, operationId: string, payload: PhysicalMapPlanPayload) =>
     request<PhysicalMapResponse>(`/api/projects/${projectId}/operations/${operationId}/physical-map/plan-from-reference`, {
       method: "POST",

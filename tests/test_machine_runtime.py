@@ -1682,6 +1682,8 @@ class MachineRuntimeTest(unittest.TestCase):
                 homed_axes="xyz", machine_label="simulated-live-runtime", session_id="test",
                 config=PhysicalMeshConfig(grid_mode="manual", rows=2, columns=2, edge_margin_left_mm=1.0, edge_margin_right_mm=1.0, edge_margin_bottom_mm=1.0, edge_margin_top_mm=1.0, safe_z_mm=0.1, probe_step_mm=0.1, probe_feed_mm_min=120.0, retract_mm=0.4),
             )
+            # Probe transport unit fixture; arming/token integration has separate real-worker coverage.
+            service.preparation.require_armed = lambda payload, runtime: None
             worker = MeshExecutionService(service)
             worker.start_all(project_id=project.id, map_id=plan["map_id"], runtime=runtime)
             self.assertTrue(worker.wait_until_idle(timeout_s=3.0))

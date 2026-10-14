@@ -769,6 +769,10 @@ class PhysicalIntegrationTest(unittest.TestCase):
                 session_id="session",
                 config=PhysicalMeshConfig(grid_mode="manual", rows=2, columns=2, edge_margin_left_mm=0.0, edge_margin_right_mm=0.0, edge_margin_bottom_mm=0.0, edge_margin_top_mm=0.0, safe_z_mm=12.0, probe_step_mm=0.05, probe_feed_mm_min=30.0, retract_mm=0.8),
             )
+            # Worker-only legacy fixtures isolate preparation. The real gate,
+            # canonical token and finally are covered by mesh_workflow_states
+            # and reference_execution_handoff, without this stub.
+            service.preparation.require_armed = lambda payload, runtime: None
             worker = MeshExecutionService(service, max_point_retries=2)
             runtime = FakeMeshRuntime(fail_first=True)
             started = worker.start_all(project_id=project.id, map_id=plan["map_id"], runtime=runtime)
@@ -778,10 +782,11 @@ class PhysicalIntegrationTest(unittest.TestCase):
             self.assertEqual(paused["status"], "MESH_PAUSED")
             self.assertEqual(paused["points"][1]["status"], "FAILED")
             self.assertEqual(runtime.calls, [1])
-            retried = service.retry_failed_point(project_id=project.id, map_id=plan["map_id"], point_index=1)
-            self.assertEqual(retried["points"][1]["status"], "RETRY_REQUIRED")
-            self.assertIsNone(retried["points"][1]["error"])
-            self.assertTrue(retried["points"][1]["last_error"])
+            worker.retry_failed(project_id=project.id, map_id=plan["map_id"], runtime=runtime, point_index=1)
+            self.assertTrue(worker.wait_until_idle(timeout_s=3.0))
+            retried = service.get_by_id(project.id, plan["map_id"])
+            self.assertEqual(retried["points"][1]["status"], "MEASURED")
+            self.assertEqual(runtime.calls, [1, 1])
             worker.resume(project_id=project.id, map_id=plan["map_id"], runtime=runtime)
             self.assertTrue(worker.wait_until_idle(timeout_s=3.0))
             completed = service.get_by_id(project.id, plan["map_id"])
@@ -811,6 +816,10 @@ class PhysicalIntegrationTest(unittest.TestCase):
                 homed_axes="xyz", machine_label="test", session_id="session",
                 config=PhysicalMeshConfig(grid_mode="manual", rows=2, columns=2, edge_margin_left_mm=0.0, edge_margin_right_mm=0.0, edge_margin_bottom_mm=0.0, edge_margin_top_mm=0.0, probe_step_mm=0.1, probe_feed_mm_min=120.0, retract_mm=1.0),
             )
+            # Worker-only legacy fixtures isolate preparation. The real gate,
+            # canonical token and finally are covered by mesh_workflow_states
+            # and reference_execution_handoff, without this stub.
+            service.preparation.require_armed = lambda payload, runtime: None
             worker = MeshExecutionService(service)
             runtime = StatefulMeshRuntime()
             worker.start_all(project_id=project.id, map_id=plan["map_id"], runtime=runtime)
@@ -833,6 +842,10 @@ class PhysicalIntegrationTest(unittest.TestCase):
                 homed_axes="xyz", machine_label="test", session_id="session",
                 config=PhysicalMeshConfig(grid_mode="manual", rows=2, columns=2, edge_margin_left_mm=0.0, edge_margin_right_mm=0.0, edge_margin_bottom_mm=0.0, edge_margin_top_mm=0.0),
             )
+            # Worker-only legacy fixtures isolate preparation. The real gate,
+            # canonical token and finally are covered by mesh_workflow_states
+            # and reference_execution_handoff, without this stub.
+            service.preparation.require_armed = lambda payload, runtime: None
             worker = MeshExecutionService(service)
             runtime = StatefulMeshRuntime(refresh_fails=True)
             worker.start_all(project_id=project.id, map_id=plan["map_id"], runtime=runtime)
@@ -847,6 +860,10 @@ class PhysicalIntegrationTest(unittest.TestCase):
             repository, _project_service, project, operation = self._physical_project(temp)
             service = PhysicalMapService(repository)
             plan = service.capture_reference_and_plan(project_id=project.id, operation_id=operation.id, machine_origin_x=0.0, machine_origin_y=0.0, reference_z=10.0, machine_position={"x_mm": 0.0, "y_mm": 0.0, "z_mm": 10.0}, homed_axes="xyz", machine_label="test", session_id="session", config=PhysicalMeshConfig(grid_mode="manual", rows=2, columns=2, edge_margin_left_mm=0.0, edge_margin_right_mm=0.0, edge_margin_bottom_mm=0.0, edge_margin_top_mm=0.0))
+            # Worker-only legacy fixtures isolate preparation. The real gate,
+            # canonical token and finally are covered by mesh_workflow_states
+            # and reference_execution_handoff, without this stub.
+            service.preparation.require_armed = lambda payload, runtime: None
             worker = MeshExecutionService(service)
             runtime = StatefulMeshRuntime(serial_stale=True)
             worker.start_all(project_id=project.id, map_id=plan["map_id"], runtime=runtime)
@@ -861,6 +878,10 @@ class PhysicalIntegrationTest(unittest.TestCase):
             repository, _project_service, project, operation = self._physical_project(temp)
             service = PhysicalMapService(repository)
             plan = service.capture_reference_and_plan(project_id=project.id, operation_id=operation.id, machine_origin_x=0.0, machine_origin_y=0.0, reference_z=10.0, machine_position={"x_mm": 0.0, "y_mm": 0.0, "z_mm": 10.0}, homed_axes="xyz", machine_label="test", session_id="session", config=PhysicalMeshConfig(grid_mode="manual", rows=2, columns=2, edge_margin_left_mm=0.0, edge_margin_right_mm=0.0, edge_margin_bottom_mm=0.0, edge_margin_top_mm=0.0))
+            # Worker-only legacy fixtures isolate preparation. The real gate,
+            # canonical token and finally are covered by mesh_workflow_states
+            # and reference_execution_handoff, without this stub.
+            service.preparation.require_armed = lambda payload, runtime: None
             worker = MeshExecutionService(service)
             runtime = StatefulMeshRuntime(block=True)
             worker.start_all(project_id=project.id, map_id=plan["map_id"], runtime=runtime)
@@ -870,6 +891,8 @@ class PhysicalIntegrationTest(unittest.TestCase):
             runtime.release.set()
             self.assertTrue(worker.wait_until_idle(timeout_s=3.0))
             plan2 = service.repeat_measurement(project_id=project.id, map_id=plan["map_id"])
+            # Simulate the preparation boundary for this isolated worker fixture.
+            service.mark_status(project_id=project.id, map_id=plan2["map_id"], status="MESH_PLANNED", worker_active=False)
             bad = StatefulMeshRuntime(unexpected=True)
             worker.start_all(project_id=project.id, map_id=plan2["map_id"], runtime=bad)
             self.assertTrue(worker.wait_until_idle(timeout_s=3.0))
@@ -894,6 +917,10 @@ class PhysicalIntegrationTest(unittest.TestCase):
                 session_id="session",
                 config=PhysicalMeshConfig(grid_mode="manual", rows=2, columns=2, edge_margin_left_mm=0.0, edge_margin_right_mm=0.0, edge_margin_bottom_mm=0.0, edge_margin_top_mm=0.0),
             )
+            # Worker-only legacy fixtures isolate preparation. The real gate,
+            # canonical token and finally are covered by mesh_workflow_states
+            # and reference_execution_handoff, without this stub.
+            service.preparation.require_armed = lambda payload, runtime: None
             worker = MeshExecutionService(service, point_watchdog_timeout_s=0.05, point_watchdog_poll_s=0.01, point_watchdog_grace_s=0.01)
             runtime = WatchdogMeshRuntime()
             worker.start_all(project_id=project.id, map_id=plan["map_id"], runtime=runtime)
@@ -923,6 +950,10 @@ class PhysicalIntegrationTest(unittest.TestCase):
                 session_id="session",
                 config=PhysicalMeshConfig(grid_mode="manual", rows=2, columns=2, edge_margin_left_mm=0.0, edge_margin_right_mm=0.0, edge_margin_bottom_mm=0.0, edge_margin_top_mm=0.0),
             )
+            # Worker-only legacy fixtures isolate preparation. The real gate,
+            # canonical token and finally are covered by mesh_workflow_states
+            # and reference_execution_handoff, without this stub.
+            service.preparation.require_armed = lambda payload, runtime: None
             worker = MeshExecutionService(service)
             runtime = CadenceMeshRuntime(lower_steps=100)
             point = service.next_pending_point(project.id, plan["map_id"])
@@ -960,6 +991,10 @@ class PhysicalIntegrationTest(unittest.TestCase):
                 session_id="session",
                 config=PhysicalMeshConfig(grid_mode="manual", rows=2, columns=2, edge_margin_left_mm=0.0, edge_margin_right_mm=0.0, edge_margin_bottom_mm=0.0, edge_margin_top_mm=0.0),
             )
+            # Worker-only legacy fixtures isolate preparation. The real gate,
+            # canonical token and finally are covered by mesh_workflow_states
+            # and reference_execution_handoff, without this stub.
+            service.preparation.require_armed = lambda payload, runtime: None
             worker = MeshExecutionService(service, point_watchdog_timeout_s=0.05, point_watchdog_poll_s=0.005, point_watchdog_grace_s=0.005)
             runtime = CadenceMeshRuntime(lower_steps=5)
             point = service.next_pending_point(project.id, plan["map_id"])
@@ -999,6 +1034,10 @@ class PhysicalIntegrationTest(unittest.TestCase):
                 session_id="session",
                 config=PhysicalMeshConfig(grid_mode="manual", rows=2, columns=2),
             )
+            # Worker-only legacy fixtures isolate preparation. The real gate,
+            # canonical token and finally are covered by mesh_workflow_states
+            # and reference_execution_handoff, without this stub.
+            service.preparation.require_armed = lambda payload, runtime: None
             worker = MeshExecutionService(service)
             first = worker.pause(project_id=project.id, map_id=plan["map_id"])
             second = worker.pause(project_id=project.id, map_id=plan["map_id"])
@@ -1023,6 +1062,10 @@ class PhysicalIntegrationTest(unittest.TestCase):
                 session_id="session",
                 config=PhysicalMeshConfig(grid_mode="manual", rows=2, columns=2),
             )
+            # Worker-only legacy fixtures isolate preparation. The real gate,
+            # canonical token and finally are covered by mesh_workflow_states
+            # and reference_execution_handoff, without this stub.
+            service.preparation.require_armed = lambda payload, runtime: None
             worker = MeshExecutionService(service)
             runtime = BlockingMeshRuntime(block_point_index=1)
             worker.start_all(project_id=project.id, map_id=plan["map_id"], runtime=runtime)
@@ -1053,6 +1096,10 @@ class PhysicalIntegrationTest(unittest.TestCase):
                 session_id="session",
                 config=PhysicalMeshConfig(grid_mode="manual", rows=2, columns=2),
             )
+            # Worker-only legacy fixtures isolate preparation. The real gate,
+            # canonical token and finally are covered by mesh_workflow_states
+            # and reference_execution_handoff, without this stub.
+            service.preparation.require_armed = lambda payload, runtime: None
             worker = MeshExecutionService(service)
             runtime = FakeMeshRuntime()
             original_record = service.record_point
@@ -1095,6 +1142,10 @@ class PhysicalIntegrationTest(unittest.TestCase):
                 session_id="session",
                 config=PhysicalMeshConfig(grid_mode="manual", rows=2, columns=2),
             )
+            # Worker-only legacy fixtures isolate preparation. The real gate,
+            # canonical token and finally are covered by mesh_workflow_states
+            # and reference_execution_handoff, without this stub.
+            service.preparation.require_armed = lambda payload, runtime: None
             worker = MeshExecutionService(service)
             runtime = FakeMeshRuntime()
             first = worker.cancel(project_id=project.id, map_id=plan["map_id"], runtime=runtime)
@@ -1120,6 +1171,10 @@ class PhysicalIntegrationTest(unittest.TestCase):
                 session_id="session",
                 config=PhysicalMeshConfig(grid_mode="manual", rows=2, columns=2),
             )
+            # Worker-only legacy fixtures isolate preparation. The real gate,
+            # canonical token and finally are covered by mesh_workflow_states
+            # and reference_execution_handoff, without this stub.
+            service.preparation.require_armed = lambda payload, runtime: None
             worker = MeshExecutionService(service)
             runtime = BlockingMeshRuntime(block_point_index=1, fail_on_cancel=True)
             worker.start_all(project_id=project.id, map_id=plan["map_id"], runtime=runtime)
@@ -1151,6 +1206,10 @@ class PhysicalIntegrationTest(unittest.TestCase):
                 session_id="session",
                 config=PhysicalMeshConfig(grid_mode="manual", rows=2, columns=2),
             )
+            # Worker-only legacy fixtures isolate preparation. The real gate,
+            # canonical token and finally are covered by mesh_workflow_states
+            # and reference_execution_handoff, without this stub.
+            service.preparation.require_armed = lambda payload, runtime: None
             worker = MeshExecutionService(service)
             runtime = FakeMeshRuntime()
             original_record = service.record_point
@@ -1193,6 +1252,10 @@ class PhysicalIntegrationTest(unittest.TestCase):
                 session_id="session",
                 config=PhysicalMeshConfig(grid_mode="manual", rows=2, columns=2),
             )
+            # Worker-only legacy fixtures isolate preparation. The real gate,
+            # canonical token and finally are covered by mesh_workflow_states
+            # and reference_execution_handoff, without this stub.
+            service.preparation.require_armed = lambda payload, runtime: None
             worker = MeshExecutionService(service)
             runtime = FakeMeshRuntime()
             original_update = service.update_execution_state
@@ -1229,6 +1292,10 @@ class PhysicalIntegrationTest(unittest.TestCase):
                 session_id="session",
                 config=PhysicalMeshConfig(grid_mode="manual", rows=2, columns=2),
             )
+            # Worker-only legacy fixtures isolate preparation. The real gate,
+            # canonical token and finally are covered by mesh_workflow_states
+            # and reference_execution_handoff, without this stub.
+            service.preparation.require_armed = lambda payload, runtime: None
             worker = MeshExecutionService(service)
             service.mark_status(
                 project_id=project.id,
@@ -1321,6 +1388,10 @@ class PhysicalIntegrationTest(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as temp:
             repository, _project_service, project, operation, service, plan = make_plan(temp)
+            # Worker-only legacy fixtures isolate preparation. The real gate,
+            # canonical token and finally are covered by mesh_workflow_states
+            # and reference_execution_handoff, without this stub.
+            service.preparation.require_armed = lambda payload, runtime: None
             worker = MeshExecutionService(service)
             runtime = BlockingMeshRuntime(block_point_index=1)
             worker.start_all(project_id=project.id, map_id=plan["map_id"], runtime=runtime)
