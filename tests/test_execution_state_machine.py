@@ -275,6 +275,7 @@ class ExecutionStateMachineTest(unittest.TestCase):
         run=self.started('JOB_STARTING')
         def racing_start(remote, *, before_send):
             before_send.prepare()
+            before_send.verify()
             self.runtime.config.reference_prep_z_mm += 1
             before_send()
             self.fail('Must never send')
@@ -288,8 +289,140 @@ class ExecutionStateMachineTest(unittest.TestCase):
             before_send.prepare()
             path=self.repo.project_dir(self.fixture.project_id)/'project.json'
             path.write_text(path.read_text()+'\n')
+            before_send.verify()
             before_send()
             self.fail('Must never send')
         with patch.object(self.fixture.adapter,'start_file',side_effect=racing_start):
             with self.assertRaises(ApplicationError):self.job._execute_next_operation(self.context,run)
         self.assertEqual(self.fixture.adapter.started,[])
+
+    def test_real_callbacks_have_no_io_after_context_start_and_resume(self):
+        from contextlib import ExitStack
+        from pathlib import Path
+        from types import SimpleNamespace
+        import time
+        from tests.test_motion_authorization import observed_machine
+        from klipper_cnc_assistant.execution.job_service import MoonrakerJobAdapter
+        from klipper_cnc_assistant.machine.motion_authorization import MotionAuthorizer
+        from klipper_cnc_assistant.machine.physical_ownership import OwnerKind
+        run = self.started('JOB_STARTING')
+        adapter = self.fixture.adapter
+        owner = self.runtime.physical_ownership
+        events = []
+        clock = [time.monotonic()]
+        original_digest = hashlib.file_digest
+        def slow_digest(*args, **kwargs):
+            clock[0] += 3.0  # The old post-context hash would expire a 2s frame.
+            events.append('digest')
+            return original_digest(*args, **kwargs)
+        def dispatch(action, callback):
+            machine = observed_machine(owner)
+            guards = ExitStack()
+            authorizer = MotionAuthorizer(owner, machine)
+            require = authorizer.require_context
+            def capture(*args, **kwargs):
+                context = require(*args, **kwargs)
+                events.append('context')
+                for target in ('read_bytes', 'read_text', 'open'):
+                    guards.enter_context(patch.object(Path, target, side_effect=AssertionError('file IO after context')))
+                guards.enter_context(patch('hashlib.file_digest', side_effect=AssertionError('hash after context')))
+                guards.enter_context(patch('json.loads', side_effect=AssertionError('JSON after context')))
+                guards.enter_context(patch.object(adapter, 'print_status', side_effect=AssertionError('HTTP after context')))
+                guards.enter_context(patch('klipper_cnc_assistant.execution.job_service.reference_context', side_effect=AssertionError('reference context rebuilt')))
+                return context
+            def refresh():
+                events.append('refresh')
+                machine.update_motion((10, 10, 10), 0, 'fake')
+                machine.update_klippy('ready')
+            def send():
+                events.append('send')
+                guards.close()
+            runtime = SimpleNamespace(_refresh_machine=refresh, _motion_authorizer=lambda: authorizer)
+            real = MoonrakerJobAdapter(runtime)
+            real.permit = adapter.permit
+            try:
+                with patch.object(authorizer, 'require_context', side_effect=capture):
+                    real._dispatch(action, send, before_send=callback)
+            finally:
+                guards.close()
+        def start(remote, *, before_send):
+            dispatch('job_start', before_send)
+            adapter.current_filename = remote
+            adapter.state = 'paused'
+        def resume(*, before_send):
+            dispatch('job_resume', before_send)
+        with patch('time.monotonic', side_effect=lambda: clock[0]), patch('hashlib.file_digest', side_effect=slow_digest):
+            with patch.object(adapter, 'start_file', side_effect=start):
+                self.job._execute_next_operation(self.context, run)
+            run = self.job.run_store.load(self.path)
+            with patch.object(adapter, 'resume', side_effect=resume):
+                self.assertTrue(self.job._existing_print_action(self.context, run, adapter, 'resume', {'paused'}))
+        self.assertEqual(events.count('send'), 2)
+        for index, event in enumerate(events):
+            if event == 'context':
+                self.assertEqual(events[index-1:index+2], ['refresh', 'context', 'send'])
+
+    def test_post_context_concurrent_changes_block_send(self):
+        from klipper_cnc_assistant.storage.safe_persistence import atomic_write
+        # Exercise the actual start callback; mutation is injected after all IO
+        # phases, at the same boundary as a freshly captured MotionContext.
+        for change in ('revision', 'cancel', 'session', 'ownership', 'project'):
+            with self.subTest(change=change):
+                fixture = ExecutionStateMachineTest()
+                fixture.setUp()
+                try:
+                    run = fixture.started('JOB_STARTING')
+                    mutations = []
+                    def mutate():
+                        mutations.append(change)
+                        if change == 'revision':
+                            latest = fixture.job.run_store.load(fixture.path)
+                            fixture.job.run_store.save(fixture.path, latest)
+                        elif change == 'cancel':
+                            fixture.job.run_store.cancel(fixture.path, run['run_id'])
+                        elif change == 'session':
+                            fixture.runtime.reference_serial_generation += 1
+                        elif change == 'ownership':
+                            fixture.runtime.physical_ownership.enter_recovery('concurrent change')
+                        else:
+                            path = fixture.repo.project_dir(fixture.fixture.project_id) / 'project.json'
+                            atomic_write(path, path.read_bytes())  # Even identical-byte rewrite invalidates generation.
+                    def start(remote, *, before_send):
+                        from types import SimpleNamespace
+                        from tests.test_motion_authorization import observed_machine
+                        from klipper_cnc_assistant.execution.job_service import MoonrakerJobAdapter
+                        from klipper_cnc_assistant.machine.motion_authorization import MotionAuthorizer
+                        owner = fixture.runtime.physical_ownership
+                        machine = observed_machine(owner)
+                        authorizer = MotionAuthorizer(owner, machine)
+                        require = authorizer.require_context
+                        def capture(*args, **kwargs):
+                            context = require(*args, **kwargs)
+                            mutate()
+                            return context
+                        def refresh():
+                            machine.update_motion((10, 10, 10), 0, 'fake')
+                            machine.update_klippy('ready')
+                        runtime = SimpleNamespace(_refresh_machine=refresh,
+                                                  _motion_authorizer=lambda: authorizer)
+                        real = MoonrakerJobAdapter(runtime)
+                        real.permit = fixture.fixture.adapter.permit
+                        with patch.object(authorizer, 'require_context', side_effect=capture):
+                            real._dispatch('job_start', lambda: self.fail('send must not occur'), before_send=before_send)
+                    with patch.object(fixture.fixture.adapter, 'start_file', side_effect=start):
+                        with self.assertRaises(Exception) as error:
+                            fixture.job._execute_next_operation(fixture.context, run)
+                        self.assertNotIsInstance(error.exception, AssertionError)
+                    self.assertEqual(mutations, [change])
+                    self.assertEqual(fixture.fixture.adapter.started, [])
+                finally:
+                    fixture.doCleanups()
+
+    def test_mutation_guard_rejects_writer_already_in_progress(self):
+        from klipper_cnc_assistant.storage.safe_persistence import FileRevisionGuard, dispatch_mutation, PersistenceConflict
+        with dispatch_mutation(self.path):
+            guard = FileRevisionGuard([self.path])
+            with self.assertRaises(PersistenceConflict):
+                guard.validate()
+        with self.assertRaises(PersistenceConflict):
+            guard.validate()

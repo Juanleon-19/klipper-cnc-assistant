@@ -757,6 +757,7 @@ describe("Estados activos y tarjetas del operador", () => {
       onPrepare={vi.fn()} onStart={vi.fn()} onAction={vi.fn()} onArchiveStale={vi.fn()} />);
     expect(screen.getByText(/PREPARANDO — Operación/)).toBeInTheDocument();
     expect(screen.queryByText("NO PUEDE INICIAR")).not.toBeInTheDocument();
+    expect(screen.queryByText("Todavía no hay checks persistidos para esta ejecución.")).not.toBeInTheDocument();
     expect(screen.queryByRole("button", {name: "Iniciar trabajo"})).not.toBeInTheDocument();
   });
   it("requiere confirmar explícitamente spindle detenido en tarjeta clickeable", () => {
@@ -769,4 +770,21 @@ describe("Estados activos y tarjetas del operador", () => {
     fireEvent.click(button);
     expect(action).toHaveBeenCalledWith("confirm-spindle-stopped");
   });
+});
+
+
+it("exige autorización explícita de movimiento y medición Z al actualizar referencia", () => {
+  const onAction = vi.fn();
+  render(<ExecutionConsole snapshot={{...baseSnapshot, run: {...baseSnapshot.run,
+    status: "RECOVERY_REQUIRED", available_actions: ["update-tool-reference"]}}}
+    error={null} busy={false} onPrepare={vi.fn()} onStart={vi.fn()}
+    onAction={onAction} onArchiveStale={vi.fn()} />);
+  const button = screen.getByRole("button", {name: "Actualizar referencia de herramienta"});
+  expect(button).toBeDisabled();
+  fireEvent.click(button);
+  expect(onAction).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole("checkbox", {name: /autorizo el movimiento al punto de referencia y la medición Z/}));
+  expect(button).toBeEnabled();
+  fireEvent.click(button);
+  expect(onAction).toHaveBeenCalledWith("update-tool-reference");
 });

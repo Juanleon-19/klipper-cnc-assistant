@@ -28,7 +28,7 @@ from klipper_cnc_assistant.machine.motion_authorization import MotionRequirement
 from klipper_cnc_assistant.machine.physical_reference import PhysicalReferenceError, reference_context, require_current_reference
 from klipper_cnc_assistant.storage.job_run_store import JobRunStore, JobRunConflict
 from klipper_cnc_assistant.storage.safe_persistence import (
-    atomic_json, atomic_write, storage_lock, patch_metadata,
+    FileRevisionGuard, atomic_json, atomic_write, storage_lock, patch_metadata,
     validate_generation, read_artifact_metadata, PersistenceConflict,
 )
 from .print_identity import PrintIdentity, PrintIdentityError
@@ -142,6 +142,9 @@ class MoonrakerJobAdapter:
         prepare = getattr(before_send, 'prepare', None)
         if prepare is not None:
             prepare()
+        verify = getattr(before_send, 'verify', None)
+        if verify is not None:
+            verify()
         self.runtime._refresh_machine()
         authorizer = self.runtime._motion_authorizer()
         context = authorizer.require_context(self.permit, action, MotionRequirements())
@@ -1042,16 +1045,17 @@ class JobService:
         self._save_run(context, run)
 
     def _reference_dispatch_guard(self, context, operation, generated=None):
-        """Keep full reference checks bound to bytes/context across HTTP refresh.
+        """Validate bytes before refresh; retain mutation guards for final checks.
 
-        Re-hash the exact dependencies without deserializing the large project
-        again inside the short-lived MotionContext. This is not a motion permit.
+        The second digest/context check is prepare-time IO. final_check uses only
+        memory and never rebuilds reference_context or reads files.
         """
         root = self.repository.project_dir(context.project_id)
         def digest(path):
             with path.open('rb') as stream:
                 return hashlib.file_digest(stream, 'sha256').hexdigest()
         project_path = root / 'project.json'
+        project_guard = FileRevisionGuard([project_path])
         project_hash = digest(project_path)
         project = self.repository.load_project(context.project_id)
         current = project.get_operation(operation['operation_id'])
@@ -1063,16 +1067,29 @@ class JobService:
         for key in ('relative_path', 'metadata_path'):
             if artifact.get(key):
                 paths.append(self.repository._resolve_project_file(context.project_id, artifact[key]))
+        files_guard = FileRevisionGuard(paths)
         hashes = {path: digest(path) for path in paths}
         hashes[project_path] = project_hash
         physical_context = reference_context(self.repository, self.runtime, context.project_id,
             current.id, physical_map, operation.get('installation_revision'), project=project)
+        config = deepcopy(vars(self.runtime.config))
+        binding = deepcopy({key: operation.get(key) for key in
+                            ('operation_id', 'installation_revision', 'physical_reference_token', 'remote_file')})
+        ownership_session = self.runtime.physical_ownership.session
         def validate():
             if any(digest(path) != value for path, value in hashes.items()):
                 raise ApplicationError('Los datos de ejecución cambiaron después de validar; revalide la operación.')
             if reference_context(self.repository, self.runtime, context.project_id, current.id,
                     physical_map, operation.get('installation_revision'), project=project) != physical_context:
                 raise ApplicationError('El contexto físico cambió durante la observación previa al envío.')
+        def final_check():
+            project_guard.validate()
+            files_guard.validate()
+            if (vars(self.runtime.config) != config
+                    or self.runtime.physical_ownership.session != ownership_session
+                    or any(operation.get(key) != value for key, value in binding.items())):
+                raise ApplicationError('La configuración o identidad física cambió antes del envío.')
+        validate.final_check = final_check
         return validate
 
     def _existing_print_action(self, context, run, adapter, action, states):
@@ -1081,28 +1098,36 @@ class JobService:
             identity = PrintIdentity(operation.get('remote_file'))
             prechecked = False
             reference_guard = None
+            run_guard = None
             session = self.runtime.current_physical_session_id()
             def prepare_dispatch():
-                nonlocal prechecked, reference_guard
+                nonlocal prechecked, reference_guard, run_guard
                 if action == 'resume':
                     reference_guard = self._reference_dispatch_guard(context, operation)
+                run_guard = FileRevisionGuard([self._run_file(context)], error=JobRunConflict)
                 self.run_store.validate(self._run_file(context), run)
                 identity.require_match(adapter.print_status(), states=states)
                 if action == 'resume':
                     self._require_run_reference(context, run)
                     self._require_spindle_confirmation(context, run, "prepared", int(run["current_operation_index"]))
                 prechecked = True
-            def before_send():
-                if not prechecked:
-                    prepare_dispatch()
+            def verify_dispatch():
                 if reference_guard is not None:
                     reference_guard()
                 identity.require_match(adapter.print_status(), states=states)
+                self.run_store.validate(self._run_file(context), run)
+            def before_send():
+                if not prechecked:
+                    prepare_dispatch()
+                    verify_dispatch()
+                if reference_guard is not None:
+                    reference_guard.final_check()
+                run_guard.validate()
                 if self.runtime.current_physical_session_id() != session:
                     raise ApplicationError('La sesión física cambió antes del envío.')
                 self.runtime.physical_ownership.validate(adapter.permit)
-                self.run_store.validate(self._run_file(context), run)
             before_send.prepare = prepare_dispatch
+            before_send.verify = verify_dispatch
             getattr(adapter, action)(before_send=before_send)
             return True
         except JobRunConflict:
@@ -1499,6 +1524,7 @@ class JobService:
         attempt_id = None
         prechecked = False
         reference_guard = None
+        run_guard = None
         def prepare_dispatch():
             nonlocal prechecked, reference_guard
             reference_guard = self._reference_dispatch_guard(context, operation, generated)
@@ -1508,10 +1534,8 @@ class JobService:
             self._validate_generated_pair(context, generated)
             self._require_spindle_confirmation(context, run, "prepared", index)
             prechecked = True
-        def before_send():
-            nonlocal attempt_id
-            if not prechecked:
-                prepare_dispatch()
+        def verify_dispatch():
+            nonlocal attempt_id, run_guard
             self.run_store.validate(self._run_file(context), run)
             reference_guard()
             PrintIdentity.require_idle(adapter.print_status())
@@ -1522,7 +1546,19 @@ class JobService:
                                                     operation['operation_id'], identity.filename)
             run.update(revision=authorized['revision'], start_attempt=authorized['start_attempt'])
             attempt_id = authorized['start_attempt']['id']
+            run_guard = FileRevisionGuard([self._run_file(context)], error=JobRunConflict)
+            self.run_store.validate(self._run_file(context), run)
+        def before_send():
+            if not prechecked:
+                prepare_dispatch()
+                verify_dispatch()
+            reference_guard.final_check()
+            run_guard.validate()
+            if self.runtime.current_physical_session_id() != reference_token['physical_session_id']:
+                raise ApplicationError('La sesión física cambió antes del envío.')
+            self.runtime.physical_ownership.validate(adapter.permit)
         before_send.prepare = prepare_dispatch
+        before_send.verify = verify_dispatch
         try:
             adapter.start_file(identity.filename, before_send=before_send)
         except BaseException:

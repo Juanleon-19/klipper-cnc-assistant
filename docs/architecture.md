@@ -410,7 +410,8 @@ interrumpida vuelve a READY_TO_RESUME para nueva confirmación de spindle.
 
 Las validaciones costosas de fuente, mapa, artefacto y referencia preceden la
 observación HTTP de start/resume. Después se obtiene un MotionContext nuevo y
-se comprueban de nuevo identidad remota, CAS, sesión y ownership antes del envío.
+se comprueban generaciones de persistencia en memoria, sesión y ownership antes del envío.
+La identidad remota se comprueba en la fase preparatoria, antes de observar.
 MotionAuthorizer conserva sus revalidaciones finales y timeout original. No se
 renueva el timestamp de un contexto vencido. El protocolo opcional `prepare`
 del callback permite a los adaptadores realizar esta separación; los fakes que
@@ -428,8 +429,29 @@ interno conserva su autorización propia. La UI muestra status HTTP real o ausen
 de respuesta, endpoint y código, conservando diagnóstico si falla el polling.
 Las tarjetas de confirmación son explícitas, clickeables y vinculadas al contexto.
 
-El guard final conserva SHA256 de las dependencias exactas antes de validar y
-vuelve a leer sus bytes después del refresh (proyecto, mapa, fuente y artefacto).
-Recalcula `reference_context` usando el proyecto ya deserializado y el runtime
-actual. Cambios de archivo, sesión, límites o configuración durante el HTTP
-bloquean; no se sustituye la validación por mtime ni se crea otra autoridad física.
+El guard preparatorio conserva SHA256 de proyecto, mapa, fuente y artefacto y
+realiza una segunda lectura antes del refresh. Las escrituras soportadas por el
+repositorio invalidan guardias de generación en memoria antes y después de la
+mutación, incluyendo escritores que ya estaban en curso al capturar la guardia.
+Las guardias son débiles y duran solo el dispatch; no son una caché de autoridad.
+No usan mtime. El process lock físico sigue excluyendo otros procesos Assistant.
+Cambios fuera de las APIs de persistencia no son un escritor soportado durante
+una ejecución; la segunda lectura detecta alteraciones anteriores al refresh.
+
+`begin_start` conserva su persistencia y semántica conservadora, pero termina
+antes de observar. Un fallo posterior deja el intento uncertain mediante
+`finish_start`, sin reintento automático. La guardia del run se captura después
+de begin_start y se valida contra CAS persistido antes del refresh. Toda escritura
+posterior invalida esa guardia, incluso observaciones: se prefiere bloquear a
+hacer IO dentro de MotionContext. Cancelación, revisión o sustitución del run
+siguen bloqueando con JobRunConflict.
+
+El protocolo es prepare → verify (segunda lectura, PrintIdentity, CAS y journal)
+→ refresh → require_context → comprobaciones en memoria → revalidate → send.
+Después de require_context no se leen archivos, no se reconstruye reference_context
+ni se consulta HTTP hasta el envío autorizado. Se comparan configuración capturada,
+sesión física, generaciones y permiso. No se amplía max_age_s=2.0.
+
+Actualizar referencia exige una confirmación que autoriza explícitamente el
+movimiento al punto de referencia y la medición Z, además de spindle detenido.
+El aviso de checks inexistentes aparece solo en estados iniciales sin checks.

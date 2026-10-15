@@ -31,6 +31,39 @@ _local = threading.local()
 _MISSING = object()
 
 
+_dispatch_guards = weakref.WeakSet()
+_dispatch_guard_lock = threading.RLock()
+_dispatch_writers = {}
+
+
+class FileRevisionGuard:
+    """In-memory mutation generation after preparation has validated bytes.
+
+    Supported writers invalidate BEFORE touching the destination. The physical
+    process lock excludes another application writer. No timestamps are used.
+    """
+    def __init__(self, paths, *, error=PersistenceConflict):
+        self.error = error
+        self.paths = frozenset(str(Path(path).resolve()) for path in paths)
+        self.changed = False
+        with _dispatch_guard_lock:
+            self.changed = any(_dispatch_writers.get(path, 0) for path in self.paths)
+            _dispatch_guards.add(self)
+
+    def validate(self):
+        with _dispatch_guard_lock:
+            if self.changed:
+                raise self.error('Una dependencia cambió durante la autorización de ejecución.')
+
+
+def invalidate_dispatch_guards(path):
+    key = str(Path(path).resolve())
+    with _dispatch_guard_lock:
+        for guard in _dispatch_guards:
+            if key in guard.paths:
+                guard.changed = True
+
+
 @contextmanager
 def storage_lock(path):
     """Per canonical path RLock + process lock, reentrant within this thread."""
@@ -66,7 +99,28 @@ def storage_lock(path):
                     _forget_path(key)
 
 
+@contextmanager
+def dispatch_mutation(path):
+    key = str(Path(path).resolve())
+    with _dispatch_guard_lock:
+        _dispatch_writers[key] = _dispatch_writers.get(key, 0) + 1
+        invalidate_dispatch_guards(path)
+    try:
+        yield
+    finally:
+        with _dispatch_guard_lock:
+            invalidate_dispatch_guards(path)
+            _dispatch_writers[key] -= 1
+            if not _dispatch_writers[key]:
+                del _dispatch_writers[key]
+
+
 def atomic_write(path, content, *, durable=False):
+    with dispatch_mutation(path):
+        _atomic_write(path, content, durable=durable)
+
+
+def _atomic_write(path, content, *, durable=False):
     """Replace only after a complete write; critical data also syncs directory."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)

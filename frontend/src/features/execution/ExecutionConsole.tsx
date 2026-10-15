@@ -241,7 +241,7 @@ export function ExecutionConsole({ snapshot, readiness: suppliedReadiness, error
             <div className="metric-box"><span>Cambios de herramienta</span><strong>{jobRun?.summary.tool_changes_required ?? 0}</strong></div>
           </div>
           <p className="muted">La compensación Legacy se genera automáticamente justo antes de cada operación usando la referencia Z vigente.</p>
-          {initial && checks.length ? (
+          {initial ? (checks.length ? (
             <div className="stack gap-sm">
               {[...checks].sort((a, b) => Number(a.ok) - Number(b.ok)).map((check) => (
                 <div className="subpanel subpanel--soft" key={`${check.name}:${check.ok ? "ok" : "fail"}`}>
@@ -253,7 +253,7 @@ export function ExecutionConsole({ snapshot, readiness: suppliedReadiness, error
             </div>
           ) : (
             <p className="muted">Todavía no hay checks persistidos para esta ejecución.</p>
-          )}
+          )) : null}
           {failedChecks.length ? (
             <div className="alert alert--warning">
               <strong>Bloqueos que debes resolver</strong>
@@ -428,6 +428,7 @@ export function ExecutionConsole({ snapshot, readiness: suppliedReadiness, error
               onChange={(event) => setActionConfirmation(event.target.checked ? `${confirmationKey}:${action}` : null)} />
               <span><strong>CONFIRMACIÓN DEL OPERADOR</strong><br />{action === "continue" ? `Confirmo que el spindle está preparado y la herramienta ${transitionTool} está instalada.`
                 : action === "confirm-tool-change" ? `Confirmo que la herramienta ${transitionTool} está instalada correctamente.`
+                : action === "update-tool-reference" ? "Confirmo que el spindle está completamente detenido y autorizo el movimiento al punto de referencia y la medición Z de la herramienta instalada."
                 : "Confirmo que el spindle está completamente detenido."}</span>
             </label>
           ) : null}

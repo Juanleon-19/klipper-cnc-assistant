@@ -7,7 +7,7 @@ import json
 from pathlib import Path
 import threading
 from uuid import uuid4
-from .safe_persistence import atomic_json
+from .safe_persistence import atomic_json, dispatch_mutation
 
 class JobRunConflict(RuntimeError):
     """The caller's run, domain revision or cancellation epoch is obsolete."""
@@ -178,4 +178,5 @@ class JobRunStore:
     def remove(self, path, expected):
         with self._locked(path):
             self._check(self.load(path), expected, allow_cancelled=True)
-            Path(path).unlink()
+            with dispatch_mutation(path):
+                Path(path).unlink()
