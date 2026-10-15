@@ -382,3 +382,54 @@ referencias ni sesiones y no se amplía ningún timeout.
 Este resultado es únicamente diagnóstico. `MoonrakerJobAdapter._dispatch` sigue
 haciendo `_refresh_machine → require_context → revalidate → send` para start y
 resume, conservando además la revalidación posterior al último callback.
+
+### Estados de Ejecución y recuperación explícita (2026-10-14)
+
+`execution/health.py` separa readiness de inicio de la salud del trabajo activo.
+El monitor conserva el estado persistido y expone `start_readiness` solamente
+antes del inicio, más `active_execution_health` para preparación, ejecución,
+espera humana, pausa, recuperación y estados terminales. Un preflight sano se
+presenta como preparación informativa; no como una solicitud de iniciar otra vez.
+Las referencias de herramientas futuras no invalidan una espera normal de cambio.
+
+Si no hay supervisor, solo se ofrece reintentar preparación cuando el estado es
+JOB_STARTING/OPERATION_PREFLIGHT, no hay remote_file, intento de start, observación
+de impresión ni started_at de operación, y Moonraker confirma standby/inactive.
+La acción POST vuelve a comprobar estas condiciones y CAS, geometría, contexto,
+referencia y confirmación humana de spindle. Descarta el puntero al artefacto
+anterior y vuelve a generar JIT; no reutiliza un upload ni repite un start.
+OPERATION_UPLOADING ya es ambiguo aunque todavía no se haya persistido remote_file.
+Las lecturas muestran recuperación requerida, sin efectuar recuperación automática.
+
+Una referencia inválida ofrece una acción diferente: actualizar referencia de la
+herramienta. Exige recuperación física resuelta, observación vigente y spindle
+detenido confirmado por el operador. Usa el punto XY del mapa, conserva la malla
+y crea evidencia para una nueva instalación; nunca adapta un token histórico.
+Si el trabajo aún no había iniciado, vuelve a JOB_READY; en una preparación
+interrumpida vuelve a READY_TO_RESUME para nueva confirmación de spindle.
+
+Las validaciones costosas de fuente, mapa, artefacto y referencia preceden la
+observación HTTP de start/resume. Después se obtiene un MotionContext nuevo y
+se comprueban de nuevo identidad remota, CAS, sesión y ownership antes del envío.
+MotionAuthorizer conserva sus revalidaciones finales y timeout original. No se
+renueva el timestamp de un contexto vencido. El protocolo opcional `prepare`
+del callback permite a los adaptadores realizar esta separación; los fakes que
+solo llaman al callback ejecutan también todos los chequeos.
+
+Los artefactos JIT incluyen SHA256 de los bytes originales (`source_sha256`),
+además del hash normalizado histórico, mapa/hash y token físico. Antes de upload
+y start se comprueban fuente/mapa vigentes, pareja G-code/metadata y coincidencia
+con operación/token esperado. Los feeds originales y la matemática de compensación
+no cambian. El perfil standard/long_tool solo dirige despejes salientes/entrantes.
+
+El panel Legacy solicita `diagnostic=true` y obtiene un preview no ejecutable.
+La ruta de generación y la generación colectiva rechazan JobRun activo; el JIT
+interno conserva su autorización propia. La UI muestra status HTTP real o ausencia
+de respuesta, endpoint y código, conservando diagnóstico si falla el polling.
+Las tarjetas de confirmación son explícitas, clickeables y vinculadas al contexto.
+
+El guard final conserva SHA256 de las dependencias exactas antes de validar y
+vuelve a leer sus bytes después del refresh (proyecto, mapa, fuente y artefacto).
+Recalcula `reference_context` usando el proyecto ya deserializado y el runtime
+actual. Cambios de archivo, sesión, límites o configuración durante el HTTP
+bloquean; no se sustituye la validación por mtime ni se crea otra autoridad física.

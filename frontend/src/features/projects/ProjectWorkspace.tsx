@@ -600,7 +600,7 @@ export function ProjectWorkspace({
   const [coverageBusy, setCoverageBusy] = useState(false);
   const [meshRecipeDirty, setMeshRecipeDirty] = useState(false);
   const [meshPreviewFingerprint, setMeshPreviewFingerprint] = useState<string | null>(null);
-  const [liveExecutionUnavailable, setLiveExecutionUnavailable] = useState(false);
+  const [liveExecutionError, setLiveExecutionError] = useState<ApiError | null>(null);
   const [executionReadiness, setExecutionReadiness] = useState<ExecutionReadiness | null>(null);
   const [jobPlan, setJobPlan] = useState<JobPlan | null>(null);
   const [liveExecution, setLiveExecution] = useState<LiveExecutionSnapshot | null>(null);
@@ -895,9 +895,11 @@ export function ProjectWorkspace({
           return;
         }
         setLiveExecution(live);
-        setLiveExecutionUnavailable(false);
-      } catch {
-        if (!cancelled) setLiveExecutionUnavailable(true);
+        setLiveExecutionError(null);
+      } catch (error) {
+        if (!cancelled) setLiveExecutionError(error instanceof ApiError ? new ApiError(`[GET /execution/live] ${error.message}`, error.status, error.fieldErrors, error.detail, error.errors) : new ApiError(
+          error instanceof Error ? error.message : "No se recibió respuesta del monitor de ejecución.", 0,
+          {}, { code: "EXECUTION_MONITOR_UNAVAILABLE", endpoint: "/execution/live" }));
       } finally {
         inFlight = false;
       }
@@ -2339,7 +2341,7 @@ export function ProjectWorkspace({
     setCompensationBusy(true);
     setWorkspaceError("");
     try {
-      const generated = await api.generateCompensatedGCode(project.id, selectedOperation.id, "legacy");
+      const generated = await api.generateCompensatedGCode(project.id, selectedOperation.id, "legacy", true);
       if (generated.warning) {
         setWorkspaceError(generated.warning);
       }
@@ -2464,7 +2466,9 @@ export function ProjectWorkspace({
     const current = rows.findIndex((row) => row.operation_id === currentExecutionReadiness?.current_operation.operation_id);
     if (current >= 0 && index >= current) {
       const sameInstallationSequence = rows.slice(current, index + 1).every((row) => row.tool_key === rows[current].tool_key);
-      return sameInstallationSequence ? currentExecutionReadiness?.reference.status : "Se medirá después del cambio";
+      return sameInstallationSequence ? (currentExecutionReadiness?.reference.valid
+        ? index === current ? "Lista — herramienta instalada" : "Reutiliza instalación actual"
+        : currentExecutionReadiness?.reference.message) : "Se medirá después del cambio";
     }
     return rows[index]?.reference_display ?? rows[index]?.reference_status ?? "pendiente";
   };
@@ -2484,10 +2488,11 @@ export function ProjectWorkspace({
           <div>
             <p className="eyebrow">Inspección técnica</p>
             <h3>Artefacto Legacy de diagnóstico — {translateFace(activeJobFace)}</h3>
+            <p>Diagnóstico únicamente. La ejecución genera automáticamente un Legacy nuevo justo antes de cada operación.</p>
           </div>
           <div className="toolbar-inline">
             <button className="button button--ghost" type="button" disabled={compensationControlsBusy || executionSettingsBlocked} onClick={() => void refreshExecutionInspection()}>Actualizar inspección</button>
-            <button className="button" type="button" disabled={compensationControlsBusy || !selectedOperation} onClick={() => void generateSelectedLegacyCompensation()}>
+            <button className="button" type="button" disabled={compensationControlsBusy || !selectedOperation || Boolean(liveExecution?.job_run?.started_at && !TERMINAL_JOB_STATES.has(liveJobState))} onClick={() => void generateSelectedLegacyCompensation()}>
               {compensationBusy ? "Generando artefacto…" : "Generar artefacto Legacy de inspección"}
             </button>
           </div>
@@ -2545,7 +2550,7 @@ export function ProjectWorkspace({
       <ExecutionConsole
         snapshot={liveExecution}
         readiness={currentExecutionReadiness}
-        error={liveExecutionUnavailable ? new ApiError("No se pudo actualizar el estado de ejecución. Reintente la inspección.", 503) : executionError}
+        error={liveExecutionError ?? executionError}
         busy={referenceBusy || compensationBusy}
         settingsBlocked={executionSettingsBlocked}
         settingsBlockReason={executionSettingsBlockReason}

@@ -2088,7 +2088,7 @@ describe("ProjectWorkspace", () => {
     expect(screen.getByText(/Orquestador JobRun/i)).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: /Generar artefacto Legacy de inspección/i }));
-    await waitFor(() => expect(apiMock.generateCompensatedGCode).toHaveBeenCalledWith(project.id, project.operaciones[0].id, "legacy"));
+    await waitFor(() => expect(apiMock.generateCompensatedGCode).toHaveBeenCalledWith(project.id, project.operaciones[0].id, "legacy", true));
     expect(apiMock.generateProjectCompensation).not.toHaveBeenCalled();
 
     fireEvent.click(screen.getByRole("button", { name: /Actualizar inspección/i }));
@@ -2156,7 +2156,7 @@ describe("ProjectWorkspace", () => {
     fireEvent.click(screen.getByRole("button", { name: /^Ejecución$/i }));
     fireEvent.click(await screen.findByRole("button", { name: /Generar artefacto Legacy de inspección/i }));
 
-    await waitFor(() => expect(apiMock.generateCompensatedGCode).toHaveBeenCalledWith(project.id, "op_2", "legacy"));
+    await waitFor(() => expect(apiMock.generateCompensatedGCode).toHaveBeenCalledWith(project.id, "op_2", "legacy", true));
     expect(apiMock.generateProjectCompensation).not.toHaveBeenCalled();
   });
 
@@ -2271,7 +2271,7 @@ describe("ProjectWorkspace", () => {
 
     expect(await screen.findByRole("button", { name: /Generando artefacto…/i })).toBeDisabled();
     expect(apiMock.generateCompensatedGCode).toHaveBeenCalledTimes(1);
-    expect(apiMock.generateCompensatedGCode).toHaveBeenCalledWith(project.id, project.operaciones[0].id, "legacy");
+    expect(apiMock.generateCompensatedGCode).toHaveBeenCalledWith(project.id, project.operaciones[0].id, "legacy", true);
     expect(screen.getByRole("button", { name: /Actualizar inspección/i })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Iniciar trabajo" })).toBeDisabled();
     expect(screen.queryByLabelText(/Tolerancia Z/i)).toBeNull();

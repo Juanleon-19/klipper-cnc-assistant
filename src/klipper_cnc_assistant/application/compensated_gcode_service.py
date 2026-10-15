@@ -222,6 +222,7 @@ class CompensatedGCodeService:
             "placement_revision": setup.placement_revision,
             "original_path": operation.archivo_gcode,
             "original_hash": original_hash,
+            "source_sha256": source_sha256,
             "generated_hash": hashlib.sha256(output.encode("utf-8")).hexdigest(),
             "algorithm_version": algorithm_version,
             "compensation_mode": selected_mode.value,

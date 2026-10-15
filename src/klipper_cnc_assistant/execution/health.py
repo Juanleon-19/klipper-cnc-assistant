@@ -1,0 +1,59 @@
+"""Read-only presentation and explicit restart recovery classification."""
+INITIAL = frozenset({'JOB_DRAFT', 'JOB_VALIDATING', 'JOB_READY'})
+PREUPLOAD = frozenset({'JOB_STARTING', 'OPERATION_PREFLIGHT'})
+WAITING = frozenset({'SPINDLE_STOP_REQUIRED', 'TOOL_CHANGE_REQUIRED', 'READY_TO_RESUME'})
+TERMINAL = frozenset({'JOB_COMPLETE', 'JOB_CANCELLED', 'JOB_ERROR'})
+
+
+def preparation_retry_safe(run, status):
+    index = int(run.get('current_operation_index') or 0)
+    operations = run.get('operations') or []
+    op = operations[index] if 0 <= index < len(operations) else {}
+    return bool(op and (run.get('state') in PREUPLOAD or (run.get('state') in INITIAL and not run.get('started_at')))
+                and not op.get('remote_file') and not op.get('observed_printing')
+                and not op.get('started_at') and not run.get('start_attempt')
+                and status.get('connected') is True
+                and status.get('print_state') == 'standby'
+                and status.get('is_active') is False)
+
+
+def execution_health(run, status, readiness, worker_alive):
+    state = run.get('state', 'JOB_DRAFT')
+    recovery = None
+    actions = list(run.get('available_actions') or [])
+    if state in INITIAL and not run.get('started_at'):
+        if not readiness['reference']['valid'] and preparation_retry_safe(run, status):
+            actions = ['update-tool-reference']
+        return {'phase': 'START', 'title': 'PUEDE INICIAR' if readiness['can_start'] else 'NO PUEDE INICIAR',
+                'severity': 'SUCCESS' if readiness['can_start'] else 'WARNING', 'recovery': None,
+                'available_actions': actions, 'detail': ''}
+    if state == 'JOB_COMPLETE': title, severity = 'COMPLETADO', 'SUCCESS'
+    elif state == 'JOB_ERROR': title, severity = 'ERROR', 'ERROR'
+    elif state == 'JOB_CANCELLED': title, severity = 'CANCELADO', 'WARNING'
+    elif state in {'JOB_PAUSED', 'OPERATION_PAUSED'}: title, severity = 'PAUSADO', 'WARNING'
+    elif state in WAITING: title, severity = 'ESPERANDO OPERADOR', 'SUCCESS' if state == 'READY_TO_RESUME' else 'WARNING'
+    elif state == 'OPERATION_RUNNING': title, severity = 'EJECUTANDO', 'INFO'
+    else: title, severity = 'PREPARANDO', 'INFO'
+    changing_tool = state in {'SPINDLE_STOP_REQUIRED', 'SPINDLE_STOP_CONFIRMED', 'RETRACTING',
+                              'TOOL_CHANGE_REQUIRED', 'TOOL_CHANGE_CONFIRMED', 'MOVING_TO_REFERENCE',
+                              'RETURNING_TO_REFERENCE_SAFE_Z', 'RETURNING_TO_REFERENCE_XY', 'CALIBRATING_TOOL'}
+    operations = run.get('operations') or []
+    index = int(run.get('current_operation_index') or 0)
+    token = (operations[index].get('physical_reference_token') or {}) if 0 <= index < len(operations) else {}
+    session_changed = bool(token and token.get('physical_session_id') != readiness.get('physical_session_id'))
+    reference_invalid = session_changed or (not changing_tool and not readiness['reference']['valid'])
+    if state not in TERMINAL and (state == 'RECOVERY_REQUIRED' or reference_invalid
+            or (not worker_alive and state not in WAITING | INITIAL | {'JOB_PAUSED', 'OPERATION_PAUSED'})):
+        title, severity = 'RECUPERACIÓN REQUERIDA', 'ERROR'
+        safe = preparation_retry_safe(run, status)
+        ref = readiness['reference']
+        recovery = {'code': ref['code'] if not ref['valid'] else 'SUPERVISOR_MISSING',
+                    'message': ref['message'] if not ref['valid'] else 'El supervisor no está activo; revise la preparación interrumpida.',
+                    'action': 'Actualizar referencia de herramienta' if safe and not ref['valid'] else
+                              'Reintentar preparación de operación' if safe else
+                              'Verifique identidad remota y recuperación física; no se reintentará start automáticamente.'}
+        actions = ['cancel']
+        if safe:
+            actions.insert(0, 'retry-operation-preparation' if ref['valid'] else 'update-tool-reference')
+    return {'phase': 'ACTIVE', 'title': title, 'severity': severity, 'recovery': recovery,
+            'available_actions': actions, 'detail': (recovery or {}).get('message') or run.get('next_action') or title}

@@ -730,8 +730,9 @@ def build_router() -> APIRouter:
         return compensated
 
     @router.post("/projects/{project_id}/operations/{operation_id}/compensated-gcode/generate", response_model=dict[str, object])
-    def generate_compensated_gcode(project_id: str, operation_id: str, request: Request, mode: str | None = None) -> dict[str, object]:
-        return request.app.state.compensated_gcode_service.generate(project_id, operation_id, mode=mode)
+    def generate_compensated_gcode(project_id: str, operation_id: str, request: Request, mode: str | None = None, diagnostic: bool = False) -> dict[str, object]:
+        request.app.state.job_service.assert_manual_compensation_allowed(project_id, operation_id)
+        return request.app.state.compensated_gcode_service.generate(project_id, operation_id, mode=mode, require_tool_reference=not diagnostic)
 
     @router.get("/projects/{project_id}/generated/{file_path:path}")
     def download_generated_file(project_id: str, file_path: str, request: Request) -> FileResponse:

@@ -11,7 +11,7 @@ from pathlib import Path
 import subprocess
 import threading
 import time
-from unittest.mock import patch
+from unittest.mock import patch, Mock
 
 import requests
 import uvicorn
@@ -138,12 +138,21 @@ try:
     assert click('Actualizar inspección')
     wait_for(lambda: 'PUEDE INICIAR' in text() and 'NO PUEDE INICIAR' not in text())
     assert js('return [...document.querySelectorAll("button")].find(b=>b.textContent==="Iniciar trabajo").disabled')
-    js('const l=[...document.querySelectorAll("label")].find(l=>l.textContent.includes("Confirmo que el spindle está preparado")); l.querySelector("input").click();')
+    assert js('const e=document.querySelector(".spindle-confirmation input"); return e && e.getBoundingClientRect().width>=20 && e.getBoundingClientRect().height>=20;')
+    js('const l=[...document.querySelectorAll("label")].find(l=>l.textContent.includes("Confirmo que el spindle está preparado")); l.click();')
     assert not js('return [...document.querySelectorAll("button")].find(b=>b.textContent==="Iniciar trabajo").disabled')
     with patch.object(fixture.job, '_start_worker'):
         assert click('Iniciar trabajo')
         wait_for(lambda: any(p.endswith('/job-run/start') for _, p in requests_seen))
         wait_for(lambda: fixture.job._load_run(fixture.context).get('started_at'))
+    # Real polling renders active preparation, not an initial start blocker.
+    run = fixture.job._load_run(fixture.context)
+    run.update(state='OPERATION_PREFLIGHT', next_action='Generando compensación Legacy para operación 1', available_actions=['cancel'])
+    fixture.job._save_run(fixture.context, run)
+    with patch.object(fixture.job, '_supervisor_thread', return_value=Mock(is_alive=lambda: True)):
+        wait_for(lambda: 'PREPARANDO' in text())
+        assert 'NO PUEDE INICIAR' not in text()
+        assert js('return [...document.querySelectorAll(".spindle-confirmation input")].every(e=>e.getBoundingClientRect().width>=20)')
     assert fixture.runtime._perform_probe_descent.call_count == 1
     assert fixture.capture.client.scripts == []
     (ARTIFACTS / 'result.json').write_text(json.dumps({'result': 'PASS', 'geometry_covered': 5, 'geometry_blocked': 0, 'read_only_inspection': True, 'explicit_spindle': True, 'widths': [1440, 390], 'requests': requests_seen}, indent=2))

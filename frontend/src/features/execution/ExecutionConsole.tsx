@@ -22,6 +22,8 @@ const ACTION_LABELS: Record<string, string> = {
   pause: "Pausar",
   resume: "Reanudar",
   cancel: "Cancelar",
+  "retry-operation-preparation": "Reintentar preparación de operación",
+  "update-tool-reference": "Actualizar referencia de herramienta",
   "confirm-spindle-stopped": "Spindle detenido",
   "confirm-tool-change": "Herramienta cambiada",
   "retry-tool-change-transition": "Reintentar transición de herramienta",
@@ -129,8 +131,8 @@ function executionTone(value: string | null | undefined): "success" | "warning" 
   const state = String(value ?? "").toUpperCase();
   if (["JOB_COMPLETE", "COMPLETED", "READY_TO_RESUME"].includes(state)) return "success";
   if (["SPINDLE_STOP_REQUIRED", "SPINDLE_STOP_CONFIRMED", "TOOL_CHANGE_REQUIRED", "TOOL_CHANGE_CONFIRMED", "RETRACTING", "MOVING_TO_REFERENCE", "CALIBRATING_TOOL", "REGENERATING_COMPENSATION", "VALIDATING_REGENERATED_PLAN", "JOB_VALIDATING"].includes(state)) return "warning";
-  if (["JOB_ERROR", "FAILED", "ERROR", "CANCELLED", "JOB_CANCELLED"].includes(state)) return "danger";
-  if (["OPERATION_RUNNING", "RUNNING", "WAITING_FOR_KLIPPER", "OPERATION_STARTING", "OPERATION_UPLOADING", "JOB_READY"].includes(state)) return "info";
+  if (["RECOVERY_REQUIRED", "JOB_ERROR", "FAILED", "ERROR", "CANCELLED", "JOB_CANCELLED"].includes(state)) return "danger";
+  if (["OPERATION_PREFLIGHT", "JOB_STARTING", "OPERATION_RUNNING", "RUNNING", "WAITING_FOR_KLIPPER", "OPERATION_STARTING", "OPERATION_UPLOADING", "JOB_READY"].includes(state)) return "info";
   return "neutral";
 }
 
@@ -171,16 +173,17 @@ function currentOperationLabel(snapshot: LiveExecutionSnapshot | null): string {
 export function ExecutionConsole({ snapshot, readiness: suppliedReadiness, error, busy, settingsBlocked = false, settingsBlockReason = "", onPrepare, onStart, onAction, onArchiveStale }: ExecutionConsoleProps) {
   const jobRun = snapshot?.job_run ?? null;
   const readiness = suppliedReadiness ?? snapshot?.readiness ?? null;
-  const confirmationKey = JSON.stringify([readiness?.run_id, readiness?.physical_session_id, readiness?.ownership_session_id, readiness?.current_operation.installation_id, readiness?.current_operation.reference_revision]);
+  const confirmationKey = JSON.stringify([snapshot?.run.status, readiness?.current_operation.operation_id, readiness?.run_id, readiness?.physical_session_id, readiness?.ownership_session_id, readiness?.current_operation.installation_id, readiness?.current_operation.reference_revision]);
+  const [actionConfirmation, setActionConfirmation] = useState<string | null>(null);
   const [confirmedContext, setConfirmedContext] = useState<string | null>(null);
   const spindlePrepared = confirmedContext === confirmationKey;
-  const canStart = readiness?.can_start === true && !settingsBlocked && !error;
+  const canStart = readiness?.can_start === true && !jobRun?.started_at && ["JOB_DRAFT", "JOB_VALIDATING", "JOB_READY"].includes(snapshot?.run.status ?? "JOB_DRAFT") && !settingsBlocked && !error;
 
   const actions = (snapshot?.run.available_actions ?? jobRun?.available_actions ?? []).filter((action, index, list) => list.indexOf(action) === index);
   const events = dedupeEvents(snapshot?.events ?? []);
   const conflictDetail = isConflictDetail(error?.detail) ? error.detail : null;
   const showArchiveStale = canArchiveStale(snapshot, conflictDetail);
-  const showStart = readiness?.can_start === true || STARTABLE_STATES.has(snapshot?.run.status ?? "") || actions.includes("start");
+  const showStart = !jobRun?.started_at && ["JOB_DRAFT", "JOB_VALIDATING", "JOB_READY"].includes(snapshot?.run.status ?? "JOB_DRAFT") && (readiness?.can_start === true || STARTABLE_STATES.has(snapshot?.run.status ?? "") || actions.includes("start"));
   const extraActions = actions.filter((action) => action !== "start");
   const operationPercent = percent(snapshot?.operation.progress ?? 0);
   const overallPercent = percent(snapshot?.run.overall_progress ?? 0);
@@ -202,8 +205,14 @@ export function ExecutionConsole({ snapshot, readiness: suppliedReadiness, error
   const checks = readiness?.checks ?? [];
   const failedChecks = checks.filter((check) => !check.ok);
   const showPreflightSummary = true;
-  const readinessTitle = canStart ? "PUEDE INICIAR" : "NO PUEDE INICIAR";
-  const readinessDetail = settingsBlocked ? settingsBlockReason : error?.message ?? readiness?.blocking_reasons[0]?.message
+  const initial = ["JOB_DRAFT", "JOB_VALIDATING", "JOB_READY"].includes(runStatus) && !jobRun?.started_at;
+  const health = snapshot?.active_execution_health;
+  const activeTitle = health?.title ?? (runStatus === "OPERATION_PREFLIGHT" || runStatus === "JOB_STARTING" || runStatus === "OPERATION_UPLOADING" ? "PREPARANDO"
+    : runStatus === "OPERATION_RUNNING" ? "EJECUTANDO" : runStatus === "JOB_COMPLETE" ? "COMPLETADO"
+    : runStatus === "JOB_ERROR" ? "ERROR" : runStatus === "RECOVERY_REQUIRED" ? "RECUPERACIÓN REQUERIDA"
+    : runStatus.includes("PAUSED") ? "PAUSADO" : "ESPERANDO OPERADOR");
+  const readinessTitle = initial ? (canStart ? "PUEDE INICIAR" : "NO PUEDE INICIAR") : `${activeTitle}${runStatus === "OPERATION_PREFLIGHT" && activeTitle === "PREPARANDO" ? ` — ${currentOperationLabel(snapshot)}` : ""}`;
+  const readinessDetail = !initial ? (health?.detail ?? automaticFlowDescription ?? snapshot?.run.next_action) : settingsBlocked ? settingsBlockReason : error?.message ?? readiness?.blocking_reasons[0]?.message
     ?? (canStart ? "Confirme que el spindle está preparado antes de iniciar." : "Actualice el diagnóstico para verificar el estado actual.");
 
   return (
@@ -220,19 +229,19 @@ export function ExecutionConsole({ snapshot, readiness: suppliedReadiness, error
       {showPreflightSummary ? (
         <section className="execution-panel" aria-label="Preparación del trabajo">
           <div className="section-heading"><h4>Preparación del trabajo</h4></div>
-          <div className={`alert ${canStart ? "alert--success" : "alert--warning"}`}>
+          <div className={`alert ${!initial ? (health?.severity === "ERROR" ? "alert--error" : health?.severity === "WARNING" ? "alert--warning" : health?.severity === "SUCCESS" ? "alert--success" : "alert--info") : canStart ? "alert--success" : "alert--warning"}`}>
             <strong>{readinessTitle}</strong>
             <p>{readinessDetail}</p>
-            <p>{readiness?.blocking_reasons[0]?.action}</p>
+            <p>{initial ? readiness?.blocking_reasons[0]?.action : snapshot?.recovery?.action}</p>
           </div>
           <div className="info-grid info-grid--double compact-grid">
             <div className="metric-box"><span>Mapa</span><strong>{readiness?.map_ready ? "LISTO" : "PENDIENTE"}</strong></div>
-            <div className="metric-box"><span>Referencia herramienta actual</span><strong>{readiness?.reference.status ?? "SIN VERIFICAR"}</strong></div>
+            <div className="metric-box"><span>Referencia herramienta actual</span><strong>{readiness?.reference.status ?? "SIN VERIFICAR"}</strong><p>{readiness?.reference.message}</p></div>
             <div className="metric-box"><span>Operaciones</span><strong>{jobRun?.summary.operations_total ?? snapshot?.run.total_operations ?? 0}</strong></div>
             <div className="metric-box"><span>Cambios de herramienta</span><strong>{jobRun?.summary.tool_changes_required ?? 0}</strong></div>
           </div>
           <p className="muted">La compensación Legacy se genera automáticamente justo antes de cada operación usando la referencia Z vigente.</p>
-          {checks.length ? (
+          {initial && checks.length ? (
             <div className="stack gap-sm">
               {[...checks].sort((a, b) => Number(a.ok) - Number(b.ok)).map((check) => (
                 <div className="subpanel subpanel--soft" key={`${check.name}:${check.ok ? "ok" : "fail"}`}>
@@ -343,10 +352,11 @@ export function ExecutionConsole({ snapshot, readiness: suppliedReadiness, error
 
       {error ? (
         <section className="execution-panel">
-          <div className="section-heading"><h4>Errores de ejecución</h4></div>
+          <div className="section-heading"><h4>Errores de ejecución</h4>{readiness ? <p>Diagnóstico disponible; monitor de ejecución no disponible</p> : null}</div>
           <div className="alert alert--danger">
-            <strong>{conflictDetail?.code ?? `HTTP ${error.status}`}</strong>
+            <strong>{conflictDetail?.code ?? (error.status ? `HTTP ${error.status}` : "Sin respuesta HTTP")}</strong>
             <p>{conflictDetail?.message ?? error.message}</p>
+            {error.detail && typeof error.detail === "object" && "code" in error.detail ? <p>Código: {String((error.detail as { code: unknown }).code)}</p> : null}
             {conflictDetail ? (
               <>
                 <div className="info-grid info-grid--double compact-grid">
@@ -404,21 +414,32 @@ export function ExecutionConsole({ snapshot, readiness: suppliedReadiness, error
           <label className="spindle-confirmation">
             <input type="checkbox" checked={spindlePrepared} disabled={busy || !canStart}
               onChange={(event) => setConfirmedContext(event.target.checked ? confirmationKey : null)} />
-            Confirmo que el spindle está preparado
+            <span><strong>CONFIRMACIÓN DEL OPERADOR</strong><br />Confirmo que el spindle está preparado
+              <br />y que la herramienta instalada es: {readiness?.current_operation.name} — {readiness?.current_operation.tool}</span>
           </label>
           <button className="button" type="button" disabled={busy || !canStart || !spindlePrepared}
             onClick={() => { setConfirmedContext(null); void onStart(true); }}>Iniciar trabajo</button>
         </> : null}
         {extraActions.map((action) => (
+          <div key={action}>
+          {["continue", "confirm-spindle-stopped", "confirm-tool-change", "update-tool-reference"].includes(action) ? (
+            <label className="spindle-confirmation"><input type="checkbox"
+              checked={actionConfirmation === `${confirmationKey}:${action}`}
+              onChange={(event) => setActionConfirmation(event.target.checked ? `${confirmationKey}:${action}` : null)} />
+              <span><strong>CONFIRMACIÓN DEL OPERADOR</strong><br />{action === "continue" ? `Confirmo que el spindle está preparado y la herramienta ${transitionTool} está instalada.`
+                : action === "confirm-tool-change" ? `Confirmo que la herramienta ${transitionTool} está instalada correctamente.`
+                : "Confirmo que el spindle está completamente detenido."}</span>
+            </label>
+          ) : null}
           <button
             key={action}
             className={`button${action === "cancel" ? " button--ghost button--danger" : " button--ghost"}`}
             type="button"
-            disabled={busy}
-            onClick={() => void onAction(action)}
+            disabled={busy || (["continue", "confirm-spindle-stopped", "confirm-tool-change", "update-tool-reference"].includes(action) && actionConfirmation !== `${confirmationKey}:${action}`)}
+            onClick={() => { setActionConfirmation(null); void onAction(action); }}
           >
             {ACTION_LABELS[action] ?? action}
-          </button>
+          </button></div>
         ))}
         {showArchiveStale ? (
           <button

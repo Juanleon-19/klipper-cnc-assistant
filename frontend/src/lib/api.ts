@@ -426,8 +426,8 @@ export const api = {
       method: "POST",
       signal: options?.signal,
     }),
-  generateCompensatedGCode: (projectId: string, operationId: string, mode?: "legacy" | "adaptive_fast") =>
-    request<CompensatedGCodeResult>(`/api/projects/${projectId}/operations/${operationId}/compensated-gcode/generate${mode ? `?mode=${encodeURIComponent(mode)}` : ""}`, {
+  generateCompensatedGCode: (projectId: string, operationId: string, mode?: "legacy" | "adaptive_fast", diagnostic = false) =>
+    request<CompensatedGCodeResult>(`/api/projects/${projectId}/operations/${operationId}/compensated-gcode/generate?diagnostic=${diagnostic}${mode ? `&mode=${encodeURIComponent(mode)}` : ""}`, {
       method: "POST",
     }),
   generatedFileUrl: (projectId: string, relativePath: string) =>
