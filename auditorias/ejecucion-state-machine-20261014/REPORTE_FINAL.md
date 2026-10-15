@@ -1,5 +1,10 @@
 # Estabilización de Ejecución — cierre de software
 
+Actualización posterior: [correcciones de auditoría externa](CORRECCIONES_AUDITORIA_EXTERNA.md).
+Ese documento registra el cierre del hallazgo de frescura y las dos correcciones
+UX, con la validación actual de 703 backend y 169 frontend. Las cifras siguientes
+se conservan como evidencia de la entrega original auditada.
+
 Fecha: 2026-10-15. Rama: `fix/execution-state-machine-20261014`.
 Base: `95f47cb93b28f499369cccda51a179b876f525db`.
 Commit funcional validado: `b85d2b837006ee4707d22485a08a133b14d821b4`.
