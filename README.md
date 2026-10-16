@@ -1,7 +1,7 @@
 # Klipper CNC Assistant
 
-Estado de referencia: cierre de software en `release/final-software-stabilization-2026-09-12`.
-Fecha de referencia: 12 de septiembre de 2026.
+Base estable auditada: `0ac6fd0c6b067c746fcb5ac819f154a546b43f44` (PR #27).
+Mejoras diferidas de software: 15 de octubre de 2026; validación física pendiente.
 
 Klipper CNC Assistant es una aplicacion web para preparar trabajos CNC basados en G-code sobre una maquina controlada por Klipper. El producto combina un backend FastAPI, un frontend React, persistencia JSON local y una frontera fisica que integra Moonraker, Klipper y un controlador Arduino.
 
@@ -160,11 +160,10 @@ python -m klipper_cnc_assistant serve --host 127.0.0.1 --port 8000 --data-dir da
 python -m klipper_cnc_assistant check-gcode archivo.nc
 ```
 
-La aplicacion activa del host no se modifica desde esta rama. El desarrollo de Fase 2 se realiza exclusivamente en `/home/impresora/klipper-cnc-assistant-fase2`.
+El desarrollo se realiza en worktrees aislados; esta fase no modifica ni despliega el checkout productivo.
 
 ## Estado de fases
 
 - Fase 1: completada y fusionada en `main`.
-- Fase 2: activa en `fase-2/referencias-conectividad`.
-- Fase 3: pendiente.
-- Fase 4: pendiente.
+- Fases 2, 3 y 4: implementación de software integrada en la base estable; no equivale a cierre de validación física.
+- Paquete diferido: frescura de muestra real, reintento de transición, navegación estable y resets contextuales. Véase [contratos y backlog](docs/deferred-improvements-20261015.md).
