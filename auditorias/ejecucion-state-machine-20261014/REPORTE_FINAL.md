@@ -1,5 +1,9 @@
 # Estabilización de Ejecución — cierre de software
 
+Última actualización: [tercera auditoría — start_attempt](TERCERA_AUDITORIA_START_ATTEMPT.md),
+con clasificación not_sent/uncertain/sent, journal durable previo al transporte y
+validación actual de 710 backend y 169 frontend.
+
 Actualización posterior: [correcciones de auditoría externa](CORRECCIONES_AUDITORIA_EXTERNA.md).
 Ese documento registra el cierre del hallazgo de frescura y las dos correcciones
 UX, con la validación actual de 703 backend y 169 frontend. Las cifras siguientes
