@@ -248,7 +248,7 @@ describe("ReferenceWorkspace connection and workflow UI", () => {
 
     expect(screen.getByText("Diagnóstico avanzado de conexión")).toBeInTheDocument();
     expect(screen.getByText(/Configuración avanzada de movimiento/i)).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "4. Medir referencia Z" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "4. Guardar origen y medir referencia inicial" })).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "Comprobación de posición de cambio de herramienta" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Probar posición de cambio" })).toBeInTheDocument();
   });
@@ -283,8 +283,7 @@ describe("ReferenceWorkspace connection and workflow UI", () => {
     expect(screen.getByText("Z de aproximación a referencia: 105.000 mm")).toBeInTheDocument();
     expect(screen.getByText("Pendiente de guardar para cambio: 130.000 mm")).toBeInTheDocument();
     expect(screen.getByText("Guarde la configuración antes de realizar movimientos de referencia.")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Sondear referencia ahora" })).toBeDisabled();
-    expect(screen.getByRole("button", { name: "Volver a medir referencia" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Guardar X/Y actual y medir referencia Z" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Ir al punto de referencia" })).toBeDisabled();
   });
 

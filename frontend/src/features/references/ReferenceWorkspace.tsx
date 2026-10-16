@@ -402,19 +402,23 @@ export function ReferenceWorkspace({
 
         <article className="panel">
           <div className="section-heading"><h3>3. Posicionar X0/Y0 del G-code</h3></div>
-          <p className="muted">Habilite el joystick X/Y, coloque la herramienta exactamente sobre el X0/Y0 generado por FlatCAM y confirme esa posición como origen de trabajo.</p>
+          <p className="muted">Habilite el joystick X/Y, coloque la herramienta exactamente sobre el X0/Y0 generado por FlatCAM. Después guarde X/Y y mida Z con la acción del paso 4; no necesita confirmar X/Y por separado.</p>
           <div className="info-grid info-grid--double compact-grid">
             <div className="metric-box"><span>X máquina</span><strong>{formatMillimeters(typeof position?.x === "number" ? Number(position.x) : null, 3)}</strong></div>
             <div className="metric-box"><span>Y máquina</span><strong>{formatMillimeters(typeof position?.y === "number" ? Number(position.y) : null, 3)}</strong></div>
           </div>
           <div className="action-grid action-grid--inline">
             <button className="button button--ghost" type="button" disabled={!canEnableJog || referenceBusy || machine.refreshing} onClick={onEnableManual}>Habilitar joystick X/Y</button>
-            <button className="button" type="button" disabled={!machine.isPhysical || referenceBusy || machine.refreshing || !selectedOperation} onClick={onCapturePhysicalWorkOrigin}>Confirmar X0/Y0</button>
           </div>
+          <details>
+            <summary>Avanzado: guardar solo X/Y</summary>
+            <p className="muted">Acción opcional: guarda el origen X/Y sin medir Z e invalida las validaciones de mapa y compensación dependientes. No es un requisito previo: la captura conjunta del paso 4 volverá a guardar X/Y.</p>
+            <button className="button button--ghost" type="button" disabled={!machine.isPhysical || referenceBusy || machine.refreshing || !selectedOperation} onClick={onCapturePhysicalWorkOrigin}>Guardar solo X/Y actual</button>
+          </details>
         </article>
 
         <article className="panel">
-          <div className="section-heading"><h3>4. Medir referencia Z</h3></div>
+          <div className="section-heading"><h3>4. Guardar origen y medir referencia inicial</h3></div>
           <div className="alert alert--info">
             <strong>Herramienta: {selectedOperation?.herramienta ?? selectedOperation?.tool_id ?? "sin herramienta"}</strong>
             <p>Perfil de cambio: {selectedToolReferenceProfileLabel}</p>
@@ -432,11 +436,16 @@ export function ReferenceWorkspace({
           </div>
           <p className="muted">Velocidad efectiva: {Number.isFinite(referenceProbeFeed) ? `${referenceProbeFeed.toFixed(2)} mm/min · ${(referenceProbeFeed / 60).toFixed(3)} mm/s` : "valor inválido"}</p>
           <button className="button button--ghost" type="button" disabled={!machine.isPhysical || settingsInputsDisabled || machine.refreshing || machine.runtimeState === "PROBING_REFERENCE"} onClick={onSaveMachineSettings}>Guardar parámetros de sonda</button>
-          <p className="muted">Puede armar la referencia para usar el botón externo o lanzar el sondeo directamente desde pantalla. Si la primera toma quedó mal, use "Volver a medir referencia" para repetir el mismo flujo seguro y sobrescribir la referencia Z activa con una nueva captura física.</p>
+          <div className="alert alert--info">
+            <strong>Configuración inicial del trabajo</strong>
+            <p>La posición actual se guardará como X0/Y0 del G-code y se realizará la medición Z de referencia.</p>
+            <p>Si repite esta acción, sustituirá el origen X/Y y la referencia Z anteriores por los de la nueva captura.</p>
+          </div>
+          <p className="muted">Para cambiar de herramienta durante un trabajo, siga el flujo de Ejecución: conserva el mapa y su origen, y mide una nueva referencia Z para la herramienta instalada.</p>
+          <p className="muted">También puede armar la referencia para usar el botón externo.</p>
           <div className="action-grid action-grid--inline">
             <button className="button button--ghost" type="button" disabled={!canArm || referenceBusy || machine.refreshing || machineSettingsDirty} onClick={onProbeRequest}>Armar referencia</button>
-            <button className="button" type="button" disabled={!canProbe || referenceBusy || machine.refreshing || !selectedOperation || machineSettingsDirty} onClick={onRemeasurePhysicalReference}>Sondear referencia ahora</button>
-            <button className="button button--ghost" type="button" disabled={!canProbe || referenceBusy || machine.refreshing || !selectedOperation || machineSettingsDirty} onClick={onRemeasurePhysicalReference}>Volver a medir referencia</button>
+            <button className="button" type="button" disabled={!canProbe || referenceBusy || machine.refreshing || !selectedOperation || machineSettingsDirty} onClick={onRemeasurePhysicalReference}>Guardar X/Y actual y medir referencia Z</button>
             <button className="button button--ghost" type="button" disabled={!canGoToReference || referenceBusy || machine.refreshing || machineSettingsDirty} onClick={onGoToReferencePoint}>{referenceBusy ? "Yendo al punto de referencia…" : "Ir al punto de referencia"}</button>
             <button className="button button--ghost" type="button" disabled={!machine.isPhysical || machine.refreshing} onClick={onCancelOperation}>Cancelar</button>
           </div>

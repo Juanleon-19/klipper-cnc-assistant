@@ -942,21 +942,39 @@ describe("ProjectWorkspace", () => {
     expect(screen.getByText(/REFERENCE_MOVE_COMPLETE/i)).toBeInTheDocument();
   });
 
-  it("permite sondear referencia ahora directamente desde pantalla", async () => {
+  it("guarda XY y mide Z en una sola petición sin confirmación XY previa", async () => {
     vi.mocked(physicalMachine.refreshRuntime).mockClear();
     renderWorkspace(physicalMachine);
 
     fireEvent.click(screen.getByRole("button", { name: /^Referencia$/i }));
-    const probeButton = await screen.findByRole("button", { name: /Sondear referencia ahora/i });
+    const probeButton = await screen.findByRole("button", { name: /Guardar X\/Y actual y medir referencia Z/i });
     expect(probeButton).toBeEnabled();
+    expect(screen.getByText("La posición actual se guardará como X0/Y0 del G-code y se realizará la medición Z de referencia.")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Confirmar X0/Y0" })).not.toBeInTheDocument();
+    expect(screen.getAllByRole("button", { name: "Guardar X/Y actual y medir referencia Z" })).toHaveLength(1);
+    expect(screen.getByText(/Para cambiar de herramienta durante un trabajo, siga el flujo de Ejecución/)).toBeInTheDocument();
 
     fireEvent.click(probeButton);
 
-    await waitFor(() => expect(apiMock.probeAndCaptureReference).toHaveBeenCalled());
+    await waitFor(() => expect(apiMock.probeAndCaptureReference).toHaveBeenCalledTimes(1));
     await waitFor(() => expect(physicalMachine.refreshRuntime).toHaveBeenCalled());
     expect(apiMock.probeAndCaptureReference).toHaveBeenCalledWith(project.id, project.operaciones[0].id);
     expect(apiMock.capturePhysicalWorkOrigin).not.toHaveBeenCalled();
     expect(apiMock.capturePhysicalZReferenceFromProbe).not.toHaveBeenCalled();
+  });
+
+  it("conserva guardar solo XY como acción avanzada opcional e independiente", async () => {
+    renderWorkspace(physicalMachine);
+    fireEvent.click(screen.getByRole("button", { name: /^Referencia$/i }));
+    const summary = await screen.findByText("Avanzado: guardar solo X/Y");
+    const details = summary.closest("details")!;
+    expect(details).not.toHaveAttribute("open");
+    expect(within(details).getByText(/Acción opcional: guarda el origen X\/Y sin medir Z/)).toBeInTheDocument();
+    fireEvent.click(summary);
+    fireEvent.click(within(details).getByRole("button", { name: "Guardar solo X/Y actual" }));
+    await waitFor(() => expect(apiMock.capturePhysicalWorkOrigin).toHaveBeenCalledTimes(1));
+    expect(apiMock.capturePhysicalWorkOrigin).toHaveBeenCalledWith(project.id, project.operaciones[0].id);
+    expect(apiMock.probeAndCaptureReference).not.toHaveBeenCalled();
   });
 
   it("permite volver a medir la referencia cuando ya existe una captura previa", async () => {
@@ -972,12 +990,12 @@ describe("ProjectWorkspace", () => {
     renderWorkspace(capturedMachine);
 
     fireEvent.click(screen.getByRole("button", { name: /^Referencia$/i }));
-    const remeasureButton = await screen.findByRole("button", { name: /Volver a medir referencia/i });
+    const remeasureButton = await screen.findByRole("button", { name: /Guardar X\/Y actual y medir referencia Z/i });
     expect(remeasureButton).toBeEnabled();
 
     fireEvent.click(remeasureButton);
 
-    await waitFor(() => expect(apiMock.probeAndCaptureReference).toHaveBeenCalled());
+    await waitFor(() => expect(apiMock.probeAndCaptureReference).toHaveBeenCalledTimes(1));
     await waitFor(() => expect(capturedMachine.refreshRuntime).toHaveBeenCalled());
     expect(apiMock.probeAndCaptureReference).toHaveBeenCalledWith(project.id, project.operaciones[0].id);
     expect(apiMock.capturePhysicalWorkOrigin).not.toHaveBeenCalled();
@@ -990,9 +1008,9 @@ describe("ProjectWorkspace", () => {
     renderWorkspace(physicalMachine);
 
     fireEvent.click(screen.getByRole("button", { name: /^Referencia$/i }));
-    fireEvent.click(await screen.findByRole("button", { name: /Sondear referencia ahora/i }));
+    fireEvent.click(await screen.findByRole("button", { name: /Guardar X\/Y actual y medir referencia Z/i }));
 
-    await waitFor(() => expect(apiMock.probeAndCaptureReference).toHaveBeenCalled());
+    await waitFor(() => expect(apiMock.probeAndCaptureReference).toHaveBeenCalledTimes(1));
     expect(apiMock.capturePhysicalWorkOrigin).not.toHaveBeenCalled();
     expect(apiMock.capturePhysicalZReferenceFromProbe).not.toHaveBeenCalled();
     expect(physicalMachine.refreshRuntime).not.toHaveBeenCalled();
@@ -1080,7 +1098,7 @@ describe("ProjectWorkspace", () => {
     expect(screen.getByText("Hay cambios de configuración sin guardar.")).toBeInTheDocument();
     expect(screen.getByText("Z de aproximación a referencia: 105.000 mm")).toBeInTheDocument();
     expect(screen.getByText("Pendiente de guardar para cambio: 130.000 mm")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Sondear referencia ahora" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Guardar X/Y actual y medir referencia Z" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Ir al punto de referencia" })).toBeDisabled();
   });
 
@@ -1163,7 +1181,7 @@ describe("ProjectWorkspace", () => {
     expect(screen.getByText("Z de aproximación a referencia: 105.000 mm")).toBeInTheDocument();
     expect(screen.getByText("Z segura durante cambio: 130.000 mm")).toBeInTheDocument();
     expect(screen.queryByText(/Pendiente de guardar:/i)).toBeNull();
-    expect(screen.getByRole("button", { name: "Sondear referencia ahora" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Guardar X/Y actual y medir referencia Z" })).toBeEnabled();
 
     view.unmount();
     apiMock.getMachineSettings.mockResolvedValue(referenceSettings(105, 130));
@@ -1191,7 +1209,7 @@ describe("ProjectWorkspace", () => {
     expect(longToolInput).toHaveValue("130");
     expect(screen.getByText("Z de aproximación a referencia: 105.000 mm")).toBeInTheDocument();
     expect(screen.getByText("Cambios sin guardar")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Sondear referencia ahora" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Guardar X/Y actual y medir referencia Z" })).toBeDisabled();
     expect(refreshRuntime).not.toHaveBeenCalled();
   });
 
@@ -1211,7 +1229,7 @@ describe("ProjectWorkspace", () => {
     expect(await screen.findByText("La configuración guardada no coincide con la configuración activa del runtime.")).toBeInTheDocument();
     expect(longToolInput).toHaveValue("130");
     expect(screen.getByText("Z de aproximación a referencia: 105.000 mm")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Sondear referencia ahora" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Guardar X/Y actual y medir referencia Z" })).toBeDisabled();
   });
 
   it("mantiene bloqueado si PUT funciona pero no se puede refrescar el runtime", async () => {
@@ -1230,7 +1248,7 @@ describe("ProjectWorkspace", () => {
     expect(await screen.findByText("Configuración guardada, pero no se pudo confirmar el runtime.")).toBeInTheDocument();
     expect(longToolInput).toHaveValue("130");
     expect(screen.getByText("Z de aproximación a referencia: 105.000 mm")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Sondear referencia ahora" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Guardar X/Y actual y medir referencia Z" })).toBeDisabled();
   });
 
   it("muestra mapa físico como flujo principal sin botón operativo SIMULADO", async () => {
