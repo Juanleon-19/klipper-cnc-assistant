@@ -36,6 +36,17 @@ from .health import execution_health, preparation_retry_safe
 from .readiness import PREPARABLE_STATES, ownership_compatible, evaluate_readiness, reference_candidate
 
 
+@dataclass
+class DispatchEvidence:
+    """Explicit adapter evidence; unknown adapters remain conservative."""
+    observed: bool = False
+    transport_invoked: bool = False
+
+    @property
+    def failure_status(self):
+        return 'not_sent' if self.observed and not self.transport_invoked else 'uncertain'
+
+
 JOB_PLAN_SCHEMA = "job-plan-v1"
 JOB_RUN_SCHEMA = "job-run-v1"
 RUN_TERMINAL_STATES = {"JOB_COMPLETE", "JOB_CANCELLED", "JOB_ERROR"}
@@ -137,6 +148,9 @@ class MoonrakerJobAdapter:
         return client
 
     def _dispatch(self, action, send, *, before_send):
+        evidence = getattr(before_send, 'dispatch_evidence', None)
+        if evidence is not None:
+            evidence.observed = True
         # Expensive artifact/reference IO precedes the fresh motion frame.
         # The callback still performs cheap CAS/session checks at dispatch.
         prepare = getattr(before_send, 'prepare', None)
@@ -151,6 +165,8 @@ class MoonrakerJobAdapter:
         def authorized_send():
             before_send()
             authorizer.revalidate(context)
+            if evidence is not None:
+                evidence.transport_invoked = True
             return send()
         return authorizer.dispatch(context, authorized_send)
 
@@ -160,7 +176,8 @@ class MoonrakerJobAdapter:
         return self._client().upload_file(local_path=local_path, remote_dir=remote_dir, checksum=checksum, print_file=False)
 
     def start_file(self, remote_path: str, *, before_send) -> dict[str, Any]:
-        return self._dispatch("job_start", lambda: self._client().start_print(remote_path), before_send=before_send)
+        transport = self._client().start_print
+        return self._dispatch("job_start", lambda: transport(remote_path), before_send=before_send)
 
     def pause(self, *, before_send) -> dict[str, Any]:
         before_send()
@@ -1027,11 +1044,12 @@ class JobService:
             return run
         self._require_run_reference(context, run, next_pending=True)
         self._require_spindle_confirmation(context, run, 'prepared', index)
-        for key in ('generated_file', 'generated_file_name', 'generated_metadata_path', 'generated_metadata'):
+        for key in ('generated_file', 'generated_file_name', 'generated_metadata_path', 'generated_metadata', 'remote_file'):
             operation.pop(key, None)
         operation['execution_status'] = 'PENDING'
-        run.update(state='JOB_STARTING', next_action='Reintentando preparación desde cero', available_actions=['cancel'])
-        self._append_event(run, 'info', 'Reintento explícito de preparación sin upload ni start previo.')
+        run.update(state='JOB_STARTING', next_action='Reintentando preparación desde cero', available_actions=['cancel'],
+                   completed_at=None, last_watcher_error=None, recovery_state=None)
+        self._append_event(run, 'info', 'Reintento explícito de preparación: se descarta el upload anterior, se regenera JIT y se conserva el historial de start.')
         self._save_run(context, run)
         self._start_worker(context)
         return run
@@ -1522,6 +1540,7 @@ class JobService:
         run["next_action"] = f"Esperando confirmación de Klipper para {operation['name']}"
         self._save_run(context, run)
         attempt_id = None
+        dispatch_evidence = DispatchEvidence()
         prechecked = False
         reference_guard = None
         run_guard = None
@@ -1546,6 +1565,8 @@ class JobService:
                                                     operation['operation_id'], identity.filename)
             run.update(revision=authorized['revision'], start_attempt=authorized['start_attempt'])
             attempt_id = authorized['start_attempt']['id']
+            sending = self.run_store.mark_start_sending(self._run_file(context), run, attempt_id)
+            run.update(revision=sending['revision'], start_attempt=sending['start_attempt'])
             run_guard = FileRevisionGuard([self._run_file(context)], error=JobRunConflict)
             self.run_store.validate(self._run_file(context), run)
         def before_send():
@@ -1559,11 +1580,12 @@ class JobService:
             self.runtime.physical_ownership.validate(adapter.permit)
         before_send.prepare = prepare_dispatch
         before_send.verify = verify_dispatch
+        before_send.dispatch_evidence = dispatch_evidence
         try:
             adapter.start_file(identity.filename, before_send=before_send)
         except BaseException:
             if attempt_id is not None:
-                self.run_store.finish_start(self._run_file(context), run['run_id'], attempt_id, status='uncertain')
+                self.run_store.finish_start(self._run_file(context), run['run_id'], attempt_id, status=dispatch_evidence.failure_status)
             raise
         else:
             self.run_store.finish_start(self._run_file(context), run['run_id'], attempt_id, status='sent')

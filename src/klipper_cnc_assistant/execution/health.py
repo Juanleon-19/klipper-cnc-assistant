@@ -9,12 +9,20 @@ def preparation_retry_safe(run, status):
     index = int(run.get('current_operation_index') or 0)
     operations = run.get('operations') or []
     op = operations[index] if 0 <= index < len(operations) else {}
-    return bool(op and (run.get('state') in PREUPLOAD or (run.get('state') in INITIAL and not run.get('started_at')))
-                and not op.get('remote_file') and not op.get('observed_printing')
-                and not op.get('started_at') and not run.get('start_attempt')
+    attempt = run.get('start_attempt') or {}
+    not_sent = (bool(attempt.get('id')) and attempt.get('status') == 'not_sent' and attempt.get('may_have_been_sent') is False
+                and attempt.get('operation_id') == op.get('operation_id'))
+    retry_state = run.get('state') in PREUPLOAD or (run.get('state') in INITIAL and not run.get('started_at'))
+    if not_sent:
+        retry_state = retry_state or run.get('state') in {'WAITING_FOR_KLIPPER', 'JOB_ERROR', 'RECOVERY_REQUIRED'}
+    remote_safe = not op.get('remote_file') or (not_sent and op['remote_file'] == attempt.get('remote_file')
+                                               and status.get('filename') in {None, '', op['remote_file']})
+    return bool(op and retry_state and remote_safe and not op.get('observed_printing')
+                and not op.get('started_at') and (not attempt or not_sent)
                 and status.get('connected') is True
                 and status.get('print_state') == 'standby'
                 and status.get('is_active') is False)
+
 
 
 def execution_health(run, status, readiness, worker_alive):
@@ -42,7 +50,8 @@ def execution_health(run, status, readiness, worker_alive):
     token = (operations[index].get('physical_reference_token') or {}) if 0 <= index < len(operations) else {}
     session_changed = bool(token and token.get('physical_session_id') != readiness.get('physical_session_id'))
     reference_invalid = session_changed or (not changing_tool and not readiness['reference']['valid'])
-    if state not in TERMINAL and (state == 'RECOVERY_REQUIRED' or reference_invalid
+    retryable_error = state == 'JOB_ERROR' and preparation_retry_safe(run, status)
+    if (state not in TERMINAL or retryable_error) and (retryable_error or state == 'RECOVERY_REQUIRED' or reference_invalid
             or (not worker_alive and state not in WAITING | INITIAL | {'JOB_PAUSED', 'OPERATION_PAUSED'})):
         title, severity = 'RECUPERACIÓN REQUERIDA', 'ERROR'
         safe = preparation_retry_safe(run, status)

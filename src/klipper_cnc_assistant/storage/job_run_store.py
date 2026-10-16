@@ -90,7 +90,7 @@ class JobRunStore:
             payload = deepcopy(run)
             # Observations and dispatch evidence cannot be overwritten by a
             # domain writer carrying a snapshot taken before those updates.
-            for key in self.OBSERVATIONS | {'start_attempt', 'cancel_remote_status'}:
+            for key in self.OBSERVATIONS | {'start_attempt', 'start_attempt_history', 'cancel_remote_status'}:
                 if key in current:
                     payload[key] = deepcopy(current[key])
             payload['revision'] = current['revision'] + 1
@@ -133,19 +133,42 @@ class JobRunStore:
                 raise JobRunConflict('La operación o archivo autorizado cambió antes del start.')
             attempt = {'id': uuid4().hex, 'operation_id': operation_id,
                        'remote_file': remote_file, 'status': 'dispatching',
-                       'may_have_been_sent': True}
+                       'may_have_been_sent': False}
+            if current.get('start_attempt'):
+                current.setdefault('start_attempt_history', []).append(deepcopy(current['start_attempt']))
             current['start_attempt'] = attempt
             current['revision'] += 1
             self._write(path, current)
             return current
 
+    def mark_start_sending(self, path, expected, attempt_id):
+        """Durable write-ahead boundary, before the final fresh observation."""
+        with self._locked(path):
+            current = self.load(path)
+            self._check(current, expected)
+            attempt = current.get('start_attempt') or {}
+            if attempt.get('id') != attempt_id or attempt.get('status') != 'dispatching':
+                raise JobRunConflict('El intento de start cambió antes del envío.')
+            operation = self._operation(current)
+            if (current.get('state') != 'WAITING_FOR_KLIPPER'
+                    or current.get('current_operation_id') != attempt['operation_id']
+                    or operation.get('operation_id') != attempt['operation_id']
+                    or operation.get('remote_file') != attempt['remote_file']):
+                raise JobRunConflict('La identidad de start cambió antes del transporte.')
+            attempt.update(status='sending', may_have_been_sent=True)
+            current['revision'] += 1
+            self._write(path, current)
+            return current
+
     def finish_start(self, path, run_id, attempt_id, *, status):
+        if status not in {'not_sent', 'uncertain', 'sent'}:
+            raise ValueError('Resultado de start inválido.')
         with self._locked(path):
             current = self.load(path)
             if (current is None or current['run_id'] != run_id
                     or current.get('start_attempt', {}).get('id') != attempt_id):
                 return
-            current['start_attempt']['status'] = status
+            current['start_attempt'].update(status=status, may_have_been_sent=status != 'not_sent')
             if current['state'] in self.CANCELLED:
                 current['recovery_state'] = 'CANCEL_RECONCILIATION_REQUIRED'
             self._write(path, current)

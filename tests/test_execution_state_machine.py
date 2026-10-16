@@ -426,3 +426,137 @@ class ExecutionStateMachineTest(unittest.TestCase):
                 guard.validate()
         with self.assertRaises(PersistenceConflict):
             guard.validate()
+
+    def exercise_start_outcome(self, failure):
+        from types import SimpleNamespace
+        from tests.test_motion_authorization import observed_machine
+        from klipper_cnc_assistant.execution.job_service import MoonrakerJobAdapter
+        from klipper_cnc_assistant.machine.motion_authorization import MotionAuthorizer
+        fixture = ExecutionStateMachineTest()
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        run = fixture.started('JOB_STARTING')
+        owner = fixture.runtime.physical_ownership
+        machine = observed_machine(owner)
+        calls = []
+        def start_print(remote):
+            persisted = fixture.job.run_store.load(fixture.path)
+            self.assertEqual(persisted['start_attempt']['status'], 'sending')
+            self.assertIs(persisted['start_attempt']['may_have_been_sent'], True)
+            calls.append(remote)
+            if failure == 'transport':
+                raise OSError('fake transport failed after entry')
+            return {'ok': True}
+        client = Mock(start_print=start_print)
+        def refresh():
+            self.assertIs(fixture.job.run_store.load(fixture.path)['start_attempt']['may_have_been_sent'], True)
+            if failure == 'refresh':
+                raise RuntimeError('fake observation failed')
+            machine.update_motion((10, 10, 10), 0, 'fake')
+            machine.update_klippy('ready')
+        authorizer = MotionAuthorizer(owner, machine)
+        require = authorizer.require_context
+        def capture(*args, **kwargs):
+            if failure == 'context':
+                raise RuntimeError('fake context failed')
+            context = require(*args, **kwargs)
+            if failure == 'final':
+                fixture.runtime.config.reference_prep_z_mm += 1
+            return context
+        runtime = SimpleNamespace(_client=client, require_physical_access=lambda: None,
+                                  _refresh_machine=refresh, _motion_authorizer=lambda: authorizer)
+        real = MoonrakerJobAdapter(runtime)
+        if failure == 'after_transport':
+            end = owner.end_dispatch
+            def failed_cleanup(permit):
+                end(permit)
+                raise OSError('fake post-transport failure')
+            owner.end_dispatch = failed_cleanup
+        def start(remote, *, before_send):
+            real.permit = fixture.fixture.adapter.permit
+            return real.start_file(remote, before_send=before_send)
+        with patch.object(authorizer, 'require_context', side_effect=capture), patch.object(fixture.fixture.adapter, 'start_file', side_effect=start):
+            if failure:
+                with self.assertRaises(Exception) as error:
+                    fixture.job._execute_next_operation(fixture.context, run)
+                self.assertNotIsInstance(error.exception, AssertionError)
+            else:
+                fixture.job._execute_next_operation(fixture.context, run)
+        persisted = fixture.job.run_store.load(fixture.path)
+        expected = 'uncertain' if failure in {'transport', 'after_transport'} else 'not_sent' if failure else 'sent'
+        self.assertEqual(persisted['start_attempt']['status'], expected)
+        self.assertEqual(persisted['start_attempt']['may_have_been_sent'], expected != 'not_sent')
+        self.assertEqual(len(calls), int(failure in {None, 'transport', 'after_transport'}))
+        status = {'connected': True, 'print_state': 'standby', 'is_active': False, 'filename': None}
+        self.assertEqual(preparation_retry_safe(persisted, status), expected == 'not_sent')
+        return fixture, persisted
+
+    def test_start_refresh_failure_is_not_sent(self):
+        fixture, run = self.exercise_start_outcome('refresh')
+        live = fixture.job.live_execution(**fixture.args)
+        self.assertIn('retry-operation-preparation', live['run']['available_actions'])
+
+    def test_start_context_and_final_failures_are_not_sent(self):
+        for stage in ('context', 'final'):
+            with self.subTest(stage=stage):
+                self.exercise_start_outcome(stage)
+
+    def test_start_transport_exception_is_uncertain_and_journal_precedes_call(self):
+        for failure in ('transport', 'after_transport'):
+            with self.subTest(failure=failure):
+                fixture, run = self.exercise_start_outcome(failure)
+                self.assertNotIn('retry-operation-preparation', fixture.job.live_execution(**fixture.args)['run']['available_actions'])
+
+    def test_start_success_is_sent_and_journal_precedes_call(self):
+        self.exercise_start_outcome(None)
+
+    def test_not_sent_explicit_retry_regenerates_and_preserves_attempt(self):
+        fixture, run = self.exercise_start_outcome('refresh')
+        old_attempt = deepcopy(run['start_attempt'])
+        run.update(state='JOB_ERROR', completed_at='previous-failure', last_watcher_error='previous-error')
+        fixture.job._save_run(fixture.context, run)
+        self.assertIn('retry-operation-preparation', fixture.job.live_execution(**fixture.args)['run']['available_actions'])
+        uploads = len(fixture.fixture.adapter.uploads)
+        with patch.object(fixture.job, '_start_worker') as worker:
+            retried = fixture.job.run_action(**fixture.args, action='retry-operation-preparation')
+        worker.assert_called_once()
+        self.assertEqual(retried['start_attempt'], old_attempt)
+        self.assertIsNone(retried['completed_at'])
+        self.assertIsNone(retried['last_watcher_error'])
+        self.assertNotIn('remote_file', retried['operations'][0])
+        self.assertNotIn('generated_file', retried['operations'][0])
+        self.assertEqual(fixture.fixture.adapter.started, [])
+        with patch.object(fixture.fixture.compensated_service, 'generate', wraps=fixture.fixture.compensated_service.generate) as generate:
+            fixture.job._execute_next_operation(fixture.context, retried)
+        generate.assert_called_once()
+        self.assertEqual(len(fixture.fixture.adapter.uploads), uploads + 1)
+        self.assertEqual(len(fixture.fixture.adapter.started), 1)
+        final = fixture.job.run_store.load(fixture.path)
+        self.assertIn(old_attempt, final['start_attempt_history'])
+        self.assertNotEqual(final['start_attempt']['id'], old_attempt['id'])
+
+    def test_retry_rejects_ambiguous_journal_and_non_idle_even_if_not_sent(self):
+        fixture, run = self.exercise_start_outcome('refresh')
+        status = {'connected': True, 'print_state': 'standby', 'is_active': False}
+        for attempt_status in ('dispatching', 'sending', 'sent', 'uncertain'):
+            changed = deepcopy(run)
+            changed['start_attempt']['status'] = attempt_status
+            self.assertFalse(preparation_retry_safe(changed, status))
+        for delta in ({'is_active': True}, {'print_state': 'printing'}, {'connected': False}, {'filename': 'other.gcode'}):
+            self.assertFalse(preparation_retry_safe(run, status | delta))
+
+
+    def test_sending_journal_transition_rejects_cancelled_revision(self):
+        from klipper_cnc_assistant.storage.job_run_store import JobRunConflict
+        run = self.started('WAITING_FOR_KLIPPER')
+        operation = run['operations'][0]
+        operation['remote_file'] = 'fake.gcode'
+        run['current_operation_id'] = operation['operation_id']
+        self.job._save_run(self.context, run)
+        intent = self.job.run_store.begin_start(self.path, run, operation['operation_id'], 'fake.gcode')
+        self.assertFalse(intent['start_attempt']['may_have_been_sent'])
+        self.assertEqual(intent['start_attempt']['status'], 'dispatching')
+        cancelled = self.job.run_store.cancel(self.path, run['run_id'])
+        with self.assertRaises(JobRunConflict):
+            self.job.run_store.mark_start_sending(self.path, intent, intent['start_attempt']['id'])
+        self.assertEqual(self.job.run_store.load(self.path), cancelled)

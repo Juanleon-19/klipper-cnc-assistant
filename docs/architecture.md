@@ -438,9 +438,12 @@ No usan mtime. El process lock físico sigue excluyendo otros procesos Assistant
 Cambios fuera de las APIs de persistencia no son un escritor soportado durante
 una ejecución; la segunda lectura detecta alteraciones anteriores al refresh.
 
-`begin_start` conserva su persistencia y semántica conservadora, pero termina
-antes de observar. Un fallo posterior deja el intento uncertain mediante
-`finish_start`, sin reintento automático. La guardia del run se captura después
+`begin_start` persiste intención dispatching (may_have_been_sent=False).
+`mark_start_sending` valida CAS e identidad y persiste sending/True antes de la
+observación fresca final. No hay IO de journal después de require_context.
+El testigo explícito de dispatch diferencia fallos anteriores al callable de
+transporte (not_sent/False) de fallos dentro o después de él (uncertain/True).
+Una respuesta confirmada termina sent/True; no hay reintento automático. La guardia del run se captura después
 de begin_start y se valida contra CAS persistido antes del refresh. Toda escritura
 posterior invalida esa guardia, incluso observaciones: se prefiere bloquear a
 hacer IO dentro de MotionContext. Cancelación, revisión o sustitución del run
@@ -455,3 +458,26 @@ sesión física, generaciones y permiso. No se amplía max_age_s=2.0.
 Actualizar referencia exige una confirmación que autoriza explícitamente el
 movimiento al punto de referencia y la medición Z, además de spindle detenido.
 El aviso de checks inexistentes aparece solo en estados iniciales sin checks.
+
+### Clasificación del intento de start (tercera auditoría)
+
+La marca durable sending precede al último refresh para no volver a envejecer
+MotionContext con fsync. Un proceso que muere con sending persistido sigue siendo
+ambiguo aunque quizá no haya enviado; no se infiere not_sent al reiniciar. Solo
+el dispatch que observó la frontera exacta puede certificar not_sent mientras
+sigue vivo. Adaptadores sin ese testigo fallan conservadoramente como uncertain.
+La marca se escribe con CAS antes de que start_print sea accesible, y el testigo
+en memoria cambia inmediatamente antes de invocar el callable ya materializado.
+
+not_sent permite ofrecer recuperación explícita, también desde JOB_ERROR o
+WAITING_FOR_KLIPPER, únicamente con operación coincidente, Moonraker standby e
+inactive, sin observed_printing ni started_at de operación. Un remote_file
+persistido de ese intento no implica impresión activa; se exige identidad
+compatible y se descarta su puntero junto con el artifact al reintentar. No se
+adopta ese upload: se genera JIT y se sube de nuevo. Se conservan el intento y,
+al crear el siguiente, start_attempt_history. Sesión, referencia, recovery,
+spindle y ownership se revalidan por las barreras existentes.
+
+Resume no tiene un journal persistente equivalente a start_attempt. Conserva
+PrintIdentity, sesión, ownership, guardias en memoria y MotionAuthorizer, sin
+una nueva máquina de estados ni reintentos automáticos.
