@@ -993,15 +993,19 @@ export function ProjectWorkspace({
     }
   }, [physicalMap]);
 
+  const viewProjectId = project?.id;
+  const viewOperationId = selectedOperation?.id;
+  const viewSetupId = selectedSetup?.id;
+  const viewFace = selectedOperation?.cara;
   useEffect(() => {
-    if (!project || !selectedOperation) {
+    if (!viewProjectId || !viewOperationId) {
       return;
     }
     if (initialView) {
       setActiveView(initialView);
       return;
     }
-    const stored = window.localStorage.getItem(workspaceViewStorageKey(project.id, selectedOperation.id));
+    const stored = window.localStorage.getItem(workspaceViewStorageKey(viewProjectId, viewOperationId));
     if (stored === "validacion") {
       setActiveView("ejecucion");
       return;
@@ -1010,7 +1014,7 @@ export function ProjectWorkspace({
       setActiveView(stored);
       return;
     }
-  }, [initialView, project, selectedOperation]);
+  }, [initialView, viewProjectId, viewOperationId, viewSetupId, viewFace]);
 
   useEffect(() => {
     if (!project || !selectedOperation) {
@@ -1653,6 +1657,18 @@ export function ProjectWorkspace({
 
   const renderReferencia = () => (
     <ReferenceWorkspace
+      resetActions={
+        <section className="panel" aria-label="Reiniciar preparación">
+          <h3>Reiniciar preparación</h3>
+          <p>Origen/Z invalida también mapa y compensaciones dependientes. Reiniciar solo mapa conserva origen y referencias físicamente válidas.</p>
+          <p>Reiniciar proceso archiva la ejecución y el mapa, invalida referencias dependientes y desconecta el runtime interno. Conserva originales, operaciones, artifacts e historial.</p>
+          <div className="action-grid">
+            <button type="button" className="button button--ghost" disabled={referenceBusy || !selectedSetup} onClick={() => void resetPreparation("reference")}>Reiniciar origen/Z y dependencias</button>
+            <button type="button" className="button button--ghost" disabled={referenceBusy || !selectedSetup} onClick={() => void resetPreparation("map")}>Reiniciar solo mapa</button>
+            <button type="button" className="button button--ghost button--danger" disabled={referenceBusy || !selectedSetup} onClick={() => void resetPreparation("preparation")}>Reiniciar proceso</button>
+          </div>
+        </section>
+      }
       machine={machine}
       runtime={runtime}
       referenceSession={referenceSession}
@@ -2275,9 +2291,9 @@ export function ProjectWorkspace({
 
   const resetPreparation = async (scope: "reference" | "map" | "preparation") => {
     if (!selectedSetup) return;
-    const completeMessage = "Esta acción eliminará las referencias y el mapa activos del montaje. Los G-codes originales, operaciones y mediciones históricas se conservarán. Después deberá repetir homing, origen, referencia y malla.";
+    const completeMessage = "Esta acción archiva la ejecución actual y el mapa activo, invalida origen/Z y asociaciones de referencia y compensación dependientes, y vuelve la preparación a SIN_INICIAR. Desconecta el runtime interno, sin reiniciar servicios. Conserva G-code originales, operaciones, artifacts e historial. Después deberá completar de nuevo la preparación física.";
     const mapMessage = "Reiniciar solo mapa archivará el mapa activo, conservará origen X/Y y referencias válidas, y exigirá una nueva malla.";
-    const referenceMessage = "Reiniciar solo referencia invalidará origen X/Y, referencias Z, mapa y compensaciones dependientes.";
+    const referenceMessage = "Reiniciar origen/Z invalida también la malla/mapa y las compensaciones dependientes. Conserva originales e historial.";
     const confirmed = window.confirm(scope === "preparation" ? completeMessage : scope === "map" ? mapMessage : referenceMessage);
     if (!confirmed) return;
     setReferenceBusy(true);
@@ -2586,7 +2602,7 @@ export function ProjectWorkspace({
               <summary className="button button--ghost">Más acciones</summary>
               <div className="inline-actions-menu__content">
                 <strong>Reiniciar...</strong>
-                <button className="button button--ghost" type="button" disabled={referenceBusy || !selectedSetup} onClick={() => void resetPreparation("reference")} title="Reiniciar solo referencia">Solo origen/Z</button>
+                <button className="button button--ghost" type="button" disabled={referenceBusy || !selectedSetup} onClick={() => void resetPreparation("reference")} title="Invalida también mapa y compensaciones dependientes">Reiniciar origen/Z y dependencias</button>
                 <button className="button button--ghost" type="button" disabled={referenceBusy || !selectedSetup} onClick={() => void resetPreparation("map")}>Reiniciar solo mapa</button>
                 <button className="button button--ghost button--danger" type="button" disabled={referenceBusy || !selectedSetup} onClick={() => void resetPreparation("preparation")} title="Desconecta Arduino, invalida origen X/Y, referencias Z y mapa activo; conserva G-code, operaciones y receta de malla.">Reiniciar proceso</button>
               </div>

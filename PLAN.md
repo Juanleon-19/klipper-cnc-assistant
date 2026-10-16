@@ -1,6 +1,6 @@
 # Plan de cierre del producto
 
-Fecha de actualización: 12 de septiembre de 2026
+Fecha de actualización: 15 de octubre de 2026
 
 El proyecto se organiza en cuatro fases independientes. Cada fase debe ejecutarse en su propia rama y solo puede integrarse en `main` después de revisión técnica, pruebas reproducibles y aprobación explícita del usuario.
 
@@ -21,7 +21,7 @@ Estado: completada y fusionada en `main`
 - Separar Moonraker HTTP, transporte WebSocket, frescura de posición y observación activa.
 - Añadir pruebas automatizadas reproducibles para reconexión, telemetría y referencias.
 
-Estado: cierre de software integrado en la rama final; validación física pendiente
+Estado: cierre de software integrado en main hasta PR #27; validación física pendiente
 
 ## Fase 3 — Mapa de alturas y compensación
 
@@ -29,7 +29,7 @@ Estado: cierre de software integrado en la rama final; validación física pendi
 - Asegurar cobertura, validación de dominio y compensación reproducible.
 - Separar claramente simulación, medición física y generación compensada.
 
-Estado: implementación de software integrada en la rama final; validación física pendiente
+Estado: implementación de software integrada en main hasta PR #27; validación física pendiente
 
 ## Fase 4 — Ejecución, recuperación y cierre del producto
 
@@ -37,9 +37,9 @@ Estado: implementación de software integrada en la rama final; validación fís
 - Asegurar preflight, cambio de herramienta, reanudación y cancelación segura.
 - Validar el producto completo contra la arquitectura aprobada y dejar criterio de cierre.
 
-Estado: implementación de software integrada en la rama final; validación física pendiente
+Estado: implementación de software integrada en main hasta PR #27; validación física pendiente
 
-## Cierre final de software
+## Cierre histórico de software (septiembre)
 
 Base: `3ca3ff404a7896506305a8a5c14f9e40cfcc411a`.
 Rama: `release/final-software-stabilization-2026-09-12`.
@@ -49,6 +49,17 @@ aplicación coherente de settings mediante el coordinator, valores finitos,
 reconciliación acotada de standby, evidencia de probe histórico, GETs de lectura,
 confirmaciones humanas de spindle vinculadas al contexto y documentación HTTP.
 
-La siguiente etapa es directamente validación física con el usuario. Esta rama
+La validación física requiere una etapa explícita con el usuario. Esta rama
 solo se valida con modo simulado, datos temporales y fakes; no modifica servicios
 reales ni se publica o fusiona a main durante el cierre.
+
+
+## Paquete diferido aprobado — octubre
+
+Base exacta: `0ac6fd0c6b067c746fcb5ac819f154a546b43f44`.
+Alcance: indicadores de frescura, reintento seguro de transición de herramienta,
+restauración de pestaña por contexto y accesos/textos de reset existentes.
+No cambia compensación, perfiles, referencias físicas ni MotionAuthorizer.
+Contratos, exclusiones y validación: [mejoras diferidas](docs/deferred-improvements-20261015.md)
+y [reporte](IMPLEMENTATION_REPORT.md).
+No desplegar ni considerar aprobada la validación física por pasar tests fake.

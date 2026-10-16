@@ -481,3 +481,12 @@ spindle y ownership se revalidan por las barreras existentes.
 Resume no tiene un journal persistente equivalente a start_attempt. Conserva
 PrintIdentity, sesión, ownership, guardias en memoria y MotionAuthorizer, sin
 una nueva máquina de estados ni reintentos automáticos.
+
+
+## Paquete diferido de octubre de 2026
+
+La frescura de safety se calcula desde la muestra live_position, no desde el
+último evento agregado. El reloj de cambio XYZ es diagnóstico independiente.
+El monitor conserva únicamente reintentos de transición específicamente
+verificados; nunca reintenta un envío incierto. Contratos y límites:
+[mejoras diferidas](deferred-improvements-20261015.md).

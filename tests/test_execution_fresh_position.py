@@ -63,6 +63,18 @@ class ExecutionFreshPositionTest(unittest.TestCase):
     def codes(self, result):
         return [r['code'] for r in result['blocking_reasons']]
 
+    def test_partial_ws_updates_do_not_suppress_http_position_refresh(self):
+        self.job.prepare_run(**self.args)
+        runtime, client, _ = self.observed_runtime()
+        runtime._attach_telemetry_tracking(runtime._machine)
+        self.stale(runtime)
+        runtime._machine.update_toolhead(position=(4, 5, 30))
+        runtime._machine.update_motion(live_velocity=0)
+        self.assertFalse(runtime.snapshot()['safety']['telemetry_recent'])
+        self.assertTrue(self.inspect()['can_start'])
+        self.refresh.assert_called_once()
+        client.query_objects.assert_called_once()
+
     def test_idle_timeout_refreshes_once_without_writes_or_reconnect(self):
         self.job.prepare_run(**self.args)
         runtime, client, _ = self.observed_runtime()

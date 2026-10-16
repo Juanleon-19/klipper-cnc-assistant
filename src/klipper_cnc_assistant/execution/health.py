@@ -25,6 +25,40 @@ def preparation_retry_safe(run, status):
 
 
 
+def tool_change_retry_safe(run, status, readiness, worker_alive):
+    """Advisory action, never a movement permit or automatic retry.
+
+    Only the failed transition after a proven completed operation qualifies.
+    A journal for that completed operation may be sent, but never ambiguous.
+    """
+    operations = run.get('operations') or []
+    index = int(run.get('current_operation_index') or 0)
+    if not 0 <= index < len(operations) - 1:
+        return False
+    current, following = operations[index:index + 2]
+    token = current.get('physical_reference_token') or {}
+    attempt = run.get('start_attempt') or {}
+    if attempt and (attempt.get('status') != 'sent'
+                    or attempt.get('operation_id') != current.get('operation_id')):
+        return False
+    runtime_blocked = any(issue.get('category') == 'runtime' or issue.get('code') == 'EXECUTION_INSPECTION_UNAVAILABLE'
+                          for issue in readiness.get('blocking_reasons', []))
+    return bool(run.get('state') == 'RECOVERY_REQUIRED' and not worker_alive
+                and 'retry-tool-change-transition' in (run.get('available_actions') or [])
+                and (run.get('last_transition_error') or {}).get('code') == 'TOOL_CHANGE_TRANSITION_FAILED'
+                and current.get('execution_status') == 'COMPLETED'
+                and following.get('execution_status') == 'PENDING'
+                and current.get('tool_key') != following.get('tool_key')
+                and not following.get('remote_file') and not following.get('started_at')
+                and not following.get('observed_printing')
+                and token.get('physical_session_id') == readiness.get('physical_session_id')
+                and bool(token.get('physical_session_id'))
+                and not runtime_blocked
+                and status.get('connected') is True and status.get('is_active') is False
+                and status.get('print_state') in {'standby', 'complete'}
+                and status.get('filename') in {None, '', current.get('remote_file')})
+
+
 def execution_health(run, status, readiness, worker_alive):
     state = run.get('state', 'JOB_DRAFT')
     recovery = None
@@ -50,6 +84,13 @@ def execution_health(run, status, readiness, worker_alive):
     token = (operations[index].get('physical_reference_token') or {}) if 0 <= index < len(operations) else {}
     session_changed = bool(token and token.get('physical_session_id') != readiness.get('physical_session_id'))
     reference_invalid = session_changed or (not changing_tool and not readiness['reference']['valid'])
+    if tool_change_retry_safe(run, status, readiness, worker_alive):
+        error = run['last_transition_error']
+        return {'phase': 'ACTIVE', 'title': 'RECUPERACIÓN REQUERIDA', 'severity': 'ERROR',
+                'recovery': {'code': error['code'], 'message': error['message'],
+                             'action': 'Reintentar transición; confirme de nuevo spindle detenido.'},
+                'available_actions': ['retry-tool-change-transition', 'cancel'],
+                'detail': error['message']}
     retryable_error = state == 'JOB_ERROR' and preparation_retry_safe(run, status)
     if (state not in TERMINAL or retryable_error) and (retryable_error or state == 'RECOVERY_REQUIRED' or reference_invalid
             or (not worker_alive and state not in WAITING | INITIAL | {'JOB_PAUSED', 'OPERATION_PAUSED'})):

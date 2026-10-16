@@ -146,3 +146,46 @@ class TelemetryFrameFreshnessTest(unittest.TestCase):
         self.assertIsNone(machine.authorization_snapshot('live_position').position)
         self.assertIsNone(machine.get_motion_snapshot()['live_position_age_s'])
         self.assertEqual(machine.authorization_snapshot('commanded_position').position, (7, 8, 9))
+
+
+class PositionFreshnessContractTest(unittest.TestCase):
+    def test_identical_samples_partial_updates_and_changed_clock(self):
+        from tests.test_machine_runtime import MachineRuntime, config, MachineMode
+        runtime = MachineRuntime(config(MachineMode.PHYSICAL))
+        machine = MachineState(MachinePosition(0, 0, 0), AxisLimits(0, 100),
+                               AxisLimits(0, 100), AxisLimits(0, 100), 'xyz', 100, 500)
+        from klipper_cnc_assistant.machine.motion_authorization import MotionAuthorizer, MotionAuthorizationError
+        from klipper_cnc_assistant.machine.physical_ownership import OwnerKind
+        machine.bind_physical_session(runtime.physical_ownership.session)
+        permit = runtime.physical_ownership.acquire(OwnerKind.RUNTIME_MOTION, 'fake-test')
+        runtime._machine = machine
+        runtime._attach_telemetry_tracking(machine)
+        with patch('time.monotonic', return_value=100):
+            machine.update_motion((1, 2, 3), 0)
+        with patch('time.monotonic', return_value=101):
+            machine.update_motion((1, 2, 3), 0)
+            self.assertEqual(machine.live_position_updated_at, 101)
+            self.assertEqual(machine.live_position_changed_at, 100)
+        with patch('time.monotonic', return_value=110):
+            runtime._on_telemetry_state({'state': 'CONNECTED', 'last_message_at': 110})
+            machine.update_toolhead(position=(1, 2, 3))
+            machine.update_motion(live_velocity=0)
+            machine.update_gcode_move(position=(1, 2, 3), gcode_position=(1, 2, 3))
+            snapshot = runtime.snapshot()
+            self.assertEqual(snapshot['moonraker']['last_position_age_s'], 9)
+            self.assertTrue(snapshot['moonraker']['websocket_connected_recently'])
+            self.assertFalse(snapshot['moonraker']['position_sample_recently'])
+            self.assertFalse(snapshot['moonraker']['position_changed_recently'])
+            self.assertFalse(snapshot['safety']['telemetry_recent'])
+            self.assertFalse(snapshot['safety']['movement_authorized'])
+            machine.update_klippy('ready')
+            with self.assertRaises(MotionAuthorizationError):
+                MotionAuthorizer(runtime.physical_ownership, machine).require_context(permit, 'test-only')
+
+            machine.update_motion((2, 2, 3), 0)
+            self.assertEqual(machine.live_position_changed_at, 110)
+            self.assertTrue(runtime.snapshot()['safety']['telemetry_recent'])
+            self.assertTrue(runtime.snapshot()['moonraker']['position_changed_recently'])
+            machine.bind_physical_session('new-session')
+            self.assertFalse(runtime.snapshot()['moonraker']['position_changed_recently'])
+            self.assertFalse(runtime.snapshot()['safety']['telemetry_recent'])
