@@ -1852,7 +1852,8 @@ class MachineRuntime:
             now = time.monotonic()
             machine_snapshot = self._machine.get_motion_snapshot() if self._machine is not None else None
             serial_age = None if self._last_packet_at is None else now - self._last_packet_at
-            telemetry_age = None if self._last_telemetry_at is None else now - self._last_telemetry_at
+            # Only an actual live-position sample can satisfy position freshness.
+            telemetry_age = None if machine_snapshot is None else machine_snapshot.get("live_position_age_s")
             profile = get_jog_profile(self._manual.mode) if self._manual is not None else get_jog_profile(JogMode.FINE)
             safety = self._safety_snapshot(serial_age=serial_age, telemetry_age=telemetry_age)
             health = self._health_from_safety(safety)
@@ -1873,6 +1874,11 @@ class MachineRuntime:
                     "http_connected": self._client is not None,
                     "http_state": self._http_status(now=now),
                     "websocket_connected": websocket_state == "CONNECTED",
+                    "websocket_connected_recently": websocket_state == "CONNECTED" and last_websocket_message_age is not None and last_websocket_message_age <= self.config.telemetry_fresh_timeout_s,
+                    "position_sample_recently": telemetry_age is not None and telemetry_age <= self.config.telemetry_fresh_timeout_s,
+                    # Diagnostic only; a stationary machine can have fresh samples.
+                    "position_changed_recently": machine_snapshot is not None and machine_snapshot.get("position_changed_age_s") is not None and machine_snapshot["position_changed_age_s"] <= self.config.telemetry_fresh_timeout_s,
+                    "position_changed_age_s": None if machine_snapshot is None else machine_snapshot.get("position_changed_age_s"),
                     "websocket_state": websocket_state,
                     "telemetry_state": self._telemetry_status(),
                     "last_websocket_message_age_s": last_websocket_message_age,
@@ -2272,31 +2278,14 @@ class MachineRuntime:
 
     def _attach_telemetry_tracking(self, machine) -> None:
         original_update_motion = machine.update_motion
-        original_update_toolhead = machine.update_toolhead
-        original_update_gcode_move = machine.update_gcode_move
-
-        def mark_telemetry() -> None:
-            with self._lock:
-                self._last_telemetry_at = time.monotonic()
 
         def update_motion_with_timestamp(*args, **kwargs):
             result = original_update_motion(*args, **kwargs)
-            mark_telemetry()
-            return result
-
-        def update_toolhead_with_timestamp(*args, **kwargs):
-            result = original_update_toolhead(*args, **kwargs)
-            mark_telemetry()
-            return result
-
-        def update_gcode_move_with_timestamp(*args, **kwargs):
-            result = original_update_gcode_move(*args, **kwargs)
-            mark_telemetry()
+            with self._lock:
+                self._last_telemetry_at = machine.live_position_updated_at
             return result
 
         machine.update_motion = update_motion_with_timestamp
-        machine.update_toolhead = update_toolhead_with_timestamp
-        machine.update_gcode_move = update_gcode_move_with_timestamp
 
     def _send_script(self, script: str, *, label: str, motion_context=None) -> None:
         if self._client is None:

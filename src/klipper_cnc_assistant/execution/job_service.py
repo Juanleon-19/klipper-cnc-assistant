@@ -934,6 +934,9 @@ class JobService:
             self._start_worker(context)
             return run
         elif action == "retry-tool-change-transition":
+            live = self.live_execution(project_id=project_id, setup_id=setup_id, face=face)
+            if action not in live['run']['available_actions']:
+                raise ApplicationError("No es seguro reintentar esta transición: revise sesión, ownership e identidad remota.")
             if run["state"] != "RECOVERY_REQUIRED":
                 raise ApplicationError("El reintento de transición solo aplica cuando la ejecución quedó en recuperación.")
             current_index = int(run.get("current_operation_index", 0) or 0)

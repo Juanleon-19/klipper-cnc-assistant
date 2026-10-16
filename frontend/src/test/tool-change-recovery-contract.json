@@ -1,0 +1,5 @@
+[
+  {"status":"RECOVERY_REQUIRED","available_actions":["retry-tool-change-transition","cancel"]},
+  {"status":"SPINDLE_STOP_REQUIRED","available_actions":["confirm-spindle-stopped","cancel"]},
+  {"status":"TOOL_CHANGE_REQUIRED","available_actions":["confirm-tool-change","cancel"]}
+]

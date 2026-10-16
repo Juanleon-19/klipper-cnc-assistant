@@ -65,6 +65,7 @@ class MachineState:
     gcode_move_position: MachinePosition | None = None
     absolute_coordinates: bool | None = None
     homing_origin: MachinePosition | None = None
+    live_position_changed_at: float | None = None
     live_position_updated_at: float | None = None
     live_position_source: str | None = None
     commanded_position_updated_at: float | None = None
@@ -117,7 +118,10 @@ class MachineState:
         with self._lock:
             now = time.monotonic()
             if live_position is not None:
-                self.live_position = MachinePosition.from_iterable(live_position)
+                observed = MachinePosition.from_iterable(live_position)
+                if self.live_position is None or self.live_position.as_tuple() != observed.as_tuple():
+                    self.live_position_changed_at = now
+                self.live_position = observed
                 self.live_position_updated_at = now
                 self.live_position_source = None if source is None else str(source)
                 self.position = MachinePosition(self.live_position.x, self.live_position.y, self.live_position.z)
@@ -148,6 +152,7 @@ class MachineState:
         with self._lock:
             if session != self.physical_session and not observed_in_session:
                 self.live_position_updated_at = None
+                self.live_position_changed_at = None
                 self.commanded_position_updated_at = None
                 self.gcode_position_updated_at = None
                 self.gcode_move_position_updated_at = None
@@ -194,6 +199,7 @@ class MachineState:
                 "velocity_updated_at": self.live_velocity_updated_at,
                 "velocity_age_s": None if self.live_velocity_updated_at is None else time.monotonic() - self.live_velocity_updated_at,
                 "homing_origin": None if self.homing_origin is None else {"x": self.homing_origin.x, "y": self.homing_origin.y, "z": self.homing_origin.z},
+                "position_changed_age_s": None if self.live_position_changed_at is None else max(0.0, time.monotonic() - self.live_position_changed_at),
                 "live_position_age_s": None if self.live_position_updated_at is None else max(0.0, time.monotonic() - self.live_position_updated_at),
                 "commanded_position_age_s": None if self.commanded_position_updated_at is None else max(0.0, time.monotonic() - self.commanded_position_updated_at),
                 "gcode_position_age_s": None if self.gcode_position_updated_at is None else max(0.0, time.monotonic() - self.gcode_position_updated_at),

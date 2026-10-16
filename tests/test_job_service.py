@@ -769,13 +769,31 @@ class JobServiceTest(unittest.TestCase):
         self.assertIn("Traceback", run["last_watcher_error"])
         live = self.job_service.live_execution(project_id=self.project_id, setup_id=self.setup_id, face="superior")
         self.assertEqual(live["transition"]["last_error"]["message"], "tool change blocked")
+        self.assertIn('retry-tool-change-transition', live['run']['available_actions'])
+
         self.assertEqual(run["operations"][1]["execution_status"], "COMPLETED")
+        contract = json.loads((Path(__file__).parents[1] / 'frontend/src/test/tool-change-recovery-contract.json').read_text())
+        def assert_contract(snapshot, index):
+            self.assertEqual({key: snapshot['run'][key] for key in ('status', 'available_actions')}, contract[index])
+        assert_contract(live, 0)
+        from unittest.mock import patch
+        with patch.object(self.adapter, 'print_status', return_value={
+                **self.adapter.print_status(), 'state': 'printing', 'is_active': True}):
+            ambiguous = self.job_service.live_execution(project_id=self.project_id, setup_id=self.setup_id, face="superior")
+            self.assertNotIn('retry-tool-change-transition', ambiguous['run']['available_actions'])
+            with self.assertRaises(ApplicationError):
+                self.job_service.run_action(project_id=self.project_id, setup_id=self.setup_id, face="superior", action='retry-tool-change-transition')
         uploads_before = list(self.adapter.uploads)
 
         self.job_service.run_action(project_id=self.project_id, setup_id=self.setup_id, face="superior", action="retry-tool-change-transition")
         run = self.job_service.get_run(project_id=self.project_id, setup_id=self.setup_id, face="superior")
         self.assertEqual(run["state"], "SPINDLE_STOP_REQUIRED")
         self.assertIsNone(run["last_transition_error"])
+        live = self.job_service.live_execution(project_id=self.project_id, setup_id=self.setup_id, face="superior")
+        self.assertNotIn('retry-tool-change-transition', live['run']['available_actions'])
+        self.assertIn('confirm-spindle-stopped', live['run']['available_actions'])
+        assert_contract(live, 1)
+
         self.assertIsNone(run["last_watcher_error"])
         self.assertEqual(run["operations"][1]["execution_status"], "COMPLETED")
         self.assertEqual(self.adapter.uploads, uploads_before)
@@ -788,6 +806,7 @@ class JobServiceTest(unittest.TestCase):
         self.assertEqual(run["operations"][1]["execution_status"], "COMPLETED")
         self.assertEqual(self.adapter.uploads, uploads_before)
         self.assertEqual(calls["count"], 2)
+        assert_contract(self.job_service.live_execution(project_id=self.project_id, setup_id=self.setup_id, face="superior"), 2)
 
     def test_cancel_archives_run_and_next_preparation_restarts_every_operation(self) -> None:
         original = self.job_service.prepare_run(
