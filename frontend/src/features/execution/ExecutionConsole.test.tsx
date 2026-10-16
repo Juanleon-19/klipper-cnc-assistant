@@ -1,3 +1,4 @@
+import recoveryContract from "../../test/tool-change-recovery-contract.json";
 import { readyExecution } from "../../test/execution-fixtures";
 import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
@@ -787,4 +788,29 @@ it("exige autorización explícita de movimiento y medición Z al actualizar ref
   expect(button).toBeEnabled();
   fireEvent.click(button);
   expect(onAction).toHaveBeenCalledWith("update-tool-reference");
+});
+
+
+it("consume el contrato live de recovery y retira retry antes de confirmar spindle", () => {
+  const onAction = vi.fn();
+  const view = (index: number) => <ExecutionConsole snapshot={{ ...baseSnapshot,
+    run: { ...baseSnapshot.run, ...recoveryContract[index] },
+  }} error={null} busy={false} onPrepare={vi.fn()} onStart={vi.fn()} onAction={onAction} onArchiveStale={vi.fn()} />;
+  const { rerender } = render(view(0));
+  fireEvent.click(screen.getByRole("button", { name: "Reintentar transición de herramienta" }));
+  expect(onAction).toHaveBeenCalledWith("retry-tool-change-transition");
+  rerender(view(1));
+  expect(screen.queryByRole("button", { name: "Reintentar transición de herramienta" })).not.toBeInTheDocument();
+  const spindle = screen.getByRole("button", { name: "Spindle detenido" });
+  expect(spindle).toBeDisabled();
+  fireEvent.click(screen.getByRole("checkbox"));
+  fireEvent.click(spindle);
+  expect(onAction).toHaveBeenCalledWith("confirm-spindle-stopped");
+  rerender(view(2));
+  expect(screen.queryByRole("button", { name: "Spindle detenido" })).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Herramienta cambiada" })).toBeDisabled();
+  rerender(<ExecutionConsole snapshot={{ ...baseSnapshot, run: { ...baseSnapshot.run,
+    status: "RECOVERY_REQUIRED", available_actions: ["cancel"] } }}
+    error={null} busy={false} onPrepare={vi.fn()} onStart={vi.fn()} onAction={onAction} onArchiveStale={vi.fn()} />);
+  expect(screen.queryByRole("button", { name: "Reintentar transición de herramienta" })).not.toBeInTheDocument();
 });

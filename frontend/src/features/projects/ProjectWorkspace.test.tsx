@@ -518,11 +518,12 @@ const longToolProject: Project = {
   })),
 };
 
-function renderWorkspace(machine?: MachineContextValue, options?: { onRefreshProject?: () => Promise<void>; onProjectStateChange?: (project: Project) => void; project?: Project }) {
-  const workspaceProject = options?.project ?? project;
+function renderWorkspace(machine?: MachineContextValue, options?: { onRefreshProject?: () => Promise<void>; onProjectStateChange?: (project: Project) => void; project?: Project; initialView?: "archivo" | "referencia" }) {
+  let workspaceProject = options?.project ?? project;
   const buildWorkspace = () => (
     <ProjectWorkspace
       project={workspaceProject}
+      initialView={options?.initialView}
       busyKey={null}
       savingProject={false}
       onSaveProject={vi.fn()}
@@ -545,6 +546,7 @@ function renderWorkspace(machine?: MachineContextValue, options?: { onRefreshPro
   const renderResult = render(buildTree(machine));
   return {
     ...renderResult,
+    refreshProject: (nextProject: Project) => { workspaceProject = nextProject; renderResult.rerender(buildTree(machine)); },
     rerenderWorkspace: (nextMachine?: MachineContextValue) => renderResult.rerender(buildTree(nextMachine)),
   };
 }
@@ -744,6 +746,20 @@ describe("ProjectWorkspace", () => {
     fireEvent.change(select, { target: { value: "setup-bottom" } });
 
     await waitFor(() => expect(sync).toHaveBeenCalledWith(expect.objectContaining({ current_setup_id: "setup-bottom" })));
+  });
+
+  it("conserva pestaña al refrescar proyecto y aplica initialView al cambiar contexto", async () => {
+    const view = renderWorkspace(undefined, { initialView: "archivo" });
+    fireEvent.click(screen.getByRole("button", { name: /^Referencia$/i }));
+    expect(await screen.findByText(/Flujo simulado de preparación/i)).toBeInTheDocument();
+    view.refreshProject({ ...project, nombre: "Nombre actualizado" });
+    expect(screen.getByText(/Flujo simulado de preparación/i)).toBeInTheDocument();
+    view.refreshProject({ ...project, operaciones: project.operaciones.map((operation) => ({ ...operation, cara: "inferior" })) });
+    await waitFor(() => expect(screen.queryByText(/Flujo simulado de preparación/i)).not.toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: /^Referencia$/i }));
+    expect(await screen.findByText(/Flujo simulado de preparación/i)).toBeInTheDocument();
+    view.refreshProject({ ...project, id: "otro-proyecto" });
+    await waitFor(() => expect(screen.queryByText(/Flujo simulado de preparación/i)).not.toBeInTheDocument());
   });
 
   it("navega entre vistas principales y subpestañas del mapa", async () => {
@@ -981,6 +997,26 @@ describe("ProjectWorkspace", () => {
     expect(apiMock.capturePhysicalZReferenceFromProbe).not.toHaveBeenCalled();
     expect(physicalMachine.refreshRuntime).not.toHaveBeenCalled();
     expect(await screen.findByText(/Timeout esperando confirmación de paso de sonda/i)).toBeInTheDocument();
+  });
+
+  it("expone resets en Referencias con consecuencias explícitas y endpoints existentes", async () => {
+    const confirmation = vi.spyOn(window, "confirm").mockReturnValue(false);
+    renderWorkspace(physicalMachine);
+    fireEvent.click(screen.getByRole("button", { name: /^Referencia$/i }));
+    const panel = within(screen.getByRole("region", { name: "Reiniciar preparación" }));
+    fireEvent.click(panel.getByRole("button", { name: "Reiniciar proceso" }));
+    const text = String(confirmation.mock.calls[confirmation.mock.calls.length - 1]?.[0]);
+    for (const consequence of ["archiva la ejecución", "mapa activo", "SIN_INICIAR", "runtime interno", "G-code originales", "operaciones", "artifacts", "historial"]) {
+      expect(text).toContain(consequence);
+    }
+    expect(apiMock.resetSetupPreparation).not.toHaveBeenCalled();
+    fireEvent.click(panel.getByRole("button", { name: "Reiniciar origen/Z y dependencias" }));
+    expect(confirmation.mock.calls[confirmation.mock.calls.length - 1]?.[0]).toContain("malla/mapa y las compensaciones dependientes");
+    confirmation.mockReturnValue(true);
+    fireEvent.click(panel.getByRole("button", { name: "Reiniciar solo mapa" }));
+    await waitFor(() => expect(apiMock.resetSetupMap).toHaveBeenCalledWith(project.id, project.montajes[0].id));
+    expect(apiMock.resetSetupReference).not.toHaveBeenCalled();
+    expect(apiMock.resetSetupPreparation).not.toHaveBeenCalled();
   });
 
   it("reiniciar proceso refresca el proyecto activo y el runtime", async () => {

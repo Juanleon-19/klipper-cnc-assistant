@@ -27,6 +27,7 @@ export type MachineSettingsInput = {
 export type MachineSettingsRuntimeStatus = "coherent" | "unconfirmed" | "refresh_failed" | "inconsistent";
 
 type ReferenceWorkspaceProps = {
+  resetActions?: ReactNode;
   machine: MachineContextValue;
   runtime: MachineRuntime | null;
   referenceSession: ReferenceSession | null;
@@ -74,6 +75,7 @@ type ReferenceWorkspaceProps = {
 const CONNECT_RECOVERY_DELAY_MS = 10_000;
 
 export function ReferenceWorkspace({
+  resetActions,
   machine,
   runtime,
   referenceSession,
@@ -244,6 +246,7 @@ export function ReferenceWorkspace({
   if (machine.isPhysical) {
     return (
       <div className="stack gap-md">
+        {resetActions}
         <article className="panel">
           <div className="section-heading section-heading--stacked">
             <div>
@@ -289,6 +292,7 @@ export function ReferenceWorkspace({
           {runtimeReconnectError ? <div className="alert alert--error">{runtimeReconnectError}</div> : null}
           <details className="advanced-settings">
             <summary>Diagnóstico avanzado de conexión</summary>
+            <p className="muted">Estar quieta no invalida muestras recientes. El cambio XYZ no autoriza movimiento.</p>
             <p className="muted">Use Reconectar Arduino solo para fallos exclusivamente seriales. Para una recuperación general use Reconectar runtime.</p>
             <dl className="definition-grid definition-grid--compact">
               <div><dt>Puerto configurado</dt><dd>{String(arduino.configured_port ?? arduino.port ?? "-")}</dd></div>
@@ -304,6 +308,7 @@ export function ReferenceWorkspace({
               <div><dt>Último error serial</dt><dd>{String(arduino.last_session_error_class ?? "-")} · {String(arduino.last_session_error_phase ?? "-")}</dd></div>
               <div><dt>Moonraker HTTP</dt><dd>{typeof moonraker.last_http_observation_age_s === "number" ? `${Number(moonraker.last_http_observation_age_s).toFixed(2)} s` : "sin consulta"}</dd></div>
               <div><dt>Edad último WS</dt><dd>{typeof moonraker.last_websocket_message_age_s === "number" ? `${Number(moonraker.last_websocket_message_age_s).toFixed(2)} s` : "sin mensajes"}</dd></div>
+              <div><dt>Último cambio XYZ (diagnóstico)</dt><dd>{typeof moonraker.position_changed_age_s === "number" ? `${Number(moonraker.position_changed_age_s).toFixed(2)} s` : "sin observación"}</dd></div>
               <div><dt>Edad de posición</dt><dd>{typeof moonraker.last_position_age_s === "number" ? `${Number(moonraker.last_position_age_s).toFixed(2)} s` : "sin posición"}</dd></div>
               <div><dt>Dirección joystick</dt><dd>{String(controller.direction ?? "CENTER")}</dd></div>
               <div><dt>Botón externo</dt><dd>{controller.external_button ? "pulsado" : "reposo"}</dd></div>
@@ -469,6 +474,7 @@ export function ReferenceWorkspace({
 
   return (
     <div className="stack gap-md">
+        {resetActions}
       <article className="panel">
         <div className="section-heading section-heading--stacked">
           <div>
