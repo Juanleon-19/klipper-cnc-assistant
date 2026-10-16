@@ -103,7 +103,7 @@ def evaluate_readiness(plan, run, snapshot, ownership, physical_session, *, obse
     state = (run or {}).get('state')
     can_prepare = run is None or (state in PREPARABLE_STATES and not run.get('started_at'))
     startable = bool(run and state in {'JOB_READY', 'JOB_VALIDATING'} and not run.get('started_at'))
-    if not startable:
+    if not startable and can_prepare:
         blockers.append({'code': 'JOB_NOT_PREPARED' if can_prepare else 'EXECUTION_STATE', 'category': 'execution',
                          'message': 'Prepare el trabajo antes de iniciar.' if can_prepare else f'No puede iniciar desde {state}.',
                          'action': 'Preparar trabajo.' if can_prepare else 'Use la acción permitida para el estado actual; no vuelva a preparar.'})

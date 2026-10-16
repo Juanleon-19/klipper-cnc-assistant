@@ -28,11 +28,23 @@ from klipper_cnc_assistant.machine.motion_authorization import MotionRequirement
 from klipper_cnc_assistant.machine.physical_reference import PhysicalReferenceError, reference_context, require_current_reference
 from klipper_cnc_assistant.storage.job_run_store import JobRunStore, JobRunConflict
 from klipper_cnc_assistant.storage.safe_persistence import (
-    atomic_json, atomic_write, storage_lock, patch_metadata,
+    FileRevisionGuard, atomic_json, atomic_write, storage_lock, patch_metadata,
     validate_generation, read_artifact_metadata, PersistenceConflict,
 )
 from .print_identity import PrintIdentity, PrintIdentityError
+from .health import execution_health, preparation_retry_safe
 from .readiness import PREPARABLE_STATES, ownership_compatible, evaluate_readiness, reference_candidate
+
+
+@dataclass
+class DispatchEvidence:
+    """Explicit adapter evidence; unknown adapters remain conservative."""
+    observed: bool = False
+    transport_invoked: bool = False
+
+    @property
+    def failure_status(self):
+        return 'not_sent' if self.observed and not self.transport_invoked else 'uncertain'
 
 
 JOB_PLAN_SCHEMA = "job-plan-v1"
@@ -136,12 +148,25 @@ class MoonrakerJobAdapter:
         return client
 
     def _dispatch(self, action, send, *, before_send):
+        evidence = getattr(before_send, 'dispatch_evidence', None)
+        if evidence is not None:
+            evidence.observed = True
+        # Expensive artifact/reference IO precedes the fresh motion frame.
+        # The callback still performs cheap CAS/session checks at dispatch.
+        prepare = getattr(before_send, 'prepare', None)
+        if prepare is not None:
+            prepare()
+        verify = getattr(before_send, 'verify', None)
+        if verify is not None:
+            verify()
         self.runtime._refresh_machine()
         authorizer = self.runtime._motion_authorizer()
         context = authorizer.require_context(self.permit, action, MotionRequirements())
         def authorized_send():
             before_send()
             authorizer.revalidate(context)
+            if evidence is not None:
+                evidence.transport_invoked = True
             return send()
         return authorizer.dispatch(context, authorized_send)
 
@@ -151,7 +176,8 @@ class MoonrakerJobAdapter:
         return self._client().upload_file(local_path=local_path, remote_dir=remote_dir, checksum=checksum, print_file=False)
 
     def start_file(self, remote_path: str, *, before_send) -> dict[str, Any]:
-        return self._dispatch("job_start", lambda: self._client().start_print(remote_path), before_send=before_send)
+        transport = self._client().start_print
+        return self._dispatch("job_start", lambda: transport(remote_path), before_send=before_send)
 
     def pause(self, *, before_send) -> dict[str, Any]:
         before_send()
@@ -309,7 +335,17 @@ class JobService:
         self._save_plan(context, plan)
         return plan
 
+    def assert_manual_compensation_allowed(self, project_id, operation_id):
+        project = self.repository.load_project(project_id)
+        operation = project.get_operation(operation_id)
+        context = self._context(project_id, operation.setup_id, str(operation.cara))
+        run = self.run_store.load(self._existing_run_file(context))
+        if run and run.get('started_at') and run.get('state') not in RUN_TERMINAL_STATES:
+            raise ApplicationError('Diagnóstico Legacy deshabilitado durante JobRun activo; la ejecución genera su propio JIT.')
+
     def generate_project_compensation(self, *, project_id: str, setup_id: str, face: str) -> dict[str, Any]:
+        for operation in self.repository.load_project(project_id).operations_for_setup(setup_id):
+            self.assert_manual_compensation_allowed(project_id, operation.id)
         context = self._context(project_id, setup_id, face)
         plan = self._build_plan(context)
         generated_results: dict[str, dict[str, Any]] = {}
@@ -518,15 +554,29 @@ class JobService:
                     return self._no_active_execution_snapshot()
                 # Return current domain state; never a stale RUNNING after cancel.
                 run = latest
-        assessment = self.inspect_execution(project_id=project_id, setup_id=setup_id, face=face)['readiness']
+        try:
+            assessment = self.inspect_execution(project_id=project_id, setup_id=setup_id, face=face)['readiness']
+        except Exception as error:
+            # Domain inspection must not hide the persisted execution monitor.
+            assessment = evaluate_readiness({'project_id': project_id, 'setup_id': setup_id, 'face': face},
+                run, self.runtime.snapshot(), self.runtime.physical_ownership.snapshot(),
+                self.runtime.current_physical_session_id())
+            assessment['blocking_reasons'].insert(0, {'code': 'EXECUTION_INSPECTION_UNAVAILABLE',
+                'category': 'execution', 'message': _safe_operator_error(error),
+                'action': 'Reintente la inspección; el monitor conserva el estado del JobRun.'})
         # Fresh presentation of the persisted run; do not save derived checks.
         run = deepcopy(run)
         run['readiness'] = assessment
         run['checks'] = assessment['checks']
         run['ready'] = assessment['can_start']
-        recovery = self._recovery_diagnostic(run, status, assessment, worker_alive)
+        health = execution_health(run, status, assessment, worker_alive)
+        run['available_actions'] = health['available_actions']
+        recovery = health['recovery'] or (self._recovery_diagnostic(run, status, assessment, worker_alive)
+            if run.get('state') in {'RECOVERY_REQUIRED', 'JOB_ERROR'} else None)
         return {
             "has_active_run": True,
+            "start_readiness": assessment if health['phase'] == 'START' else None,
+            "active_execution_health": health,
             "readiness": assessment,
             "recovery": recovery,
             "moonraker": {
@@ -846,6 +896,8 @@ class JobService:
         if action == "cancel":
             return self._cancel_run(context, run)
         self.run_store.validate(self._run_file(context), run)
+        if action in {'retry-operation-preparation', 'update-tool-reference'}:
+            return self._recover_preparation(context, run, measure=action == 'update-tool-reference')
         adapter = self._motion_adapter(context)
         if action == "pause":
             operation = self.run_store._operation(run)
@@ -956,6 +1008,52 @@ class JobService:
             self._start_worker(context)
         return run
 
+    def _recover_preparation(self, context, run, *, measure=False):
+        """Explicit action only. Never adopt an upload or replay a start attempt."""
+        thread = self._supervisor_thread(context)
+        if thread and thread.is_alive():
+            raise ApplicationError('El supervisor sigue activo.')
+        diagnosis = self._diagnose_run(context, run)
+        if not preparation_retry_safe(run, diagnosis['moonraker']):
+            raise ApplicationError('Preparación ambigua o upload iniciado; requiere recuperación de identidad remota.')
+        plan = self._resolved_plan(context, publish=False)
+        assessment = self._execution_readiness(context, plan, run)
+        blocked = [r for r in assessment['blocking_reasons'] if r['category'] in {'geometry', 'runtime'}]
+        if blocked:
+            raise ApplicationError('; '.join(r['message'] for r in blocked))
+        index = int(run.get('current_operation_index') or 0)
+        operation = run['operations'][index]
+        self.run_store.validate(self._run_file(context), run)
+        if measure:
+            # Deliberate physical action, protected by the existing motion adapter.
+            # No historical token is promoted; create a new installation evidence.
+            from uuid import uuid4
+            self._validate_spindle_stop_confirmation(self.adapter_factory(self.runtime))
+            operation['installation_revision'] = uuid4().hex
+            operation['physical_reference_token'] = None
+            self._save_run(context, run)
+            try:
+                self._measure_tool_reference(context, run)
+                if not run.get('started_at'):
+                    run.update(state='JOB_READY', available_actions=['start'], next_action='Confirme spindle preparado e inicie el trabajo.')
+                    self._save_run(context, run)
+            except Exception as error:
+                self.runtime.physical_ownership.enter_recovery('Medición de referencia interrumpida; verifique el estado físico.')
+                self._identity_failure(context, run, error)
+                raise
+            return run
+        self._require_run_reference(context, run, next_pending=True)
+        self._require_spindle_confirmation(context, run, 'prepared', index)
+        for key in ('generated_file', 'generated_file_name', 'generated_metadata_path', 'generated_metadata', 'remote_file'):
+            operation.pop(key, None)
+        operation['execution_status'] = 'PENDING'
+        run.update(state='JOB_STARTING', next_action='Reintentando preparación desde cero', available_actions=['cancel'],
+                   completed_at=None, last_watcher_error=None, recovery_state=None)
+        self._append_event(run, 'info', 'Reintento explícito de preparación: se descarta el upload anterior, se regenera JIT y se conserva el historial de start.')
+        self._save_run(context, run)
+        self._start_worker(context)
+        return run
+
     def _identity_failure(self, context, run, error):
         reference_failure = isinstance(error, ApplicationError) and not isinstance(error, PrintIdentityError)
         run.update(state='RECOVERY_REQUIRED', recovery_state='PHYSICAL_REFERENCE_REQUIRED' if reference_failure else 'PRINT_IDENTITY_REQUIRED',
@@ -964,18 +1062,90 @@ class JobService:
         self._append_event(run, 'error', str(error))
         self._save_run(context, run)
 
+    def _reference_dispatch_guard(self, context, operation, generated=None):
+        """Validate bytes before refresh; retain mutation guards for final checks.
+
+        The second digest/context check is prepare-time IO. final_check uses only
+        memory and never rebuilds reference_context or reads files.
+        """
+        root = self.repository.project_dir(context.project_id)
+        def digest(path):
+            with path.open('rb') as stream:
+                return hashlib.file_digest(stream, 'sha256').hexdigest()
+        project_path = root / 'project.json'
+        project_guard = FileRevisionGuard([project_path])
+        project_hash = digest(project_path)
+        project = self.repository.load_project(context.project_id)
+        current = project.get_operation(operation['operation_id'])
+        physical_map = self.physical_map_service.get_active(context.project_id, current.id)
+        paths = [self.repository._height_map_file(context.project_id, physical_map['map_id']),
+                 self.repository._resolve_project_file(context.project_id, current.archivo_gcode)]
+        artifact = generated or {'relative_path': operation.get('generated_file'),
+                                 'metadata_path': operation.get('generated_metadata_path') or operation.get('generated_metadata')}
+        for key in ('relative_path', 'metadata_path'):
+            if artifact.get(key):
+                paths.append(self.repository._resolve_project_file(context.project_id, artifact[key]))
+        files_guard = FileRevisionGuard(paths)
+        hashes = {path: digest(path) for path in paths}
+        hashes[project_path] = project_hash
+        physical_context = reference_context(self.repository, self.runtime, context.project_id,
+            current.id, physical_map, operation.get('installation_revision'), project=project)
+        config = deepcopy(vars(self.runtime.config))
+        binding = deepcopy({key: operation.get(key) for key in
+                            ('operation_id', 'installation_revision', 'physical_reference_token', 'remote_file')})
+        ownership_session = self.runtime.physical_ownership.session
+        def validate():
+            if any(digest(path) != value for path, value in hashes.items()):
+                raise ApplicationError('Los datos de ejecución cambiaron después de validar; revalide la operación.')
+            if reference_context(self.repository, self.runtime, context.project_id, current.id,
+                    physical_map, operation.get('installation_revision'), project=project) != physical_context:
+                raise ApplicationError('El contexto físico cambió durante la observación previa al envío.')
+        def final_check():
+            project_guard.validate()
+            files_guard.validate()
+            if (vars(self.runtime.config) != config
+                    or self.runtime.physical_ownership.session != ownership_session
+                    or any(operation.get(key) != value for key, value in binding.items())):
+                raise ApplicationError('La configuración o identidad física cambió antes del envío.')
+        validate.final_check = final_check
+        return validate
+
     def _existing_print_action(self, context, run, adapter, action, states):
         operation = self.run_store._operation(run)
         try:
             identity = PrintIdentity(operation.get('remote_file'))
-            def before_send():
+            prechecked = False
+            reference_guard = None
+            run_guard = None
+            session = self.runtime.current_physical_session_id()
+            def prepare_dispatch():
+                nonlocal prechecked, reference_guard, run_guard
+                if action == 'resume':
+                    reference_guard = self._reference_dispatch_guard(context, operation)
+                run_guard = FileRevisionGuard([self._run_file(context)], error=JobRunConflict)
                 self.run_store.validate(self._run_file(context), run)
                 identity.require_match(adapter.print_status(), states=states)
                 if action == 'resume':
                     self._require_run_reference(context, run)
                     self._require_spindle_confirmation(context, run, "prepared", int(run["current_operation_index"]))
-                self.runtime.physical_ownership.validate(adapter.permit)
+                prechecked = True
+            def verify_dispatch():
+                if reference_guard is not None:
+                    reference_guard()
+                identity.require_match(adapter.print_status(), states=states)
                 self.run_store.validate(self._run_file(context), run)
+            def before_send():
+                if not prechecked:
+                    prepare_dispatch()
+                    verify_dispatch()
+                if reference_guard is not None:
+                    reference_guard.final_check()
+                run_guard.validate()
+                if self.runtime.current_physical_session_id() != session:
+                    raise ApplicationError('La sesión física cambió antes del envío.')
+                self.runtime.physical_ownership.validate(adapter.permit)
+            before_send.prepare = prepare_dispatch
+            before_send.verify = verify_dispatch
             getattr(adapter, action)(before_send=before_send)
             return True
         except JobRunConflict:
@@ -1169,7 +1339,8 @@ class JobService:
         operation_payload["installation_revision"] = token['installation_id']
         operation_payload["reference_status"] = "LISTA"
         run["current_tool_key"] = operation_payload["tool_key"]
-        run["summary"]["tool_changes_completed"] = int(run["summary"].get("tool_changes_completed", 0)) + 1
+        if returning_from_tool_change:
+            run["summary"]["tool_changes_completed"] = int(run["summary"].get("tool_changes_completed", 0)) + 1
         run["state"] = "READY_TO_RESUME"
         run["next_action"] = "Referencia Z lista; continuar para generar Legacy y ejecutar la siguiente operación"
         run["available_actions"] = ["continue", "cancel"]
@@ -1303,6 +1474,9 @@ class JobService:
             require_tool_reference=True,
         )
         self._require_operation_reference(context, operation, expected_token=reference_token)
+        if (generated.get('metadata', {}).get('operation_id') != operation['operation_id']
+                or generated.get('metadata', {}).get('physical_reference_token') != reference_token):
+            raise ApplicationError('El artefacto JIT no corresponde a la operación/instalación actual.')
         if not generated.get('executable'):
             raise ApplicationError('El artefacto JIT no autoriza ejecución.')
         self._require_spindle_confirmation(context, run, "prepared", index)
@@ -1366,23 +1540,52 @@ class JobService:
         run["next_action"] = f"Esperando confirmación de Klipper para {operation['name']}"
         self._save_run(context, run)
         attempt_id = None
-        def before_send():
-            nonlocal attempt_id
+        dispatch_evidence = DispatchEvidence()
+        prechecked = False
+        reference_guard = None
+        run_guard = None
+        def prepare_dispatch():
+            nonlocal prechecked, reference_guard
+            reference_guard = self._reference_dispatch_guard(context, operation, generated)
             self.run_store.validate(self._run_file(context), run)
             PrintIdentity.require_idle(adapter.print_status())
             self._require_operation_reference(context, operation, expected_token=reference_token)
             self._validate_generated_pair(context, generated)
             self._require_spindle_confirmation(context, run, "prepared", index)
+            prechecked = True
+        def verify_dispatch():
+            nonlocal attempt_id, run_guard
+            self.run_store.validate(self._run_file(context), run)
+            reference_guard()
+            PrintIdentity.require_idle(adapter.print_status())
+            if self.runtime.current_physical_session_id() != reference_token['physical_session_id']:
+                raise ApplicationError('La sesión física cambió antes del envío.')
             self.runtime.physical_ownership.validate(adapter.permit)
             authorized = self.run_store.begin_start(self._run_file(context), run,
                                                     operation['operation_id'], identity.filename)
             run.update(revision=authorized['revision'], start_attempt=authorized['start_attempt'])
             attempt_id = authorized['start_attempt']['id']
+            sending = self.run_store.mark_start_sending(self._run_file(context), run, attempt_id)
+            run.update(revision=sending['revision'], start_attempt=sending['start_attempt'])
+            run_guard = FileRevisionGuard([self._run_file(context)], error=JobRunConflict)
+            self.run_store.validate(self._run_file(context), run)
+        def before_send():
+            if not prechecked:
+                prepare_dispatch()
+                verify_dispatch()
+            reference_guard.final_check()
+            run_guard.validate()
+            if self.runtime.current_physical_session_id() != reference_token['physical_session_id']:
+                raise ApplicationError('La sesión física cambió antes del envío.')
+            self.runtime.physical_ownership.validate(adapter.permit)
+        before_send.prepare = prepare_dispatch
+        before_send.verify = verify_dispatch
+        before_send.dispatch_evidence = dispatch_evidence
         try:
             adapter.start_file(identity.filename, before_send=before_send)
         except BaseException:
             if attempt_id is not None:
-                self.run_store.finish_start(self._run_file(context), run['run_id'], attempt_id, status='uncertain')
+                self.run_store.finish_start(self._run_file(context), run['run_id'], attempt_id, status=dispatch_evidence.failure_status)
             raise
         else:
             self.run_store.finish_start(self._run_file(context), run['run_id'], attempt_id, status='sent')
@@ -1643,11 +1846,11 @@ class JobService:
         for row in plan['operations']:
             if row['operation_id'] == current_id:
                 seen_current = True
-                row['reference_display'] = readiness['reference']['status']
+                row['reference_display'] = ('Lista — herramienta instalada' if readiness['reference']['valid'] else readiness['reference']['message'])
             elif seen_current:
                 after_change = after_change or row['tool_key'] != previous_key
                 row['reference_display'] = ('Se medirá después del cambio' if after_change
-                                            else row['reference_diagnostic']['status'])
+                                            else 'Reutiliza instalación actual')
             else:
                 row['reference_display'] = row['reference_diagnostic']['status']
             previous_key = row['tool_key']
@@ -2884,6 +3087,14 @@ class JobService:
         patch_metadata(absolute, updates)
 
     def _validate_generated_pair(self, context: JobContext, generated: dict[str, Any]) -> None:
+        metadata = generated['metadata']
+        operation = self.repository.load_project(context.project_id).get_operation(metadata['operation_id'])
+        _, source_hash = self.repository.read_gcode_source(context.project_id, operation.archivo_gcode)
+        active_map = self.physical_map_service.get_active(context.project_id, operation.id)
+        if (metadata.get('source_sha256') != source_hash
+                or metadata.get('map_id') != active_map.get('map_id')
+                or metadata.get('map_hash') != hashlib.sha256(json.dumps(active_map, sort_keys=True).encode('utf-8')).hexdigest()):
+            raise ApplicationError('El origen G-code o mapa cambió después de generar el JIT.')
         read_artifact_metadata(
             self.repository._resolve_project_file(context.project_id, str(generated['relative_path'])),
             self.repository._resolve_project_file(context.project_id, str(generated['metadata_path'])),

@@ -382,3 +382,102 @@ referencias ni sesiones y no se amplía ningún timeout.
 Este resultado es únicamente diagnóstico. `MoonrakerJobAdapter._dispatch` sigue
 haciendo `_refresh_machine → require_context → revalidate → send` para start y
 resume, conservando además la revalidación posterior al último callback.
+
+### Estados de Ejecución y recuperación explícita (2026-10-14)
+
+`execution/health.py` separa readiness de inicio de la salud del trabajo activo.
+El monitor conserva el estado persistido y expone `start_readiness` solamente
+antes del inicio, más `active_execution_health` para preparación, ejecución,
+espera humana, pausa, recuperación y estados terminales. Un preflight sano se
+presenta como preparación informativa; no como una solicitud de iniciar otra vez.
+Las referencias de herramientas futuras no invalidan una espera normal de cambio.
+
+Si no hay supervisor, solo se ofrece reintentar preparación cuando el estado es
+JOB_STARTING/OPERATION_PREFLIGHT, no hay remote_file, intento de start, observación
+de impresión ni started_at de operación, y Moonraker confirma standby/inactive.
+La acción POST vuelve a comprobar estas condiciones y CAS, geometría, contexto,
+referencia y confirmación humana de spindle. Descarta el puntero al artefacto
+anterior y vuelve a generar JIT; no reutiliza un upload ni repite un start.
+OPERATION_UPLOADING ya es ambiguo aunque todavía no se haya persistido remote_file.
+Las lecturas muestran recuperación requerida, sin efectuar recuperación automática.
+
+Una referencia inválida ofrece una acción diferente: actualizar referencia de la
+herramienta. Exige recuperación física resuelta, observación vigente y spindle
+detenido confirmado por el operador. Usa el punto XY del mapa, conserva la malla
+y crea evidencia para una nueva instalación; nunca adapta un token histórico.
+Si el trabajo aún no había iniciado, vuelve a JOB_READY; en una preparación
+interrumpida vuelve a READY_TO_RESUME para nueva confirmación de spindle.
+
+Las validaciones costosas de fuente, mapa, artefacto y referencia preceden la
+observación HTTP de start/resume. Después se obtiene un MotionContext nuevo y
+se comprueban generaciones de persistencia en memoria, sesión y ownership antes del envío.
+La identidad remota se comprueba en la fase preparatoria, antes de observar.
+MotionAuthorizer conserva sus revalidaciones finales y timeout original. No se
+renueva el timestamp de un contexto vencido. El protocolo opcional `prepare`
+del callback permite a los adaptadores realizar esta separación; los fakes que
+solo llaman al callback ejecutan también todos los chequeos.
+
+Los artefactos JIT incluyen SHA256 de los bytes originales (`source_sha256`),
+además del hash normalizado histórico, mapa/hash y token físico. Antes de upload
+y start se comprueban fuente/mapa vigentes, pareja G-code/metadata y coincidencia
+con operación/token esperado. Los feeds originales y la matemática de compensación
+no cambian. El perfil standard/long_tool solo dirige despejes salientes/entrantes.
+
+El panel Legacy solicita `diagnostic=true` y obtiene un preview no ejecutable.
+La ruta de generación y la generación colectiva rechazan JobRun activo; el JIT
+interno conserva su autorización propia. La UI muestra status HTTP real o ausencia
+de respuesta, endpoint y código, conservando diagnóstico si falla el polling.
+Las tarjetas de confirmación son explícitas, clickeables y vinculadas al contexto.
+
+El guard preparatorio conserva SHA256 de proyecto, mapa, fuente y artefacto y
+realiza una segunda lectura antes del refresh. Las escrituras soportadas por el
+repositorio invalidan guardias de generación en memoria antes y después de la
+mutación, incluyendo escritores que ya estaban en curso al capturar la guardia.
+Las guardias son débiles y duran solo el dispatch; no son una caché de autoridad.
+No usan mtime. El process lock físico sigue excluyendo otros procesos Assistant.
+Cambios fuera de las APIs de persistencia no son un escritor soportado durante
+una ejecución; la segunda lectura detecta alteraciones anteriores al refresh.
+
+`begin_start` persiste intención dispatching (may_have_been_sent=False).
+`mark_start_sending` valida CAS e identidad y persiste sending/True antes de la
+observación fresca final. No hay IO de journal después de require_context.
+El testigo explícito de dispatch diferencia fallos anteriores al callable de
+transporte (not_sent/False) de fallos dentro o después de él (uncertain/True).
+Una respuesta confirmada termina sent/True; no hay reintento automático. La guardia del run se captura después
+de begin_start y se valida contra CAS persistido antes del refresh. Toda escritura
+posterior invalida esa guardia, incluso observaciones: se prefiere bloquear a
+hacer IO dentro de MotionContext. Cancelación, revisión o sustitución del run
+siguen bloqueando con JobRunConflict.
+
+El protocolo es prepare → verify (segunda lectura, PrintIdentity, CAS y journal)
+→ refresh → require_context → comprobaciones en memoria → revalidate → send.
+Después de require_context no se leen archivos, no se reconstruye reference_context
+ni se consulta HTTP hasta el envío autorizado. Se comparan configuración capturada,
+sesión física, generaciones y permiso. No se amplía max_age_s=2.0.
+
+Actualizar referencia exige una confirmación que autoriza explícitamente el
+movimiento al punto de referencia y la medición Z, además de spindle detenido.
+El aviso de checks inexistentes aparece solo en estados iniciales sin checks.
+
+### Clasificación del intento de start (tercera auditoría)
+
+La marca durable sending precede al último refresh para no volver a envejecer
+MotionContext con fsync. Un proceso que muere con sending persistido sigue siendo
+ambiguo aunque quizá no haya enviado; no se infiere not_sent al reiniciar. Solo
+el dispatch que observó la frontera exacta puede certificar not_sent mientras
+sigue vivo. Adaptadores sin ese testigo fallan conservadoramente como uncertain.
+La marca se escribe con CAS antes de que start_print sea accesible, y el testigo
+en memoria cambia inmediatamente antes de invocar el callable ya materializado.
+
+not_sent permite ofrecer recuperación explícita, también desde JOB_ERROR o
+WAITING_FOR_KLIPPER, únicamente con operación coincidente, Moonraker standby e
+inactive, sin observed_printing ni started_at de operación. Un remote_file
+persistido de ese intento no implica impresión activa; se exige identidad
+compatible y se descarta su puntero junto con el artifact al reintentar. No se
+adopta ese upload: se genera JIT y se sube de nuevo. Se conservan el intento y,
+al crear el siguiente, start_attempt_history. Sesión, referencia, recovery,
+spindle y ownership se revalidan por las barreras existentes.
+
+Resume no tiene un journal persistente equivalente a start_attempt. Conserva
+PrintIdentity, sesión, ownership, guardias en memoria y MotionAuthorizer, sin
+una nueva máquina de estados ni reintentos automáticos.

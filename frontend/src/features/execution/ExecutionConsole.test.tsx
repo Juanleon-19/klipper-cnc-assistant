@@ -715,11 +715,11 @@ describe("Autoridad de ejecución y confirmación humana", () => {
     const { rerender } = render(<ExecutionConsole {...props} onStart={onStart} snapshot={readySnapshot} readiness={readyExecution()} />);
     const button = screen.getByRole("button", { name: "Iniciar trabajo" });
     expect(button).toBeDisabled();
-    fireEvent.click(screen.getByRole("checkbox", { name: "Confirmo que el spindle está preparado" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: /Confirmo que el spindle está preparado/ }));
     expect(button).toBeEnabled();
     rerender(<ExecutionConsole {...props} onStart={onStart} snapshot={readySnapshot} readiness={readyExecution({ physical_session_id: "new-session" })} />);
     expect(button).toBeDisabled();
-    fireEvent.click(screen.getByRole("checkbox", { name: "Confirmo que el spindle está preparado" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: /Confirmo que el spindle está preparado/ }));
     fireEvent.click(button);
     expect(onStart).toHaveBeenCalledWith(true);
     expect(button).toBeDisabled();
@@ -743,8 +743,48 @@ describe("Autoridad de ejecución y confirmación humana", () => {
     expect(screen.getByText("PUEDE INICIAR")).toBeInTheDocument();
     const start = screen.getByRole("button", { name: "Iniciar trabajo" });
     expect(start).toBeDisabled();
-    fireEvent.click(screen.getByRole("checkbox", { name: "Confirmo que el spindle está preparado" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: /Confirmo que el spindle está preparado/ }));
     expect(start).toBeEnabled();
   });
 
+});
+
+
+describe("Estados activos y tarjetas del operador", () => {
+  it("muestra preflight como preparación activa sin pedir iniciar otra vez", () => {
+    render(<ExecutionConsole snapshot={{...baseSnapshot, run: {...baseSnapshot.run, status: "OPERATION_PREFLIGHT", next_action: "Generando compensación Legacy para A", available_actions: ["cancel"]}}}
+      readiness={readyExecution({can_start: false, can_prepare: false})} error={null} busy={false}
+      onPrepare={vi.fn()} onStart={vi.fn()} onAction={vi.fn()} onArchiveStale={vi.fn()} />);
+    expect(screen.getByText(/PREPARANDO — Operación/)).toBeInTheDocument();
+    expect(screen.queryByText("NO PUEDE INICIAR")).not.toBeInTheDocument();
+    expect(screen.queryByText("Todavía no hay checks persistidos para esta ejecución.")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", {name: "Iniciar trabajo"})).not.toBeInTheDocument();
+  });
+  it("requiere confirmar explícitamente spindle detenido en tarjeta clickeable", () => {
+    const action = vi.fn();
+    render(<ExecutionConsole snapshot={{...baseSnapshot, run: {...baseSnapshot.run, status: "SPINDLE_STOP_REQUIRED", available_actions: ["confirm-spindle-stopped"]}}}
+      error={null} busy={false} onPrepare={vi.fn()} onStart={vi.fn()} onAction={action} onArchiveStale={vi.fn()} />);
+    const button=screen.getByRole("button", {name: "Spindle detenido"});
+    expect(button).toBeDisabled();
+    fireEvent.click(screen.getByRole("checkbox",{name:/spindle está completamente detenido/}));
+    fireEvent.click(button);
+    expect(action).toHaveBeenCalledWith("confirm-spindle-stopped");
+  });
+});
+
+
+it("exige autorización explícita de movimiento y medición Z al actualizar referencia", () => {
+  const onAction = vi.fn();
+  render(<ExecutionConsole snapshot={{...baseSnapshot, run: {...baseSnapshot.run,
+    status: "RECOVERY_REQUIRED", available_actions: ["update-tool-reference"]}}}
+    error={null} busy={false} onPrepare={vi.fn()} onStart={vi.fn()}
+    onAction={onAction} onArchiveStale={vi.fn()} />);
+  const button = screen.getByRole("button", {name: "Actualizar referencia de herramienta"});
+  expect(button).toBeDisabled();
+  fireEvent.click(button);
+  expect(onAction).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole("checkbox", {name: /autorizo el movimiento al punto de referencia y la medición Z/}));
+  expect(button).toBeEnabled();
+  fireEvent.click(button);
+  expect(onAction).toHaveBeenCalledWith("update-tool-reference");
 });

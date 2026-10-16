@@ -1,3 +1,4 @@
+import { ApiError } from "../../lib/api";
 import { readyExecution } from "../../test/execution-fixtures";
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -425,9 +426,21 @@ describe("ProjectWorkspace job run flow", () => {
     renderWorkspace();
     const b1 = await screen.findByRole("row", { name: /B3/ });
     const b2 = screen.getByRole("row", { name: /B4/ });
-    await waitFor(() => expect(within(b1).getByText("LISTA")).toBeInTheDocument());
-    expect(within(b2).getByText("LISTA")).toBeInTheDocument();
+    await waitFor(() => expect(within(b1).getByText("Lista — herramienta instalada")).toBeInTheDocument());
+    expect(within(b2).getByText("Reutiliza instalación actual")).toBeInTheDocument();
     expect(apiMock.prepareJobRun).not.toHaveBeenCalled();
+  });
+
+  it("conserva diagnóstico y status real cuando falla polling del monitor", async () => {
+    apiMock.getLiveExecution.mockRejectedValue(new ApiError("Monitor temporalmente indisponible", 502, {}, { code: "UPSTREAM_TIMEOUT" }));
+    renderWorkspace();
+    await screen.findByText("Diagnóstico disponible; monitor de ejecución no disponible");
+    expect(screen.getByText("HTTP 502")).toBeInTheDocument();
+    expect(screen.queryByText("HTTP 503")).not.toBeInTheDocument();
+    expect(screen.getAllByText(/GET \/execution\/live/).length).toBeGreaterThan(0);
+    expect(apiMock.prepareJobRun).not.toHaveBeenCalled();
+    apiMock.getLiveExecution.mockResolvedValue(liveExecution);
+    await waitFor(() => expect(screen.queryByText("HTTP 502")).not.toBeInTheDocument(), { timeout: 3000 });
   });
 
 });

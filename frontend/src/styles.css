@@ -2454,3 +2454,19 @@ button {
 .advanced-settings .metric-box, .execution-console-v2 .metric-box { min-width: 0; overflow-wrap: anywhere; }
 .spindle-confirmation { display: flex; align-items: center; gap: .6rem; }
 .spindle-confirmation input { width: auto; }
+
+.spindle-confirmation {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  padding: 1rem;
+  border: 2px solid currentColor;
+  border-radius: .5rem;
+  cursor: pointer;
+}
+.spindle-confirmation input[type="checkbox"] {
+  width: 24px;
+  height: 24px;
+  min-width: 24px;
+  accent-color: var(--color-primary, #2463eb);
+}

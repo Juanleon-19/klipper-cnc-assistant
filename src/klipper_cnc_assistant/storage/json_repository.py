@@ -8,7 +8,7 @@ from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
 
-from .safe_persistence import atomic_json, merge_snapshot, remember_snapshot, storage_lock, forget_snapshots, PersistenceConflict
+from .safe_persistence import atomic_write, dispatch_mutation, atomic_json, merge_snapshot, remember_snapshot, storage_lock, forget_snapshots, PersistenceConflict
 
 from klipper_cnc_assistant.domain import (
     AgujeroAlineacion,
@@ -216,7 +216,7 @@ class JsonProjectRepository:
                     "Se detecto un conflicto al preservar el archivo original."
                 )
         else:
-            absolute_path.write_bytes(encoded)
+            atomic_write(absolute_path, encoded)
 
         return relative_path.as_posix(), sha256, len(encoded)
 
@@ -275,7 +275,8 @@ class JsonProjectRepository:
                 raise FileNotFoundError(
                     f"El mapa de alturas para la operacion '{operation_id}' no existe."
                 )
-            target.unlink()
+            with dispatch_mutation(target):
+                target.unlink()
             forget_snapshots(target)
 
     def _resolve_project_file(

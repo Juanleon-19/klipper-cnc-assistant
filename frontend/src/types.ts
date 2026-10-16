@@ -921,6 +921,8 @@ export type StaleRunArchiveResult = {
 };
 
 export type LiveExecutionSnapshot = {
+  start_readiness?: ExecutionReadiness | null;
+  active_execution_health?: { phase: string; title: string; severity: string; detail: string; available_actions: string[] };
   readiness?: ExecutionReadiness;
   recovery?: { code: string; message: string; action: string } | null;
   moonraker: {
