@@ -2178,6 +2178,9 @@ class MachineRuntime:
     def _refresh_machine(self, *, require_valid_observation=False) -> None:
         if self._client is None:
             raise MachineRuntimeError("Moonraker no está conectado.")
+        session_before = self.current_physical_session_id()
+        client_before = self._client
+        observation_started = time.monotonic()
         try:
             if hasattr(self._client, "get_server_info"):
                 server_info = self._client.get_server_info()
@@ -2189,15 +2192,20 @@ class MachineRuntime:
             else:
                 klippy_state = "ready"
             refreshed = self._discovery(self._client)
+            if self.current_physical_session_id() != session_before or self._client is not client_before:
+                raise MachineRuntimeError("La sesión física cambió durante la observación HTTP (sesión Arduino o transporte).")
             if require_valid_observation:
                 # Validate this HTTP response before publishing its timestamps.
                 # Missing live data must not inherit a previous position/velocity.
-                if (refreshed.live_position is None
+                if (time.monotonic() - observation_started > self.config.telemetry_fresh_timeout_s
+                        or refreshed.live_position is None
                         or refreshed.live_position_updated_at is None
                         or refreshed.live_velocity_updated_at is None
                         or not all(math.isfinite(v) for v in (
                             *refreshed.live_position.as_tuple(), refreshed.live_velocity))
-                        or refreshed.live_velocity < 0):
+                        or refreshed.live_velocity < 0
+                        or not all(0 <= time.monotonic() - stamp <= self.config.telemetry_fresh_timeout_s
+                                   for stamp in (refreshed.live_position_updated_at, refreshed.live_velocity_updated_at))):
                     raise MachineRuntimeError('Observación HTTP sin posición/velocidad válida.')
         except Exception as error:
             with self._lock:

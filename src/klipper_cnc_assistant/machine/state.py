@@ -126,7 +126,11 @@ class MachineState:
                 self.live_position_source = None if source is None else str(source)
                 self.position = MachinePosition(self.live_position.x, self.live_position.y, self.live_position.z)
             if live_velocity is not None:
-                self.live_velocity = float(live_velocity)
+                # Klipper trapq computes start_v + accel*t; cancellation at
+                # rest can leave a tiny negative residual (observed -5.55e-17).
+                # Normalize only floating-point noise, never missing/real negative data.
+                velocity = float(live_velocity)
+                self.live_velocity = 0.0 if -1e-12 <= velocity < 0.0 else velocity
                 self.live_velocity_updated_at = now
 
     def update_gcode_move(self, *, gcode_position=None, position=None, absolute_coordinates=None, homing_origin=None):

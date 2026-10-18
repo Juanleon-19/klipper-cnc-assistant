@@ -1736,6 +1736,14 @@ class JobService:
             raise ApplicationError(
                 f"No fue posible actualizar el estado de Moonraker antes de confirmar el spindle detenido: {error}"
             ) from error
+        position = snapshot.get("klipper", {}).get("position") or {}
+        velocity = position.get("velocity")
+        velocity_age = position.get("velocity_age_s")
+        if (not isinstance(velocity, (int, float)) or not math.isfinite(velocity)
+                or abs(velocity) > self.runtime.config.velocity_tolerance_mm_s
+                or not isinstance(velocity_age, (int, float)) or not math.isfinite(velocity_age)
+                or not 0 <= velocity_age <= getattr(self.runtime.config, "telemetry_fresh_timeout_s", 2.0)):
+            raise ApplicationError("Se requiere evidencia vigente de velocidad cero antes del cambio de herramienta.")
         if str(snapshot.get("moonraker", {}).get("telemetry_state") or "") != "LIVE":
             raise ApplicationError(
                 "La telemetría Moonraker sigue sin estar fresca después de una observación HTTP activa; "

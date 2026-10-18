@@ -35,7 +35,7 @@ class FakeRuntime(FakeWorkflowOwnership):
         self.snapshot_payload = {
             "mode": "PHYSICAL",
             "moonraker": {"http_connected": True, "websocket_connected": True, "telemetry_state": "LIVE", "url": "http://moonraker.local"},
-            "klipper": {"ready": True, "homed_axes": "xyz"},
+            "klipper": {"ready": True, "homed_axes": "xyz", "position": {"velocity": 0.0, "velocity_age_s": 0.0}},
             "started_at": "runtime-session",
             "safety": {"telemetry_recent": True},
         }
@@ -931,6 +931,7 @@ class JobServiceTest(unittest.TestCase):
         self.assertEqual(self.adapter.cancel_calls, 0)
 
     def test_preparation_reset_fails_closed_without_a_velocity_observation(self) -> None:
+        self.runtime.snapshot_payload["klipper"].pop("position", None)
         self.job_service.generate_project_compensation(project_id=self.project_id, setup_id=self.setup_id, face="superior")
         self.job_service.prepare_run(project_id=self.project_id, setup_id=self.setup_id, face="superior")
         context = self.job_service._context(self.project_id, self.setup_id, "superior")
