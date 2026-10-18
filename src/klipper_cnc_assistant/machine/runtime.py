@@ -298,6 +298,7 @@ class MachineRuntime:
             return config
         external_mapping = {
             "reference_prep_z_mm": "reference_prep_z_mm",
+            "long_tool_reference_approach_z_mm": "long_tool_reference_approach_z_mm",
             "long_tool_change_clearance_z_mm": "long_tool_change_clearance_z_mm",
             "z_clearance_feed_mm_min": "z_clearance_feed_mm_min",
             "reference_approach_z_feed_mm_min": "reference_approach_z_feed_mm_min",
@@ -333,6 +334,7 @@ class MachineRuntime:
     def machine_settings(self) -> dict[str, float]:
         return {
             "reference_prep_z_mm": self.config.reference_prep_z_mm,
+            "long_tool_reference_approach_z_mm": self.config.long_tool_reference_approach_z_mm if self.config.long_tool_reference_approach_z_mm is not None else self.config.reference_prep_z_mm,
             "long_tool_change_clearance_z_mm": self.config.long_tool_change_clearance_z_mm,
             "z_clearance_feed_mm_min": self.config.z_clearance_feed_mm_min,
             "reference_approach_z_feed_mm_min": self.config.reference_approach_z_feed_mm_min,
@@ -371,6 +373,7 @@ class MachineRuntime:
                 normalized_payload["reference_approach_z_feed_mm_min"] = legacy_reference_z_feed
         mapping = {
             "reference_prep_z_mm": "reference_prep_z_mm",
+            "long_tool_reference_approach_z_mm": "long_tool_reference_approach_z_mm",
             "long_tool_change_clearance_z_mm": "long_tool_change_clearance_z_mm",
             "z_clearance_feed_mm_min": "z_clearance_feed_mm_min",
             "reference_approach_z_feed_mm_min": "reference_approach_z_feed_mm_min",
@@ -406,7 +409,7 @@ class MachineRuntime:
             if self._settings_path is not None:
                 from klipper_cnc_assistant.storage.safe_persistence import atomic_json
                 settings = {external: getattr(candidate, field) * (60.0 if external in {"reference_probe_feed_mm_min", "reference_probe_retract_feed_mm_min"} else 1.0)
-                            for external, field in mapping.items()}
+                            for external, field in mapping.items() if getattr(candidate, field) is not None}
                 atomic_json(self._settings_path, settings, durable=True)
             self.config = candidate
             return self.machine_settings()
@@ -414,12 +417,11 @@ class MachineRuntime:
             self.physical_ownership.release(permit, quiescent=True)
 
     def reference_preparation_z(self, tool_reference_profile: str | None = None) -> float:
-        """Return the single approach Z used at the reference point.
-
-        ``tool_reference_profile`` remains accepted for API compatibility, but
-        the physical tool profile no longer changes reference preparation.
-        """
-        target = float(self.config.reference_prep_z_mm)
+        """Approach is distinct from clearance and contact. Unset override inherits standard."""
+        if tool_reference_profile not in (None, "standard", "long_tool"):
+            raise MachineRuntimeError("Perfil de referencia inválido.")
+        override = self.config.long_tool_reference_approach_z_mm if tool_reference_profile == "long_tool" else None
+        target = float(self.config.reference_prep_z_mm if override is None else override)
         self._validate_reference_preparation_settings(self.config)
         if self._machine is not None:
             self._validate_machine_target(z=target, label="Z de aproximación al punto de referencia")
@@ -427,6 +429,8 @@ class MachineRuntime:
 
     def _validate_reference_preparation_settings(self, config: MachineRuntimeConfig) -> None:
         standard = float(config.reference_prep_z_mm)
+        if config.long_tool_reference_approach_z_mm is not None and self._machine is not None:
+            self._validate_machine_target(z=float(config.long_tool_reference_approach_z_mm), label="aproximación larga")
         if self._machine is not None:
             if standard < self._machine.z_limits.minimum or standard > self._machine.z_limits.maximum:
                 raise MachineRuntimeError(
@@ -930,7 +934,17 @@ class MachineRuntime:
             self._event("info", f"Modo de jog cambiado a {selected.name}.")
         return self.snapshot()
 
-    def initialize(self, target_z_mm: float | None = None, *, permit: PhysicalPermit | None = None) -> dict[str, Any]:
+    def home_xyz(self, *, permit: PhysicalPermit | None = None) -> dict[str, Any]:
+        """Home only; never travel to center or start probing."""
+        return self.initialize(permit=permit, _home_only=True)
+
+    def prepare_position(self, tool_reference_profile: str = "standard", *, permit: PhysicalPermit | None = None) -> dict[str, Any]:
+        """Travel at configured clearance without homing; keep Z there at center."""
+        target = self.tool_change_clearance_z(tool_reference_profile)
+        return self.initialize(target, permit=permit, _skip_home=True)
+
+    def initialize(self, target_z_mm: float | None = None, *, permit: PhysicalPermit | None = None,
+                   _home_only: bool = False, _skip_home: bool = False) -> dict[str, Any]:
         """Prepare the machine in strict HOME → configured absolute Z → center order."""
         self._require_physical_ready()
         context = self._begin_motion_operation("preparation", permit=permit)
@@ -940,11 +954,12 @@ class MachineRuntime:
         configured_z = self.config.reference_prep_z_mm if target_z_mm is None else float(target_z_mm)
         try:
             with self._lock:
-                self._state = MachineRuntimeState.HOMING
+                self._state = MachineRuntimeState.HOMED if _skip_home else MachineRuntimeState.HOMING
                 self._manual_enabled = False
                 self._diagnostic_input_only = True
                 self._initialization_steps = []
-            self._step("PREPARATION_HOME_START", "ok", "Homing solicitado antes de la preparación.")
+            self._step("PREPARATION_VERIFY_HOME" if _skip_home else "PREPARATION_HOME_START", "ok",
+                       "Verificando homing existente; no se solicita un nuevo homing." if _skip_home else "Homing solicitado antes de la preparación.")
             self._log_preparation_transition("PREPARATION_HOME_START", target_z=configured_z, center_x=center_x, center_y=center_y, started=started)
             self._step("verificar_modo_fisico", "ok", "Modo físico confirmado.")
             self._assert_safety_for_connection()
@@ -953,12 +968,13 @@ class MachineRuntime:
             self._wait_for_serial_recent()
             self._step("verificar_arduino", "ok", "Arduino con paquetes válidos recientes.")
 
-            self._refresh_machine()
-            self._send_script("G28", label="homing")
-            self._step("homing_solicitado", "ok", "G28 enviado; la finalización se confirma por toolhead.homed_axes y velocidad cero.")
-            self._wait_for_homing({"x", "y", "z"})
+            self._refresh_machine(require_valid_observation=_skip_home)
+            if not _skip_home:
+                self._send_script("G28", label="homing")
+                self._step("homing_solicitado", "ok", "G28 enviado; la finalización se confirma por toolhead.homed_axes y velocidad cero.")
+                self._wait_for_homing({"x", "y", "z"})
             # This is a mandatory post-home HTTP observation, not cached state.
-            self._refresh_machine()
+            self._refresh_machine(require_valid_observation=_skip_home)
             machine = self._machine
             if machine is None:
                 raise MachineRuntimeError("No hay estado de máquina descubierto.")
@@ -971,6 +987,13 @@ class MachineRuntime:
             self._step("homing_confirmado", "ok", f"Klipper reporta homed_axes={machine.homed_axes}.")
             self._step("PREPARATION_HOME_DONE", "ok", f"Home confirmado con Z observada={float(homed_snapshot["z"]):.3f} mm.")
             self._log_preparation_transition("PREPARATION_HOME_DONE", target_z=configured_z, center_x=center_x, center_y=center_y, observed=homed_snapshot, started=started)
+
+            if _home_only:
+                return self.snapshot()
+            if _skip_home:
+                # Never lower toward the surface merely to reach a clearance.
+                current_z = float(homed_snapshot["z"])
+                configured_z = (max if self.config.tool_change_z_positive_up else min)(current_z, configured_z, self.config.safe_z_mm)
 
             # preparation_z is an absolute machine coordinate.  It is intentionally
             # independent of mesh safe-Z, probing clearance, retract and PCB reference Z.
@@ -993,7 +1016,7 @@ class MachineRuntime:
                     target_z=configured_z,
                 ),
             )
-            self._refresh_machine()
+            self._refresh_machine(require_valid_observation=_skip_home)
             z_snapshot = machine.get_motion_snapshot()
             if abs(float(z_snapshot["z"]) - configured_z) > self.config.settle_tolerance_mm:
                 raise MachineRuntimeError(f"Z de preparación no alcanzada: objetivo {configured_z:.3f} mm, observada {float(z_snapshot["z"]):.3f} mm.")
@@ -1011,7 +1034,7 @@ class MachineRuntime:
                 label="xy_centro",
                 feed_mm_min=AUXILIARY_REFERENCE_XY_FEED_MM_MIN,
             )
-            self._refresh_machine()
+            self._refresh_machine(require_valid_observation=_skip_home)
             center_snapshot = machine.get_motion_snapshot()
             if abs(float(center_snapshot["x"]) - center_x) > self.config.settle_tolerance_mm or abs(float(center_snapshot["y"]) - center_y) > self.config.settle_tolerance_mm:
                 raise MachineRuntimeError(f"Centro no alcanzado: objetivo X={center_x:.3f} Y={center_y:.3f}; observada X={float(center_snapshot["x"]):.3f} Y={float(center_snapshot["y"]):.3f}.")
@@ -1131,7 +1154,7 @@ class MachineRuntime:
         with self._lock:
             preserve_reference_captured = self._state is MachineRuntimeState.REFERENCE_CAPTURED
         context = self._begin_motion_operation("reference_move", permit=permit)
-        preparation_z = self.reference_preparation_z()
+        preparation_z = self.reference_preparation_z(tool_reference_profile)
         try:
             with self._lock:
                 self._manual_enabled = False
@@ -1153,13 +1176,16 @@ class MachineRuntime:
             self._validate_machine_target(z=preparation_z, label="Z de preparación de referencia")
             self._validate_machine_target(x=float(reference_x), y=float(reference_y), label="punto de referencia CNC")
             current_snapshot = machine.get_motion_snapshot()
+            clearance = self.tool_change_clearance_z(tool_reference_profile)
+            travel_z = (max if self.config.tool_change_z_positive_up else min)(float(current_snapshot["z"]), clearance, preparation_z, self.config.safe_z_mm)
+            self._validate_machine_target(z=travel_z, label="despeje de referencia")
             self._event("info", f"REFERENCE_MOVE_SAFE_Z: moviendo Z a preparación {preparation_z:.3f} mm.")
             self._move_absolute(
-                z=preparation_z,
+                z=travel_z,
                 label="reference_move_safe_z",
                 feed_mm_min=self._reference_target_z_feed(
                     current_z=float(current_snapshot["z"]),
-                    target_z=preparation_z,
+                    target_z=travel_z,
                 ),
             )
             with self._lock:
@@ -1171,6 +1197,9 @@ class MachineRuntime:
                 label="reference_move_xy",
                 feed_mm_min=AUXILIARY_REFERENCE_XY_FEED_MM_MIN,
             )
+            if abs(travel_z - preparation_z) > self.config.settle_tolerance_mm:
+                self._move_absolute(z=preparation_z, label="reference_approach",
+                    feed_mm_min=self.config.reference_approach_z_feed_mm_min)
             with self._lock:
                 self._state = (
                     MachineRuntimeState.REFERENCE_CAPTURED
@@ -1241,7 +1270,7 @@ class MachineRuntime:
                 )
 
             configured_clearance = self.tool_change_clearance_z(tool_change_profile)
-            preparation_z = self.reference_preparation_z()
+            preparation_z = self.reference_preparation_z(tool_change_profile)
             self._validate_machine_target(
                 x=float(reference_x),
                 y=float(reference_y),
@@ -1906,6 +1935,7 @@ class MachineRuntime:
                 },
                 "preparation": {
                     "reference_prep_z_mm": self.config.reference_prep_z_mm,
+                    "long_tool_reference_approach_z_mm": self.config.long_tool_reference_approach_z_mm if self.config.long_tool_reference_approach_z_mm is not None else self.config.reference_prep_z_mm,
                     "z_clearance_feed_mm_min": self.config.z_clearance_feed_mm_min,
                     "z_clearance_speed_mm_s": self.config.z_clearance_feed_mm_min / 60.0,
                     "reference_approach_z_feed_mm_min": self.config.reference_approach_z_feed_mm_min,

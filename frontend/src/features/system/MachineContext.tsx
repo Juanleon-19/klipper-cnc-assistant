@@ -2,7 +2,7 @@ import { createContext, useContext } from "react";
 
 import type { MachineRuntime } from "../../types";
 
-export type MachineAction = "connect" | "disconnect" | "diagnostic" | "reconnect-arduino" | "initialize" | "manual-on" | "manual-off" | "probe-request" | "probe-confirm" | "tool-change-position" | "cancel" | "safe-stop" | "emergency" | "refresh";
+export type MachineAction = "connect" | "disconnect" | "diagnostic" | "reconnect-arduino" | "initialize" | "home" | "prepare-position" | "manual-on" | "manual-off" | "probe-request" | "probe-confirm" | "tool-change-position" | "cancel" | "safe-stop" | "emergency" | "refresh";
 
 export type MachineContextValue = {
   runtime: MachineRuntime | null;
@@ -17,7 +17,7 @@ export type MachineContextValue = {
   telemetryRecent: boolean;
   movementAuthorized: boolean;
   lastError: string | null;
-  runMachineAction: (action: MachineAction, targetZ?: number) => Promise<void>;
+  runMachineAction: (action: MachineAction, targetZ?: number, toolProfile?: string) => Promise<void>;
   refreshRuntime: () => Promise<MachineRuntime | null>;
 };
 

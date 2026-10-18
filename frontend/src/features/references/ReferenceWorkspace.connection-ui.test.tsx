@@ -80,6 +80,9 @@ function renderReference(options?: {
   hasReference?: boolean;
   recoveryPending?: boolean;
   activeOperation?: Record<string, unknown>;
+  homedAxes?: string;
+  telemetryRecent?: boolean;
+  activeJob?: boolean;
 }) {
   const connected = options?.connected ?? false;
   const onConnectRuntime = options?.onConnectRuntime ?? vi.fn();
@@ -95,13 +98,13 @@ function renderReference(options?: {
     machineSettingsDirty: options?.machineSettingsDirty ?? false,
     machineSettingsHasUnsavedChanges: options?.machineSettingsHasUnsavedChanges ?? false,
     machineSettingsRuntimeStatus: options?.machineSettingsRuntimeStatus ?? "coherent",
-    machineSettingsLockedByJobRun: false,
+    machineSettingsLockedByJobRun: options?.activeJob ?? false,
   };
 
   const renderResult = render(
     <ReferenceWorkspace
       {...consistencyProps}
-      machine={machine(currentRuntime, refreshRuntime)}
+      machine={{ ...machine(currentRuntime, refreshRuntime), homedAxes: options?.homedAxes ?? "", telemetryRecent: options?.telemetryRecent ?? connected }}
       runtime={currentRuntime}
       referenceSession={(options?.hasReference ? { referencia_z: { z_mm: 0 } } : null) as ReferenceSession | null}
       referenceBusy={false}
@@ -299,7 +302,7 @@ describe("ReferenceWorkspace connection and workflow UI", () => {
       machineSettingsHasUnsavedChanges: true,
     });
 
-    expect(screen.getByRole("button", { name: "Realizar homing, subir Z e ir al centro" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Realizar homing XYZ" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Repetir preparación" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Guardar configuración" })).toBeEnabled();
   });
@@ -334,5 +337,25 @@ describe("ReferenceWorkspace connection and workflow UI", () => {
   it("muestra verde cuando todos los enlaces del runtime están listos", () => {
     renderReference({ connected: true });
     expect(screen.getByText("CONECTADO")).toHaveClass("status-badge--success");
+  });
+});
+
+
+describe("standalone tool-change position guards", () => {
+  it.each([
+    [{ activeJob: true }, "Hay un trabajo activo"],
+    [{ machineSettingsDirty: true }, "Guarde la configuración"],
+    [{ homedAxes: "xy" }, "Se requiere homing XYZ vigente"],
+    [{ recoveryPending: true }, "Recuperación física pendiente"],
+    [{ activeOperation: { kind: "probe" } }, "operación física incompatible"],
+    [{ telemetryRecent: false }, "observación de posición vigente"],
+  ])("explains and disables the blocked action %j", (options, reason) => {
+    renderReference({ connected: true, homedAxes: "xyz", ...options });
+    expect(screen.getByRole("button", { name: "Probar posición de cambio" })).toBeDisabled();
+    expect(screen.getByText(new RegExp("No se puede probar posición de cambio:.*" + reason))).toBeInTheDocument();
+  });
+  it("allows the advisory button only when ready and idle", () => {
+    renderReference({ connected: true, homedAxes: "xyz" });
+    expect(screen.getByRole("button", { name: "Probar posición de cambio" })).toBeEnabled();
   });
 });

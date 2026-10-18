@@ -9,6 +9,7 @@ from .machine_schemas import (
     EmergencyStopRequest,
     JogModeRequest,
     MachineInitializationRequest,
+    ToolProfileRequest,
     MachineRuntimeResponse,
     MachineSettingsRequest,
     ManualControlRequest,
@@ -65,15 +66,28 @@ def build_machine_router() -> APIRouter:
 
     @router.post("/initialize", response_model=MachineRuntimeResponse)
     def initialize(payload: MachineInitializationRequest, request: Request) -> MachineRuntimeResponse:
+        request.app.state.job_service.assert_machine_settings_update_allowed()
         return MachineRuntimeResponse(**runtime(request).initialize(payload.target_z_mm))
+
+    @router.post("/home", response_model=MachineRuntimeResponse)
+    def home(request: Request) -> MachineRuntimeResponse:
+        request.app.state.job_service.assert_machine_settings_update_allowed()
+        return MachineRuntimeResponse(**runtime(request).home_xyz())
+
+    @router.post("/prepare-position", response_model=MachineRuntimeResponse)
+    def prepare_position(payload: ToolProfileRequest, request: Request) -> MachineRuntimeResponse:
+        request.app.state.job_service.assert_machine_settings_update_allowed()
+        return MachineRuntimeResponse(**runtime(request).prepare_position(payload.tool_reference_profile))
 
     @router.post("/manual-control", response_model=MachineRuntimeResponse)
     def manual_control(payload: ManualControlRequest, request: Request) -> MachineRuntimeResponse:
         return MachineRuntimeResponse(**runtime(request).enable_manual_control(payload.enabled))
 
     @router.post("/tool-change-position", response_model=MachineRuntimeResponse)
-    def tool_change_position(request: Request) -> MachineRuntimeResponse:
-        return MachineRuntimeResponse(**runtime(request).move_to_tool_change_position())
+    def tool_change_position(request: Request, payload: ToolProfileRequest | None = None) -> MachineRuntimeResponse:
+        request.app.state.job_service.assert_machine_settings_update_allowed()
+        profile = "standard" if payload is None else payload.tool_reference_profile
+        return MachineRuntimeResponse(**runtime(request).move_to_tool_change_position(profile))
 
     @router.post("/jog-mode", response_model=MachineRuntimeResponse)
     def jog_mode(payload: JogModeRequest, request: Request) -> MachineRuntimeResponse:

@@ -58,6 +58,7 @@ class MachineRuntimeConfig:
     spindle_control_mode: SpindleControlMode = SpindleControlMode.MANUAL
     safe_z_is_configured: bool = False
     physical_machine_id: str = "default-cnc"
+    long_tool_reference_approach_z_mm: float | None = None
 
     def __post_init__(self):
         for name, value in self.__dict__.items():

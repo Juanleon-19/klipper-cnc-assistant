@@ -51,7 +51,7 @@ class FakeRuntime(FakeWorkflowOwnership):
     def move_to_tool_change_position(self, *, tool_change_profile: str = "standard") -> dict:
         return self.snapshot()
 
-    def reference_preparation_z(self) -> float:
+    def reference_preparation_z(self, profile="standard") -> float:
         return self.config.reference_prep_z_mm
 
     def tool_change_clearance_z(self, tool_change_profile: str) -> float:

@@ -48,11 +48,16 @@ class JogModeRequest(BaseModel):
     mode: str = Field(pattern="^(fine|normal|coarse)$")
 
 
+class ToolProfileRequest(BaseModel):
+    tool_reference_profile: str = Field(default="standard", pattern="^(standard|long_tool)$")
+
+
 class MachineInitializationRequest(BaseModel):
     target_z_mm: float | None = None
 
 
 class MachineSettingsRequest(BaseModel):
+    long_tool_reference_approach_z_mm: float | None = None
     reference_prep_z_mm: float | None = Field(default=None, gt=0)
     long_tool_change_clearance_z_mm: float | None = Field(default=None, gt=0)
     # Alias transitorio de lectura/escritura para clientes anteriores al hotfix.

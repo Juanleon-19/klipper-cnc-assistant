@@ -219,7 +219,9 @@ export const api = {
     request<MachineRuntime>("/api/machine/diagnostic-mode", { method: "POST", body: JSON.stringify({ enabled }) }),
   initializeMachine: (target_z_mm?: number) =>
     request<MachineRuntime>("/api/machine/initialize", { method: "POST", body: JSON.stringify({ target_z_mm }) }),
-  moveToToolChangePosition: () => request<MachineRuntime>("/api/machine/tool-change-position", { method: "POST" }),
+  homeMachine: () => request<MachineRuntime>("/api/machine/home", { method: "POST" }),
+  prepareMachinePosition: (tool_reference_profile = "standard") => request<MachineRuntime>("/api/machine/prepare-position", { method: "POST", body: JSON.stringify({ tool_reference_profile }) }),
+  moveToToolChangePosition: (tool_reference_profile = "standard") => request<MachineRuntime>("/api/machine/tool-change-position", { method: "POST", body: JSON.stringify({ tool_reference_profile }) }),
   setManualControl: (enabled: boolean) =>
     request<MachineRuntime>("/api/machine/manual-control", { method: "POST", body: JSON.stringify({ enabled }) }),
   setJogMode: (mode: "fine" | "normal" | "coarse") =>

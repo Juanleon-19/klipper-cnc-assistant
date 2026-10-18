@@ -457,6 +457,7 @@ export type MachineRuntime = {
   klipper: Record<string, unknown>;
   preparation?: {
     reference_prep_z_mm?: number;
+    long_tool_reference_approach_z_mm?: number;
     z_clearance_feed_mm_min?: number;
     z_clearance_speed_mm_s?: number;
     reference_approach_z_feed_mm_min?: number;

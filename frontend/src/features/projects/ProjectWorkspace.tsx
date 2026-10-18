@@ -69,10 +69,11 @@ type HeightMapSource = "SIMULATED" | "MEASURED";
 type ReferenceFieldErrors = Partial<Record<"x_mm" | "y_mm" | "z_mm", string>>;
 type InputState = { x_mm: string; y_mm: string };
 type ZInputState = { x_mm: string; y_mm: string; z_mm: string };
-type MachineSettingsValues = { [Key in keyof MachineSettingsInput]: number };
+type MachineSettingsValues = { [Key in keyof MachineSettingsInput]-?: number };
 
 const DEFAULT_MACHINE_SETTINGS: MachineSettingsValues = {
   reference_prep_z_mm: 115,
+  long_tool_reference_approach_z_mm: 115,
   long_tool_change_clearance_z_mm: 115,
   z_clearance_feed_mm_min: 180,
   reference_approach_z_feed_mm_min: 180,
@@ -97,6 +98,7 @@ function normalizeMachineSettings(
     const value = settings[key];
     normalized[key] = typeof value === "number" && Number.isFinite(value) ? value : fallback[key];
   }
+  if (typeof settings.long_tool_reference_approach_z_mm !== "number") normalized.long_tool_reference_approach_z_mm = normalized.reference_prep_z_mm;
   const legacyReferenceZFeed = settings.reference_prep_z_feed_mm_min;
   if (typeof legacyReferenceZFeed === "number" && Number.isFinite(legacyReferenceZFeed)) {
     if (!(typeof settings.z_clearance_feed_mm_min === "number" && Number.isFinite(settings.z_clearance_feed_mm_min))) {
@@ -115,6 +117,7 @@ function normalizeMachineSettings(
 function machineSettingsToInput(settings: MachineSettingsValues): MachineSettingsInput {
   return {
     reference_prep_z_mm: String(settings.reference_prep_z_mm),
+    long_tool_reference_approach_z_mm: String(settings.long_tool_reference_approach_z_mm ?? settings.reference_prep_z_mm),
     long_tool_change_clearance_z_mm: String(settings.long_tool_change_clearance_z_mm),
     z_clearance_feed_mm_min: String(settings.z_clearance_feed_mm_min),
     reference_approach_z_feed_mm_min: String(settings.reference_approach_z_feed_mm_min),
@@ -132,7 +135,7 @@ function machineSettingsToInput(settings: MachineSettingsValues): MachineSetting
 function machineSettingsInputsDiffer(input: MachineSettingsInput, saved: MachineSettingsValues | null) {
   if (!saved) return true;
   return MACHINE_SETTING_KEYS.some((key) => {
-    const edited = Number(input[key].trim());
+    const edited = Number((input[key] ?? String(saved[key])).trim());
     return !Number.isFinite(edited) || edited !== saved[key];
   });
 }
@@ -145,7 +148,7 @@ function runtimeSettingsStatus(settings: MachineSettingsValues, runtime: Machine
   const runtimeSettings = runtime?.settings;
   if (runtimeSettings && typeof runtimeSettings === "object") {
     const confirmed = MACHINE_SETTING_KEYS.every((key) => {
-      const value = runtimeSettings[key];
+      const value = runtimeSettings[key] ?? (key === "long_tool_reference_approach_z_mm" ? runtimeSettings.reference_prep_z_mm : undefined);
       return typeof value === "number" && Number.isFinite(value) && value === settings[key];
     });
     return confirmed ? "coherent" : "inconsistent";
@@ -154,7 +157,8 @@ function runtimeSettingsStatus(settings: MachineSettingsValues, runtime: Machine
   if (typeof standardZ !== "number" || !Number.isFinite(standardZ)) return "unconfirmed";
   const longToolClearanceZ = runtime?.tool_change?.long_tool_clearance_z_mm;
   if (typeof longToolClearanceZ !== "number" || !Number.isFinite(longToolClearanceZ)) return "unconfirmed";
-  return standardZ === settings.reference_prep_z_mm && longToolClearanceZ === settings.long_tool_change_clearance_z_mm
+  const longApproachZ = runtime?.preparation?.long_tool_reference_approach_z_mm ?? standardZ;
+  return longApproachZ === settings.long_tool_reference_approach_z_mm && standardZ === settings.reference_prep_z_mm && longToolClearanceZ === settings.long_tool_change_clearance_z_mm
     ? "coherent"
     : "inconsistent";
 }
@@ -1132,6 +1136,7 @@ export function ProjectWorkspace({
     }
     const labels: Record<keyof typeof machineSettingsInput, string> = {
       reference_prep_z_mm: "Z de preparación",
+      long_tool_reference_approach_z_mm: "Z de aproximación para herramienta larga",
       long_tool_change_clearance_z_mm: "Z segura de cambio para herramienta larga",
       z_clearance_feed_mm_min: "Velocidad Z de despeje",
       reference_approach_z_feed_mm_min: "Velocidad Z de aproximación",
@@ -1146,7 +1151,7 @@ export function ProjectWorkspace({
     };
     const payload = {} as MachineSettingsValues;
     for (const [key, label] of Object.entries(labels)) {
-      const parsed = parseFiniteNumber(machineSettingsInput[key as keyof typeof machineSettingsInput]);
+      const parsed = parseFiniteNumber(machineSettingsInput[key as keyof typeof machineSettingsInput] ?? machineSettingsInput.reference_prep_z_mm);
       if (parsed.value === null || parsed.value <= 0) {
         setMachineSettingsMessage(`${label} debe ser un número mayor que cero.`);
         return;
@@ -1695,19 +1700,12 @@ export function ProjectWorkspace({
       onDiagnosticMode={() => void machine.runMachineAction("diagnostic")}
       onReconnectArduino={() => void machine.runMachineAction("reconnect-arduino")}
       onSaveMachineSettings={() => void saveMachineSettings()}
-      onInitialize={() => {
-        if (!referenceSettingsAllowMovement()) return;
-        const activeReferencePrepZ = runtime?.preparation?.reference_prep_z_mm;
-        if (typeof activeReferencePrepZ !== "number" || !Number.isFinite(activeReferencePrepZ)) {
-          setMachineSettingsMessage("No se pudo confirmar la Z de preparación activa del runtime.");
-          return;
-        }
-        void withPhysicalReferenceAction(async () => { await machine.runMachineAction("initialize", activeReferencePrepZ); });
-      }}
+      onHome={() => { if (referenceSettingsAllowMovement()) void withPhysicalReferenceAction(async () => { await machine.runMachineAction("home"); }); }}
+      onInitialize={() => { if (referenceSettingsAllowMovement()) void withPhysicalReferenceAction(async () => { await machine.runMachineAction("prepare-position", undefined, selectedOperation?.tool_reference_profile ?? "standard"); }); }}
       onEnableManual={() => void machine.runMachineAction("manual-on")}
       onCapturePhysicalWorkOrigin={() => void withPhysicalReferenceAction(() => api.capturePhysicalWorkOrigin(project.id, selectedOperation!.id))}
       onCancelOperation={() => void machine.runMachineAction("cancel")}
-      onToolChangePosition={() => void withPhysicalReferenceAction(async () => { await machine.runMachineAction("tool-change-position"); })}
+      onToolChangePosition={() => void withPhysicalReferenceAction(async () => { await machine.runMachineAction("tool-change-position", undefined, selectedOperation?.tool_reference_profile ?? "standard"); })}
       onProbeRequest={() => { if (referenceSettingsAllowMovement()) void machine.runMachineAction("probe-request"); }}
       onRemeasurePhysicalReference={() => void remeasurePhysicalReference()}
       onGoToReferencePoint={() => void goToReferencePoint()}

@@ -11,6 +11,7 @@ type ZInputState = { x_mm: string; y_mm: string; z_mm: string };
 type ReferenceFieldErrors = Partial<Record<"x_mm" | "y_mm" | "z_mm", string>>;
 export type MachineSettingsInput = {
   reference_prep_z_mm: string;
+  long_tool_reference_approach_z_mm?: string;
   long_tool_change_clearance_z_mm: string;
   z_clearance_feed_mm_min: string;
   reference_approach_z_feed_mm_min: string;
@@ -55,6 +56,7 @@ type ReferenceWorkspaceProps = {
   onReconnectArduino: () => void;
   onSaveMachineSettings: () => void;
   onInitialize: () => void;
+  onHome?: () => void;
   onEnableManual: () => void;
   onCapturePhysicalWorkOrigin: () => void;
   onCancelOperation: () => void;
@@ -103,6 +105,7 @@ export function ReferenceWorkspace({
   onReconnectArduino,
   onSaveMachineSettings,
   onInitialize,
+  onHome,
   onEnableManual,
   onCapturePhysicalWorkOrigin,
   onCancelOperation,
@@ -141,6 +144,7 @@ export function ReferenceWorkspace({
   const selectedToolReferenceProfile = selectedOperation?.tool_reference_profile ?? "standard";
   const selectedToolReferenceProfileLabel = selectedToolReferenceProfile === "long_tool" ? "Herramienta larga" : "Estándar";
   const selectedToolChangeClearanceZ = selectedToolReferenceProfile === "long_tool" ? longToolChangeClearanceZ : standardToolChangeClearanceZ;
+  const selectedReferencePrepZ = selectedToolReferenceProfile === "long_tool" && typeof preparation.long_tool_reference_approach_z_mm === "number" ? preparation.long_tool_reference_approach_z_mm : referencePrepZ;
   const editedReferencePrepZ = Number(machineSettingsInput.reference_prep_z_mm);
   const editedLongToolChangeClearanceZ = Number(machineSettingsInput.long_tool_change_clearance_z_mm);
   const editedReferencePrepZDiffers = Number.isFinite(editedReferencePrepZ) && editedReferencePrepZ !== referencePrepZ;
@@ -163,6 +167,15 @@ export function ReferenceWorkspace({
   const probeFreshOk = probeLive.fresh_ok === true;
   const canConnect = machine.isPhysical && machine.runtimeState === "DISCONNECTED";
   const canInitialize = machine.isPhysical && ["DIAGNOSTIC", "READY_FOR_HOME", "HOMED", "ERROR", "CANCELLED"].includes(machine.runtimeState);
+  const toolChangeBlock = machineSettingsLockedByJobRun ? "Hay un trabajo activo. Use el cambio de herramienta desde Ejecución."
+    : machineSettingsDirty ? "Guarde la configuración antes de mover."
+    : !machine.isPhysical || !machine.connected || !machine.klipperReady ? "Moonraker/Klipper no está listo."
+    : ![..."xyz"].every(axis => machine.homedAxes.includes(axis)) ? "Se requiere homing XYZ vigente."
+    : runtime?.recovery_pending ? "Recuperación física pendiente. Verifique reposo antes de recuperar controles."
+    : runtime?.active_operation || (runtime?.physical_owner?.kind && runtime.physical_owner.kind !== "IDLE") ? "Hay una operación física incompatible activa."
+    : !machine.telemetryRecent ? "Se requiere una observación de posición vigente."
+    : null;
+  const canPrepare = !toolChangeBlock;
   const canEnableJog = machine.isPhysical && machine.runtimeState === "WAITING_FOR_XY_REFERENCE";
   const canArm = machine.isPhysical && ["WAITING_FOR_XY_REFERENCE", "REFERENCE_CAPTURED"].includes(machine.runtimeState);
   const canProbe = machine.isPhysical && ["WAITING_FOR_XY_REFERENCE", "REFERENCE_ARMED", "REFERENCE_CAPTURED"].includes(machine.runtimeState);
@@ -335,7 +348,9 @@ export function ReferenceWorkspace({
             <div className="metric-box"><span>Etapa actual</span><strong>{String(preparationStage?.name ?? "pendiente")}</strong></div>
           </div>
           <div className="action-grid action-grid--inline">
-            <button className="button" type="button" disabled={!canInitialize || referenceBusy || machine.refreshing || machineSettingsDirty} onClick={onInitialize}>Realizar homing, subir Z e ir al centro</button>
+            <button className="button" type="button" disabled={!canInitialize || referenceBusy || machine.refreshing || machineSettingsDirty || machineSettingsLockedByJobRun} onClick={onHome}>Realizar homing XYZ</button>
+            <button className="button" type="button" disabled={!canPrepare || referenceBusy || machine.refreshing} onClick={onInitialize}>Ir a posición de preparación</button>
+            <p className="muted">Homing solo referencia los ejes. Preparación desplaza Z al despeje del perfil instalado y después X/Y al centro, sin repetir homing. El punto de referencia guardado se visita con su botón independiente.</p>
           </div>
           {machineSettingsDirty ? <div className="alert alert--warning">Guarde la configuración antes de realizar movimientos de referencia.</div> : null}
           <details className="advanced-settings">
@@ -387,7 +402,7 @@ export function ReferenceWorkspace({
             {!machineSettingsHasUnsavedChanges && machineSettingsRuntimeStatus === "inconsistent" && editedLongToolChangeClearanceZDiffers ? <p className="muted">Despeje de herramienta larga · Valor activo: {formatMillimeters(longToolChangeClearanceZ, 3)} · Valor confirmado por PUT: {formatMillimeters(editedLongToolChangeClearanceZ, 3)}</p> : null}
             <div className="action-grid action-grid--inline">
               <button className="button" type="button" disabled={!machine.isPhysical || settingsInputsDisabled || machine.refreshing || !machineSettingsHasUnsavedChanges} onClick={onSaveMachineSettings}>Guardar configuración</button>
-              <button className="button button--ghost" type="button" disabled={!canInitialize || referenceBusy || machine.refreshing || machineSettingsDirty} onClick={onInitialize}>Repetir preparación</button>
+              <button className="button button--ghost" type="button" disabled={!canPrepare || referenceBusy || machine.refreshing} onClick={onInitialize}>Repetir preparación</button>
             </div>
             {machineSettingsMessage ? <p className="muted">{machineSettingsMessage}</p> : null}
             <div className="workflow-steps-grid">
@@ -422,13 +437,15 @@ export function ReferenceWorkspace({
           <div className="alert alert--info">
             <strong>Herramienta: {selectedOperation?.herramienta ?? selectedOperation?.tool_id ?? "sin herramienta"}</strong>
             <p>Perfil de cambio: {selectedToolReferenceProfileLabel}</p>
-            <p>Z de aproximación a referencia: {formatMillimeters(referencePrepZ, 3)}</p>
+            <p>Z de aproximación a referencia: {formatMillimeters(selectedReferencePrepZ, 3)}</p>
             {machineSettingsHasUnsavedChanges && editedReferencePrepZDiffers ? <p>Pendiente de guardar para aproximación: {formatMillimeters(editedReferencePrepZ, 3)}</p> : null}
             <p>Z segura durante cambio: {formatMillimeters(selectedToolChangeClearanceZ, 3)}</p>
             {selectedToolReferenceProfile === "long_tool" && machineSettingsHasUnsavedChanges && editedLongToolChangeClearanceZDiffers ? <p>Pendiente de guardar para cambio: {formatMillimeters(editedLongToolChangeClearanceZ, 3)}</p> : null}
             <p>Esta altura solo se usa durante el cambio de herramienta. No modifica el mapa ni la compensación Z.</p>
           </div>
           <div className="form-grid form-grid--dense">
+            <label>Z de aproximación para herramienta larga (mm)<input value={machineSettingsInput.long_tool_reference_approach_z_mm ?? machineSettingsInput.reference_prep_z_mm} inputMode="decimal" disabled={settingsInputsDisabled} onChange={(event) => onMachineSettingChange("long_tool_reference_approach_z_mm", event.target.value)} /></label>
+            <p className="muted">La aproximación larga es independiente del despeje de traslado y de la Z de contacto. Configure una altura verificada para la herramienta instalada; el mapa y la compensación no cambian.</p>
             <label>Paso de sonda (mm)<input value={machineSettingsInput.reference_probe_step_mm} inputMode="decimal" disabled={settingsInputsDisabled || machine.runtimeState === "PROBING_REFERENCE"} onChange={(event) => onMachineSettingChange("reference_probe_step_mm", event.target.value)} /></label>
             <label>Velocidad de sonda (mm/min)<input value={machineSettingsInput.reference_probe_feed_mm_min} inputMode="decimal" disabled={settingsInputsDisabled || machine.runtimeState === "PROBING_REFERENCE"} onChange={(event) => onMachineSettingChange("reference_probe_feed_mm_min", event.target.value)} /></label>
             <label>Retracto tras contacto (mm)<input value={machineSettingsInput.reference_probe_retract_mm} inputMode="decimal" disabled={settingsInputsDisabled || machine.runtimeState === "PROBING_REFERENCE"} onChange={(event) => onMachineSettingChange("reference_probe_retract_mm", event.target.value)} /></label>
@@ -475,7 +492,8 @@ export function ReferenceWorkspace({
             <div className="metric-box"><span>Velocidades</span><strong>Z {toolChangeZFeed.toFixed(0)} mm/min · X/Y {toolChangeXyFeed.toFixed(0)} mm/min</strong></div>
             <div className="metric-box"><span>Secuencia</span><strong>Z segura → X/Y</strong></div>
           </div>
-          <button className="button" type="button" disabled={!machine.isPhysical || referenceBusy || machine.refreshing || !machine.homedAxes || machineSettingsDirty || machineSettingsLockedByJobRun} onClick={onToolChangePosition}>Probar posición de cambio</button>
+          <button className="button" type="button" disabled={Boolean(toolChangeBlock) || referenceBusy || machine.refreshing} onClick={onToolChangePosition}>Probar posición de cambio</button>
+          {toolChangeBlock ? <p role="status">No se puede probar posición de cambio: {toolChangeBlock}</p> : null}
         </article>
       </div>
     );

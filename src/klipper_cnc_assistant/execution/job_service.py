@@ -249,6 +249,7 @@ class MoonrakerJobAdapter:
             permit=self.permit,
             reference_x=x_mm,
             reference_y=y_mm,
+            tool_reference_profile=tool_reference_profile,
         )
 
     def move_from_tool_change_to_reference_point(
@@ -1239,7 +1240,7 @@ class JobService:
         reference_x = float(active_map["machine_origin_x"])
         reference_y = float(active_map["machine_origin_y"])
         tool_reference_profile = str(operation_payload.get("tool_reference_profile") or "standard")
-        reference_prep_z = self._reference_preparation_z()
+        reference_prep_z = self._reference_preparation_z(tool_reference_profile)
         tool_change_clearance_z = self._tool_change_clearance_z(tool_reference_profile)
         z_clearance_feed = self._z_clearance_feed()
         reference_approach_feed = self._reference_approach_z_feed()
@@ -1288,7 +1289,7 @@ class JobService:
                 progress_callback=transition_progress,
             )
         else:
-            adapter.move_to_reference_point(x_mm=reference_x, y_mm=reference_y)
+            adapter.move_to_reference_point(x_mm=reference_x, y_mm=reference_y, tool_reference_profile=tool_reference_profile)
         run["state"] = "CALIBRATING_TOOL"
         run["transition_stage"] = "CALIBRATING_TOOL"
         run["next_action"] = "Sondeando referencia Z de la nueva herramienta"
@@ -1959,7 +1960,7 @@ class JobService:
                     "tool_key": tool_key,
                     "tool_reference_profile": str(operation.tool_reference_profile),
                     "tool_change_clearance_z_mm": self._tool_change_clearance_z(str(operation.tool_reference_profile)),
-                    "reference_prep_z_mm": self._reference_preparation_z(),
+                    "reference_prep_z_mm": self._reference_preparation_z(str(operation.tool_reference_profile)),
                     "z_clearance_feed_mm_min": self._z_clearance_feed(),
                     "reference_approach_z_feed_mm_min": self._reference_approach_z_feed(),
                     "reference_probe_feed_mm_min": self._reference_probe_feed(
@@ -2522,10 +2523,10 @@ class JobService:
                 + "."
             )
 
-    def _reference_preparation_z(self) -> float:
+    def _reference_preparation_z(self, profile="standard") -> float:
         resolver = getattr(self.runtime, "reference_preparation_z", None)
         if callable(resolver):
-            return float(resolver())
+            return float(resolver(profile))
         config = getattr(self.runtime, "config", None)
         return float(getattr(config, "reference_prep_z_mm", 115.0))
 

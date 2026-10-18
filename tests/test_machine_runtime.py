@@ -2056,7 +2056,8 @@ class ReferencePointMoveTest(unittest.TestCase):
 
         self.assertEqual(result["tool_reference_profile"], "long_tool")
         self.assertEqual(result["preparation_z"], 115.0)
-        self.assertIn("Z115.000000", client.scripts[0])
+        self.assertIn("Z135.000000", client.scripts[0])
+        self.assertIn("Z115.000000", client.scripts[2])
         self.assertNotIn("X42.500000", client.scripts[0])
         self.assertIn("X42.500000", client.scripts[1])
         self.assertIn("Y67.250000", client.scripts[1])
