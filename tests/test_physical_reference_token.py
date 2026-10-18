@@ -167,8 +167,8 @@ class PhysicalReferenceTokenTest(unittest.TestCase):
     def test_G_session_change_during_jit_rejects_artifact_before_publication(self):
         generator = self.fixture.compensated_service
         original = generator._build_compensated_lines
-        def generate(*args):
-            result = original(*args)
+        def generate(*args, **kwargs):
+            result = original(*args, **kwargs)
             self.runtime.reference_serial_generation += 1
             return result
         with patch.object(generator, '_build_compensated_lines', side_effect=generate):

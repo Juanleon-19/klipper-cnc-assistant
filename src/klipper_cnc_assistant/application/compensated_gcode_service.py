@@ -13,12 +13,14 @@ from klipper_cnc_assistant.storage.safe_persistence import atomic_json, atomic_w
 from klipper_cnc_assistant.application.adaptive_compensation import (
     ReferenceFrame as AdaptiveReferenceFrame,
     generate_adaptive_gcode,
+    _build_rapid_clearance_policy,
 )
 from klipper_cnc_assistant.application.errors import ApplicationError, NotFoundError
 from klipper_cnc_assistant.domain import CompensationMode, OperacionPCB, ProjectValidationError
 from klipper_cnc_assistant.gcode import analyze_gcode_text
 from klipper_cnc_assistant.gcode.analysis_cache import analysis_is_current
 from klipper_cnc_assistant.heightmap import HeightGrid, HeightMap, HeightSample, ProbeRegion, SampleQuality, interpolate_height
+from klipper_cnc_assistant.heightmap.models import ExclusionZone
 from klipper_cnc_assistant.heightmap.coverage import DOMAIN_TOLERANCE_MM, build_coverage_report, segment_uses_surface_map
 from klipper_cnc_assistant.storage import JsonProjectRepository
 from klipper_cnc_assistant.heightmap.transform import compensated_z, sample_programmed_segment, compensation_tool_key, measured_reference_z
@@ -98,7 +100,7 @@ def compensate_cut_point(*, pcb: PcbCoordinates, programmed_z_mm: float | None, 
 
 
 class CompensatedGCodeService:
-    LEGACY_ALGORITHM_VERSION = "compensated-gcode-v2"
+    LEGACY_ALGORITHM_VERSION = "compensated-gcode-v3-safe-rapid"
     ADAPTIVE_ALGORITHM_VERSION = "adaptive-fast-v1"
 
     def __init__(self, repository: JsonProjectRepository, physical_map_service, time_estimation_service=None, machine_runtime=None) -> None:
@@ -185,7 +187,7 @@ class CompensatedGCodeService:
             output = adaptive["output"]
             algorithm_version = self.ADAPTIVE_ALGORITHM_VERSION
         else:
-            lines, preview = self._build_compensated_lines(operation, height_map, segment_limit, reference_frame)
+            lines, preview = self._build_compensated_lines(operation, height_map, segment_limit, reference_frame, clearance_settings=adaptive_settings)
             output = "\n".join(lines) + "\n"
             algorithm_version = self.LEGACY_ALGORITHM_VERSION
         audit_fingerprint = self._build_artifact_fingerprint(
@@ -319,7 +321,7 @@ class CompensatedGCodeService:
             preview={"trace": [], "segments_subdivided": 0, "segments_fused": 0, "max_approximation_error_mm": 0.0, "outside_points": [], "unsupported_commands": []},
             analysis=operation.analisis,
         )
-        legacy_lines, legacy_preview = self._build_compensated_lines(operation, height_map, segment_limit, reference_frame)
+        legacy_lines, legacy_preview = self._build_compensated_lines(operation, height_map, segment_limit, reference_frame, clearance_settings=adaptive_settings)
         legacy_text = "\n".join(legacy_lines) + "\n"
         legacy_summary = self._summarize_artifact(
             label="legacy",
@@ -622,7 +624,7 @@ class CompensatedGCodeService:
                 + " ".join(f"Línea {i.linea}, {i.comando}: {i.mensaje}" for i in operation.analisis.incidencias)
             )
 
-    def _build_compensated_lines(self, operation: OperacionPCB, height_map: HeightMap, max_segment_mm: float, reference_frame: ReferenceFrame) -> tuple[list[str], dict[str, Any]]:
+    def _build_compensated_lines(self, operation: OperacionPCB, height_map: HeightMap, max_segment_mm: float, reference_frame: ReferenceFrame, *, clearance_settings=None) -> tuple[list[str], dict[str, Any]]:
         self._validate_legacy_analysis(operation)
         lines = [
             "; Klipper CNC Assistant - plan compensado inmutable",
@@ -642,6 +644,24 @@ class CompensatedGCodeService:
             sampled = sample_programmed_segment(segment, max_segment_mm)
             uses_surface = segment_uses_surface_map(segment)
             selected = sampled[1:] if len(sampled) > 1 else sampled
+            emitted_motion = "G1"
+            # Keep rapid semantics only when the entire segment is supported and
+            # above the shared adaptive clearance bound. Never infer F from comments.
+            if str(segment.tipo).upper() == "G0" and clearance_settings is not None and segment_index > 0:
+                policy = _build_rapid_clearance_policy(height_map=height_map, **clearance_settings)
+                start, end = sampled[0], sampled[-1]
+                xy = start.x_mm != end.x_mm or start.y_mm != end.y_mm
+                z_values_known = start.z_mm is not None and end.z_mm is not None
+                supported = build_coverage_report(height_map=height_map,
+                    operations=((operation.id, operation.nombre, replace(operation.analisis,
+                        segmentos_vista_previa=(segment,))),), include_all_segments=True).sufficient
+                horizontal = z_values_known and start.z_mm == end.z_mm and start.z_mm >= policy.required_rapid_z_mm
+                retract = z_values_known and not xy and end.z_mm > start.z_mm and end.z_mm >= policy.required_rapid_z_mm
+                positive_up = getattr(getattr(self.machine_runtime, "config", None), "tool_change_z_positive_up", True)
+                if positive_up and supported and policy.configured_safe_z_mm is not None and (horizontal or retract):
+                    emitted_motion = "G0"
+                else:
+                    warnings.append(f"L{segment.numero_linea}: rápido conservado como G1; clearance o soporte completo no demostrado.")
             for point in selected:
                 compensated = compensate_cut_point(
                     pcb=PcbCoordinates(point.x_mm, point.y_mm),
@@ -651,7 +671,7 @@ class CompensatedGCodeService:
                     uses_surface_map=uses_surface,
                 )
                 final = compensated.machine
-                lines.append(self._format_move(final.x_mm, final.y_mm, final.z_mm, segment.avance_mm_min))
+                lines.append(self._format_move(final.x_mm, final.y_mm, final.z_mm, segment.avance_mm_min, motion=emitted_motion))
                 if final.z_mm is not None:
                     z_values.append(final.z_mm)
                 if compensated.delta_z_mm is not None:
@@ -660,6 +680,7 @@ class CompensatedGCodeService:
                     "plan_index": len(trace),
                     "line_number": segment.numero_linea,
                     "motion": segment.tipo,
+                    "emitted_motion": emitted_motion,
                     "movement_type": segment.tipo_movimiento,
                     "pcb_x_mm": point.x_mm,
                     "pcb_y_mm": point.y_mm,
@@ -684,8 +705,8 @@ class CompensatedGCodeService:
             "trace": trace,
         }
 
-    def _format_move(self, x_mm: float, y_mm: float, z_mm: float | None, feed_mm_min: float | None) -> str:
-        parts = ["G1", f"X{x_mm:.5f}", f"Y{y_mm:.5f}"]
+    def _format_move(self, x_mm: float, y_mm: float, z_mm: float | None, feed_mm_min: float | None, *, motion: str = "G1") -> str:
+        parts = [motion, f"X{x_mm:.5f}", f"Y{y_mm:.5f}"]
         if z_mm is not None:
             parts.append(f"Z{z_mm:.5f}")
         if feed_mm_min is not None:
@@ -727,7 +748,7 @@ class CompensatedGCodeService:
             etiqueta_simulada=bool(payload.get("etiqueta_simulada", False)),
             grid=grid,
             probe_region=region,
-            exclusion_zones=(),
+            exclusion_zones=tuple(ExclusionZone(**zone) for zone in payload.get("exclusion_zones", [])),
             muestras=list(samples),
             estado=str(payload.get("estado", "medido relativo")),
         )
