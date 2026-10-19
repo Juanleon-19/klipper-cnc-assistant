@@ -78,3 +78,42 @@ class SeparatePreparationTest(unittest.TestCase):
             self.assertEqual(loaded.long_tool_reference_approach_z_mm,125)
             self.assertEqual(runtime.reference_preparation_z('long_tool'),125)
             self.assertEqual(runtime.reference_preparation_z('standard'),115)
+
+    def test_inherited_approach_follows_standard_and_unrelated_save(self):
+        runtime,_=self.runtime()
+        self.assertIsNone(runtime.machine_settings()['long_tool_reference_approach_z_mm'])
+        runtime.update_machine_settings({'reference_prep_z_mm':110})
+        self.assertEqual(runtime.reference_preparation_z('long_tool'),110)
+        settings=runtime.machine_settings()
+        settings['reference_probe_step_mm']=0.1
+        runtime.update_machine_settings(settings)
+        self.assertIsNone(runtime.config.long_tool_reference_approach_z_mm)
+        runtime.update_machine_settings({'reference_prep_z_mm':120})
+        self.assertEqual(runtime.reference_preparation_z('long_tool'),120)
+
+    def test_override_is_independent_and_reset_removes_persisted_value(self):
+        import tempfile,json
+        from pathlib import Path
+        runtime,_=self.runtime()
+        with tempfile.TemporaryDirectory() as directory:
+            runtime._settings_path=Path(directory)/'settings.json'
+            runtime.update_machine_settings({'long_tool_reference_approach_z_mm':125})
+            runtime.update_machine_settings({'reference_prep_z_mm':110})
+            self.assertEqual(runtime.reference_preparation_z('long_tool'),125)
+            runtime.update_machine_settings({'long_tool_reference_approach_z_mm':None})
+            self.assertNotIn('long_tool_reference_approach_z_mm',json.loads(runtime._settings_path.read_text()))
+            self.assertIsNone(runtime._load_persisted_config(replace(runtime.config,long_tool_reference_approach_z_mm=125)).long_tool_reference_approach_z_mm)
+            runtime.update_machine_settings({'reference_prep_z_mm':120})
+            self.assertEqual(runtime.reference_preparation_z('long_tool'),120)
+
+    def test_legacy_file_inherits_without_reinterpreting_old_clearance_alias(self):
+        import tempfile,json
+        from pathlib import Path
+        runtime,_=self.runtime()
+        with tempfile.TemporaryDirectory() as directory:
+            runtime._settings_path=Path(directory)/'settings.json'
+            runtime._settings_path.write_text(json.dumps({'reference_prep_z_mm':110,'long_tool_reference_prep_z_mm':140}))
+            runtime.config=runtime._load_persisted_config(runtime.config)
+            self.assertEqual(runtime.tool_change_clearance_z('long_tool'),140)
+            self.assertEqual(runtime.reference_preparation_z('long_tool'),110)
+            self.assertIsNone(runtime.machine_settings()['long_tool_reference_approach_z_mm'])

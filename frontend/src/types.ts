@@ -484,7 +484,7 @@ export type MachineRuntime = {
     xy_feed_mm_min?: number;
     xy_speed_mm_s?: number;
   };
-  settings?: Record<string, number>;
+  settings?: Record<string, number | null>;
   arduino: Record<string, unknown>;
   probe_live?: Record<string, unknown>;
   last_probe_failure?: Record<string, unknown> | null;

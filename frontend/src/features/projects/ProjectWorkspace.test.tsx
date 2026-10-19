@@ -405,6 +405,7 @@ const projectWithSecondOperation: Project = {
 
 const physicalMachine: MachineContextValue = {
   runtime: {
+    settings: referenceSettings(115, 115),
     state: "WAITING_FOR_XY_REFERENCE",
     mode: "PHYSICAL",
     mode_label: "FÍSICO",
@@ -471,6 +472,7 @@ const physicalRuntime = requireRuntime(physicalMachine);
 function referenceSettings(standardZ: number, longToolZ: number) {
   return {
     reference_prep_z_mm: standardZ,
+    long_tool_reference_approach_z_mm: null as number | null,
     long_tool_change_clearance_z_mm: longToolZ,
     z_clearance_feed_mm_min: 180,
     reference_approach_z_feed_mm_min: 180,
@@ -488,6 +490,7 @@ function referenceSettings(standardZ: number, longToolZ: number) {
 function runtimeWithReferenceSettings(standardZ: number, longToolZ: number, state = "REFERENCE_CAPTURED"): MachineRuntime {
   return {
     ...physicalRuntime,
+    settings: referenceSettings(standardZ, longToolZ),
     state,
     preparation: {
       ...physicalRuntime.preparation,
@@ -1064,6 +1067,63 @@ describe("ProjectWorkspace", () => {
     await waitFor(() => expect(apiMock.resetSetupPreparation).toHaveBeenCalledWith(project.id, project.montajes[0].id));
     await waitFor(() => expect(onRefreshProject).toHaveBeenCalled());
     await waitFor(() => expect(physicalMachine.refreshRuntime).toHaveBeenCalled());
+  });
+
+  it("conserva herencia al guardar otro ajuste y actualiza la Z efectiva editada", async () => {
+    const settings = referenceSettings(105, 130);
+    const observed = runtimeWithReferenceSettings(105, 130);
+    apiMock.getMachineSettings.mockResolvedValue(settings);
+    apiMock.updateMachineSettings.mockImplementation(async (payload) => {
+      observed.settings = payload;
+      return payload;
+    });
+    renderWorkspace(machineWithRuntime(observed), { project: longToolProject });
+    fireEvent.click(screen.getByRole("button", { name: /^Referencia$/i }));
+    const selector = await screen.findByLabelText("Aproximación de herramienta larga");
+    await waitFor(() => expect(screen.getByLabelText("Z de aproximación para herramienta larga (mm)")).toHaveValue("105"));
+    expect(selector).toHaveValue("inherit");
+    expect(screen.getByLabelText("Z de aproximación para herramienta larga (mm)")).toHaveAttribute("readonly");
+    fireEvent.change(screen.getByLabelText(/Velocidad Z de aproximación/i), { target: { value: "90" } });
+    fireEvent.click(screen.getByRole("button", { name: "Guardar configuración" }));
+    await waitFor(() => expect(apiMock.updateMachineSettings).toHaveBeenCalledWith(expect.objectContaining({long_tool_reference_approach_z_mm: null, reference_approach_z_feed_mm_min: 90})));
+    await screen.findByText("Configuración guardada y activa en runtime.");
+    const standard = screen.getByLabelText("Z de aproximación a referencia (mm)");
+    fireEvent.change(standard, { target: { value: "110" } });
+    expect(screen.getByLabelText("Z de aproximación para herramienta larga (mm)")).toHaveValue("110");
+    expect(screen.getByRole("button", { name: "Guardar X/Y actual y medir referencia Z" })).toBeDisabled();
+  });
+
+  it("permite personalizar y volver a herencia enviando null explícito", async () => {
+    const settings = referenceSettings(105, 130);
+    const observed = runtimeWithReferenceSettings(105, 130);
+    apiMock.getMachineSettings.mockResolvedValue(settings);
+    apiMock.updateMachineSettings.mockImplementation(async (payload) => { observed.settings = payload; return payload; });
+    renderWorkspace(machineWithRuntime(observed), { project: longToolProject });
+    fireEvent.click(screen.getByRole("button", { name: /^Referencia$/i }));
+    await waitFor(() => expect(screen.getByLabelText("Z de aproximación para herramienta larga (mm)")).toHaveValue("105"));
+    fireEvent.change(screen.getByLabelText("Aproximación de herramienta larga"), { target: { value: "custom" } });
+    const custom = screen.getByLabelText("Z de aproximación para herramienta larga (mm)");
+    expect(custom).not.toHaveAttribute("readonly");
+    fireEvent.change(custom, { target: { value: "125" } });
+    fireEvent.click(screen.getByRole("button", { name: "Guardar configuración" }));
+    await waitFor(() => expect(apiMock.updateMachineSettings).toHaveBeenLastCalledWith(expect.objectContaining({long_tool_reference_approach_z_mm: 125})));
+    await screen.findByText("Configuración guardada y activa en runtime.");
+    fireEvent.change(screen.getByLabelText("Aproximación de herramienta larga"), { target: { value: "inherit" } });
+    expect(custom).toHaveValue("105");
+    fireEvent.click(screen.getByRole("button", { name: "Guardar configuración" }));
+    await waitFor(() => expect(apiMock.updateMachineSettings).toHaveBeenLastCalledWith(expect.objectContaining({long_tool_reference_approach_z_mm: null})));
+  });
+
+  it.each(["missing", "same-height-override"])("bloquea movimiento si el modo no está confirmado: %s", async (mode) => {
+    const observed = runtimeWithReferenceSettings(105, 130);
+    if (mode === "missing") delete observed.settings!.long_tool_reference_approach_z_mm;
+    else observed.settings!.long_tool_reference_approach_z_mm = 105;
+    apiMock.getMachineSettings.mockResolvedValue(referenceSettings(105, 130));
+    renderWorkspace(machineWithRuntime(observed), { project: longToolProject });
+    fireEvent.click(screen.getByRole("button", { name: /^Referencia$/i }));
+    await screen.findByText("La configuración guardada no coincide con la configuración activa del runtime.");
+    expect(screen.getByRole("button", { name: "Guardar X/Y actual y medir referencia Z" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Ir al punto de referencia" })).toBeDisabled();
   });
 
   it("permite guardar parámetros avanzados de preparación física", async () => {

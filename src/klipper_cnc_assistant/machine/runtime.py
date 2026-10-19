@@ -312,6 +312,7 @@ class MachineRuntime:
             "reference_probe_retract_feed_mm_min": "probe_retract_speed_mm_s",
         }
         overrides = {field: payload[field] for field in self._MACHINE_SETTINGS_FIELDS if field in payload}
+        overrides["long_tool_reference_approach_z_mm"] = payload.get("long_tool_reference_approach_z_mm")
         for external, field in external_mapping.items():
             if external in payload:
                 value = payload[external]
@@ -331,10 +332,10 @@ class MachineRuntime:
             overrides.setdefault("move_minimum_timeout_s", overrides["move_timeout_s"])
         return replace(config, **overrides) if overrides else config
 
-    def machine_settings(self) -> dict[str, float]:
+    def machine_settings(self) -> dict[str, float | None]:
         return {
             "reference_prep_z_mm": self.config.reference_prep_z_mm,
-            "long_tool_reference_approach_z_mm": self.config.long_tool_reference_approach_z_mm if self.config.long_tool_reference_approach_z_mm is not None else self.config.reference_prep_z_mm,
+            "long_tool_reference_approach_z_mm": self.config.long_tool_reference_approach_z_mm,
             "long_tool_change_clearance_z_mm": self.config.long_tool_change_clearance_z_mm,
             "z_clearance_feed_mm_min": self.config.z_clearance_feed_mm_min,
             "reference_approach_z_feed_mm_min": self.config.reference_approach_z_feed_mm_min,
@@ -353,7 +354,7 @@ class MachineRuntime:
         profile = self._reference_probe_profile() if probe_config is None else self._resolve_probe_profile(probe_config)
         return profile.to_payload(overrides)
 
-    def update_machine_settings(self, payload: dict[str, Any]) -> dict[str, float]:
+    def update_machine_settings(self, payload: dict[str, Any]) -> dict[str, float | None]:
         ownership = self.physical_ownership.snapshot()
         if ownership["active"] or ownership["recovery_pending"]:
             raise MachineRuntimeError("La configuración física está bloqueada por ownership o recuperación pendiente.")
@@ -386,7 +387,9 @@ class MachineRuntime:
             "reference_probe_retract_mm": "probe_retract_mm",
             "reference_probe_retract_feed_mm_min": "probe_retract_speed_mm_s",
         }
-        overrides: dict[str, float] = {}
+        overrides: dict[str, float | None] = {}
+        if "long_tool_reference_approach_z_mm" in normalized_payload and normalized_payload["long_tool_reference_approach_z_mm"] is None:
+            overrides["long_tool_reference_approach_z_mm"] = None
         for external, field in mapping.items():
             if external not in normalized_payload or normalized_payload[external] is None:
                 continue

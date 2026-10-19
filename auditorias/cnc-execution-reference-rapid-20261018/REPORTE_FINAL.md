@@ -212,3 +212,35 @@ No se modificaron dependencias, datos productivos, malla, fórmula de compensaci
 - `ec45377`: rápidos Legacy bajo política de clearance compartida y exclusiones preservadas.
 
 El commit documental siguiente contiene este cierre. El árbol queda limpio tras él. No se realizó push, merge ni deploy. El resultado es GO para auditoría externa del software y NO-GO para acelerar el archivo real sin resolver los bloqueos físicos descritos.
+
+## Corrección de auditoría externa — persistencia de aproximación larga
+
+Base de esta revisión: `9fb0e815c99d99a40eeea2139c172c8403c863a0`, misma rama y worktree. Solo se corrige el contrato de configuración; los resultados anteriores describen el paquete original.
+
+**Causa:** machine_settings exponía únicamente el número efectivo. El frontend lo reenviaba al guardar cualquier ajuste, convirtiendo una herencia en un override sin intención del operador. Además, el PUT ignoraba null, impidiendo restablecer herencia.
+
+**Contrato corregido:**
+
+- `settings.long_tool_reference_approach_z_mm = null` significa herencia; un número significa override explícito. GET, PUT y snapshot mantienen esa distinción.
+- Omitir el campo en PUT conserva la configuración actual. Enviar null elimina el override de la persistencia. Al recargar un archivo antiguo o sin ese campo, el modo es heredado. El alias antiguo de clearance no se reinterpreta como aproximación.
+- La Z efectiva continúa en `preparation.long_tool_reference_approach_z_mm`, calculada con la configuración vigente; no se altera la resolución física de alturas.
+- Referencias permite elegir “Heredar Z estándar” o “Usar altura personalizada”. En herencia, el campo es read-only y muestra la Z estándar editada; se muestra el valor efectivo y la necesidad de guardar/confirmar antes de mover. Al elegir explícitamente personalizar se propone el valor estándar ya presente, sin crear una altura arbitraria ni guardar automáticamente.
+- Guardar otro ajuste reenvía null cuando corresponde; nunca materializa la altura heredada como override. Volver a herencia envía null explícito.
+- La confirmación compara configuración guardada y snapshot, incluyendo null versus número. Coincidir numéricamente hoy no basta si el modo difiere. Un snapshot sin el campo o sin settings completos no confirma configuración para movimiento; se retiró el fallback que infería coherencia a partir de alturas efectivas solamente.
+- Los archivos antiguos siguen funcionando con el backend actual. Un cliente/backend antiguo que solo exponga alturas efectivas no ofrece prueba suficiente del modo y permanece bloqueado en la UI nueva hasta recibir un contrato completo.
+
+**Regresiones:** tests de preparación verifican cambio de estándar, guardado de otro ajuste, independencia explícita, eliminación en disco/relectura y alias antiguo. Test API distingue PUT parcial, valor y null, y valida el snapshot. Frontend verifica selector, campo heredado read-only, altura efectiva, payload null/número, vuelta a herencia y bloqueo con modo ausente o override numéricamente igual.
+
+**Resultados de esta revisión:**
+
+- Backend focalizado: 14/14 PASS.
+- Frontend focalizado: 95/95 PASS.
+- Backend completo: 739/739 PASS.
+- Frontend completo: 185/185 PASS.
+- Lint: PASS.
+- Build: PASS.
+- Diff check: PASS.
+
+Pruebas ejecutadas en el worktree con MACHINE_MODE=simulated y MACHINE_AUTO_CONNECT=false para backend; frontend usa mocks. Sin servicios productivos ni transportes físicos. No se requiere una prueba física para verificar este contrato de serialización/UI; las validaciones físicas pendientes del paquete original permanecen pendientes.
+
+Archivos: runtime y esquemas/rutas ajustan nulabilidad/persistencia; api/types frontend transportan null; ProjectWorkspace conserva y confirma el modo; ReferenceWorkspace ofrece selector y valor efectivo; tests y este informe documentan la regresión. Sin cambios a MotionContext, JobRun, Legacy, mapas, compensación ni secuencias de movimiento.

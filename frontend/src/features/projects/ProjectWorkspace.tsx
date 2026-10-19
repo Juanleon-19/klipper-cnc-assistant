@@ -69,11 +69,11 @@ type HeightMapSource = "SIMULATED" | "MEASURED";
 type ReferenceFieldErrors = Partial<Record<"x_mm" | "y_mm" | "z_mm", string>>;
 type InputState = { x_mm: string; y_mm: string };
 type ZInputState = { x_mm: string; y_mm: string; z_mm: string };
-type MachineSettingsValues = { [Key in keyof MachineSettingsInput]-?: number };
+type MachineSettingsValues = { [Key in keyof MachineSettingsInput]-?: number | null };
 
 const DEFAULT_MACHINE_SETTINGS: MachineSettingsValues = {
   reference_prep_z_mm: 115,
-  long_tool_reference_approach_z_mm: 115,
+  long_tool_reference_approach_z_mm: null,
   long_tool_change_clearance_z_mm: 115,
   z_clearance_feed_mm_min: 180,
   reference_approach_z_feed_mm_min: 180,
@@ -90,7 +90,7 @@ const DEFAULT_MACHINE_SETTINGS: MachineSettingsValues = {
 const MACHINE_SETTING_KEYS = Object.keys(DEFAULT_MACHINE_SETTINGS) as Array<keyof MachineSettingsValues>;
 
 function normalizeMachineSettings(
-  settings: Record<string, number>,
+  settings: Record<string, number | null>,
   fallback: MachineSettingsValues = DEFAULT_MACHINE_SETTINGS,
 ): MachineSettingsValues {
   const normalized = { ...fallback };
@@ -98,7 +98,7 @@ function normalizeMachineSettings(
     const value = settings[key];
     normalized[key] = typeof value === "number" && Number.isFinite(value) ? value : fallback[key];
   }
-  if (typeof settings.long_tool_reference_approach_z_mm !== "number") normalized.long_tool_reference_approach_z_mm = normalized.reference_prep_z_mm;
+  if (typeof settings.long_tool_reference_approach_z_mm !== "number") normalized.long_tool_reference_approach_z_mm = null;
   const legacyReferenceZFeed = settings.reference_prep_z_feed_mm_min;
   if (typeof legacyReferenceZFeed === "number" && Number.isFinite(legacyReferenceZFeed)) {
     if (!(typeof settings.z_clearance_feed_mm_min === "number" && Number.isFinite(settings.z_clearance_feed_mm_min))) {
@@ -117,7 +117,7 @@ function normalizeMachineSettings(
 function machineSettingsToInput(settings: MachineSettingsValues): MachineSettingsInput {
   return {
     reference_prep_z_mm: String(settings.reference_prep_z_mm),
-    long_tool_reference_approach_z_mm: String(settings.long_tool_reference_approach_z_mm ?? settings.reference_prep_z_mm),
+    long_tool_reference_approach_z_mm: settings.long_tool_reference_approach_z_mm === null ? null : String(settings.long_tool_reference_approach_z_mm),
     long_tool_change_clearance_z_mm: String(settings.long_tool_change_clearance_z_mm),
     z_clearance_feed_mm_min: String(settings.z_clearance_feed_mm_min),
     reference_approach_z_feed_mm_min: String(settings.reference_approach_z_feed_mm_min),
@@ -135,6 +135,7 @@ function machineSettingsToInput(settings: MachineSettingsValues): MachineSetting
 function machineSettingsInputsDiffer(input: MachineSettingsInput, saved: MachineSettingsValues | null) {
   if (!saved) return true;
   return MACHINE_SETTING_KEYS.some((key) => {
+    if (key === "long_tool_reference_approach_z_mm" && input[key] == null) return saved[key] !== null;
     const edited = Number((input[key] ?? String(saved[key])).trim());
     return !Number.isFinite(edited) || edited !== saved[key];
   });
@@ -148,19 +149,14 @@ function runtimeSettingsStatus(settings: MachineSettingsValues, runtime: Machine
   const runtimeSettings = runtime?.settings;
   if (runtimeSettings && typeof runtimeSettings === "object") {
     const confirmed = MACHINE_SETTING_KEYS.every((key) => {
-      const value = runtimeSettings[key] ?? (key === "long_tool_reference_approach_z_mm" ? runtimeSettings.reference_prep_z_mm : undefined);
+      const value = runtimeSettings[key];
+      if (key === "long_tool_reference_approach_z_mm" && value === null) return settings[key] === null;
       return typeof value === "number" && Number.isFinite(value) && value === settings[key];
     });
     return confirmed ? "coherent" : "inconsistent";
   }
-  const standardZ = runtime?.preparation?.reference_prep_z_mm;
-  if (typeof standardZ !== "number" || !Number.isFinite(standardZ)) return "unconfirmed";
-  const longToolClearanceZ = runtime?.tool_change?.long_tool_clearance_z_mm;
-  if (typeof longToolClearanceZ !== "number" || !Number.isFinite(longToolClearanceZ)) return "unconfirmed";
-  const longApproachZ = runtime?.preparation?.long_tool_reference_approach_z_mm ?? standardZ;
-  return longApproachZ === settings.long_tool_reference_approach_z_mm && standardZ === settings.reference_prep_z_mm && longToolClearanceZ === settings.long_tool_change_clearance_z_mm
-    ? "coherent"
-    : "inconsistent";
+  // An effective height alone cannot prove inherited versus explicit mode.
+  return "unconfirmed";
 }
 
 const TERMINAL_JOB_STATES = new Set(["JOB_COMPLETE", "JOB_CANCELLED", "JOB_ERROR"]);
@@ -1151,7 +1147,11 @@ export function ProjectWorkspace({
     };
     const payload = {} as MachineSettingsValues;
     for (const [key, label] of Object.entries(labels)) {
-      const parsed = parseFiniteNumber(machineSettingsInput[key as keyof typeof machineSettingsInput] ?? machineSettingsInput.reference_prep_z_mm);
+      if (key === "long_tool_reference_approach_z_mm" && machineSettingsInput.long_tool_reference_approach_z_mm == null) {
+        payload.long_tool_reference_approach_z_mm = null;
+        continue;
+      }
+      const parsed = parseFiniteNumber(machineSettingsInput[key as keyof typeof machineSettingsInput] ?? "");
       if (parsed.value === null || parsed.value <= 0) {
         setMachineSettingsMessage(`${label} debe ser un número mayor que cero.`);
         return;

@@ -11,7 +11,7 @@ type ZInputState = { x_mm: string; y_mm: string; z_mm: string };
 type ReferenceFieldErrors = Partial<Record<"x_mm" | "y_mm" | "z_mm", string>>;
 export type MachineSettingsInput = {
   reference_prep_z_mm: string;
-  long_tool_reference_approach_z_mm?: string;
+  long_tool_reference_approach_z_mm?: string | null;
   long_tool_change_clearance_z_mm: string;
   z_clearance_feed_mm_min: string;
   reference_approach_z_feed_mm_min: string;
@@ -68,7 +68,7 @@ type ReferenceWorkspaceProps = {
   onSubmitWorkOrigin: () => void;
   onSubmitZReference: () => void;
   onValidateHeightMap: () => void;
-  onMachineSettingChange: (field: keyof MachineSettingsInput, value: string) => void;
+  onMachineSettingChange: (field: keyof MachineSettingsInput, value: string | null) => void;
   onToggleUseWorkOriginXYForZ: (checked: boolean) => void;
   onWorkOriginChange: (field: "x_mm" | "y_mm", value: string) => void;
   onZReferenceChange: (field: "x_mm" | "y_mm" | "z_mm", value: string) => void;
@@ -444,7 +444,9 @@ export function ReferenceWorkspace({
             <p>Esta altura solo se usa durante el cambio de herramienta. No modifica el mapa ni la compensación Z.</p>
           </div>
           <div className="form-grid form-grid--dense">
-            <label>Z de aproximación para herramienta larga (mm)<input value={machineSettingsInput.long_tool_reference_approach_z_mm ?? machineSettingsInput.reference_prep_z_mm} inputMode="decimal" disabled={settingsInputsDisabled} onChange={(event) => onMachineSettingChange("long_tool_reference_approach_z_mm", event.target.value)} /></label>
+            <label>Aproximación de herramienta larga<select value={machineSettingsInput.long_tool_reference_approach_z_mm == null ? "inherit" : "custom"} disabled={settingsInputsDisabled} onChange={(event) => onMachineSettingChange("long_tool_reference_approach_z_mm", event.target.value === "inherit" ? null : machineSettingsInput.reference_prep_z_mm)}><option value="inherit">Heredar Z estándar</option><option value="custom">Usar altura personalizada</option></select></label>
+            <label>Z de aproximación para herramienta larga (mm)<input value={machineSettingsInput.long_tool_reference_approach_z_mm ?? machineSettingsInput.reference_prep_z_mm} inputMode="decimal" readOnly={machineSettingsInput.long_tool_reference_approach_z_mm == null} disabled={settingsInputsDisabled} onChange={(event) => onMachineSettingChange("long_tool_reference_approach_z_mm", event.target.value)} /></label>
+            <p className="muted">Z larga efectiva de esta configuración: {machineSettingsInput.long_tool_reference_approach_z_mm ?? machineSettingsInput.reference_prep_z_mm} mm. {machineSettingsInput.long_tool_reference_approach_z_mm == null ? "Heredada: sigue los cambios de la Z estándar." : "Personalizada: independiente de la Z estándar."} Los cambios requieren guardar y confirmar el runtime antes de mover.</p>
             <p className="muted">La aproximación larga es independiente del despeje de traslado y de la Z de contacto. Configure una altura verificada para la herramienta instalada; el mapa y la compensación no cambian.</p>
             <label>Paso de sonda (mm)<input value={machineSettingsInput.reference_probe_step_mm} inputMode="decimal" disabled={settingsInputsDisabled || machine.runtimeState === "PROBING_REFERENCE"} onChange={(event) => onMachineSettingChange("reference_probe_step_mm", event.target.value)} /></label>
             <label>Velocidad de sonda (mm/min)<input value={machineSettingsInput.reference_probe_feed_mm_min} inputMode="decimal" disabled={settingsInputsDisabled || machine.runtimeState === "PROBING_REFERENCE"} onChange={(event) => onMachineSettingChange("reference_probe_feed_mm_min", event.target.value)} /></label>

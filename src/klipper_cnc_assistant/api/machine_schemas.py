@@ -18,7 +18,7 @@ class MachineRuntimeResponse(BaseModel):
     klipper: dict
     preparation: dict = Field(default_factory=dict)
     tool_change: dict = Field(default_factory=dict)
-    settings: dict[str, float] = Field(default_factory=dict)
+    settings: dict[str, float | None] = Field(default_factory=dict)
     arduino: dict
     probe_live: dict = Field(default_factory=dict)
     last_probe_failure: dict | None = None

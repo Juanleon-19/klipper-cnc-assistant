@@ -22,3 +22,15 @@ class PreparationAPITest(unittest.TestCase):
                     response=self.fixture.client.post('/api/machine'+route,json={})
                     self.assertEqual(response.status_code,400,response.text)
                     move.assert_not_called()
+
+    def test_settings_api_preserves_null_and_distinguishes_omission(self):
+        response=self.fixture.client.get('/api/machine/settings')
+        self.assertEqual(response.status_code,200)
+        self.assertIsNone(response.json()['long_tool_reference_approach_z_mm'])
+        for payload,expected in [({'long_tool_reference_approach_z_mm':125},125),({'reference_probe_step_mm':0.1},125),({'long_tool_reference_approach_z_mm':None},None)]:
+            response=self.fixture.client.put('/api/machine/settings',json=payload)
+            self.assertEqual(response.status_code,200,response.text)
+            self.assertEqual(response.json()['long_tool_reference_approach_z_mm'],expected)
+            snapshot=self.fixture.client.get('/api/machine/status')
+            self.assertEqual(snapshot.status_code,200,snapshot.text)
+            self.assertEqual(snapshot.json()['settings']['long_tool_reference_approach_z_mm'],expected)
