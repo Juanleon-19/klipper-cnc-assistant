@@ -1396,6 +1396,94 @@ class JobServiceTest(unittest.TestCase):
         self.assertEqual(new_run["state"], "JOB_READY")
         self.assertTrue(self.job_service._run_file(context).exists())
 
+    def test_archive_rejects_retained_job_owner_without_losing_run(self):
+        context = self.job_service._context(self.project_id, self.setup_id, "superior")
+        run = self.job_service.prepare_run(project_id=self.project_id, setup_id=self.setup_id, face="superior")
+        run["state"] = "SPINDLE_STOP_REQUIRED"
+        run["updated_at"] = "2020-01-01T00:00:00+00:00"
+        run["operations"][0]["execution_status"] = "COMPLETED"
+        self.job_service._save_run(context, run)
+        permit = self.job_service._job_permit(context)
+        self.runtime.physical_ownership.request_cancel(permit)
+        path = self.job_service._run_file(context)
+        before = path.read_bytes()
+        owner = self.runtime.physical_ownership.snapshot()
+        self.adapter.status_sequence = [{"state": "complete", "is_active": False}]
+        detail = self.job_service.describe_run_conflict(project_id=self.project_id, setup_id=self.setup_id, face="superior")
+        self.assertFalse(detail["can_archive_stale"])
+        self.assertNotIn("archive-stale", detail["available_actions"])
+        with self.assertRaises(ApplicationError):
+            self.job_service.archive_stale_run(project_id=self.project_id, setup_id=self.setup_id, face="superior")
+        self.assertEqual(path.read_bytes(), before)
+        self.assertEqual(self.runtime.physical_ownership.snapshot(), owner)
+        self.assertEqual(self.adapter.cancel_calls, 0)
+        self.assertEqual(self.adapter.started, [])
+
+    def test_archive_remote_unknown_shutdown_or_missing_evidence_is_not_idle(self):
+        good = {"connected": True, "klipper_state": "ready", "print_state": "complete", "is_active": False}
+        self.assertTrue(self.job_service._moonraker_is_idle(good))
+        for delta in ({"connected": False}, {"klipper_state": "shutdown"},
+                      {"print_state": None}, {"is_active": None}, {"print_state": "paused"}):
+            with self.subTest(delta=delta):
+                self.assertFalse(self.job_service._moonraker_is_idle({**good, **delta}))
+        self.assertFalse(self.job_service._moonraker_is_idle({}))
+
+    def test_waiting_worker_retains_lease_and_cancel_requires_owner_retirement(self):
+        context = self.job_service._context(self.project_id, self.setup_id, "superior")
+        run = self.job_service.prepare_run(project_id=self.project_id, setup_id=self.setup_id, face="superior")
+        run["state"] = "SPINDLE_STOP_REQUIRED"
+        self.job_service._save_run(context, run)
+        permit = self.job_service._job_permit(context)
+        self.job_service._run_worker(context, run["run_id"])
+        self.assertTrue(self.runtime.physical_ownership.snapshot()["producer_active"])
+        self.runtime.physical_ownership.request_cancel(permit)
+        with self.assertRaises(RuntimeError):
+            self.runtime.reconcile_physical_ownership()
+        self.assertEqual(self.job_service._load_run(context)["state"], "SPINDLE_STOP_REQUIRED")
+        self.assertEqual(self.adapter.started, [])
+        self.assertEqual(self.adapter.cancel_calls, 0)
+
+    def test_archive_http_failure_preserves_persistence(self):
+        context = self.job_service._context(self.project_id, self.setup_id, "superior")
+        run = self.job_service.prepare_run(project_id=self.project_id, setup_id=self.setup_id, face="superior")
+        run["state"] = "SPINDLE_STOP_REQUIRED"
+        run["updated_at"] = "2020-01-01T00:00:00+00:00"
+        self.job_service._save_run(context, run)
+        path = self.job_service._run_file(context)
+        before = path.read_bytes()
+        def unavailable():
+            raise TimeoutError("simulated HTTP failure")
+        self.adapter.print_status = unavailable
+        with self.assertRaises(ApplicationError):
+            self.job_service.archive_stale_run(project_id=self.project_id, setup_id=self.setup_id, face="superior")
+        self.assertEqual(before, path.read_bytes())
+        self.assertEqual(self.adapter.started, [])
+        self.assertEqual(self.adapter.cancel_calls, 0)
+
+    def test_retired_producer_still_requires_explicit_reconciliation(self):
+        context = self.job_service._context(self.project_id, self.setup_id, "superior")
+        permit = self.job_service._job_permit(context)
+        self.runtime.physical_ownership.retire(permit)
+        self.assertFalse(self.runtime.physical_ownership.snapshot()["producer_active"])
+        self.assertFalse(self.job_service._archive_ownership_clear())
+        self.assertEqual(self.runtime.physical_ownership.snapshot()["kind"], "RECOVERY")
+
+    def test_archive_does_not_coerce_missing_sdcard_field_to_idle(self):
+        from unittest.mock import Mock
+        adapter = MoonrakerJobAdapter(self.runtime)
+        adapter._client = lambda: Mock(query_objects=lambda _query: {
+            "webhooks": {"state": "ready"}, "print_stats": {"state": "complete"},
+            "virtual_sdcard": {},
+        })
+        status = adapter.print_status()
+        self.assertIsNone(status["is_active_observed"])
+        self.job_service.adapter_factory = lambda _runtime: adapter
+        context = self.job_service._context(self.project_id, self.setup_id, "superior")
+        run = self.job_service.prepare_run(project_id=self.project_id, setup_id=self.setup_id, face="superior")
+        diagnosis = self.job_service._diagnose_run(context, run)
+        self.assertIsNone(diagnosis["moonraker"]["is_active"])
+        self.assertFalse(self.job_service._moonraker_is_idle(diagnosis["moonraker"]))
+
 
 if __name__ == "__main__":
     unittest.main()

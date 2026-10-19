@@ -221,6 +221,7 @@ class MoonrakerJobAdapter:
             "total_duration": print_stats.get("total_duration"),
             "active": bool(virtual_sdcard.get("is_active")),
             "is_active": bool(virtual_sdcard.get("is_active")),
+            "is_active_observed": virtual_sdcard.get("is_active"),
             "live_position": motion_report.get("live_position"),
             "live_velocity": motion_report.get("live_velocity"),
             "toolhead_position": toolhead.get("position"),
@@ -760,7 +761,8 @@ class JobService:
             "por lo que start_run rechaza un segundo inicio para el mismo montaje/cara."
         )
         can_archive_stale = (
-            self._moonraker_is_idle(diagnosis["moonraker"])
+            self._archive_ownership_clear()
+            and self._moonraker_is_idle(diagnosis["moonraker"])
             and self._is_stale_run(diagnosis["run"], state)
         )
         return {
@@ -781,9 +783,11 @@ class JobService:
         diagnosis = self._diagnose_run(context, run)
         moonraker = diagnosis["moonraker"]
         if not self._moonraker_is_idle(moonraker):
-            raise ApplicationError("No se puede archivar la ejecución obsoleta mientras Moonraker siga imprimiendo o virtual_sdcard esté activa.")
+            raise ApplicationError("No se puede archivar la ejecución obsoleta: Moonraker debe confirmar conexión, Klipper ready e impresión inactiva; un estado desconocido o shutdown no demuestra reposo.")
         if not self._is_stale_run(diagnosis["run"], str(run.get("state") or "JOB_DRAFT")):
             raise ApplicationError("La ejecución actual no cumple el criterio real de obsolescencia; primero revalide el plan o espere a que el estado se estabilice.")
+        if not self._archive_ownership_clear():
+            raise ApplicationError("No se puede archivar mientras exista ownership físico, recuperación o un productor pendiente de cierre. Conserve la ejecución y resuelva el cierre por su flujo autorizado.")
         released = self._release_stale_supervisor(context, run, diagnosis)
         previous_status = str(run.get("state") or "JOB_DRAFT")
         archived = json.loads(json.dumps(run))
@@ -2992,13 +2996,13 @@ class JobService:
         current_operation = self._diagnostic_operation(run)
         return {
             "moonraker": {
-                "connected": bool(status.get("connected", True)),
+                "connected": status.get("connected") is True,
                 "webhooks_state": status.get("klipper_state"),
                 "klipper_state": status.get("klipper_state"),
                 "print_state": status.get("state"),
                 "filename": status.get("filename"),
                 "progress": self._clamp_progress(status.get("progress")),
-                "is_active": bool(status.get("is_active", status.get("active"))),
+                "is_active": status.get("is_active_observed", status.get("is_active", status.get("active"))),
                 "file_position": status.get("file_position"),
                 "file_size": status.get("file_size"),
                 "print_duration": status.get("print_duration"),
@@ -3049,15 +3053,26 @@ class JobService:
         except Exception:
             return None
 
+    def _archive_ownership_clear(self) -> bool:
+        # Absence of a supervisor is not proof that the workflow retired its
+        # producer. Archiving must never orphan a retained physical lease.
+        owner = self.runtime.physical_ownership.snapshot()
+        return (owner.get("active") is False and owner.get("recovery_pending") is False
+                and owner.get("producer_active") is False
+                and owner.get("children") == 0 and owner.get("dispatching") == 0
+                and self._movement_lock_state() is not True
+                and getattr(self.runtime, "_active_operation", None) is None)
+
     def _moonraker_is_idle(self, status: dict[str, Any]) -> bool:
-        state = str(status.get("print_state") or "").lower()
-        return state not in {"printing", "paused"} and not bool(status.get("is_active"))
+        return (status.get("connected") is True and status.get("klipper_state") == "ready"
+                and status.get("print_state") in {"standby", "complete", "cancelled", "error"}
+                and status.get("is_active") is False)
 
     def _available_recovery_actions(self, diagnosis: dict[str, Any], run: dict[str, Any]) -> list[str]:
         actions = ["open"]
         if diagnosis["moonraker"]["print_state"] == "printing" or diagnosis["moonraker"]["is_active"]:
             actions.append("recover")
-        if self._moonraker_is_idle(diagnosis["moonraker"]) and self._is_stale_run(diagnosis["run"], str(run.get("state") or "")):
+        if self._archive_ownership_clear() and self._moonraker_is_idle(diagnosis["moonraker"]) and self._is_stale_run(diagnosis["run"], str(run.get("state") or "")):
             actions.append("archive-stale")
         return actions
 
