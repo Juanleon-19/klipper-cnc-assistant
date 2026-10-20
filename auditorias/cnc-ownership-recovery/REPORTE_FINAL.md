@@ -251,3 +251,124 @@ Se retiraron del informe rutas absolutas privadas, endpoints específicos de ins
 PRODUCTION_ADDITIONAL_MODIFICATIONS = NO
 GRAPHIFY_ADDITIONAL_WRITES = NO
 OPERATIONAL_AUTHORIZATION = NONE
+
+## Cierre integral de bypass administrativos — 2026-10-20
+
+Esta sección sustituye el hallazgo abierto de reset-preparation de la publicación anterior. Conserva el diagnóstico físico previo como evidencia histórica: **NO-GO operativo**, sin nuevas consultas al runtime ni autorización de recuperación. Base de esta corrección: `909dac6318556a9e8047abbd4abe94d350db2ac7`, descendiente del main aprobado `e6b3725a1f46ec6e89f706d02f1cc0d40bdb7184`.
+
+### Defectos reproducidos antes de corregir
+
+La reproducción inicial en `tests/test_administrative_exclusion.py` produjo cuatro métodos fallidos: reset con productor retenido/RECOVERY eliminaba el run; shutdown/estado remoto desconocido no impedían el reset; MovementLock ausente se aceptaba como libre; reset-reference/reset-map aceptaban un lease JOB_EXECUTION retenido. Todas las reproducciones utilizaron almacenamiento temporal y transportes fake.
+
+La comprobación `is not True` se reemplazó por evidencia afirmativa `is False`. Un lock inexistente, una consulta que lanza excepción o una respuesta no booleana no demuestran exclusión. Ownership desconocido tampoco es IDLE.
+
+### Política y secuencia de exclusión
+
+`execution/administrative_guard.py` concentra una reserva administrativa del coordinador existente. No crea un PhysicalPermit ni permite despacho físico. La reserva exige revisión CAS vigente, IDLE explícito, ausencia de productor, hijos, dispatch, recovery y solicitudes de ejecución en curso. Los mutex del coordinador sólo protegen bookkeeping; no se mantienen durante HTTP, disco ni callbacks.
+
+Antes de reservar se obtiene evidencia HTTP de firmware ready, homing XYZ, estado remoto explícitamente inactivo, `is_active_observed is False` y velocidad finita dentro de tolerancia. No se utiliza la velocidad cacheada para completar datos ausentes. El plazo de observación empieza antes de consultar y utiliza el timeout existente, sin ampliarlo. En modo simulado no se contacta Moonraker; los gates locales siguen activos.
+
+Durante la reserva se revalidan sesión física, revisión de ownership, MovementLock y edad de la observación. Prepare/start/actions poseen tickets lógicos de escritura que excluyen la administración durante su solicitud; la administración excluye esos tickets y nuevas adquisiciones físicas. Así no se considera permanente el precheck anterior a HTTP.
+
+El reset completo sigue este orden:
+
+1. Validar todos los JobRun del setup, sus revisiones y, si existe, su identidad remota. Intentos de start ambiguos bloquean.
+2. Persistir `administrative-reset.pending.json` antes de las mutaciones destructivas.
+3. Crear históricos de todas las caras, conservando evidencia y progreso.
+4. Ejecutar reset de mapa/referencia y sesión; comprobar el guard entre pasos.
+5. Cerrar el runtime interno sólo mediante la reserva exacta. Este cierre conserva RECOVERY; no fabrica IDLE. No es un restart de servicio.
+6. Revalidar conjunto de runs y CAS de cada archivo; retirar los actuales únicamente después de completar las dependencias.
+7. Comprobar guard final y retirar el marcador sólo al terminar correctamente.
+
+Si falla mapa/sesión, current_run aún existe. Si falla la retirada de un segundo run, los históricos de ambos ya existen y el marcador permanece. No se devuelve éxito. El coordinador permanece bloqueado por administración incompleta; la reconciliación ordinaria no puede despejarla. Tras reinicio simulado, JobService detecta el marcador y reinstala ese bloqueo. No hay replay, rollback, eliminación automática del journal ni endpoint nuevo de force-clear. La reparación de un marcador pendiente requiere auditoría explícita, no repetir ciegamente el reset.
+
+**No se declara atomicidad global entre archivos.** CAS y reserva previenen nuevas solicitudes locales competidoras; un fallo de disco o una pérdida de sesión después de una escritura pueden dejar cambios parciales con historial y marcador. Este es un resultado bloqueado y trazable, no un reset exitoso. El protocolo no controla clientes externos de Moonraker ni escrituras manuales al filesystem. La evidencia HTTP expira y se comprueba, pero no se presenta como exclusión transaccional del firmware remoto.
+
+### Matriz de rutas y cobertura
+
+| Rutas / método | Exclusión y condiciones | Evidencia / prueba |
+|---|---|---|
+| job-run/archive-stale | Gate remoto estricto + reserva CAS + identidad + CAS del run + journal antes de retirar actual | JobService/archive; unknown/shutdown/owner; MovementLock libre/ocupado/ausente/error |
+| reset-preparation / reset_runs_for_preparation | Gate completo, todos los runs/caras, históricos antes de dependencias, retirada al final, fallo persistido | Productor retenido, RECOVERY, shutdown, homing ausente, campo remoto ausente, HTTP fallido, cancel CAS, fallo de callback y segunda retirada |
+| reset-reference | Reserva común; no run iniciado/no terminal; marcador de mutación | HTTP 400 con lease retenido; bytes de proyecto, referencias y mapa intactos |
+| reset-map | Misma política de reset-reference | Mismos rechazos y preservación byte a byte |
+| Project archive/trash/permanent-delete/restore | Reserva común y rechazo de ejecuciones que conservan dependencias | Suite API y exclusión del coordinador; no sustituye el archivado específico del JobRun |
+| Actualizar proyecto/setup; añadir setup; editar/añadir/mover/duplicar/eliminar operación; cargar/quitar/analizar G-code | Reserva durante la escritura; no modifica dependencias de un run iniciado | Suite API; prepare/start no pueden comenzar durante reserva |
+| Confirmar referencia máquina/origen/Z; capturar origen físico/Z/Z desde probe previo | Reserva común, sin añadir comandos físicos | Suite API/reference; productor y RECOVERY bloquean |
+| probe-and-capture inicial | Rechazo de administración pendiente y de run con dependencias; conserva permiso físico y guards existentes del sondeo | Suite referencias/ownership; no se convierte en acción administrativa sin permiso |
+| Armar y rehacer malla | Rechazo de run con dependencias; permiso MESH con revisión esperada y guards existentes | Suite mesh preparation/race; no se encapsula en un permiso administrativo que pueda mover |
+| Edición manual/skip de punto, configurar/simular/importar/recalcular/validar/eliminar height-map, finalizar mapa | Reserva común y rechazo de dependencias de ejecución | Suite API/mapas; coordinador impide competir con productor físico |
+| Medir/reintentar/reanudar/pausar/cancelar malla | Continúan contratos del worker, permisos MESH y cancelación propios; no son un archivado administrativo de current_run | Suite mesh, cancel/retry/recovery; sin comandos reales |
+| prepare_run / start_run / run_action | Ticket lógico de escritura, rechazo de reserva/journal pendiente; permisos y guards físicos originales siguen obligatorios | Ambas direcciones de carrera administración/ejecución, cancel identity, state machine |
+| _archive_run por finalización/cancelación | Histórico no destructivo; conserva current_run, no exige fingir IDLE para guardar evidencia | Suite JobRun/cancel/state machine |
+| GET proyecto/mapa/historial, continue_project_step | No retiran current_run ni ofrecen un reset alternativo; continue sólo selecciona vista | Inspección de consumidores |
+| open_project | Actualiza metadatos de apertura, protegido por reserva por ser escritura de project.json | Suite API |
+| reset_session / reset_physical_session | En el reset completo se invocan bajo reserva y antes de retirar current_run; cierre autorizado conserva recovery | API reset completo; fallo intermedio y restart simulado |
+
+Los servicios de persistencia no se presentan como una API de autorización independiente: las rutas administrativas se coordinan en backend. El worker conserva sus escrituras bajo su propio permiso físico; la reserva no permite reemplazarlo ni liberar un lease ajeno.
+
+### Regresiones y resultados finales
+
+`tests/test_administrative_exclusion.py`: **19/19 PASS**. Incluye productor activo/RECOVERY, remoto shutdown/desconocido, lock ausente/ocupado/error/no booleano, HTTP fallido, homing ausente, NaN, expiración, ownership adquirido durante preflight, cambio de sesión, cancelación CAS, dos caras del setup, fallo intermedio, fallo en segunda retirada, persistencia tras restart, exclusión de nuevos productores y prepare, y los tres endpoints de reset con bytes intactos.
+
+Se actualizaron fixtures para exponer homing, virtual_sdcard observado y MovementLock de manera explícita. Una regresión antigua usaba reset para salir de una cancelación con evidencia remota fallida: ahora comprueba que ese reset se rechaza; el caso independiente de start con HTTP fallido usa una ejecución preparada nueva en otro test. No se relajó el guard para mantener ese bypass de fixture. Los tests de mensajes se ajustaron al diagnóstico estructurado nuevo.
+
+Comandos ejecutados desde el worktree con `MACHINE_MODE=simulated MACHINE_AUTO_CONNECT=false PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src:. PYTHONWARNINGS=ignore`:
+
+- `python -m unittest tests.test_administrative_exclusion -q`: 19/19 PASS.
+- `python -m unittest tests.test_administrative_exclusion tests.test_job_cancel_identity tests.test_mesh_failure_recovery_guards -q`: 42/42 PASS en la selección previa a los dos últimos casos de exclusión, también incluidos en la suite final.
+- `python -m unittest discover -s tests -q`: **765/765 PASS**, 371.556 s, sobre el código final.
+- `python -m unittest tests.test_final_workflow_api -q`: **4/4 PASS**, 11.351 s; los cuatro casos también están incluidos en la suite completa final.
+- Frontend/lint/build: NOT_RUN; no se modifican frontend, dependencias ni archivos de distribución en esta fase.
+- `git diff --check`: PASS.
+
+Las primeras ejecuciones durante desarrollo detectaron expectativas de mensajes y fixtures incompatibles, además de los bypass reproducidos. No se contabilizan como PASS. Los logs seriales sintéticos de pruebas negativas no son observaciones ni conexiones de la CNC productiva.
+
+### Integridad, límites y decisión
+
+Verificación final: respaldo **810/810** intacto; datos productivos **535/535** intactos. Inventario global original **809/810**, misma excepción histórica `graphify-out/cache/last_query_stamp`. Su hash coincide con el inicio de esta fase: no se ejecutó Graphify ni se restauró su caché. Checkout productivo y cambios locales protegidos permanecen intactos. No se publican mapas, originales, artifacts productivos, tokens, logs crudos ni secretos.
+
+Rutas bloqueadas deliberadamente: cualquier reset/archivado con productor retenido, RECOVERY, lock no observable, firmware shutdown, homing inválido, campos remotos ausentes, identidad incoherente, CAS/sesión cambiados o journal administrativo pendiente. Un run iniciado conserva sus dependencias frente a modificaciones independientes de referencia/mapa, aunque su worker haya desaparecido.
+
+Riesgos residuales a revisar externamente: ausencia de transacción multiarchivo, posible cambio remoto por un cliente ajeno, tiempo de IO que puede agotar el plazo de observación y requerir revisión del journal. Ninguno se resuelve inventando reposo, ampliando freshness ni borrando evidencia. No se incluye una reparación automática de fallos parciales.
+
+**GO para nueva auditoría externa del software; NO-GO operativo.** La situación física previamente observada sigue sin intervención autorizada. Esta fase no autoriza desplegar, recuperar, cancelar ni mover la máquina.
+
+```text
+RESET_ARCHIVE_CLOSURE
+BASE_HEAD = 909dac6318556a9e8047abbd4abe94d350db2ac7
+APPROVED_MAIN_ANCESTOR = e6b3725a1f46ec6e89f706d02f1cc0d40bdb7184
+BRANCH = fix/cnc-ownership-recovery-20261019
+FINAL_HEAD = commit documental de este cierre; SHA exacto en entrega y origin
+RESET_PREPARATION_BYPASS_CLOSED = YES
+RESET_REFERENCE_MAP_EXCLUDED = YES
+UNKNOWN_MOVEMENT_LOCK_FAIL_CLOSED = YES
+ADMINISTRATIVE_RESERVATION = YES; no permiso de movimiento
+GLOBAL_FILESYSTEM_ATOMICITY = NO; journal e históricos, fallo cerrado
+BACKEND_FULL = PASS 765/765
+NEW_REGRESSIONS = PASS 19/19
+PRODUCTION_ADDITIONAL_MODIFICATIONS = NO
+PRODUCTIVE_DATA_HASHES = PASS 535/535
+BACKUP_HASHES = PASS 810/810
+GRAPHIFY_ADDITIONAL_WRITES = NO
+MAIN_MODIFIED = NO
+PHYSICAL_COMMANDS = NO
+SERVICES_RESTARTED = NO
+DEPLOY = NO
+EXTERNAL_REAUDIT = GO
+OPERATIONAL_VERDICT = NO-GO
+```
+
+Implementación de este cierre: `35168f7bd5656ddaa2a21252c0baa8eb97532209`. El siguiente commit contiene exclusivamente este informe.
+
+Archivos de implementación:
+
+- `execution/administrative_guard.py`: reserva, journal y exclusión de solicitudes de ejecución.
+- `execution/job_service.py`: evidencia explícita, CAS, orden de archivado/reset y rechazo de journal pendiente.
+- `machine/physical_ownership.py`: reserva administrativa sin permiso físico; recuperación incompleta no reconciliable automáticamente.
+- `machine/runtime.py`: cierre interno bajo la reserva exacta del reset, conservando recuperación.
+- `api/routes.py`: exclusión backend de resets y escrituras de dependencias; reset completo coordinado.
+- `tests/test_administrative_exclusion.py`: 19 regresiones nuevas.
+- `tests/physical_fakes.py`, `tests/test_job_service.py`, `tests/test_job_cancel_identity.py`, `tests/test_mesh_failure_recovery_guards.py`: fixtures explícitas y expectativas coherentes con fail-closed.
+
+Estado local de entrega: archivos versionados sin cambios pendientes; `graphify-out/` preexistente permanece sin seguimiento y fuera de ambos commits. Push normal limitado a esta rama, sin merge ni cambios en main; el SHA remoto se verifica en la entrega final.
