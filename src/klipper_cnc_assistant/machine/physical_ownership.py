@@ -41,7 +41,8 @@ class PhysicalMachineCoordinator:
         self._revision = 0
         self._administrative = None
         self._administrative_incomplete = False
-        self._job_updates = set()
+        self._job_updates = {}
+        self._project_edits = {}
         self._administrative_closed_revision = None
         self._reason = 'Estado remoto no reconciliado.' if uncertain else None
 
@@ -55,6 +56,9 @@ class PhysicalMachineCoordinator:
         if kind in {OwnerKind.IDLE, OwnerKind.RECOVERY, OwnerKind.ADMINISTRATIVE} or not owner_id:
             raise OwnershipError('Owner inválido.')
         with self._lock:
+            project = str(owner_id).split('/')[0] if kind in {OwnerKind.JOB_EXECUTION, OwnerKind.MESH} and '/' in str(owner_id) else None
+            if self._project_edits and (project is None or project in self._project_edits.values()):
+                raise OwnershipError('El proyecto tiene una escritura administrativa en curso.')
             if expected_revision is not None and expected_revision != self._revision:
                 raise OwnershipError("La autoridad física cambió antes de aplicar configuración.")
             if self._root is not None or self._recovery or self._administrative is not None:
@@ -194,18 +198,39 @@ class PhysicalMachineCoordinator:
             self._session = uuid4().hex
             self._revision += 1
 
-    def begin_job_update(self):
+    def begin_job_update(self, *, project_id=None):
         """Exclude administrative mutation while an execution request is writing."""
         with self._lock:
-            if self._administrative is not None or self._administrative_incomplete:
+            if (self._administrative is not None or self._administrative_incomplete
+                    or (self._project_edits and (project_id is None or project_id in self._project_edits.values()))):
                 raise OwnershipError('Administración activa o incompleta; ejecución bloqueada.')
             token = uuid4().hex
-            self._job_updates.add(token)
+            self._job_updates[token] = project_id
             return token
 
     def end_job_update(self, token):
         with self._lock:
-            self._job_updates.remove(token)
+            self._job_updates.pop(token)
+
+    def begin_project_edit(self, project_id):
+        """Scope software writes without changing physical epoch/revision/recovery."""
+        with self._lock:
+            if (not project_id or self._administrative is not None or self._administrative_incomplete
+                    or project_id in self._project_edits.values()
+                    or any(p is None or p == project_id for p in self._job_updates.values())):
+                raise OwnershipError('Proyecto ocupado por administración o ejecución.')
+            if self._root is not None:
+                owner = self._root
+                known = owner.owner_kind in {OwnerKind.JOB_EXECUTION, OwnerKind.MESH} and '/' in owner.owner_id
+                if not known or owner.owner_id.split('/')[0] == project_id:
+                    raise OwnershipError('El ownership conserva dependencias de este proyecto o no permite identificarlas.')
+            token = uuid4().hex
+            self._project_edits[token] = project_id
+            return token
+
+    def end_project_edit(self, token):
+        with self._lock:
+            self._project_edits.pop(token)
 
     def administration_failed(self, reason):
         """Pending journal requires explicit repair, never idle reconciliation."""
@@ -218,7 +243,7 @@ class PhysicalMachineCoordinator:
         with self._lock:
             if (expected_revision != self._revision or self._root is not None
                     or self._recovery or self._administrative is not None
-                    or self._producer_active or self._dispatching or self._permits or self._job_updates):
+                    or self._producer_active or self._dispatching or self._permits or self._job_updates or self._project_edits):
                 raise OwnershipError('Administración bloqueada: ownership cambió o no está libre.')
             self._revision += 1
             token = (uuid4().hex, self._session, self._revision)

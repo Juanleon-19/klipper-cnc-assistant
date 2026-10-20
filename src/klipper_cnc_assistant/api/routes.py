@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from klipper_cnc_assistant.execution.administrative_guard import project_mutation
 from functools import wraps
 import inspect
 
@@ -133,10 +134,12 @@ def _reject_active_motion(request: Request) -> None:
     service._assert_no_started_runs()
 
 
-def _administrative_route(function=None, *, persistent=False):
+def _administrative_route(function=None, *, persistent=False, independent=False):
     def decorate(handler):
         def scope(kwargs):
             service = kwargs['request'].app.state.job_service
+            if independent:
+                return project_mutation(service, kwargs['project_id'])
             return service.administrative_mutation(handler.__name__)
 
         def mark(guard, kwargs):
@@ -204,7 +207,7 @@ def build_router() -> APIRouter:
         return project_to_response(project)
 
     @router.put("/projects/{project_id}", response_model=ProjectResponse)
-    @_administrative_route
+    @_administrative_route(independent=True)
     def update_project(project_id: str, payload: ProjectUpdateRequest, request: Request) -> ProjectResponse:
         service = request.app.state.project_service
         project = service.update_project(
@@ -230,28 +233,28 @@ def build_router() -> APIRouter:
         return request.app.state.project_service.continue_project_step(project_id)
 
     @router.post("/projects/{project_id}/archive", response_model=ProjectResponse)
-    @_administrative_route
+    @_administrative_route(independent=True)
     def archive_project(project_id: str, request: Request) -> ProjectResponse:
         return project_to_response(request.app.state.project_service.archive_project(project_id))
 
     @router.post("/projects/{project_id}/trash", response_model=ProjectResponse)
-    @_administrative_route
+    @_administrative_route(independent=True)
     def trash_project(project_id: str, request: Request) -> ProjectResponse:
         return project_to_response(request.app.state.project_service.trash_project(project_id))
 
     @router.post("/projects/{project_id}/restore", response_model=ProjectResponse)
-    @_administrative_route
+    @_administrative_route(independent=True)
     def restore_project(project_id: str, request: Request) -> ProjectResponse:
         return project_to_response(request.app.state.project_service.restore_project(project_id))
 
     @router.delete("/projects/{project_id}/permanent", response_model=dict[str, str])
-    @_administrative_route
+    @_administrative_route(independent=True)
     def permanently_delete_project(project_id: str, payload: ProjectPermanentDeleteRequest, request: Request) -> dict[str, str]:
         request.app.state.project_service.permanently_delete_project(project_id, confirm_name=payload.confirm_name)
         return {"detalle": "Proyecto eliminado permanentemente."}
 
     @router.post("/projects/{project_id}/setups", response_model=SetupResponse, status_code=201)
-    @_administrative_route
+    @_administrative_route(independent=True)
     def add_setup(project_id: str, payload: SetupCreateRequest, request: Request) -> SetupResponse:
         service = request.app.state.project_service
         return setup_to_response(
@@ -259,7 +262,7 @@ def build_router() -> APIRouter:
         )
 
     @router.patch("/projects/{project_id}/setups/{setup_id}", response_model=SetupResponse)
-    @_administrative_route
+    @_administrative_route(independent=True)
     def update_setup(project_id: str, setup_id: str, payload: SetupUpdateRequest, request: Request) -> SetupResponse:
         service = request.app.state.project_service
         return setup_to_response(
@@ -302,7 +305,7 @@ def build_router() -> APIRouter:
         return result
 
     @router.post("/projects/{project_id}/operations", response_model=OperationResponse, status_code=201)
-    @_administrative_route
+    @_administrative_route(independent=True)
     def add_operation(project_id: str, payload: OperationCreateRequest, request: Request) -> OperationResponse:
         service = request.app.state.project_service
         operation = service.add_operation(
@@ -321,7 +324,7 @@ def build_router() -> APIRouter:
         return operation_to_response(operation)
 
     @router.patch("/projects/{project_id}/operations/{operation_id}", response_model=OperationResponse)
-    @_administrative_route
+    @_administrative_route(independent=True)
     def update_operation(project_id: str, operation_id: str, payload: OperationUpdateRequest, request: Request) -> OperationResponse:
         service = request.app.state.project_service
         operation = service.update_operation(
@@ -337,7 +340,7 @@ def build_router() -> APIRouter:
         return operation_to_response(operation)
 
     @router.post("/projects/{project_id}/operations/{operation_id}/duplicate", response_model=OperationResponse, status_code=201)
-    @_administrative_route
+    @_administrative_route(independent=True)
     def duplicate_operation(project_id: str, operation_id: str, request: Request) -> OperationResponse:
         service = request.app.state.project_service
         return operation_to_response(
@@ -345,7 +348,7 @@ def build_router() -> APIRouter:
         )
 
     @router.post("/projects/{project_id}/operations/{operation_id}/move", response_model=OperationResponse)
-    @_administrative_route
+    @_administrative_route(independent=True)
     def move_operation(project_id: str, operation_id: str, payload: OperationMoveRequest, request: Request) -> OperationResponse:
         service = request.app.state.project_service
         return operation_to_response(
@@ -357,21 +360,21 @@ def build_router() -> APIRouter:
         )
 
     @router.delete("/projects/{project_id}/operations/{operation_id}", response_model=dict[str, str])
-    @_administrative_route
+    @_administrative_route(independent=True)
     def delete_operation(project_id: str, operation_id: str, request: Request) -> dict[str, str]:
         service = request.app.state.project_service
         service.delete_operation(project_id, operation_id)
         return {"detalle": "Operacion eliminada."}
 
     @router.delete("/projects/{project_id}/operations/{operation_id}/gcode", response_model=OperationResponse)
-    @_administrative_route
+    @_administrative_route(independent=True)
     def remove_gcode(project_id: str, operation_id: str, request: Request) -> OperationResponse:
         service = request.app.state.project_service
         operation = service.remove_operation_gcode(project_id=project_id, operation_id=operation_id)
         return operation_to_response(operation)
 
     @router.post("/projects/{project_id}/operations/{operation_id}/gcode", response_model=OperationResponse)
-    @_administrative_route
+    @_administrative_route(independent=True)
     async def upload_gcode(project_id: str, operation_id: str, request: Request) -> OperationResponse:
         service = request.app.state.project_service
         filename, payload, is_binary = await _parse_gcode_upload_request(request)
@@ -392,7 +395,7 @@ def build_router() -> APIRouter:
         return operation_to_response(operation)
 
     @router.post("/projects/{project_id}/operations/{operation_id}/analyze", response_model=OperationAnalysisResponse)
-    @_administrative_route
+    @_administrative_route(independent=True)
     def analyze_operation(project_id: str, operation_id: str, request: Request) -> OperationAnalysisResponse:
         service = request.app.state.project_service
         operation = service.analyze_operation(project_id, operation_id)
@@ -810,9 +813,11 @@ def build_router() -> APIRouter:
         return FileResponse(target, media_type="text/plain", filename=target.name)
 
     @router.post("/projects/{project_id}/open", response_model=ProjectResponse)
-    @_administrative_route
     def open_project(project_id: str, request: Request):
-        return project_to_response(request.app.state.project_service.open_project(project_id))
+        service = request.app.state.project_service
+        with project_mutation(request.app.state.job_service, project_id, read_only_fallback=True) as writable:
+            project = service.open_project(project_id) if writable else service.get_project(project_id)
+            return project_to_response(project)
 
     @router.post("/projects/{project_id}/maps/finalize", response_model=dict[str, object])
     @_administrative_route

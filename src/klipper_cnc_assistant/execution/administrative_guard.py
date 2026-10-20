@@ -84,7 +84,7 @@ def execution_write(function):
     def wrapped(service, *args, **kwargs):
         coordinator = service.runtime.physical_ownership
         try:
-            token = coordinator.begin_job_update()
+            token = coordinator.begin_job_update(project_id=kwargs.get("project_id"))
         except OwnershipError as error:
             raise ApplicationError(str(error)) from error
         try:
@@ -92,3 +92,35 @@ def execution_write(function):
         finally:
             coordinator.end_job_update(token)
     return wrapped
+
+
+@contextmanager
+def project_mutation(service, project_id, *, read_only_fallback=False):
+    """Offline project IO, excluded from execution of the same project.
+
+    No HTTP, movement permit, recovery clearing or physical evidence mutation.
+    Fallback catches authorization rejection only, never mutation failures.
+    """
+    coordinator = service.runtime.physical_ownership
+    token = None
+    try:
+        if service.administrative_pending_path.exists():
+            raise ApplicationError('Journal administrativo pendiente; escritura bloqueada.')
+        token = coordinator.begin_project_edit(project_id)
+        service.assert_project_edit_safe(project_id)
+    except (OwnershipError, ApplicationError) as error:
+        if token is not None:
+            coordinator.end_project_edit(token)
+            token = None
+        if read_only_fallback:
+            yield False
+            return
+        raise ApplicationError(str(error)) from error
+    except BaseException:
+        if token is not None:
+            coordinator.end_project_edit(token)
+        raise
+    try:
+        yield True
+    finally:
+        coordinator.end_project_edit(token)

@@ -320,6 +320,24 @@ class JobService:
                 or self.runtime.physical_ownership.snapshot().get('administrative_active')):
             raise ApplicationError('Administración activa o incompleta; conservar datos y revisar recuperación.')
 
+    def assert_project_edit_safe(self, project_id):
+        """Software-only writes must not change even prepared execution evidence."""
+        self.repository.load_project(project_id)
+        for path in self.repository.project_dir(project_id).glob('reports/jobs/*/*/current_run.json'):
+            run = self.run_store.load(path)
+            if not run:
+                continue
+            attempt = run.get('start_attempt') or {}
+            unresolved_terminal = run.get('state') in {'JOB_ERROR', 'JOB_CANCELLED'} and (
+                run.get('started_at') or attempt.get('may_have_been_sent')
+                or any(op.get('remote_file') for op in run.get('operations', []))
+                or run.get('cancel_remote_status') in {'pending_identity_check',
+                    'identity_unverified', 'cancel_sent_requires_reconciliation',
+                    'identity_or_transport_error_requires_reconciliation'})
+            if (run.get('state') not in RUN_TERMINAL_STATES or unresolved_terminal
+                    or attempt.get('status') in {'dispatching', 'sending', 'uncertain'}):
+                raise ApplicationError('La ejecución actual conserva dependencias de este proyecto.')
+
     def administrative_mutation(self, action, *, allow_started_runs=False):
         return administrative_mutation(self, action, allow_started_runs=allow_started_runs)
 
