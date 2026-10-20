@@ -372,3 +372,88 @@ Archivos de implementación:
 - `tests/physical_fakes.py`, `tests/test_job_service.py`, `tests/test_job_cancel_identity.py`, `tests/test_mesh_failure_recovery_guards.py`: fixtures explícitas y expectativas coherentes con fail-closed.
 
 Estado local de entrega: archivos versionados sin cambios pendientes; `graphify-out/` preexistente permanece sin seguimiento y fuera de ambos commits. Push normal limitado a esta rama, sin merge ni cambios en main; el SHA remoto se verifica en la entrega final.
+
+## Corrección de administración offline — 2026-10-20
+
+Base de esta revisión: `2d88ac5963cba5aba9cfdb11436c1490af22397a`. Sustituye la clasificación global de escrituras de proyecto de la sección anterior; los contratos de reset/archivado físico permanecen estrictos.
+
+### Reproducción y causa
+
+Dos pruebas escritas antes de corregir fallaron: abrir un proyecto con snapshot PHYSICAL/DISCONNECTED y Moonraker fake en shutdown devolvía 400; añadir una operación a otro proyecto con un owner JOB_EXECUTION retenido en RECOVERY también devolvía 400. La causa era usar `_assert_preparation_reset_safe()` indiscriminadamente en toda escritura administrativa, aunque la operación no consultase ni modificase la máquina.
+
+### Contratos separados
+
+- **Administración offline por proyecto:** reserva lógica de edición, comprobación de ownership y de todos los current_run del proyecto, sin consulta Moonraker. No exige ready, homing, posición o MovementLock para editar archivos que no participan en una ejecución. Tampoco los declara válidos. La reserva no crea PhysicalPermit ni cambia revisión, sesión o recovery físicos.
+- **Administración de dependencias físicas:** mantiene `administrative_mutation()`, evidencia remota, homing, MovementLock observable/libre, reserva CAS, identidad y journal existentes. Los tres resets, archive-stale y las rutas de referencias/mapas no pasan al contrato offline.
+- **Apertura:** si puede editarse el proyecto, conserva la actualización normal de `last_opened_at`. Si está protegido, abre por lectura sin modificar ese timestamp, current_setup_id ni project.json. Sólo se captura el rechazo de autorización previo; un fallo de escritura no se oculta como una apertura exitosa.
+
+Un JobRun no terminal, incluido JOB_READY, conserva dependencias. JOB_ERROR/JOB_CANCELLED con evidencia de envío, archivo remoto, inicio o reconciliación pendiente también bloquean la edición. Un estado terminal no demuestra por sí solo cierre físico. Las rutas de consulta siguen disponibles.
+
+### Matriz de permisos por efectos reales
+
+| Ruta / familia | Offline sin dependencia protegida | Si afecta proyecto de ejecución / owner | Contrato |
+|---|---|---|---|
+| POST project/open | Permite apertura y timestamp | Permite sólo lectura; no reescribe project.json | Apertura con fallback read-only |
+| GET proyectos/proyecto/mapas/historial; continue | Sin cambio de contrato de consulta | Sin retirada de current_run ni permiso físico | Consulta |
+| Crear proyecto nuevo | Permitido; crea identidad/directorio nuevos | No reemplaza proyecto de ejecución | Creación existente |
+| PUT proyecto: nombre/material/alineación | Permitido | Bloqueado; incluso metadatos cambian bytes/hash del proyecto | Reserva offline por proyecto |
+| Añadir setup / renombrar setup | Permitido | Bloqueado en proyecto protegido | Reserva offline por proyecto |
+| Añadir/editar/mover/duplicar/eliminar operaciones | Permitido | Bloqueado: afectan plan, herramienta, orden o dependencias | Reserva offline por proyecto |
+| Cargar/quitar G-code y analizar | Permitido; sólo archivos y análisis | Bloqueado: no se reemplaza fuente de un run preparado/iniciado | Reserva offline por proyecto |
+| Archivar/restaurar/enviar a papelera/eliminar proyecto | Permitido con guard de proyecto | Bloqueado: no elimina datos de ejecución protegida | Reserva offline por proyecto |
+| reset-preparation / reset-reference / reset-map | Shutdown/homing ausente siguen bloqueando | Productor, RECOVERY, evidencia insuficiente siguen bloqueando | Administración física estricta, sin cambios |
+| job-run/archive-stale | Requiere evidencia física explícita | No retira current_run con owner retenido | Administración física estricta, sin cambios |
+| Confirmar/capturar origen o referencia; editar/importar/configurar/finalizar/eliminar mapa | No se habilitan offline mediante esta corrección | Conservan exclusión física y de JobRun | Administración física estricta, sin cambios |
+| Sondeo, armar/medir/reintentar malla, start/resume/tool change | Ninguna autorización nueva | Conservan todos sus guards y permisos | Flujo físico existente |
+
+La inspección de `ProjectService.update_metadata` confirma que cambiar material invalida análisis; no es un cambio puramente cosmético. La edición de setups renombra el setup; no introduce un desplazamiento físico. La carga de G-code escribe original y hash/análisis asociado. Por ello estas rutas se permiten sólo si el proyecto no conserva dependencias protegidas. No se ejecuta compensación ni movimiento como consecuencia de la reserva offline.
+
+### Carreras y ámbitos
+
+La reserva por proyecto se obtiene antes de inspeccionar sus runs y se mantiene hasta terminar el handler. Prepare/start/actions registran su proyecto antes de IO; una edición del mismo proyecto excluye esas solicitudes y la adquisición de un lease para él. El orden inverso también rechaza la edición. Las solicitudes de otro proyecto pueden continuar, incluida su cancelación: no se bloquea una ejecución ajena por editar archivos independientes.
+
+Un root JOB_EXECUTION o MESH con identidad de proyecto conocida sólo protege ese proyecto. Ownership sin ámbito identificable (por ejemplo movimiento runtime o preparación de malla sin proyecto en owner_id) bloquea conservadoramente escrituras; permite apertura read-only. Una reserva administrativa física o un journal incompleto conserva el bloqueo global. No se despeja recovery ni se retira un productor para administrar otros proyectos.
+
+Las reservas usan el coordinador existente y sólo bookkeeping bajo su mutex. No mantienen mutex durante HTTP/disco. No alteran revisión/epoch físico, evitando invalidar MotionContext de otro trabajo por abrir o editar un proyecto ajeno. La reserva física global también excluye las ediciones offline en curso.
+
+### Interfaz y pruebas
+
+`DashboardPage` ofrece Abrir sin condición de conexión. `App.handleOpenProject` llama exclusivamente a `api.openProject`, actualiza selección y abre el workspace; no conecta ni reconcilia runtime. La API conserva el mismo response_model. La regresión de apertura protegida comprueba todos los bytes del proyecto, ownership intacto y ausencia de llamada connect/HTTP. No fue necesario cambiar frontend.
+
+Nuevas pruebas en `tests/test_offline_administration.py`: 11 métodos con fakes y repositorios temporales. Cubren apertura shutdown, apertura protegida read-only, edición de otro proyecto durante RECOVERY, rechazo del proyecto protegido, carga/análisis offline, tres resets rechazados ante shutdown, run persistido tras restart sin owner, owner de ámbito desconocido, carreras en ambas direcciones, JOB_READY y terminal ambiguo. La reproducción inicial fue FAIL 2/2 antes del cambio.
+
+La selección final `tests.test_offline_administration tests.test_administrative_exclusion tests.test_final_workflow_api` pasó **34/34** (34.521 s): incluye las **19 regresiones anteriores sin modificar** y **API E2E 4/4**. Entorno: `MACHINE_MODE=simulated MACHINE_AUTO_CONNECT=false PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src:. PYTHONWARNINGS=ignore`. No hay conexiones ni fixtures productivas.
+
+Frontend/lint/build: NOT_RUN en esta revisión; fuentes frontend intactas, inspección de flujo y pruebas HTTP. La suite backend completa y diff check se registran en el cierre inferior tras finalizar.
+
+### Riesgos y preservación
+
+La protección offline es por proyecto, no por operación: mientras haya evidencia protegida se rechaza incluso un cambio cosmético para no invalidar hashes ni perder actualizaciones concurrentes. Las escrituras con owner no identificable o journal global incompleto siguen siendo conservadoras. No se modifica el protocolo de recuperación de fallos multiarchivo de la revisión anterior ni se declara atomicidad remota. Los clientes externos y las escrituras manuales fuera de los servicios no quedan serializados por este contrato.
+
+Verificados nuevamente: datos productivos 535/535 intactos; respaldo 810/810 intacto; inventario global 809/810 por la única excepción histórica Graphify, cuyo hash no cambió en esta fase. No se consultó el runtime productivo. No se editaron main, mapas, journals ni configuración productivos; no hubo movimientos, cancelaciones, reinicios, merge ni deploy.
+
+### Cierre validado de administración offline
+
+```text
+OFFLINE_ADMINISTRATION_AUDIT
+BASE_HEAD = 2d88ac5963cba5aba9cfdb11436c1490af22397a
+IMPLEMENTATION_COMMIT = b09ca257cb30b1985b3346ab10dd5c7c09f177f3
+FINAL_HEAD = commit documental de esta revisión; SHA exacto en entrega y origin
+BACKEND_FULL = PASS 776/776 (387.018 s)
+FOCUSED = PASS 34/34
+NEW_OFFLINE_TESTS = PASS 11/11
+PREVIOUS_RESET_REGRESSIONS = PASS 19/19; archivo sin modificaciones
+API_E2E = PASS 4/4
+FRONTEND = NOT_RUN; sin cambios, flujo de apertura inspeccionado
+DIFF_CHECK = PASS
+PRODUCTION_MODIFIED = NO
+MAIN_MODIFIED = NO
+PHYSICAL_COMMANDS = NO
+SERVICES_RESTARTED = NO
+MERGE = NO
+DEPLOY = NO
+EXTERNAL_REAUDIT = GO
+OPERATIONAL_AUTHORIZATION = NONE
+```
+
+Archivos de implementación: `api/routes.py` clasifica efectos y permite apertura read-only; `execution/administrative_guard.py` añade contexto offline y tickets de ejecución por proyecto; `execution/job_service.py` protege dependencias persistidas, incluidos terminales ambiguos; `machine/physical_ownership.py` arbitra ámbitos sin alterar autoridad física; `tests/test_offline_administration.py` contiene las 11 regresiones. Este informe se incorpora en commit documental separado. `graphify-out/` preexistente queda fuera de los commits.
