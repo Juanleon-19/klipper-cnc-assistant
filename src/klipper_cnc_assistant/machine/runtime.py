@@ -534,7 +534,9 @@ class MachineRuntime:
         with self._lifecycle_lock:
             self._stop_locked()
 
-    def _stop_locked(self) -> None:
+    def _stop_locked(self, *, administrative_token=None) -> None:
+        if self.physical_ownership.snapshot().get("administrative_active"):
+            self.physical_ownership.validate_administration(administrative_token)
         owner = self.physical_ownership.snapshot()
         if self._active_operation is not None or owner['producer_active'] or owner['children'] or owner['dispatching']:
             raise MachineRuntimeError('No se puede cerrar acceso físico mientras un owner conserva la máquina.')
@@ -578,7 +580,10 @@ class MachineRuntime:
             self._manual = None
             self._state = MachineRuntimeState.DISCONNECTED
             self._event("info", "Runtime detenido.")
-        self.physical_ownership.enter_recovery("Acceso físico cerrado; requiere reconciliación al conectar.")
+        if administrative_token is None:
+            self.physical_ownership.enter_recovery("Acceso físico cerrado; requiere reconciliación al conectar.")
+        else:
+            self.physical_ownership.administrative_disconnected(administrative_token)
         self._process_lock.close()
 
     def current_physical_session_id(self) -> str:
@@ -866,7 +871,7 @@ class MachineRuntime:
         self.stop()
         return self.snapshot()
 
-    def reset_physical_session(self) -> dict[str, Any]:
+    def reset_physical_session(self, *, administrative_token=None) -> dict[str, Any]:
         with self._lifecycle_lock:
             with self._lock:
                 active_operation = self._active_operation
@@ -879,7 +884,7 @@ class MachineRuntime:
             if not lock_acquired:
                 raise MachineRuntimeError("No se pudo reiniciar: movement_lock sigue ocupado.")
             try:
-                self._stop_locked()
+                self._stop_locked(administrative_token=administrative_token)
             finally:
                 self._movement_lock.release()
             with self._lock:

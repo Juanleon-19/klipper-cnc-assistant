@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from functools import wraps
+import inspect
+
 from time import perf_counter
 
 from fastapi import APIRouter, HTTPException, Request
@@ -122,13 +125,40 @@ def _reference_session_to_response(payload: dict[str, object]) -> ReferenceSessi
 
 
 def _reject_active_motion(request: Request) -> None:
-    runtime = getattr(request.app.state, "machine_runtime", None)
-    if runtime is None:
-        return
-    snapshot = runtime.snapshot()
-    state = str(snapshot.get("state") or "")
-    if state in {"RUNNING", "MOVING", "PROBING", "REFERENCE_ARMED", "MESH_PROBING"}:
-        raise ApplicationError("No se puede reiniciar o eliminar mientras existe movimiento físico activo. Pause o cancele de forma segura primero.")
+    # Advisory precheck for routes which subsequently acquire their own mesh or
+    # physical permit. Administrative writes use a reservation spanning writes.
+    service = request.app.state.job_service
+    service.assert_administration_available()
+    service._assert_preparation_reset_safe()
+    service._assert_no_started_runs()
+
+
+def _administrative_route(function=None, *, persistent=False):
+    def decorate(handler):
+        def scope(kwargs):
+            service = kwargs['request'].app.state.job_service
+            return service.administrative_mutation(handler.__name__)
+
+        def mark(guard, kwargs):
+            if persistent:
+                project = guard.service.repository.load_project(kwargs['project_id'])
+                project.get_setup(kwargs['setup_id'])
+                guard.begin_mutation(project_id=kwargs['project_id'], setup_id=kwargs['setup_id'])
+
+        if inspect.iscoroutinefunction(handler):
+            @wraps(handler)
+            async def wrapped(**kwargs):
+                with scope(kwargs) as guard:
+                    mark(guard, kwargs)
+                    return await handler(**kwargs)
+        else:
+            @wraps(handler)
+            def wrapped(**kwargs):
+                with scope(kwargs) as guard:
+                    mark(guard, kwargs)
+                    return handler(**kwargs)
+        return wrapped
+    return decorate(function) if function else decorate
 
 
 def _physical_map_response(request: Request, payload: dict[str, object]) -> PhysicalMapResponse:
@@ -174,6 +204,7 @@ def build_router() -> APIRouter:
         return project_to_response(project)
 
     @router.put("/projects/{project_id}", response_model=ProjectResponse)
+    @_administrative_route
     def update_project(project_id: str, payload: ProjectUpdateRequest, request: Request) -> ProjectResponse:
         service = request.app.state.project_service
         project = service.update_project(
@@ -199,25 +230,28 @@ def build_router() -> APIRouter:
         return request.app.state.project_service.continue_project_step(project_id)
 
     @router.post("/projects/{project_id}/archive", response_model=ProjectResponse)
+    @_administrative_route
     def archive_project(project_id: str, request: Request) -> ProjectResponse:
         return project_to_response(request.app.state.project_service.archive_project(project_id))
 
     @router.post("/projects/{project_id}/trash", response_model=ProjectResponse)
+    @_administrative_route
     def trash_project(project_id: str, request: Request) -> ProjectResponse:
-        _reject_active_motion(request)
         return project_to_response(request.app.state.project_service.trash_project(project_id))
 
     @router.post("/projects/{project_id}/restore", response_model=ProjectResponse)
+    @_administrative_route
     def restore_project(project_id: str, request: Request) -> ProjectResponse:
         return project_to_response(request.app.state.project_service.restore_project(project_id))
 
     @router.delete("/projects/{project_id}/permanent", response_model=dict[str, str])
+    @_administrative_route
     def permanently_delete_project(project_id: str, payload: ProjectPermanentDeleteRequest, request: Request) -> dict[str, str]:
-        _reject_active_motion(request)
         request.app.state.project_service.permanently_delete_project(project_id, confirm_name=payload.confirm_name)
         return {"detalle": "Proyecto eliminado permanentemente."}
 
     @router.post("/projects/{project_id}/setups", response_model=SetupResponse, status_code=201)
+    @_administrative_route
     def add_setup(project_id: str, payload: SetupCreateRequest, request: Request) -> SetupResponse:
         service = request.app.state.project_service
         return setup_to_response(
@@ -225,6 +259,7 @@ def build_router() -> APIRouter:
         )
 
     @router.patch("/projects/{project_id}/setups/{setup_id}", response_model=SetupResponse)
+    @_administrative_route
     def update_setup(project_id: str, setup_id: str, payload: SetupUpdateRequest, request: Request) -> SetupResponse:
         service = request.app.state.project_service
         return setup_to_response(
@@ -236,32 +271,38 @@ def build_router() -> APIRouter:
         )
 
     @router.post("/projects/{project_id}/setups/{setup_id}/reset-reference", response_model=dict[str, object])
+    @_administrative_route(persistent=True)
     def reset_setup_reference(project_id: str, setup_id: str, payload: SetupResetRequest, request: Request) -> dict[str, object]:
-        _reject_active_motion(request)
         return request.app.state.physical_map_service.reset_reference(project_id=project_id, setup_id=setup_id, reason=payload.motivo, user_session=payload.session)
 
     @router.post("/projects/{project_id}/setups/{setup_id}/reset-map", response_model=dict[str, object])
+    @_administrative_route(persistent=True)
     def reset_setup_map(project_id: str, setup_id: str, payload: SetupResetRequest, request: Request) -> dict[str, object]:
-        _reject_active_motion(request)
         return request.app.state.physical_map_service.reset_map(project_id=project_id, setup_id=setup_id, reason=payload.motivo, user_session=payload.session)
 
     @router.post("/projects/{project_id}/setups/{setup_id}/reset-preparation", response_model=dict[str, object])
     def reset_setup_preparation(project_id: str, setup_id: str, payload: SetupResetRequest, request: Request) -> dict[str, object]:
+        def reset_dependencies(guard):
+            guard.check()
+            result = request.app.state.physical_map_service.reset_preparation(
+                project_id=project_id, setup_id=setup_id, reason=payload.motivo, user_session=payload.session)
+            guard.check()
+            machine_session_service = getattr(request.app.state, "machine_session_service", None)
+            if machine_session_service is not None:
+                result["machine_session"] = machine_session_to_response(machine_session_service.reset_session()).model_dump()
+            guard.check()
+            runtime = request.app.state.machine_runtime
+            result["runtime"] = runtime.reset_physical_session(administrative_token=guard.token)
+            guard.disconnected = True
+            return result
         execution_reset = request.app.state.job_service.reset_runs_for_preparation(
-            project_id=project_id,
-            setup_id=setup_id,
-        )
-        result = request.app.state.physical_map_service.reset_preparation(project_id=project_id, setup_id=setup_id, reason=payload.motivo, user_session=payload.session)
-        result["execution_reset"] = execution_reset
-        machine_session_service = getattr(request.app.state, "machine_session_service", None)
-        if machine_session_service is not None:
-            result["machine_session"] = machine_session_to_response(machine_session_service.reset_session()).model_dump()
-        runtime = getattr(request.app.state, "machine_runtime", None)
-        if runtime is not None:
-            result["runtime"] = runtime.reset_physical_session()
+            project_id=project_id, setup_id=setup_id, reset_dependencies=reset_dependencies)
+        result = execution_reset.pop('dependency_result')
+        result['execution_reset'] = execution_reset
         return result
 
     @router.post("/projects/{project_id}/operations", response_model=OperationResponse, status_code=201)
+    @_administrative_route
     def add_operation(project_id: str, payload: OperationCreateRequest, request: Request) -> OperationResponse:
         service = request.app.state.project_service
         operation = service.add_operation(
@@ -280,6 +321,7 @@ def build_router() -> APIRouter:
         return operation_to_response(operation)
 
     @router.patch("/projects/{project_id}/operations/{operation_id}", response_model=OperationResponse)
+    @_administrative_route
     def update_operation(project_id: str, operation_id: str, payload: OperationUpdateRequest, request: Request) -> OperationResponse:
         service = request.app.state.project_service
         operation = service.update_operation(
@@ -295,6 +337,7 @@ def build_router() -> APIRouter:
         return operation_to_response(operation)
 
     @router.post("/projects/{project_id}/operations/{operation_id}/duplicate", response_model=OperationResponse, status_code=201)
+    @_administrative_route
     def duplicate_operation(project_id: str, operation_id: str, request: Request) -> OperationResponse:
         service = request.app.state.project_service
         return operation_to_response(
@@ -302,6 +345,7 @@ def build_router() -> APIRouter:
         )
 
     @router.post("/projects/{project_id}/operations/{operation_id}/move", response_model=OperationResponse)
+    @_administrative_route
     def move_operation(project_id: str, operation_id: str, payload: OperationMoveRequest, request: Request) -> OperationResponse:
         service = request.app.state.project_service
         return operation_to_response(
@@ -313,18 +357,21 @@ def build_router() -> APIRouter:
         )
 
     @router.delete("/projects/{project_id}/operations/{operation_id}", response_model=dict[str, str])
+    @_administrative_route
     def delete_operation(project_id: str, operation_id: str, request: Request) -> dict[str, str]:
         service = request.app.state.project_service
         service.delete_operation(project_id, operation_id)
         return {"detalle": "Operacion eliminada."}
 
     @router.delete("/projects/{project_id}/operations/{operation_id}/gcode", response_model=OperationResponse)
+    @_administrative_route
     def remove_gcode(project_id: str, operation_id: str, request: Request) -> OperationResponse:
         service = request.app.state.project_service
         operation = service.remove_operation_gcode(project_id=project_id, operation_id=operation_id)
         return operation_to_response(operation)
 
     @router.post("/projects/{project_id}/operations/{operation_id}/gcode", response_model=OperationResponse)
+    @_administrative_route
     async def upload_gcode(project_id: str, operation_id: str, request: Request) -> OperationResponse:
         service = request.app.state.project_service
         filename, payload, is_binary = await _parse_gcode_upload_request(request)
@@ -345,6 +392,7 @@ def build_router() -> APIRouter:
         return operation_to_response(operation)
 
     @router.post("/projects/{project_id}/operations/{operation_id}/analyze", response_model=OperationAnalysisResponse)
+    @_administrative_route
     def analyze_operation(project_id: str, operation_id: str, request: Request) -> OperationAnalysisResponse:
         service = request.app.state.project_service
         operation = service.analyze_operation(project_id, operation_id)
@@ -362,11 +410,13 @@ def build_router() -> APIRouter:
         return _reference_session_to_response(service.get_session(project_id, operation_id))
 
     @router.post("/projects/{project_id}/operations/{operation_id}/reference-session/machine-reference", response_model=ReferenceSessionResponse)
+    @_administrative_route
     def confirm_machine_reference(project_id: str, operation_id: str, request: Request) -> ReferenceSessionResponse:
         service = request.app.state.reference_session_service
         return _reference_session_to_response(service.confirm_machine_reference(project_id, operation_id))
 
     @router.post("/projects/{project_id}/operations/{operation_id}/reference-session/work-origin", response_model=ReferenceSessionResponse)
+    @_administrative_route
     def confirm_work_origin(project_id: str, operation_id: str, payload: ReferenceWorkOriginRequest, request: Request) -> ReferenceSessionResponse:
         service = request.app.state.reference_session_service
         if payload.x_mm is None or payload.y_mm is None:
@@ -376,6 +426,7 @@ def build_router() -> APIRouter:
         )
 
     @router.post("/projects/{project_id}/operations/{operation_id}/reference-session/z-reference", response_model=ReferenceSessionResponse)
+    @_administrative_route
     def confirm_z_reference(project_id: str, operation_id: str, payload: ReferenceZRequest, request: Request) -> ReferenceSessionResponse:
         service = request.app.state.reference_session_service
         if payload.x_mm is None or payload.y_mm is None or payload.z_mm is None:
@@ -385,6 +436,7 @@ def build_router() -> APIRouter:
         )
 
     @router.post("/projects/{project_id}/operations/{operation_id}/reference-session/physical-work-origin", response_model=ReferenceSessionResponse)
+    @_administrative_route
     def capture_physical_work_origin(project_id: str, operation_id: str, request: Request) -> ReferenceSessionResponse:
         reference_service = request.app.state.reference_session_service
         runtime = request.app.state.machine_runtime
@@ -401,6 +453,7 @@ def build_router() -> APIRouter:
         )
 
     @router.post("/projects/{project_id}/operations/{operation_id}/reference-session/physical-z-reference", response_model=ReferenceSessionResponse)
+    @_administrative_route
     def capture_physical_z_reference(project_id: str, operation_id: str, request: Request) -> ReferenceSessionResponse:
         reference_service = request.app.state.reference_session_service
         runtime = request.app.state.machine_runtime
@@ -418,11 +471,14 @@ def build_router() -> APIRouter:
 
     @router.post("/projects/{project_id}/operations/{operation_id}/reference-session/probe-and-capture", response_model=ReferenceSessionResponse)
     def probe_and_capture_reference(project_id: str, operation_id: str, request: Request) -> ReferenceSessionResponse:
+        request.app.state.job_service.assert_administration_available()
+        request.app.state.job_service._assert_no_started_runs()
         service = request.app.state.reference_session_service
         return _reference_session_to_response(service.probe_and_capture_reference(
             project_id, operation_id, runtime=request.app.state.machine_runtime))
 
     @router.post("/projects/{project_id}/operations/{operation_id}/reference-session/physical-z-reference-from-probe", response_model=ReferenceSessionResponse)
+    @_administrative_route
     def capture_physical_z_reference_from_probe(project_id: str, operation_id: str, request: Request) -> ReferenceSessionResponse:
         reference_service = request.app.state.reference_session_service
         runtime = request.app.state.machine_runtime
@@ -494,6 +550,8 @@ def build_router() -> APIRouter:
 
     @router.post("/projects/{project_id}/operations/{operation_id}/physical-map/plan-from-reference", response_model=PhysicalMapResponse)
     def plan_physical_map_from_reference(project_id: str, operation_id: str, payload: PhysicalMapPlanRequest, request: Request):
+        request.app.state.job_service.assert_administration_available()
+        request.app.state.job_service._assert_no_started_runs()
         result = request.app.state.physical_map_service.preparation.arm(
             **mesh_arguments(project_id, operation_id, payload, request), preview_fingerprint=payload.preview_fingerprint)
         return _physical_map_response(request, result)
@@ -510,6 +568,8 @@ def build_router() -> APIRouter:
 
     @router.post("/projects/{project_id}/physical-maps/{map_id:path}/repeat", response_model=PhysicalMapResponse)
     def repeat_physical_map(project_id: str, map_id: str, request: Request) -> PhysicalMapResponse:
+        request.app.state.job_service.assert_administration_available()
+        request.app.state.job_service._assert_no_started_runs()
         _reject_active_motion(request)
         payload = request.app.state.physical_map_service.preparation.rebuild(project_id=project_id, map_id=map_id, runtime=request.app.state.machine_runtime)
         return _physical_map_response(request, payload)
@@ -537,6 +597,7 @@ def build_router() -> APIRouter:
         return request.app.state.physical_map_service.execution_log(project_id=project_id, map_id=map_id)
 
     @router.post("/projects/{project_id}/physical-maps/{map_id:path}/points/{point_index}", response_model=PhysicalMapResponse)
+    @_administrative_route
     def update_physical_map_point(project_id: str, map_id: str, point_index: int, payload: PhysicalMapPointUpdateRequest, request: Request) -> PhysicalMapResponse:
         service = request.app.state.physical_map_service
         updated = service.record_point(
@@ -561,13 +622,15 @@ def build_router() -> APIRouter:
 
     @router.post("/projects/{project_id}/physical-maps/{map_id:path}/retry-failed", response_model=PhysicalMapResponse)
     def retry_failed_physical_points(project_id: str, map_id: str, request: Request):
+        request.app.state.job_service.assert_administration_available()
+        request.app.state.job_service._assert_no_started_runs()
         payload = request.app.state.mesh_execution_service.retry_failed(
             project_id=project_id, map_id=map_id, runtime=request.app.state.machine_runtime)
         return _physical_map_response(request, payload)
 
     @router.post("/projects/{project_id}/physical-maps/{map_id:path}/points/{point_index}/skip", response_model=PhysicalMapResponse)
+    @_administrative_route
     def skip_physical_map_point(project_id: str, map_id: str, point_index: int, request: Request) -> PhysicalMapResponse:
-        _reject_active_motion(request)
         payload = request.app.state.physical_map_service.skip_failed_point(project_id, map_id, point_index)
         return _physical_map_response(request, payload)
 
@@ -598,6 +661,7 @@ def build_router() -> APIRouter:
         return height_map_to_response(height_map, height_service.build_surfaces(height_map))
 
     @router.put("/projects/{project_id}/operations/{operation_id}/height-map/config", response_model=HeightMapResponse)
+    @_administrative_route
     def configure_height_map(project_id: str, operation_id: str, payload: HeightMapConfigRequest, request: Request) -> HeightMapResponse:
         service = request.app.state.height_map_service
         height_map = service.configure_map(
@@ -611,6 +675,7 @@ def build_router() -> APIRouter:
         return height_map_to_response(height_map, service.build_surfaces(height_map))
 
     @router.post("/projects/{project_id}/operations/{operation_id}/height-map/simulate", response_model=HeightMapResponse)
+    @_administrative_route
     def simulate_height_map(project_id: str, operation_id: str, payload: HeightMapSimulationRequest, request: Request) -> HeightMapResponse:
         service = request.app.state.height_map_service
         height_map = service.generate_simulated_map(
@@ -626,12 +691,14 @@ def build_router() -> APIRouter:
         return height_map_to_response(height_map, service.build_surfaces(height_map))
 
     @router.post("/projects/{project_id}/operations/{operation_id}/height-map/import/json", response_model=HeightMapResponse)
+    @_administrative_route
     def import_height_map_json(project_id: str, operation_id: str, payload: HeightMapImportRequest, request: Request) -> HeightMapResponse:
         service = request.app.state.height_map_service
         height_map = service.import_json_map(project_id=project_id, operation_id=operation_id, content=payload.contenido)
         return height_map_to_response(height_map, service.build_surfaces(height_map))
 
     @router.post("/projects/{project_id}/operations/{operation_id}/height-map/import/csv", response_model=HeightMapResponse)
+    @_administrative_route
     def import_height_map_csv(project_id: str, operation_id: str, payload: HeightMapImportRequest, request: Request) -> HeightMapResponse:
         service = request.app.state.height_map_service
         height_map = service.import_csv_map(project_id=project_id, operation_id=operation_id, content=payload.contenido)
@@ -663,6 +730,7 @@ def build_router() -> APIRouter:
         )
 
     @router.patch("/projects/{project_id}/operations/{operation_id}/height-map/samples/{sample_id}", response_model=HeightMapResponse)
+    @_administrative_route
     def update_height_map_sample(project_id: str, operation_id: str, sample_id: str, payload: HeightMapSampleUpdateRequest, request: Request) -> HeightMapResponse:
         service = request.app.state.height_map_service
         update_kwargs = {}
@@ -676,12 +744,14 @@ def build_router() -> APIRouter:
         return height_map_to_response(height_map, service.build_surfaces(height_map))
 
     @router.post("/projects/{project_id}/operations/{operation_id}/height-map/recalculate", response_model=HeightMapResponse)
+    @_administrative_route
     def recalculate_height_map(project_id: str, operation_id: str, request: Request) -> HeightMapResponse:
         service = request.app.state.height_map_service
         height_map = service.recalculate_map(project_id, operation_id)
         return height_map_to_response(height_map, service.build_surfaces(height_map))
 
     @router.post("/projects/{project_id}/operations/{operation_id}/height-map/validate", response_model=ReferenceSessionResponse)
+    @_administrative_route
     def validate_height_map(project_id: str, operation_id: str, request: Request) -> ReferenceSessionResponse:
         service = request.app.state.reference_session_service
         return _reference_session_to_response(service.mark_map_validated(project_id, operation_id))
@@ -740,10 +810,12 @@ def build_router() -> APIRouter:
         return FileResponse(target, media_type="text/plain", filename=target.name)
 
     @router.post("/projects/{project_id}/open", response_model=ProjectResponse)
+    @_administrative_route
     def open_project(project_id: str, request: Request):
         return project_to_response(request.app.state.project_service.open_project(project_id))
 
     @router.post("/projects/{project_id}/maps/finalize", response_model=dict[str, object])
+    @_administrative_route
     def finalize_map(project_id: str, map_id: str, request: Request):
         return request.app.state.physical_map_service.finalize_map(project_id=project_id, map_id=map_id)
 
@@ -884,6 +956,7 @@ def build_router() -> APIRouter:
         return {"state": state_by_action.get(action, "PREFLIGHT"), "action": action, "detail": f"Acción {action} registrada para operación {operation_id}.", "preflight": preflight}
 
     @router.delete("/projects/{project_id}/operations/{operation_id}/height-map", response_model=dict[str, str])
+    @_administrative_route
     def delete_height_map(project_id: str, operation_id: str, request: Request) -> dict[str, str]:
         service = request.app.state.height_map_service
         service.delete_map(project_id, operation_id)

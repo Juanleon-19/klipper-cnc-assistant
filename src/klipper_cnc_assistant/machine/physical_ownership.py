@@ -15,6 +15,7 @@ class OwnerKind(StrEnum):
     MESH = 'MESH'
     JOB_EXECUTION = 'JOB_EXECUTION'
     RECOVERY = 'RECOVERY'
+    ADMINISTRATIVE = 'ADMINISTRATIVE'
 
 
 @dataclass(frozen=True)
@@ -38,6 +39,10 @@ class PhysicalMachineCoordinator:
         self._recovery = uncertain
         self._producer_active = False
         self._revision = 0
+        self._administrative = None
+        self._administrative_incomplete = False
+        self._job_updates = set()
+        self._administrative_closed_revision = None
         self._reason = 'Estado remoto no reconciliado.' if uncertain else None
 
     @property
@@ -47,12 +52,12 @@ class PhysicalMachineCoordinator:
 
     def acquire(self, owner_kind, owner_id, *, expected_revision=None):
         kind = OwnerKind(owner_kind)
-        if kind in {OwnerKind.IDLE, OwnerKind.RECOVERY} or not owner_id:
+        if kind in {OwnerKind.IDLE, OwnerKind.RECOVERY, OwnerKind.ADMINISTRATIVE} or not owner_id:
             raise OwnershipError('Owner inválido.')
         with self._lock:
             if expected_revision is not None and expected_revision != self._revision:
                 raise OwnershipError("La autoridad física cambió antes de aplicar configuración.")
-            if self._root is not None or self._recovery:
+            if self._root is not None or self._recovery or self._administrative is not None:
                 raise OwnershipError('La máquina ya tiene ownership físico o recuperación pendiente.')
             token = uuid4().hex
             permit = PhysicalPermit(self._session, token, token, kind, str(owner_id))
@@ -100,7 +105,7 @@ class PhysicalMachineCoordinator:
         with self._lock:
             if permit is not None:
                 self._validate(permit, allow_blocked=True)
-            if self._root is not None:
+            if self._root is not None or self._administrative is not None:
                 self._revision += 1
                 self._uncertain_dispatch = None
                 self._cancelled = True
@@ -179,7 +184,7 @@ class PhysicalMachineCoordinator:
     def reconcile_quiescent(self, *, expected_session, quiescent, expected_revision=None):
         """Caller must obtain fresh remote idle evidence AND stop local producers."""
         with self._lock:
-            if not quiescent or expected_session != self._session or (expected_revision is not None and expected_revision != self._revision) or self._producer_active or self._dispatching or (self._root and len(self._permits) > 1):
+            if self._administrative_incomplete or self._administrative is not None or not quiescent or expected_session != self._session or (expected_revision is not None and expected_revision != self._revision) or self._producer_active or self._dispatching or (self._root and len(self._permits) > 1):
                 raise OwnershipError('Quiescencia no demostrada o productores aún activos.')
             self._permits.clear()
             self._root = None
@@ -189,10 +194,67 @@ class PhysicalMachineCoordinator:
             self._session = uuid4().hex
             self._revision += 1
 
+    def begin_job_update(self):
+        """Exclude administrative mutation while an execution request is writing."""
+        with self._lock:
+            if self._administrative is not None or self._administrative_incomplete:
+                raise OwnershipError('Administración activa o incompleta; ejecución bloqueada.')
+            token = uuid4().hex
+            self._job_updates.add(token)
+            return token
+
+    def end_job_update(self, token):
+        with self._lock:
+            self._job_updates.remove(token)
+
+    def administration_failed(self, reason):
+        """Pending journal requires explicit repair, never idle reconciliation."""
+        with self._lock:
+            self._administrative_incomplete = True
+            self.enter_recovery(reason)
+
+    def begin_administration(self, *, expected_revision):
+        """Reserve exclusivity without creating a movement permit. No IO here."""
+        with self._lock:
+            if (expected_revision != self._revision or self._root is not None
+                    or self._recovery or self._administrative is not None
+                    or self._producer_active or self._dispatching or self._permits or self._job_updates):
+                raise OwnershipError('Administración bloqueada: ownership cambió o no está libre.')
+            self._revision += 1
+            token = (uuid4().hex, self._session, self._revision)
+            self._administrative = token
+            return token
+
+    def validate_administration(self, token, *, disconnected=False):
+        with self._lock:
+            closed = (disconnected and self._administrative_closed_revision == self._revision
+                      and not self._cancelled)
+            if (self._administrative != token or token is None or token[1] != self._session
+                    or (not closed and (token[2] != self._revision or self._recovery))):
+                raise OwnershipError('La reserva administrativa cambió; mutación rechazada.')
+
+    def administrative_disconnected(self, token):
+        """Record the exact authorized transport closure, without clearing recovery."""
+        with self._lock:
+            self.validate_administration(token)
+            self._revision += 1
+            self._recovery = True
+            self._reason = 'Acceso físico cerrado; requiere reconciliación al conectar.'
+            self._administrative_closed_revision = self._revision
+
+    def end_administration(self, token):
+        """Close only this reservation; never clear physical recovery or leases."""
+        with self._lock:
+            if self._administrative != token or token is None:
+                raise OwnershipError('Reserva administrativa ajena o inexistente.')
+            self._administrative = None
+            self._administrative_closed_revision = None
+            self._revision += 1
+
     def snapshot(self):
         with self._lock:
-            kind = OwnerKind.RECOVERY if self._recovery else (self._root.owner_kind if self._root else OwnerKind.IDLE)
+            kind = OwnerKind.RECOVERY if self._recovery else (self._root.owner_kind if self._root else (OwnerKind.ADMINISTRATIVE if self._administrative is not None else OwnerKind.IDLE))
             return {'kind': kind.value, 'owner_id': None if self._root is None else self._root.owner_id,
-                    'active': kind != OwnerKind.IDLE, 'recovery_pending': self._recovery,
+                    'job_updates': len(self._job_updates), 'active': kind != OwnerKind.IDLE, 'administrative_active': self._administrative is not None, 'recovery_pending': self._recovery,
                     'cancel_requested': self._cancelled, 'reason': self._reason,
                     'session': self._session, 'revision': self._revision, 'producer_active': self._producer_active, 'dispatching': len(self._dispatching), 'children': max(0, len(self._permits) - 1)}

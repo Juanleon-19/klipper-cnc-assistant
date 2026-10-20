@@ -122,9 +122,13 @@ class JobCancelIdentityTest(unittest.TestCase):
             self.service.run_action(**self.args, action='pause')
             self.service.run_action(**self.args, action='cancel')
         self.assertEqual(self.adapter.pause_calls + self.adapter.cancel_calls, 0)
-        self.adapter.state = 'standby'  # explicit fake idle proof for preparation reset
-        self.service.reset_runs_for_preparation(project_id=self.args['project_id'], setup_id=self.args['setup_id'])
-        self.service.prepare_run(**self.args)
+        self.adapter.state = 'standby'
+        before = self.path.read_bytes()
+        with self.assertRaises(Exception):  # retained recovery cannot be erased by reset
+            self.service.reset_runs_for_preparation(project_id=self.args['project_id'], setup_id=self.args['setup_id'])
+        self.assertEqual(self.path.read_bytes(), before)
+
+    def test_identity_query_failure_blocks_start_on_independent_prepared_run(self):
         with patch.object(self.adapter, 'print_status', side_effect=RuntimeError('offline')):
             with self.assertRaises(Exception):
                 self.service.start_run(**self.args, spindle_prepared=True)

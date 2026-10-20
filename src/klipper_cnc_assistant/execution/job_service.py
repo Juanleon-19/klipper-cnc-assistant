@@ -31,6 +31,7 @@ from klipper_cnc_assistant.storage.safe_persistence import (
     FileRevisionGuard, atomic_json, atomic_write, storage_lock, patch_metadata,
     validate_generation, read_artifact_metadata, PersistenceConflict,
 )
+from .administrative_guard import administrative_mutation, execution_write
 from .print_identity import PrintIdentity, PrintIdentityError
 from .health import execution_health, preparation_retry_safe
 from .readiness import PREPARABLE_STATES, ownership_compatible, evaluate_readiness, reference_candidate
@@ -196,7 +197,7 @@ class MoonrakerJobAdapter:
                 "webhooks": ["state", "state_message"],
                 "print_stats": ["state", "filename", "message", "print_duration", "total_duration"],
                 "virtual_sdcard": ["progress", "file_position", "file_size", "file_path", "is_active"],
-                "toolhead": ["position"],
+                "toolhead": ["position", "homed_axes"],
                 "motion_report": ["live_position", "live_velocity"],
             }
         )
@@ -222,6 +223,7 @@ class MoonrakerJobAdapter:
             "active": bool(virtual_sdcard.get("is_active")),
             "is_active": bool(virtual_sdcard.get("is_active")),
             "is_active_observed": virtual_sdcard.get("is_active"),
+            "homed_axes_observed": toolhead.get("homed_axes"),
             "live_position": motion_report.get("live_position"),
             "live_velocity": motion_report.get("live_velocity"),
             "toolhead_position": toolhead.get("position"),
@@ -309,8 +311,40 @@ class JobService:
         self._project_dependency_cache = OrderedDict()
         self.remote_standby_grace_s = 2.0
         self.run_store = JobRunStore()
+        self.administrative_pending_path = self.repository.projects_dir.parent / 'administrative-reset.pending.json'
+        if self.administrative_pending_path.exists():
+            self.runtime.physical_ownership.administration_failed('Journal administrativo pendiente; no se reanuda automáticamente.')
+
+    def assert_administration_available(self):
+        if (self.administrative_pending_path.exists()
+                or self.runtime.physical_ownership.snapshot().get('administrative_active')):
+            raise ApplicationError('Administración activa o incompleta; conservar datos y revisar recuperación.')
+
+    def administrative_mutation(self, action, *, allow_started_runs=False):
+        return administrative_mutation(self, action, allow_started_runs=allow_started_runs)
+
+    def _assert_administrative_print_identity(self, run, guard):
+        if guard.remote is None:
+            return
+        operation = self.run_store._operation(run)
+        expected = operation.get('remote_file')
+        if expected:
+            try:
+                PrintIdentity(expected).require_match(guard.remote)
+            except PrintIdentityError as error:
+                raise ApplicationError('Identidad remota diferente; se conserva la ejecución.') from error
+        if (run.get('start_attempt') or {}).get('status') in {'sending', 'dispatching', 'uncertain'}:
+            raise ApplicationError('Intento de start ambiguo; no se permite reset administrativo.')
+
+    def _assert_no_started_runs(self):
+        for path in self.repository.projects_dir.glob('*/reports/jobs/*/*/current_run.json'):
+            run = self.run_store.load(path)
+            if run and run.get('state') not in RUN_TERMINAL_STATES and (
+                    run.get('started_at') or run.get('state') not in PREPARABLE_STATES):
+                raise ApplicationError('Una ejecución conserva dependencias físicas; no se pueden modificar referencias o mapas.')
 
     def _job_permit(self, context):
+        self.assert_administration_available()
         key = (context.project_id, context.setup_id, context.face)
         with self._lock:
             permit = self._physical_leases.get(key)
@@ -378,7 +412,9 @@ class JobService:
         self._save_plan(context, refreshed)
         return refreshed
 
+    @execution_write
     def prepare_run(self, *, project_id: str, setup_id: str, face: str) -> dict[str, Any]:
+        self.assert_administration_available()
         context = self._context(project_id, setup_id, face)
         current = self.run_store.load(self._existing_run_file(context))
         if current is not None and (current.get('state') not in PREPARABLE_STATES or current.get('started_at')):
@@ -395,7 +431,9 @@ class JobService:
         run.update(revision=saved['revision'], cancellation_epoch=saved['cancellation_epoch'])
         return run
 
+    @execution_write
     def start_run(self, *, project_id: str, setup_id: str, face: str, spindle_prepared: bool = False) -> dict[str, Any]:
+        self.assert_administration_available()
         context = self._context(project_id, setup_id, face)
         with self._lock:
             current = self._load_run(context)
@@ -776,6 +814,10 @@ class JobService:
         }
 
     def archive_stale_run(self, *, project_id: str, setup_id: str, face: str) -> dict[str, Any]:
+        with self.administrative_mutation('archive-stale', allow_started_runs=True) as guard:
+            return self._archive_stale_run(project_id=project_id, setup_id=setup_id, face=face, guard=guard)
+
+    def _archive_stale_run(self, *, project_id, setup_id, face, guard):
         context = self._context(project_id, setup_id, face)
         run = self._load_run(context)
         if run is None:
@@ -786,8 +828,9 @@ class JobService:
             raise ApplicationError("No se puede archivar la ejecución obsoleta: Moonraker debe confirmar conexión, Klipper ready e impresión inactiva; un estado desconocido o shutdown no demuestra reposo.")
         if not self._is_stale_run(diagnosis["run"], str(run.get("state") or "JOB_DRAFT")):
             raise ApplicationError("La ejecución actual no cumple el criterio real de obsolescencia; primero revalide el plan o espere a que el estado se estabilice.")
-        if not self._archive_ownership_clear():
-            raise ApplicationError("No se puede archivar mientras exista ownership físico, recuperación o un productor pendiente de cierre. Conserve la ejecución y resuelva el cierre por su flujo autorizado.")
+        guard.check()
+        self._assert_administrative_print_identity(run, guard)
+        self.run_store.validate(self._run_file(context), run)
         released = self._release_stale_supervisor(context, run, diagnosis)
         previous_status = str(run.get("state") or "JOB_DRAFT")
         archived = json.loads(json.dumps(run))
@@ -800,7 +843,9 @@ class JobService:
         archived["next_action"] = "Ejecución obsoleta archivada"
         archived["moonraker_snapshot"] = moonraker
         self._append_event(archived, "warning", "Ejecución obsoleta archivada manualmente tras confirmar que Moonraker estaba inactivo.")
+        guard.begin_mutation(run_id=run['run_id'], revision=run['revision'])
         archive_path = self._write_archived_run(context, archived, suffix="stale")
+        guard.check()
         run_file = self._run_file(context)
         if run_file.exists():
             self.run_store.remove(run_file, run)
@@ -813,58 +858,49 @@ class JobService:
             "can_start_new_run": not self._run_file(context).exists(),
         }
 
-    def reset_runs_for_preparation(self, *, project_id: str, setup_id: str) -> dict[str, Any]:
-        """Archive current runs after proving that no physical owner is active."""
-        if not setup_id or setup_id in {".", ".."} or "/" in setup_id or "\\" in setup_id:
-            raise ApplicationError("Identificador de montaje inválido.")
-        self._assert_preparation_reset_safe()
-        self.repository.load_project(project_id).get_setup(setup_id)
-
-        archived_runs: list[dict[str, Any]] = []
-        with self._lock:
-            if any(thread.is_alive() for thread in self._threads.values()):
-                raise ApplicationError("No se puede reiniciar mientras el supervisor de una ejecución sigue activo.")
-            for context, run_file, run in self._current_runs_for_setup(project_id, setup_id):
-                previous_status = str(run.get("state") or "JOB_DRAFT")
-                archived = json.loads(json.dumps(run))
-                already_in_history = self._history_contains_run(context, str(run.get("run_id") or ""))
-                archive_path: Path | None = None
-                if not already_in_history:
-                    archived["previous_status"] = previous_status
-                    archived["archive_reason"] = "preparation_reset"
-                    archived["completed_at"] = archived.get("completed_at") or _iso_now()
-                    archived["updated_at"] = _iso_now()
-                    archived["available_actions"] = []
-                    archived["next_action"] = "Ejecución archivada por reinicio de preparación"
-                    if previous_status not in RUN_TERMINAL_STATES:
-                        archived["state"] = "PREPARATION_RESET_ARCHIVED"
-                        archived["recovery_state"] = "PREPARATION_RESET_ARCHIVED"
-                    self._append_event(
-                        archived,
-                        "warning",
-                        "Ejecución archivada porque el operador reinició la preparación con la máquina inactiva.",
-                    )
-                    self._prepare_history_snapshot(archived)
-                    archive_path = self._write_archived_run(context, archived, suffix="preparation-reset")
-                self.run_store.remove(run_file, run)
-                archived_runs.append(
-                    {
-                        "run_id": run.get("run_id"),
-                        "previous_status": previous_status,
-                        "archive_reason": "preparation_reset",
-                        "history_already_present": already_in_history,
-                        "archive_path": None if archive_path is None else self._relative_to_project(project_id, archive_path),
-                    }
-                )
-        return {
-            "reason": "preparation_reset",
-            "archived_runs": archived_runs,
-            "current_runs_cleared": len(archived_runs),
-            "can_start_new_run": not any(
-                run_file.exists()
-                for _context, run_file in self._setup_run_files(project_id, setup_id)
-            ),
-        }
+    def reset_runs_for_preparation(self, *, project_id: str, setup_id: str, reset_dependencies=None) -> dict[str, Any]:
+        """Keep current runs until all dependency callbacks succeed; never fake rollback."""
+        if not setup_id or setup_id in {'.', '..'} or '/' in setup_id or '\\' in setup_id:
+            raise ApplicationError('Identificador de montaje inválido.')
+        with self.administrative_mutation('reset-preparation', allow_started_runs=True) as guard:
+            self.repository.load_project(project_id).get_setup(setup_id)
+            entries = list(self._current_runs_for_setup(project_id, setup_id))
+            for _context, path, run in entries:
+                self._assert_administrative_print_identity(run, guard)
+                self.run_store.validate(path, run, allow_cancelled=True)
+            guard.begin_mutation(project_id=project_id, setup_id=setup_id,
+                                 runs=[{'run_id': r['run_id'], 'revision': r['revision']} for _, _, r in entries])
+            archived_runs = []
+            for context, path, run in entries:
+                guard.check()
+                archived = deepcopy(run)
+                archived.update(previous_status=run.get('state'), archive_reason='preparation_reset',
+                                completed_at=run.get('completed_at') or _iso_now(), updated_at=_iso_now(),
+                                available_actions=[], next_action='Ejecución archivada por reinicio de preparación')
+                if run.get('state') not in RUN_TERMINAL_STATES:
+                    archived.update(state='PREPARATION_RESET_ARCHIVED', recovery_state='PREPARATION_RESET_ARCHIVED')
+                self._append_event(archived, "warning", "El operador reinició la preparación; se conserva el historial de ejecución.")
+                self._prepare_history_snapshot(archived)
+                archive_path = self._write_archived_run(context, archived, suffix='preparation-reset')
+                archived_runs.append({'run_id': run['run_id'], 'previous_status': run.get('state'),
+                    'archive_reason': 'preparation_reset', 'history_already_present': False,
+                    'archive_path': self._relative_to_project(project_id, archive_path)})
+            dependency_result = reset_dependencies(guard) if reset_dependencies else None
+            guard.check()
+            # No removal until every callback and every expected revision passed.
+            current_paths = {str(path) for _, path, _ in self._current_runs_for_setup(project_id, setup_id)}
+            if current_paths != {str(path) for _, path, _ in entries}:
+                raise JobRunConflict('Cambió el conjunto de ejecuciones durante el reset.')
+            for _, path, run in entries:
+                self.run_store.validate(path, run, allow_cancelled=True)
+            for _, path, run in entries:
+                guard.check()
+                self.run_store.remove(path, run)
+            result = {'reason': 'preparation_reset', 'archived_runs': archived_runs,
+                      'current_runs_cleared': len(entries), 'can_start_new_run': True}
+            if dependency_result is not None:
+                result['dependency_result'] = dependency_result
+            return result
 
     def history(self, *, project_id: str, setup_id: str, face: str) -> list[dict[str, Any]]:
         history_dir = self._existing_run_file(self._context(project_id, setup_id, face)).parent / "history"
@@ -893,7 +929,9 @@ class JobService:
             )
         return items
 
+    @execution_write
     def run_action(self, *, project_id: str, setup_id: str, face: str, action: str) -> dict[str, Any]:
+        self.assert_administration_available()
         context = self._context(project_id, setup_id, face)
         run = self._load_run(context)
         if run is None:
@@ -2600,61 +2638,37 @@ class JobService:
                 return True
         return False
 
-    def _assert_preparation_reset_safe(self) -> None:
+    def _assert_preparation_reset_safe(self) -> dict[str, Any] | None:
+        if not self._archive_ownership_clear():
+            raise ApplicationError('No se puede reiniciar: ownership, productor, recuperación o movement_lock no están libres y observables.')
         snapshot = self.runtime.snapshot()
-        mode = str(snapshot.get("mode") or getattr(getattr(self.runtime, "config", None), "mode", "")).upper()
-        try:
-            moonraker = self.adapter_factory(self.runtime).print_status()
-        except Exception as error:
-            if mode == "PHYSICAL":
-                raise ApplicationError(
-                    f"No se pudo comprobar que Moonraker está inactivo; el reinicio fue rechazado: {error}"
-                ) from error
-            moonraker = {"connected": False, "state": None, "is_active": False, "live_velocity": None}
-
-        print_state = str(moonraker.get("state") or "").lower()
-        if print_state in {"printing", "paused"}:
-            raise ApplicationError("No se puede reiniciar el proceso mientras Moonraker mantiene una impresión activa o pausada.")
-        if bool(moonraker.get("is_active", moonraker.get("active"))):
-            raise ApplicationError("No se puede reiniciar el proceso mientras virtual_sdcard.is_active sea true.")
-        if mode == "PHYSICAL" and moonraker.get("connected") is False:
-            raise ApplicationError("No se pudo comprobar que Moonraker está inactivo; el reinicio fue rechazado.")
-
-        active_operation = snapshot.get("active_operation")
-        movement_lock = self._movement_lock_state()
-        if active_operation is not None or movement_lock is True or bool(snapshot.get("recovery_pending")):
-            raise ApplicationError("No se puede reiniciar el proceso mientras una operación física conserva el control de la máquina.")
-        runtime_state = str(snapshot.get("state") or "").upper()
-        if runtime_state in {"HOMING", "WAITING_SAFE_Z", "MOVING_TO_SAFE_Z", "MOVING_TO_CENTER", "PROBING_REFERENCE", "MESH_PROBING", "STOPPING"}:
-            raise ApplicationError(f"No se puede reiniciar el proceso durante el estado físico {runtime_state}.")
-
-        position = snapshot.get("klipper", {}).get("position") if isinstance(snapshot.get("klipper"), dict) else None
-        snapshot_velocity = position.get("velocity") if isinstance(position, dict) else None
-        observed_speeds = [
-            speed
-            for speed in (
-                self._observed_speed(moonraker.get("live_velocity")),
-                self._observed_speed(snapshot_velocity),
-            )
-            if speed is not None
-        ]
-        if mode == "PHYSICAL" and not observed_speeds:
-            raise ApplicationError("No se pudo comprobar que la máquina está detenida; falta una observación válida de velocidad.")
-        speed = max(observed_speeds, default=0.0)
-        tolerance = float(getattr(getattr(self.runtime, "config", None), "velocity_tolerance_mm_s", 0.02))
-        if speed > tolerance:
-            raise ApplicationError(f"No se puede reiniciar el proceso: se observa movimiento físico ({speed:.3f} mm/s).")
-
-        mesh_snapshot = None
-        mesh_snapshot_fn = getattr(self.mesh_execution_service, "active_execution_snapshot", None)
-        if callable(mesh_snapshot_fn):
-            mesh_snapshot = mesh_snapshot_fn()
-        if isinstance(mesh_snapshot, dict) and mesh_snapshot.get("active"):
-            raise ApplicationError("No se puede reiniciar el proceso mientras una operación física de malla sigue activa.")
-
+        if snapshot.get('recovery_pending') or snapshot.get('active_operation') is not None:
+            raise ApplicationError('Operación física o recuperación pendiente.')
+        if str(snapshot.get('state') or '').upper() in {'HOMING', 'WAITING_SAFE_Z', 'MOVING_TO_SAFE_Z', 'MOVING_TO_CENTER', 'PROBING_REFERENCE', 'MESH_PROBING', 'STOPPING'}:
+            raise ApplicationError('Estado físico transitorio; reinicio rechazado.')
         with self._lock:
             if any(thread.is_alive() for thread in self._threads.values()):
-                raise ApplicationError("No se puede reiniciar el proceso mientras el supervisor de una ejecución controla la máquina.")
+                raise ApplicationError('Supervisor activo; reinicio rechazado.')
+        if self.mesh_execution_service is not None and self.mesh_execution_service.active_execution_snapshot().get('active'):
+            raise ApplicationError('Worker de malla activo; reinicio rechazado.')
+        if str(snapshot.get('mode', '')).upper() == 'SIMULATED':
+            return
+        try:
+            remote = self.adapter_factory(self.runtime).print_status()
+        except Exception as error:
+            raise ApplicationError('No se pudo observar Moonraker; no se modifica la preparación.') from error
+        if not self._moonraker_is_idle({
+                'connected': remote.get('connected'), 'klipper_state': remote.get('klipper_state'),
+                'print_state': remote.get('state'),
+                'is_active': remote.get('is_active_observed')}):
+            raise ApplicationError('Se requiere Moonraker conectado, Klipper ready e is_active observado false; shutdown/estado desconocido bloquean.')
+        if not set('xyz').issubset(str(remote.get('homed_axes_observed') or '')):
+            raise ApplicationError('Falta homing XYZ observado; reset rechazado.')
+        speed = self._observed_speed(remote.get('live_velocity'))
+        tolerance = float(self.runtime.config.velocity_tolerance_mm_s)
+        if speed is None or not math.isfinite(speed) or speed > tolerance:
+            raise ApplicationError('Velocidad remota ausente, inválida o movimiento activo; reset rechazado.')
+        return remote
 
     def _observed_speed(self, value: Any) -> float | None:
         if isinstance(value, dict):
@@ -2668,9 +2682,10 @@ class JobService:
             try:
                 parsed = float(component)
             except (TypeError, ValueError):
-                continue
-            if math.isfinite(parsed):
-                numeric.append(parsed)
+                return None
+            if not math.isfinite(parsed):
+                return None
+            numeric.append(parsed)
         return math.sqrt(sum(component * component for component in numeric)) if numeric else None
 
     def _load_or_build_plan(self, context: JobContext) -> dict[str, Any]:
@@ -3049,18 +3064,24 @@ class JobService:
         if lock is None or not hasattr(lock, "locked"):
             return None
         try:
-            return bool(lock.locked())
+            state = lock.locked()
+            return state if isinstance(state, bool) else None
         except Exception:
             return None
 
     def _archive_ownership_clear(self) -> bool:
         # Absence of a supervisor is not proof that the workflow retired its
         # producer. Archiving must never orphan a retained physical lease.
-        owner = self.runtime.physical_ownership.snapshot()
-        return (owner.get("active") is False and owner.get("recovery_pending") is False
-                and owner.get("producer_active") is False
+        try:
+            owner = self.runtime.physical_ownership.snapshot()
+        except Exception:
+            return False
+        if not isinstance(owner, dict):
+            return False
+        return (owner.get("kind") == "IDLE" and owner.get("active") is False and owner.get("recovery_pending") is False
+                and owner.get("producer_active") is False and owner.get("job_updates", 0) == 0
                 and owner.get("children") == 0 and owner.get("dispatching") == 0
-                and self._movement_lock_state() is not True
+                and self._movement_lock_state() is False
                 and getattr(self.runtime, "_active_operation", None) is None)
 
     def _moonraker_is_idle(self, status: dict[str, Any]) -> bool:

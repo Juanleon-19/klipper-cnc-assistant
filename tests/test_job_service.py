@@ -136,10 +136,12 @@ class FakeAdapter:
             return {
                 "connected": True,
                 "klipper_state": "ready",
+                "homed_axes_observed": "xyz",
                 "state": state,
                 "filename": filename,
                 "progress": progress,
                 "is_active": bool(payload.get("is_active", state == "printing")),
+                "is_active_observed": payload.get("is_active", state == "printing"),
                 "file_position": payload.get("file_position", 49386),
                 "file_size": payload.get("file_size", 119710),
                 "print_duration": payload.get("print_duration", 0.0),
@@ -154,10 +156,12 @@ class FakeAdapter:
         return {
             "connected": True,
             "klipper_state": "ready",
+            "homed_axes_observed": "xyz",
             "state": state,
             "filename": self.current_filename,
             "progress": 1.0 if self.state == "complete" else 0.5,
             "is_active": state == "printing",
+            "is_active_observed": state == "printing",
             "file_position": 49386,
             "file_size": 119710,
             "print_duration": 0.0,
@@ -910,7 +914,7 @@ class JobServiceTest(unittest.TestCase):
         before = self.job_service._run_file(context).read_text(encoding="utf-8")
         self.adapter.status_sequence = [{"state": "printing", "filename": "active.gcode", "progress": 0.2, "is_active": True}]
 
-        with self.assertRaisesRegex(Exception, "Moonraker mantiene una impresión activa"):
+        with self.assertRaisesRegex(Exception, "Se requiere Moonraker"):
             self.job_service.reset_runs_for_preparation(project_id=self.project_id, setup_id=self.setup_id)
 
         self.assertEqual(self.job_service._run_file(context).read_text(encoding="utf-8"), before)
@@ -924,7 +928,7 @@ class JobServiceTest(unittest.TestCase):
         before = self.job_service._run_file(context).read_text(encoding="utf-8")
         self.adapter.status_sequence = [{"state": "standby", "filename": "active.gcode", "progress": 0.2, "is_active": True}]
 
-        with self.assertRaisesRegex(Exception, "virtual_sdcard.is_active"):
+        with self.assertRaisesRegex(Exception, "is_active observado false"):
             self.job_service.reset_runs_for_preparation(project_id=self.project_id, setup_id=self.setup_id)
 
         self.assertEqual(self.job_service._run_file(context).read_text(encoding="utf-8"), before)
@@ -938,7 +942,7 @@ class JobServiceTest(unittest.TestCase):
         before = self.job_service._run_file(context).read_text(encoding="utf-8")
         self.adapter.status_sequence = [{"state": "standby", "filename": "", "is_active": False, "live_velocity": None}]
 
-        with self.assertRaisesRegex(Exception, "falta una observación válida de velocidad"):
+        with self.assertRaisesRegex(Exception, "Velocidad remota ausente"):
             self.job_service.reset_runs_for_preparation(project_id=self.project_id, setup_id=self.setup_id)
 
         self.assertEqual(self.job_service._run_file(context).read_text(encoding="utf-8"), before)
@@ -950,13 +954,13 @@ class JobServiceTest(unittest.TestCase):
         before = self.job_service._run_file(context).read_text(encoding="utf-8")
         self.adapter.status_sequence = [{"state": "standby", "filename": "", "is_active": False, "live_velocity": [0.0, 0.0, 0.5]}]
 
-        with self.assertRaisesRegex(Exception, "movimiento físico"):
+        with self.assertRaisesRegex(Exception, "movimiento activo"):
             self.job_service.reset_runs_for_preparation(project_id=self.project_id, setup_id=self.setup_id)
 
         self.assertEqual(self.job_service._run_file(context).read_text(encoding="utf-8"), before)
         self.runtime.snapshot_payload["active_operation"] = {"operation_type": "probe"}
         self.adapter.status_sequence = [{"state": "standby", "filename": "", "is_active": False, "live_velocity": [0.0, 0.0, 0.0]}]
-        with self.assertRaisesRegex(Exception, "operación física"):
+        with self.assertRaisesRegex(Exception, "Operación física"):
             self.job_service.reset_runs_for_preparation(project_id=self.project_id, setup_id=self.setup_id)
         self.assertEqual(self.job_service._run_file(context).read_text(encoding="utf-8"), before)
 
@@ -1358,7 +1362,7 @@ class JobServiceTest(unittest.TestCase):
         self.job_service._save_run(context, run)
         self.adapter.status_sequence = [{"state": "printing", "filename": "active.gcode", "progress": 0.42, "is_active": True}]
 
-        with self.assertRaisesRegex(Exception, "No se puede archivar la ejecución obsoleta"):
+        with self.assertRaisesRegex(Exception, "Se requiere Moonraker"):
             self.job_service.archive_stale_run(project_id=self.project_id, setup_id=self.setup_id, face="superior")
 
         self.assertTrue(self.job_service._run_file(context).exists())
@@ -1420,7 +1424,8 @@ class JobServiceTest(unittest.TestCase):
         self.assertEqual(self.adapter.started, [])
 
     def test_archive_remote_unknown_shutdown_or_missing_evidence_is_not_idle(self):
-        good = {"connected": True, "klipper_state": "ready", "print_state": "complete", "is_active": False}
+        good = {"connected": True, "klipper_state": "ready",
+                "homed_axes_observed": "xyz", "print_state": "complete", "is_active": False}
         self.assertTrue(self.job_service._moonraker_is_idle(good))
         for delta in ({"connected": False}, {"klipper_state": "shutdown"},
                       {"print_state": None}, {"is_active": None}, {"print_state": "paused"}):

@@ -1,4 +1,5 @@
 """Explicit test doubles: never acquire the host lock or contact hardware."""
+import threading
 from klipper_cnc_assistant.machine.physical_ownership import PhysicalMachineCoordinator
 
 
@@ -20,6 +21,8 @@ class FakePhysicalAccess:
 class FakeWorkflowOwnership:
     def init_ownership(self):
         self.physical_ownership = PhysicalMachineCoordinator()
+        self._movement_lock = threading.Lock()
+        self._active_operation = None
         self.reference_serial_generation = 1
 
     def current_physical_session_id(self):
