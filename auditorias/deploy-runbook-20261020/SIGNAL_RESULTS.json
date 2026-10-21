@@ -1,0 +1,62 @@
+[
+  {
+    "version": "old",
+    "case": "idle",
+    "returncode": -15,
+    "exit_s": 0.215,
+    "callback_failed": true,
+    "manager_closed": false,
+    "http_closed": false,
+    "data_unchanged": true,
+    "pre_lifespan_wait_observed": false,
+    "outbound_network": "DENIED"
+  },
+  {
+    "version": "old",
+    "case": "http",
+    "returncode": -15,
+    "exit_s": 0.515,
+    "callback_failed": true,
+    "manager_closed": false,
+    "http_closed": false,
+    "data_unchanged": true,
+    "pre_lifespan_wait_observed": true,
+    "outbound_network": "DENIED"
+  },
+  {
+    "version": "approved",
+    "case": "idle",
+    "returncode": -15,
+    "exit_s": 0.265,
+    "callback_failed": false,
+    "manager_closed": true,
+    "http_closed": true,
+    "data_unchanged": true,
+    "pre_lifespan_wait_observed": false,
+    "outbound_network": "DENIED"
+  },
+  {
+    "version": "approved",
+    "case": "http",
+    "returncode": -15,
+    "exit_s": 0.515,
+    "callback_failed": false,
+    "manager_closed": true,
+    "http_closed": true,
+    "data_unchanged": true,
+    "pre_lifespan_wait_observed": true,
+    "outbound_network": "DENIED"
+  },
+  {
+    "version": "approved",
+    "case": "stuck",
+    "returncode": -15,
+    "exit_s": 0.265,
+    "callback_failed": true,
+    "manager_closed": false,
+    "http_closed": false,
+    "data_unchanged": true,
+    "pre_lifespan_wait_observed": false,
+    "outbound_network": "DENIED"
+  }
+]
