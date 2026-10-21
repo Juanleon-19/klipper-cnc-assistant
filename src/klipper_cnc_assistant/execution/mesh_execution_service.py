@@ -83,6 +83,14 @@ class MeshExecutionService:
         self._physical_leases = {}
         self._pause_requests = set()
         self._retry_targets = {}
+        self._shutdown = threading.Event()
+
+    def request_application_shutdown(self):
+        self._shutdown.set()
+
+    def application_workers(self):
+        with self._lock:
+            return tuple(self._threads.values()) + tuple(p.thread for p in self._probe_threads.values())
 
     def start_all(self, *, project_id: str, map_id: str, runtime: Any) -> dict[str, Any]:
         return self._start(project_id=project_id, map_id=map_id, runtime=runtime, point_budget=None)
@@ -101,6 +109,8 @@ class MeshExecutionService:
                            point_budget=None, retry_indices=indices)
 
     def _start(self, *, project_id: str, map_id: str, runtime: Any, point_budget: int | None, retry_indices=None) -> dict[str, Any]:
+        if self._shutdown.is_set():
+            raise ApplicationError("Application shutdown; mesh start forbidden.")
         guard = self.motion_ownership_snapshot(runtime=runtime, project_id=project_id, map_id=map_id)
         if not guard["can_start_motion"]:
             raise ApplicationError(str(guard["reason"]))
@@ -422,7 +432,7 @@ class MeshExecutionService:
             if key not in self._physical_leases:
                 self._physical_leases[key] = runtime.physical_ownership.acquire(OwnerKind.MESH, f"{project_id}/{map_id}")
         try:
-            while True:
+            while not self._shutdown.is_set():
                 with self._lock:
                     cancel_requested = self._cancel_requests.get(key)
                 if cancel_requested is not None and cancel_requested.is_set():

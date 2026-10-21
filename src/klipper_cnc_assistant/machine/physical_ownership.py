@@ -30,6 +30,7 @@ class PhysicalPermit:
 class PhysicalMachineCoordinator:
     def __init__(self, *, uncertain: bool = False):
         self._lock = RLock()
+        self._shutdown = False
         self._session = uuid4().hex
         self._root: PhysicalPermit | None = None
         self._permits: dict[str, PhysicalPermit] = {}
@@ -46,6 +47,20 @@ class PhysicalMachineCoordinator:
         self._administrative_closed_revision = None
         self._reason = 'Estado remoto no reconciliado.' if uncertain else None
 
+    def begin_shutdown(self):
+        """Terminal emission fence, not proof of physical idle or lease release."""
+        with self._lock:
+            if not self._shutdown:
+                self._shutdown = True
+                self._revision += 1
+                self._recovery = True
+                self._reason = 'Application shutdown; physical state requires recovery.'
+
+    def require_running(self):
+        with self._lock:
+            if self._shutdown:
+                raise OwnershipError('Application shutdown; new operations are forbidden.')
+
     @property
     def session(self):
         with self._lock:
@@ -56,6 +71,7 @@ class PhysicalMachineCoordinator:
         if kind in {OwnerKind.IDLE, OwnerKind.RECOVERY, OwnerKind.ADMINISTRATIVE} or not owner_id:
             raise OwnershipError('Owner inválido.')
         with self._lock:
+            self.require_running()
             project = str(owner_id).split('/')[0] if kind in {OwnerKind.JOB_EXECUTION, OwnerKind.MESH} and '/' in str(owner_id) else None
             if self._project_edits and (project is None or project in self._project_edits.values()):
                 raise OwnershipError('El proyecto tiene una escritura administrativa en curso.')
@@ -75,7 +91,7 @@ class PhysicalMachineCoordinator:
     def _validate(self, permit, *, allow_blocked=False):
         if not isinstance(permit, PhysicalPermit) or permit.session != self._session or self._permits.get(permit.token) != permit or self._root is None or permit.root != self._root.root:
             raise OwnershipError('Lease físico inválido o de sesión anterior.')
-        if not allow_blocked and (self._recovery or self._cancelled or not self._producer_active):
+        if not allow_blocked and (self._shutdown or self._recovery or self._cancelled or not self._producer_active):
             raise OwnershipError('Ownership cancelado o en recuperación; emisión bloqueada.')
 
     def validate(self, permit):
@@ -188,7 +204,7 @@ class PhysicalMachineCoordinator:
     def reconcile_quiescent(self, *, expected_session, quiescent, expected_revision=None):
         """Caller must obtain fresh remote idle evidence AND stop local producers."""
         with self._lock:
-            if self._administrative_incomplete or self._administrative is not None or not quiescent or expected_session != self._session or (expected_revision is not None and expected_revision != self._revision) or self._producer_active or self._dispatching or (self._root and len(self._permits) > 1):
+            if self._shutdown or self._administrative_incomplete or self._administrative is not None or not quiescent or expected_session != self._session or (expected_revision is not None and expected_revision != self._revision) or self._producer_active or self._dispatching or (self._root and len(self._permits) > 1):
                 raise OwnershipError('Quiescencia no demostrada o productores aún activos.')
             self._permits.clear()
             self._root = None
@@ -201,7 +217,7 @@ class PhysicalMachineCoordinator:
     def begin_job_update(self, *, project_id=None):
         """Exclude administrative mutation while an execution request is writing."""
         with self._lock:
-            if (self._administrative is not None or self._administrative_incomplete
+            if (self._shutdown or self._administrative is not None or self._administrative_incomplete
                     or (self._project_edits and (project_id is None or project_id in self._project_edits.values()))):
                 raise OwnershipError('Administración activa o incompleta; ejecución bloqueada.')
             token = uuid4().hex
@@ -215,7 +231,7 @@ class PhysicalMachineCoordinator:
     def begin_project_edit(self, project_id):
         """Scope software writes without changing physical epoch/revision/recovery."""
         with self._lock:
-            if (not project_id or self._administrative is not None or self._administrative_incomplete
+            if (self._shutdown or not project_id or self._administrative is not None or self._administrative_incomplete
                     or project_id in self._project_edits.values()
                     or any(p is None or p == project_id for p in self._job_updates.values())):
                 raise OwnershipError('Proyecto ocupado por administración o ejecución.')
@@ -241,7 +257,7 @@ class PhysicalMachineCoordinator:
     def begin_administration(self, *, expected_revision):
         """Reserve exclusivity without creating a movement permit. No IO here."""
         with self._lock:
-            if (expected_revision != self._revision or self._root is not None
+            if (self._shutdown or expected_revision != self._revision or self._root is not None
                     or self._recovery or self._administrative is not None
                     or self._producer_active or self._dispatching or self._permits or self._job_updates or self._project_edits):
                 raise OwnershipError('Administración bloqueada: ownership cambió o no está libre.')
@@ -279,7 +295,7 @@ class PhysicalMachineCoordinator:
     def snapshot(self):
         with self._lock:
             kind = OwnerKind.RECOVERY if self._recovery else (self._root.owner_kind if self._root else (OwnerKind.ADMINISTRATIVE if self._administrative is not None else OwnerKind.IDLE))
-            return {'kind': kind.value, 'owner_id': None if self._root is None else self._root.owner_id,
-                    'job_updates': len(self._job_updates), 'active': kind != OwnerKind.IDLE, 'administrative_active': self._administrative is not None, 'recovery_pending': self._recovery,
+            return {'shutdown': self._shutdown, 'kind': kind.value, 'owner_id': None if self._root is None else self._root.owner_id,
+                    'project_edits': len(self._project_edits), 'job_updates': len(self._job_updates), 'active': kind != OwnerKind.IDLE, 'administrative_active': self._administrative is not None, 'recovery_pending': self._recovery,
                     'cancel_requested': self._cancelled, 'reason': self._reason,
                     'session': self._session, 'revision': self._revision, 'producer_active': self._producer_active, 'dispatching': len(self._dispatching), 'children': max(0, len(self._permits) - 1)}

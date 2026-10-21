@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import hashlib
 import math
 import threading
@@ -305,6 +306,7 @@ class JobService:
         self.mesh_execution_service = mesh_execution_service
         self._lock = threading.RLock()
         self._threads: dict[tuple[str, str, str], threading.Thread] = {}
+        self._shutdown = threading.Event()
         self._physical_leases = {}
         self._standby_observations = {}
         self._plan_cache = OrderedDict()
@@ -314,6 +316,14 @@ class JobService:
         self.administrative_pending_path = self.repository.projects_dir.parent / 'administrative-reset.pending.json'
         if self.administrative_pending_path.exists():
             self.runtime.physical_ownership.administration_failed('Journal administrativo pendiente; no se reanuda automáticamente.')
+
+    def request_application_shutdown(self):
+        # No cancel_print and no JobRun cancellation/archival.
+        self._shutdown.set()
+
+    def application_workers(self):
+        with self._lock:
+            return tuple(self._threads.values())
 
     def assert_administration_available(self):
         if (self.administrative_pending_path.exists()
@@ -1416,9 +1426,13 @@ class JobService:
         self._save_run(context, run)
 
     def _start_worker(self, context: JobContext) -> None:
+        if self._shutdown.is_set():
+            raise ApplicationError("Application shutdown; worker start forbidden.")
         self._job_permit(context)
         key = (context.project_id, context.setup_id, context.face)
         with self._lock:
+            if self._shutdown.is_set():
+                raise ApplicationError("Application shutdown; worker start forbidden.")
             thread = self._threads.get(key)
             if thread is not None and thread.is_alive():
                 return
@@ -1436,7 +1450,7 @@ class JobService:
         permit = self._physical_leases.get(key)
         try:
             try:
-                while True:
+                while not self._shutdown.is_set():
                     run = self._load_run(context)
                     if run is None or run.get("run_id") != run_id or run.get("state") in RUN_TERMINAL_STATES | RUN_WAITING_STATES:
                         return
@@ -1457,6 +1471,9 @@ class JobService:
             except JobRunConflict:
                 return
             except Exception as error:
+                if self._shutdown.is_set():
+                    logging.getLogger(__name__).warning("JOB supervisor stopped during shutdown: %s", error, exc_info=True)
+                    return
                 self.runtime.physical_ownership.enter_recovery("Fallo del supervisor JOB; estado físico incierto.")
                 current = run
                 if current is not None and current.get('run_id') == run_id:
@@ -1473,7 +1490,7 @@ class JobService:
                         pass
         finally:
             current = self._load_run(context)
-            if current is None or (current.get('run_id') == run_id and current.get('state') in RUN_TERMINAL_STATES):
+            if not self._shutdown.is_set() and (current is None or (current.get('run_id') == run_id and current.get('state') in RUN_TERMINAL_STATES)):
                 if (permit is not None and current is not None and current.get('state') == 'JOB_COMPLETE'
                         and self.runtime.complete_physical_workflow(permit)):
                     self._physical_leases.pop(key, None)
@@ -1685,7 +1702,7 @@ class JobService:
     def _watch_operation(self, context: JobContext, run: dict[str, Any]) -> None:
         adapter = self.adapter_factory(self.runtime)
         operation = run["operations"][int(run["current_operation_index"])]
-        while True:
+        while not self._shutdown.is_set():
             current = self._load_run(context)
             if (current is None or current.get('run_id') != run['run_id']
                     or current.get('current_operation_id') != run.get('current_operation_id')):
@@ -1695,13 +1712,18 @@ class JobService:
             operation = current["operations"][int(current["current_operation_index"])]
             try:
                 status = adapter.print_status()
+                if self._shutdown.is_set():
+                    return
                 if self._reconcile_standby(context, current, status):
                     if current.get("state") == "RECOVERY_REQUIRED":
                         return
-                    time.sleep(0.5)
+                    self._shutdown.wait(0.5)
                     continue
                 PrintIdentity(operation.get('remote_file')).require_match(status)
             except Exception as error:
+                if self._shutdown.is_set():
+                    logging.getLogger(__name__).warning("JOB observation interrupted by shutdown: %s", error, exc_info=True)
+                    return
                 self._identity_failure(context, current, error)
                 return
             transition = False
@@ -1771,7 +1793,7 @@ class JobService:
                 self.run_store.observe(self._run_file(context), current, {},
                     operation_id=operation['operation_id'],
                     operation_fields={key: operation.get(key) for key in JobRunStore.OPERATION_OBSERVATIONS})
-            time.sleep(0.5)
+            self._shutdown.wait(0.5)
 
     def _retry_tool_change_transition(self, context: JobContext, run: dict[str, Any]) -> None:
         current_index = int(run.get("current_operation_index", 0) or 0)

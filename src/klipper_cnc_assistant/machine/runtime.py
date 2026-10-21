@@ -521,6 +521,7 @@ class MachineRuntime:
         )
 
     def start(self) -> None:
+        self.physical_ownership.require_running()
         with self._lock:
             if self.config.mode is MachineMode.SIMULATED:
                 self._state = MachineRuntimeState.READY_FOR_HOME
@@ -530,11 +531,38 @@ class MachineRuntime:
         if self.config.auto_connect:
             self.connect()
 
+    def request_application_shutdown(self):
+        """Stop local production only; never send cancel or claim remote idle."""
+        self.physical_ownership.begin_shutdown()
+        with self._lock:
+            self._manual_enabled = False
+            self._diagnostic_input_only = True
+            self._ready_for_jog = False
+            self._state = MachineRuntimeState.STOPPING
+            if self._active_operation is not None:
+                self._active_operation.cancel_event.set()
+
+    def application_producers_idle(self):
+        # A connect/disconnect already in progress can still publish transports.
+        # Inspect its lock without waiting or holding it across cleanup IO.
+        if not self._lifecycle_lock.acquire(blocking=False):
+            return False
+        try:
+            with self._lock:
+                owner = self.physical_ownership.snapshot()
+                return (self._active_operation is None and not self._movement_lock.locked()
+                        and not owner['dispatching'] and not owner['children']
+                        and not owner['job_updates'] and not owner['project_edits'] and not owner['administrative_active']
+                        and not (self._manual_thread and self._manual_thread.is_alive()))
+        finally:
+            self._lifecycle_lock.release()
+
     def stop(self) -> None:
         with self._lifecycle_lock:
             self._stop_locked()
 
     def _stop_locked(self, *, administrative_token=None) -> None:
+        self.physical_ownership.require_running()
         if self.physical_ownership.snapshot().get("administrative_active"):
             self.physical_ownership.validate_administration(administrative_token)
         owner = self.physical_ownership.snapshot()
@@ -751,6 +779,7 @@ class MachineRuntime:
             return self._connect_locked()
 
     def _connect_locked(self) -> dict[str, Any]:
+        self.physical_ownership.require_running()
         telemetry_thread: threading.Thread | None = None
         with self._lock:
             if self.config.mode is MachineMode.SIMULATED:
@@ -1728,6 +1757,7 @@ class MachineRuntime:
         return context.permit
 
     def require_physical_access(self):
+        self.physical_ownership.require_running()
         self._process_lock.require_held()
 
     def _motion_authorizer(self):

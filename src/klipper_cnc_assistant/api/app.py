@@ -8,6 +8,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
 
+from klipper_cnc_assistant.application.shutdown import ApplicationShutdown
 from klipper_cnc_assistant import __version__
 from klipper_cnc_assistant.application import (
     ApplicationError,
@@ -84,6 +85,19 @@ def create_app(
             "diagnostico y sesion de maquina fisica o simulada."
         ),
     )
+    shutdown = ApplicationShutdown(machine_runtime, (job_service, mesh_execution_service))
+    app.state.application_shutdown = shutdown
+
+    @app.middleware("http")
+    async def reject_during_shutdown(request, call_next):
+        if shutdown.started:
+            return JSONResponse(status_code=503, content={"detail": "Application shutting down"})
+        shutdown.active_requests += 1
+        try:
+            return await call_next(request)
+        finally:
+            shutdown.active_requests -= 1
+
     app.state.project_service = project_service
     app.state.height_map_service = height_map_service
     app.state.physical_map_service = physical_map_service
@@ -106,7 +120,7 @@ def create_app(
 
     @app.on_event("shutdown")
     async def stop_machine_runtime() -> None:
-        machine_runtime.stop()
+        await shutdown.close()
 
     from klipper_cnc_assistant.storage.safe_persistence import PersistenceConflict
     app.add_exception_handler(PersistenceConflict, lambda request, exc: JSONResponse(status_code=409, content={"detalle": str(exc)}))
