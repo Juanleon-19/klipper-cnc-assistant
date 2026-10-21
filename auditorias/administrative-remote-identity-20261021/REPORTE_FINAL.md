@@ -127,25 +127,19 @@ PRODUCTIVE_JOB_MODIFIED_BY_THIS_TASK = NO
 PHYSICAL_COMMANDS = NO
 SERVICES_RESTARTED = NO
 DEPLOY = NO
-PHYSICAL_- Regresión sobre implementación base: fallo original reproducido (esperado).
-- Regresiones nuevas: 11/11 PASS.
-- Focalizados (nuevos + exclusión administrativa + administración offline + API): 45/45 PASS.
-- API E2E simulados: 4/4 PASS, incluidos en los focalizados.
-- Backend completo: 811/811 PASS (360.383 s).
-- Frontend/lint/build: NOT_RUN; no se modificó frontend ni contrato HTTP.
-- Diff check: PASS.
-- JobRun productivo: hash idéntico al baseline privado previo al despliegue.
-
-Comandos (todos con MACHINE_MODE=simulated, MACHINE_AUTO_CONNECT=false,
-PYTHONDONTWRITEBYTECODE=1, PYTHONPATH=src:., PYTHONWARNINGS=ignore):
-
-```bash
-python -m unittest tests.test_administrative_remote_identity -q
-python -m unittest tests.test_administrative_remote_identity tests.test_administrative_exclusion tests.test_offline_administration tests.test_final_workflow_api -q
-python -m unittest discover -s tests -q
-git diff --check
-``` = YES
+PHYSICAL_VALIDATION_PENDING = YES
 
 SOFTWARE_VALIDATED = YES
 READY_FOR_EXTERNAL_AUDIT = YES
 El HEAD final se obtiene con `git rev-parse HEAD` en esta rama; no se publica.
+
+## Revisión focalizada previa a integración
+
+Revisado el diff completo contra cece955: no se encontró debilitamiento de
+ownership, guard administrativo, homing/velocidad, frescura, CAS o journal.
+Repetición de 45 tests focalizados (incluidos 11 nuevos y 4 API E2E): PASS.
+Se reutiliza el resultado reciente 811/811 del mismo código backend.
+Corregida únicamente una duplicación editorial de este informe; sin cambio de
+implementación. Integración/despliegue posteriores autorizados por el operador,
+condicionados a los gates de mantenimiento. No implica autorización de reset
+sobre el trabajo productivo ni aprobación de pruebas físicas.
