@@ -354,15 +354,50 @@ class JobService:
     def _assert_administrative_print_identity(self, run, guard):
         if guard.remote is None:
             return
+        guard.check()
+        remote = guard.remote
+        attempt = run.get('start_attempt') or {}
+        if attempt.get('status') in {'sending', 'dispatching', 'uncertain'}:
+            raise ApplicationError('Intento de inicio ambiguo; se conserva la ejecución. Verifique el archivo remoto y resuelva la recuperación antes de archivar o reiniciar.')
+        try:
+            PrintIdentity.require_status(remote)
+        except PrintIdentityError as error:
+            raise ApplicationError('Identidad remota no verificable: Moonraker no confirma conexión y Klipper ready. Se conserva la ejecución; revise la conexión y la recuperación antes de reintentar.') from error
         operation = self.run_store._operation(run)
         expected = operation.get('remote_file')
-        if expected:
-            try:
-                PrintIdentity(expected).require_match(guard.remote)
-            except PrintIdentityError as error:
-                raise ApplicationError('Identidad remota diferente; se conserva la ejecución.') from error
-        if (run.get('start_attempt') or {}).get('status') in {'sending', 'dispatching', 'uncertain'}:
-            raise ApplicationError('Intento de start ambiguo; no se permite reset administrativo.')
+        if not expected:
+            return
+        try:
+            identity = PrintIdentity(expected)
+        except PrintIdentityError as error:
+            raise ApplicationError('Identidad guardada inválida; se conserva la ejecución. Revise el histórico antes de reiniciar.') from error
+        observed = remote.get('filename')
+        if observed == '':
+            # An explicitly empty standby is not a different file. Only retire
+            # completed execution evidence; never infer completion from standby.
+            completed = (
+                run.get('state') in {'SPINDLE_STOP_REQUIRED', 'JOB_COMPLETE'}
+                and operation.get('execution_status') == 'COMPLETED'
+                and operation.get('observed_printing') is True
+                and bool(operation.get('finished_at'))
+                and operation.get('moonraker_filename') == identity.filename
+                and attempt.get('status') == 'sent'
+                and attempt.get('may_have_been_sent') is True
+                and attempt.get('operation_id') == operation.get('operation_id')
+                and attempt.get('remote_file') == identity.filename
+            )
+            if (remote.get('state') == 'standby'
+                    and remote.get('is_active_observed') is False and completed):
+                # The existing administrative reservation, idle/homing/velocity
+                # checks and CAS remain mandatory. No physical identity changes.
+                return
+            raise ApplicationError('Moonraker no tiene un archivo seleccionado. No hay evidencia suficiente para archivar esta ejecución con seguridad; se conserva el trabajo. Revise su finalización y la recuperación, sin volver a iniciarlo.')
+        try:
+            PrintIdentity(observed)
+        except PrintIdentityError as error:
+            raise ApplicationError('Moonraker no devuelve un nombre de archivo válido; identidad no verificable. Se conserva la ejecución. Revise la conexión antes de reintentar.') from error
+        if observed != identity.filename:
+            raise ApplicationError('Moonraker informa un archivo distinto al de la ejecución guardada. Se conserva el trabajo; revise qué archivo se ejecutó y complete la recuperación antes de archivar o reiniciar.')
 
     def _assert_no_started_runs(self):
         for path in self.repository.projects_dir.glob('*/reports/jobs/*/*/current_run.json'):
