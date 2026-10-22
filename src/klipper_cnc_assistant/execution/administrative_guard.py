@@ -21,11 +21,10 @@ class AdministrativeGuard:
         self.disconnected = False
         self.remote = remote
         self.observed_at = observed_at
+        self._validate_remote_identity = None
 
     def check(self):
         runtime = self.service.runtime
-        if self.remote is not None and time.monotonic() - self.observed_at > float(getattr(runtime.config, 'telemetry_fresh_timeout_s', 2.0)):
-            raise ApplicationError('La observación administrativa expiró; no se continúa con evidencia antigua.')
         try:
             runtime.physical_ownership.validate_administration(self.token, disconnected=self.disconnected)
         except OwnershipError as error:
@@ -35,7 +34,25 @@ class AdministrativeGuard:
         if self.service._movement_lock_state() is not False or getattr(runtime, '_active_operation', None) is not None:
             raise ApplicationError('No se puede verificar movement_lock libre durante administración.')
 
-    def begin_mutation(self, **evidence):
+    def observe_before_commit(self):
+        """Acquire evidence at mutation boundaries, never rejuvenate a cache.
+
+        The reservation excludes local producers throughout IO. No bookkeeping
+        mutex spans HTTP. After the authorized disconnect, finish only local
+        persistence under the reservation; never reconnect hardware for cleanup.
+        """
+        self.check()
+        if not self.disconnected:
+            self.remote = self.service._observe_administrative_remote()
+            self.observed_at = time.monotonic()
+            self.check()
+            if self._validate_remote_identity is not None:
+                self._validate_remote_identity()
+        self.check()
+
+    def begin_mutation(self, *, validate_remote_identity=None, **evidence):
+        self._validate_remote_identity = validate_remote_identity
+        self.observe_before_commit()
         self.check()
         if not self.dirty:
             atomic_json(self.service.administrative_pending_path, {
@@ -43,7 +60,7 @@ class AdministrativeGuard:
                 'status': 'PENDING', 'evidence': evidence,
             }, durable=True)
             self.dirty = True
-        self.check()
+        self.observe_before_commit()
 
 
 @contextmanager
@@ -53,8 +70,8 @@ def administrative_mutation(service, action, *, allow_started_runs=False):
     coordinator = runtime.physical_ownership
     owner = coordinator.snapshot()
     session = runtime.current_physical_session_id()
-    observed_at = time.monotonic()
     remote = service._assert_preparation_reset_safe()
+    observed_at = time.monotonic()
     if not allow_started_runs:
         service._assert_no_started_runs()
     try:

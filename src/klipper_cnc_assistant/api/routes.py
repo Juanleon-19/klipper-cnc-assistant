@@ -147,6 +147,8 @@ def _administrative_route(function=None, *, persistent=False, independent=False)
                 project = guard.service.repository.load_project(kwargs['project_id'])
                 project.get_setup(kwargs['setup_id'])
                 guard.begin_mutation(project_id=kwargs['project_id'], setup_id=kwargs['setup_id'])
+            elif not independent:
+                guard.observe_before_commit()
 
         if inspect.iscoroutinefunction(handler):
             @wraps(handler)
@@ -295,6 +297,7 @@ def build_router() -> APIRouter:
                 result["machine_session"] = machine_session_to_response(machine_session_service.reset_session()).model_dump()
             guard.check()
             runtime = request.app.state.machine_runtime
+            guard.observe_before_commit()
             result["runtime"] = runtime.reset_physical_session(administrative_token=guard.token)
             guard.disconnected = True
             return result

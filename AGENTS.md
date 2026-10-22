@@ -8,6 +8,7 @@ Antes de modificar el repositorio, leer en este orden:
 2. `README.md`
 3. `PLAN.md`, si existe
 4. `docs/architecture.md`
+5. `docs/functional-continuity.md`
 
 ## Politica de ramas
 

@@ -171,9 +171,11 @@ class AdministrativeResetTest(unittest.TestCase):
             service.assert_administration_available()
         self.assertTrue(self.path.exists())
 
-    def test_expired_remote_observation_never_mutates(self):
+    def test_unrefreshable_remote_observation_never_mutates(self):
         before = self.path.read_bytes()
-        with patch('klipper_cnc_assistant.execution.administrative_guard.time.monotonic', side_effect=[100., 110.]):
+        valid = self.fixture.adapter.print_status()
+        with patch.object(self.fixture.adapter, 'print_status',
+                          side_effect=[valid, OSError('fresh query failed')]):
             with self.assertRaises(ApplicationError):
                 self.reset()
         self.assertEqual(before, self.path.read_bytes())

@@ -906,9 +906,10 @@ class JobService:
         archived["next_action"] = "Ejecución obsoleta archivada"
         archived["moonraker_snapshot"] = moonraker
         self._append_event(archived, "warning", "Ejecución obsoleta archivada manualmente tras confirmar que Moonraker estaba inactivo.")
-        guard.begin_mutation(run_id=run['run_id'], revision=run['revision'])
+        guard.begin_mutation(validate_remote_identity=lambda: self._assert_administrative_print_identity(run, guard),
+                             run_id=run['run_id'], revision=run['revision'])
         archive_path = self._write_archived_run(context, archived, suffix="stale")
-        guard.check()
+        guard.observe_before_commit()
         run_file = self._run_file(context)
         if run_file.exists():
             self.run_store.remove(run_file, run)
@@ -931,7 +932,9 @@ class JobService:
             for _context, path, run in entries:
                 self._assert_administrative_print_identity(run, guard)
                 self.run_store.validate(path, run, allow_cancelled=True)
-            guard.begin_mutation(project_id=project_id, setup_id=setup_id,
+            guard.begin_mutation(
+                validate_remote_identity=lambda: [self._assert_administrative_print_identity(r, guard) for _, _, r in entries],
+                project_id=project_id, setup_id=setup_id,
                                  runs=[{'run_id': r['run_id'], 'revision': r['revision']} for _, _, r in entries])
             archived_runs = []
             for context, path, run in entries:
@@ -948,8 +951,9 @@ class JobService:
                 archived_runs.append({'run_id': run['run_id'], 'previous_status': run.get('state'),
                     'archive_reason': 'preparation_reset', 'history_already_present': False,
                     'archive_path': self._relative_to_project(project_id, archive_path)})
+            guard.observe_before_commit()
             dependency_result = reset_dependencies(guard) if reset_dependencies else None
-            guard.check()
+            guard.observe_before_commit()
             # No removal until every callback and every expected revision passed.
             current_paths = {str(path) for _, path, _ in self._current_runs_for_setup(project_id, setup_id)}
             if current_paths != {str(path) for _, path, _ in entries}:
@@ -2726,8 +2730,12 @@ class JobService:
                 raise ApplicationError('Supervisor activo; reinicio rechazado.')
         if self.mesh_execution_service is not None and self.mesh_execution_service.active_execution_snapshot().get('active'):
             raise ApplicationError('Worker de malla activo; reinicio rechazado.')
-        if str(snapshot.get('mode', '')).upper() == 'SIMULATED':
-            return
+        return self._observe_administrative_remote()
+
+    def _observe_administrative_remote(self) -> dict[str, Any] | None:
+        # No motion permit or bookkeeping mutex across HTTP.
+        if str(self.runtime.snapshot().get('mode', '')).upper() == 'SIMULATED':
+            return None
         try:
             remote = self.adapter_factory(self.runtime).print_status()
         except Exception as error:
