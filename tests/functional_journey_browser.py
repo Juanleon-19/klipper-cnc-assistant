@@ -22,6 +22,7 @@ DRIVER = 'http://127.0.0.1:18918'
 fixture = FunctionalJourneyTest()
 server = driver = session = None
 responses = []
+reject_preparation_once = False
 
 
 def wait(fn, timeout=45):
@@ -61,6 +62,7 @@ def field(label, value):
 
 
 def ui_post(path, payload=None):
+    global reject_preparation_once
     index = len(responses)
     if path.endswith('/connect'):
         wait(lambda: click('Referencia'))
@@ -78,6 +80,13 @@ def ui_post(path, payload=None):
     elif path.endswith('/home'):
         wait(lambda: click('Realizar homing XYZ'))
     elif path.endswith('/prepare-position'):
+        # A real HTTP rejection must reach the local step, not only App's banner.
+        wait(lambda: 'La posición cacheada está obsoleta' in js('return document.body.innerText'))
+        reject_preparation_once = True
+        wait(lambda: click('Ir a posición de preparación'))
+        wait(lambda: any(r['path'] == path and r['status'] == 400 for r in responses[index:]))
+        wait(lambda: js('const b=[...document.querySelectorAll("button")].find(e=>e.textContent.trim()==="Ir a posición de preparación"); return b?.closest("article")?.textContent.includes("Observación simulada rechazada");'))
+        index = len(responses)
         wait(lambda: click('Ir a posición de preparación'))
     elif path.endswith('/manual-control'):
         wait(lambda: click('Habilitar joystick X/Y'))
@@ -116,6 +125,8 @@ def ui_post(path, payload=None):
         raise AssertionError(f'No UI mapping for {path}')
     result = wait(lambda: next((r for r in responses[index:] if r['path'] == path), None))
     assert result['status'] == 200, result
+    if path.endswith('/prepare-position'):
+        assert len([r for r in responses if r['path'] == path and r['status'] == 200]) == 1
     print('UI PASS', path.rsplit('/', 1)[-1], flush=True)
     return result['body']
 
@@ -128,6 +139,13 @@ try:
     app.middleware_stack = None
     @app.middleware('http')
     async def record(request, next_call):
+        global reject_preparation_once
+        if request.method == 'POST' and request.url.path == '/api/machine/prepare-position' and reject_preparation_once:
+            from starlette.responses import JSONResponse
+            reject_preparation_once = False
+            body = {'detail': 'Observación simulada rechazada'}
+            responses.append({'path': request.url.path, 'status': 400, 'body': body})
+            return JSONResponse(body, status_code=400)
         response = await next_call(request)
         if request.method == 'POST':
             body = b''.join([chunk async for chunk in response.body_iterator])

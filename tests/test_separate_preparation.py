@@ -30,6 +30,16 @@ class SeparatePreparationTest(unittest.TestCase):
             runtime.prepare_position()
         self.assertEqual(client.scripts,[])
 
+    def test_stale_preparation_refresh_failure_emits_nothing(self):
+        from unittest.mock import patch
+        runtime, client = self.runtime()
+        runtime._machine.live_position_updated_at -= 60
+        self.assertFalse(runtime.snapshot()['safety']['telemetry_recent'])
+        with patch.object(runtime, '_refresh_machine', side_effect=RuntimeError('HTTP unavailable')):
+            with self.assertRaisesRegex(RuntimeError, 'HTTP unavailable'):
+                runtime.prepare_position()
+        self.assertEqual(client.scripts, [])
+
     def test_long_reference_clearance_then_xy_then_approach(self):
         runtime,client=self.runtime()
         runtime.config=replace(runtime.config,long_tool_change_clearance_z_mm=140,long_tool_reference_approach_z_mm=125)

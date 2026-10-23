@@ -597,6 +597,7 @@ Después deberá volver a conectar el Arduino, hacer homing, posicionar X0/Y0 y 
       await loadSystem();
     } catch (requestError) {
       setError(requestError instanceof Error ? requestError.message : "No fue posible completar la acción física.");
+      if (action === "prepare-position") throw requestError;
     } finally {
       setRefreshingSystem(false);
     }

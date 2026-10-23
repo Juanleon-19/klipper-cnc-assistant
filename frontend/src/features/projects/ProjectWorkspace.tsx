@@ -557,6 +557,7 @@ export function ProjectWorkspace({
   const [mapActionBusy, setMapActionBusy] = useState(false);
   const [suggestionBusy, setSuggestionBusy] = useState(false);
   const [referenceBusy, setReferenceBusy] = useState(false);
+  const [preparationError, setPreparationError] = useState("");
   const [compensationBusy, setCompensationBusy] = useState(false);
   const [referenceMoveResult, setReferenceMoveResult] = useState<ReferenceMoveResult | null>(null);
   const referenceMoveInFlight = useRef(false);
@@ -1677,6 +1678,7 @@ export function ProjectWorkspace({
       machine={machine}
       runtime={runtime}
       referenceSession={referenceSession}
+      preparationError={preparationError}
       referenceBusy={referenceBusy}
       selectedOperation={selectedOperation}
       heightMap={heightMap}
@@ -1701,7 +1703,7 @@ export function ProjectWorkspace({
       onReconnectArduino={() => void machine.runMachineAction("reconnect-arduino")}
       onSaveMachineSettings={() => void saveMachineSettings()}
       onHome={() => { if (referenceSettingsAllowMovement()) void withPhysicalReferenceAction(async () => { await machine.runMachineAction("home"); }); }}
-      onInitialize={() => { if (referenceSettingsAllowMovement()) void withPhysicalReferenceAction(async () => { await machine.runMachineAction("prepare-position", undefined, selectedOperation?.tool_reference_profile ?? "standard"); }); }}
+      onInitialize={() => { if (referenceSettingsAllowMovement()) void withPhysicalReferenceAction(async () => { setPreparationError(""); try { await machine.runMachineAction("prepare-position", undefined, selectedOperation?.tool_reference_profile ?? "standard"); } catch (error) { setPreparationError(error instanceof Error ? error.message : "No fue posible preparar la máquina."); throw error; } }); }}
       onEnableManual={() => void machine.runMachineAction("manual-on")}
       onCapturePhysicalWorkOrigin={() => void withPhysicalReferenceAction(() => api.capturePhysicalWorkOrigin(project.id, selectedOperation!.id))}
       onCancelOperation={() => void machine.runMachineAction("cancel")}

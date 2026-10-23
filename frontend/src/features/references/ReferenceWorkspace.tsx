@@ -29,6 +29,7 @@ export type MachineSettingsRuntimeStatus = "coherent" | "unconfirmed" | "refresh
 
 type ReferenceWorkspaceProps = {
   resetActions?: ReactNode;
+  preparationError?: string;
   machine: MachineContextValue;
   runtime: MachineRuntime | null;
   referenceSession: ReferenceSession | null;
@@ -78,6 +79,7 @@ const CONNECT_RECOVERY_DELAY_MS = 10_000;
 
 export function ReferenceWorkspace({
   resetActions,
+  preparationError,
   machine,
   runtime,
   referenceSession,
@@ -175,7 +177,18 @@ export function ReferenceWorkspace({
     : runtime?.active_operation || (runtime?.physical_owner?.kind && runtime.physical_owner.kind !== "IDLE") ? "Hay una operación física incompatible activa."
     : !machine.telemetryRecent ? "Se requiere una observación de posición vigente."
     : null;
-  const canPrepare = !toolChangeBlock;
+  // Preparation obtains a fresh HTTP observation before authorizing any move.
+  // A stale cached position must not prevent that observation from being requested.
+  const preparationBlock = machineSettingsLockedByJobRun ? "Hay un trabajo activo. Termine o archive la ejecución antes de preparar."
+    : machineSettingsDirty ? "Guarde y confirme la configuración del runtime antes de preparar."
+    : !machine.isPhysical || !machine.connected || !machine.klipperReady ? "Moonraker/Klipper no está listo."
+    : ![..."xyz"].every(axis => machine.homedAxes.includes(axis)) ? "Se requiere homing XYZ vigente."
+    : runtime?.recovery_pending ? "Recuperación física pendiente. Verifique reposo antes de recuperar controles."
+    : runtime?.active_operation || (runtime?.physical_owner?.kind && runtime.physical_owner.kind !== "IDLE") ? "Hay una operación física incompatible activa."
+    : referenceBusy ? "Hay una acción de referencia en curso."
+    : machine.refreshing ? "Actualizando el estado de la máquina; espere a que termine."
+    : null;
+  const canPrepare = !preparationBlock;
   const canEnableJog = machine.isPhysical && machine.runtimeState === "WAITING_FOR_XY_REFERENCE";
   const canArm = machine.isPhysical && ["WAITING_FOR_XY_REFERENCE", "REFERENCE_CAPTURED"].includes(machine.runtimeState);
   const canProbe = machine.isPhysical && ["WAITING_FOR_XY_REFERENCE", "REFERENCE_ARMED", "REFERENCE_CAPTURED"].includes(machine.runtimeState);
@@ -352,6 +365,9 @@ export function ReferenceWorkspace({
             <button className="button" type="button" disabled={!canPrepare || referenceBusy || machine.refreshing} onClick={onInitialize}>Ir a posición de preparación</button>
             <p className="muted">Homing solo referencia los ejes. Preparación desplaza Z al despeje del perfil instalado y después X/Y al centro, sin repetir homing. El punto de referencia guardado se visita con su botón independiente.</p>
           </div>
+          {preparationBlock ? <p role="status">No se puede preparar: {preparationBlock}</p> : null}
+          {!preparationBlock && !machine.telemetryRecent ? <p role="status">La posición cacheada está obsoleta. Al preparar se obtendrá una observación actual; si no es válida, no habrá movimiento.</p> : null}
+          {preparationError ? <div role="alert" className="alert alert--error">{preparationError}</div> : null}
           {machineSettingsDirty ? <div className="alert alert--warning">Guarde la configuración antes de realizar movimientos de referencia.</div> : null}
           <details className="advanced-settings">
             <summary>Configuración avanzada de movimiento y telemetría</summary>

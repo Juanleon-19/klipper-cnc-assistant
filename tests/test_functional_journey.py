@@ -4,6 +4,7 @@ import time
 import os
 import re
 import asyncio
+import threading
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -83,13 +84,19 @@ class FunctionalJourneyTest(unittest.TestCase):
                 return result
         self.transport = Transport(self.machine)
         machine = self.machine
+        self.pause_position_samples = threading.Event()
+        self.position_samples_paused = threading.Event()
+        pause_samples, paused = self.pause_position_samples, self.position_samples_paused
         class Telemetry(machine_fakes.PassiveTelemetry):
             async def run(self):
                 while not self._stop.is_set():
                     # New simulator samples, including stationary XYZ; not a
                     # production timestamp override or authorizer replacement.
-                    machine.update_motion(live_position=machine.position.as_tuple(), live_velocity=0,
-                                          source='websocket')
+                    if pause_samples.is_set():
+                        paused.set()
+                    else:
+                        machine.update_motion(live_position=machine.position.as_tuple(), live_velocity=0,
+                                              source='websocket')
                     machine.update_klippy('ready')
                     if self._snapshot_callback:
                         self._snapshot_callback({'state': 'CONNECTED', 'last_message_at': time.monotonic(),
@@ -152,7 +159,12 @@ class FunctionalJourneyTest(unittest.TestCase):
         self.assertEqual(len(self.job.history(**self.args)), 1)
         self.post('/api/machine/connect')
         self.post('/api/machine/home')
+        self.pause_position_samples.set()
+        self.assertTrue(self.position_samples_paused.wait(2))
+        self.machine.live_position_updated_at -= 60
+        self.assertFalse(self.runtime.snapshot()['safety']['telemetry_recent'])
         self.post('/api/machine/prepare-position', {'tool_reference_profile': 'standard'})
+        self.pause_position_samples.clear()
         self.assertEqual(self.machine.position.z, 35)
         self.post('/api/machine/manual-control', {'enabled': True})
         from klipper_cnc_assistant.input.command_mapper import CommandMapper

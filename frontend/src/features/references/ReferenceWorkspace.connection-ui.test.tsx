@@ -83,6 +83,10 @@ function renderReference(options?: {
   homedAxes?: string;
   telemetryRecent?: boolean;
   activeJob?: boolean;
+  preparationError?: string;
+  referenceBusy?: boolean;
+  refreshing?: boolean;
+  onInitialize?: ReturnType<typeof vi.fn>;
 }) {
   const connected = options?.connected ?? false;
   const onConnectRuntime = options?.onConnectRuntime ?? vi.fn();
@@ -104,10 +108,11 @@ function renderReference(options?: {
   const renderResult = render(
     <ReferenceWorkspace
       {...consistencyProps}
-      machine={{ ...machine(currentRuntime, refreshRuntime), homedAxes: options?.homedAxes ?? "", telemetryRecent: options?.telemetryRecent ?? connected }}
+      preparationError={options?.preparationError}
+      machine={{ ...machine(currentRuntime, refreshRuntime), refreshing: options?.refreshing ?? false, homedAxes: options?.homedAxes ?? "", telemetryRecent: options?.telemetryRecent ?? connected }}
       runtime={currentRuntime}
       referenceSession={(options?.hasReference ? { referencia_z: { z_mm: 0 } } : null) as ReferenceSession | null}
-      referenceBusy={false}
+      referenceBusy={options?.referenceBusy ?? false}
       selectedOperation={{ id: "op-1", herramienta: "Broca 0.8 mm", tool_reference_profile: options?.toolReferenceProfile ?? "standard" } as unknown as Operation}
       heightMap={null}
       machineSettingsInput={{
@@ -139,7 +144,7 @@ function renderReference(options?: {
       onDiagnosticMode={vi.fn()}
       onReconnectArduino={vi.fn()}
       onSaveMachineSettings={vi.fn()}
-      onInitialize={vi.fn()}
+      onInitialize={options?.onInitialize ?? vi.fn()}
       onEnableManual={vi.fn()}
       onCapturePhysicalWorkOrigin={vi.fn()}
       onCancelOperation={vi.fn()}
@@ -357,5 +362,37 @@ describe("standalone tool-change position guards", () => {
   it("allows the advisory button only when ready and idle", () => {
     renderReference({ connected: true, homedAxes: "xyz" });
     expect(screen.getByRole("button", { name: "Probar posición de cambio" })).toBeEnabled();
+  });
+});
+
+
+describe("Preparation authorization and feedback", () => {
+  it.each([true, false])("allows an explicit preparation request with cached freshness %s", (telemetryRecent) => {
+    const onInitialize = vi.fn();
+    renderReference({ connected: true, homedAxes: "xyz", runtimeState: "HOMED", telemetryRecent, onInitialize });
+    const button = screen.getByRole("button", { name: "Ir a posición de preparación" });
+    expect(button).toBeEnabled();
+    fireEvent.click(button);
+    expect(onInitialize).toHaveBeenCalledTimes(1);
+    if (!telemetryRecent) expect(screen.getByText(/Al preparar se obtendrá una observación actual/)).toBeVisible();
+  });
+  it.each([
+    [{ recoveryPending: true }, "Recuperación física pendiente"],
+    [{ activeJob: true }, "Hay un trabajo activo"],
+    [{ activeOperation: { type: "probe" } }, "operación física incompatible"],
+    [{ homedAxes: "xy" }, "homing XYZ"],
+    [{ machineSettingsDirty: true }, "confirme la configuración"],
+    [{ referenceBusy: true }, "acción de referencia en curso"],
+    [{ refreshing: true }, "Actualizando el estado"],
+    [{ connected: false }, "Moonraker/Klipper no está listo"],
+  ])("explains every disabled preparation gate %j", (overrides, message) => {
+    renderReference({ connected: true, homedAxes: "xyz", ...overrides });
+    expect(screen.getByRole("button", { name: "Ir a posición de preparación" })).toBeDisabled();
+    expect(screen.getByText(new RegExp("No se puede preparar:.*" + message))).toBeVisible();
+  });
+  it("shows a backend rejection next to the preparation action", () => {
+    renderReference({ connected: true, homedAxes: "xyz", preparationError: "Observación HTTP sin posición válida" });
+    const button = screen.getByRole("button", { name: "Ir a posición de preparación" });
+    expect(button.closest("article")).toHaveTextContent("Observación HTTP sin posición válida");
   });
 });
