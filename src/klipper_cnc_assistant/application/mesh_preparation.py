@@ -99,29 +99,49 @@ class MeshPreparationService:
                       segment=item.segment_index, line=next(a for oid, _, a in analyses if oid == item.operation_id).segmentos_vista_previa[item.segment_index].numero_linea,
                       x_mm=item.x_mm, y_mm=item.y_mm,
                       distance_outside_mm=item.distance_mm)
+        local_coverage_valid = not issues
         limits = dependencies['limits'] or {}
         origin, reference_z = dependencies['origin'], dependencies['reference_z']
-        if origin is None or reference_z is None:
-            issue('TRANSFORM_UNAVAILABLE', 'Faltan origen CNC o referencia Z para la transformación PCB → CNC.', 'Complete la referencia física antes de validar límites.')
+        transform_available = origin is not None and reference_z is not None
+        if not transform_available:
+            issue('TRANSFORM_UNAVAILABLE', 'Falta origen CNC y/o referencia Z para validar los límites físicos. La geometría PCB está disponible, pero todavía no se puede armar ni medir la malla.', 'Conecte el runtime, prepare y capture X/Y y referencia Z; después valide los límites físicos.')
+        else:
+            operation = project.get_operation(payload.get('operation_id') or payload['operation_ids'][0])
+            try:
+                evidence = project.get_setup(operation.setup_id).preparacion.physical_reference
+                if not evidence:
+                    raise ValueError('Falta evidencia de referencia física vigente.')
+                capture = captured_reference_map(project, operation, evidence)
+                require_current_reference(self.repository, runtime, project.id, operation.id, capture, project=project, capture_only=True)
+            except (ValueError, TypeError, KeyError, AttributeError) as error:
+                transform_available = False
+                issue('REFERENCE_INVALID', str(error), 'Compruebe la sesión física y capture una referencia vigente antes de validar límites.')
         try:
             limits_valid = all(axis in limits and all(math.isfinite(float(limits[axis][k])) for k in ('min', 'max')) and limits[axis]['min'] < limits[axis]['max'] for axis in 'xyz')
         except (TypeError, KeyError, ValueError):
             limits_valid = False
-        if not limits_valid:
+        if transform_available and not limits_valid:
             issue('LIMITS_UNAVAILABLE', 'No hay límites Klipper verificables.', 'Conecte y observe el runtime antes de validar.')
-        else:
+        elif transform_available:
             for point in payload['points']:
                 if point.get('status') == 'EXCLUDED':
                     continue
                 for axis in 'xy':
                     value = point.get(axis + '_machine')
-                    if value is None or not math.isfinite(float(value)) or not limits[axis]['min'] <= value <= limits[axis]['max']:
-                        issue('MESH_POINT_OUTSIDE_LIMITS', f'Punto de malla fuera del límite {axis.upper()}.',
-                              'Revise origen, montaje y región de sondeo.', point=point['index'], x_mm=point.get('x_machine'), y_mm=point.get('y_machine'))
+                    if value is None or not math.isfinite(float(value)):
+                        issue('TRANSFORM_UNAVAILABLE', 'Coordenada CNC no disponible para este punto.', 'Regenere la vista previa con una referencia vigente.', point=point['index'], axis=axis)
+                    elif not limits[axis]['min'] <= value <= limits[axis]['max']:
+                        issue('MESH_POINT_OUTSIDE_LIMITS', f"Punto {point['index']} de malla fuera del límite {axis.upper()}: CNC {value:.3f} mm; recorrido {limits[axis]['min']:.3f}..{limits[axis]['max']:.3f} mm.",
+                              'Revise origen, montaje y región de sondeo.', point=point['index'], axis=axis, coordinate_mm=value, limit_min_mm=limits[axis]['min'], limit_max_mm=limits[axis]['max'], x_mm=point.get('x_machine'), y_mm=point.get('y_machine'))
             safe_z = (payload.get('probe_config') or {}).get('safe_z_mm')
-            if reference_z is None or safe_z is None or not limits['z']['min'] <= reference_z + safe_z <= limits['z']['max']:
+            if safe_z is None or not limits['z']['min'] <= reference_z + safe_z <= limits['z']['max']:
                 issue('SAFE_Z_OUTSIDE_LIMITS', 'Z de contacto + separación segura fuera del recorrido Z.', 'Ajuste la separación segura dentro de los límites físicos.')
-        return {'coverage_valid': not issues, 'validated_at': datetime.now(timezone.utc).isoformat(),
+            retract = dependencies['probe_profile'].get('effective_retract_mm')
+            if not limits['z']['min'] <= reference_z <= limits['z']['max']:
+                issue('REFERENCE_Z_OUTSIDE_LIMITS', 'Z de contacto fuera del recorrido Z.', 'Capture una referencia física válida.')
+            if retract is None or not limits['z']['min'] <= reference_z + retract <= limits['z']['max']:
+                issue('RETRACT_OUTSIDE_LIMITS', 'Z de contacto + retracto fuera del recorrido Z.', 'Revise el retracto del perfil de sonda.')
+        return {'local_coverage_valid': local_coverage_valid, 'physical_limits_valid': transform_available and not any(i['code'] in {'LIMITS_UNAVAILABLE', 'TRANSFORM_UNAVAILABLE', 'MESH_POINT_OUTSIDE_LIMITS', 'SAFE_Z_OUTSIDE_LIMITS', 'REFERENCE_Z_OUTSIDE_LIMITS', 'RETRACT_OUTSIDE_LIMITS'} for i in issues), 'coverage_valid': not issues, 'validated_at': datetime.now(timezone.utc).isoformat(),
                 'mesh_fingerprint': digest(dependencies), 'operations_checked': len(operations),
                 'segments_checked': sum(segment_uses_surface_map(segment) for _, _, a in analyses for segment in a.segmentos_vista_previa),
                 'blocking_issues': issues[:200], 'warnings': warnings}

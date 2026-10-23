@@ -396,3 +396,17 @@ describe("Preparation authorization and feedback", () => {
     expect(button.closest("article")).toHaveTextContent("Observación HTTP sin posición válida");
   });
 });
+
+describe("Main preparation sequence", () => {
+  it("explains reconnect after reset while local PCB remains available", () => {
+    renderReference({ connected: false });
+    expect(screen.getByText(/Reconectar para continuar/)).toBeVisible();
+    expect(screen.getByText(/La vista previa PCB sigue disponible/)).toBeVisible();
+  });
+  it("shows active travel and approach feeds without changing settings", () => {
+    renderReference({ connected: true, homedAxes: "xyz" });
+    expect(screen.getByText(/Velocidades activas: despeje Z 180 mm\/min; traslado X\/Y 1800 mm\/min/)).toBeVisible();
+    expect(screen.getByLabelText(/Velocidad Z de despeje/)).not.toBeDisabled();
+    expect(screen.getByLabelText(/Velocidad Z de aproximación/)).not.toBeDisabled();
+  });
+});

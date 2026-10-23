@@ -13,6 +13,7 @@ from tests import test_api, test_machine_runtime as machine_fakes
 from klipper_cnc_assistant.execution.job_service import MoonrakerJobAdapter
 from klipper_cnc_assistant.machine.state import MachineState, MachinePosition, AxisLimits
 from klipper_cnc_assistant.machine.config import MachineMode
+from klipper_cnc_assistant.machine.recoverable_runtime import RecoverableMachineRuntime
 
 
 class FunctionalJourneyTest(unittest.TestCase):
@@ -109,7 +110,7 @@ class FunctionalJourneyTest(unittest.TestCase):
         def observe(_client):
             self.machine.update_motion(live_position=self.machine.position.as_tuple(), live_velocity=0)
             return self.machine
-        self.runtime = machine_fakes.MachineRuntime(
+        self.runtime = RecoverableMachineRuntime(
             machine_fakes.config(MachineMode.PHYSICAL, moonraker_url='http://fake.invalid',
                 moonraker_ws='ws://fake.invalid', serial_port='/tmp/kca-fake-serial',
                 reference_prep_z_mm=31, tool_change_clearance_z_mm=35,
@@ -152,11 +153,27 @@ class FunctionalJourneyTest(unittest.TestCase):
             may_have_been_sent=True, operation_id=op['operation_id'], remote_file=op['remote_file']))
         self.job._save_run(self.context, run)
         self.transport.filename = ''
+        self.runtime.physical_ownership.enter_recovery('Synthetic retired operation')
+        before = self.job._run_file(self.context).read_bytes()
+        rejected = self.client.post(f'/api/projects/{self.project}/setups/{self.setup}/reset-preparation', json={})
+        self.assertEqual(rejected.status_code, 400)
+        self.assertIn('recuperar controles', rejected.text)
+        self.assertEqual(before, self.job._run_file(self.context).read_bytes())
+        self.post('/api/machine/recover-idle-controls')
         root = f'/api/projects/{self.project}'
         result = self.post(root + f'/setups/{self.setup}/reset-preparation', {'motivo': 'synthetic restart'})
         self.assertEqual(result['execution_reset']['current_runs_cleared'], 1)
         self.assertEqual(self.runtime.snapshot()['state'], 'DISCONNECTED')
         self.assertEqual(len(self.job.history(**self.args)), 1)
+        local_base = root + f'/operations/{self.operation}/physical-map'
+        local_config = dict(grid_mode='manual', rows=2, columns=2, margin_mm=0, safe_z_mm=5,
+            edge_margin_left_mm=0, edge_margin_right_mm=0, edge_margin_bottom_mm=0, edge_margin_top_mm=0)
+        preview = self.post(local_base + '/preview', local_config)['payload']
+        local_config['preview_fingerprint'] = preview['mesh_fingerprint']
+        local = self.post(local_base + '/validate', local_config)
+        self.assertTrue(local['local_coverage_valid'])
+        self.assertEqual([i['code'] for i in local['blocking_issues']], ['TRANSFORM_UNAVAILABLE'])
+        self.assertIsNone(self.runtime._client)
         self.post('/api/machine/connect')
         self.post('/api/machine/home')
         self.pause_position_samples.set()

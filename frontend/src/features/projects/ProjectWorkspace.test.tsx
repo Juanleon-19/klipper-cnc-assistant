@@ -917,7 +917,7 @@ describe("ProjectWorkspace", () => {
 
     fireEvent.click(screen.getByRole("button", { name: /^Referencia$/i }));
 
-    expect(await screen.findByText(/Home, Z de preparación y centro/i)).toBeInTheDocument();
+    expect(await screen.findByText(/Homing y posición de preparación/i)).toBeInTheDocument();
     expect(screen.getAllByText(/Z de preparación/i).length).toBeGreaterThan(0);
     expect(screen.getAllByText(/X 110.000 mm · Y 110.000 mm/i).length).toBeGreaterThan(0);
     expect(screen.getByRole("heading", { name: /Comprobación de posición de cambio de herramienta/i })).toBeInTheDocument();

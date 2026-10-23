@@ -45,6 +45,47 @@ class MeshPreparationTest(unittest.TestCase):
         self.assertEqual(payload['preflight_validation']['mesh_fingerprint'], report['mesh_fingerprint'])
         self.assertEqual(self.capture.client.scripts, [])
 
+    def test_local_preview_without_reference_has_one_physical_blocker(self):
+        project = self.repo.load_project(self.project_id)
+        setup = project.setup_for_operation(self.operation_id)
+        self.repo.save_project(project.replace_setup(replace(setup, preparacion=replace(
+            setup.preparacion, origen_trabajo=None, referencia_z=None, physical_reference=None))))
+        report = self.validate()
+        self.assertTrue(report['local_coverage_valid'])
+        self.assertFalse(report['physical_limits_valid'])
+        self.assertFalse(report['coverage_valid'])
+        self.assertEqual([i['code'] for i in report['blocking_issues']], ['TRANSFORM_UNAVAILABLE'])
+        self.assertEqual(self.post('/plan-from-reference').status_code, 400)
+        self.assertEqual(self.capture.client.scripts, [])
+
+    def test_stale_physical_context_does_not_masquerade_as_local_geometry_error(self):
+        from klipper_cnc_assistant.machine.state import AxisLimits
+        self.runtime._machine.x_limits = AxisLimits(0, 50)
+        report = self.validate()
+        self.assertTrue(report['local_coverage_valid'])
+        self.assertFalse(report['physical_limits_valid'])
+        self.assertEqual([i['code'] for i in report['blocking_issues']], ['REFERENCE_INVALID'])
+        self.assertEqual(self.post('/plan-from-reference').status_code, 400)
+
+    def test_retract_outside_travel_blocks_with_valid_reference(self):
+        self.config.update(probe_profile_source='map_override', probe_step_mm=.05,
+                           probe_feed_mm_min=40, retract_mm=500)
+        report = self.validate()
+        self.assertFalse(report['physical_limits_valid'])
+        self.assertIn('RETRACT_OUTSIDE_LIMITS', [i['code'] for i in report['blocking_issues']])
+        self.assertEqual(self.post('/plan-from-reference').status_code, 400)
+
+    def test_real_transformed_point_outside_reports_coordinate_and_limit(self):
+        from klipper_cnc_assistant.machine.state import AxisLimits
+        self.runtime._machine.x_limits = AxisLimits(0, 50)
+        self.assertEqual(self.client.post(self.capture.url + '/probe-and-capture').status_code, 200)
+        report = self.validate()
+        outside = [i for i in report['blocking_issues'] if i['code'] == 'MESH_POINT_OUTSIDE_LIMITS']
+        self.assertTrue(outside, report)
+        self.assertEqual(outside[0]['limit_max_mm'], 50)
+        self.assertGreater(outside[0]['coordinate_mm'], 50)
+        self.assertEqual(self.post('/plan-from-reference').status_code, 400)
+
     def test_arm_without_validation_blocks(self):
         self.preview()
         self.assertEqual(self.post('/plan-from-reference').status_code, 400)

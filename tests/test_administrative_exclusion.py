@@ -30,6 +30,17 @@ class AdministrativeResetTest(unittest.TestCase):
         return self.service.reset_runs_for_preparation(project_id=self.fixture.project_id,
                                                        setup_id=self.fixture.setup_id, **kwargs)
 
+    def test_reset_reports_exact_owner_blocker_and_preserves_bytes(self):
+        before = self.path.read_bytes()
+        permit = self.runtime.physical_ownership.acquire(OwnerKind.JOB_EXECUTION, 'test-owner')
+        with self.assertRaisesRegex(ApplicationError, 'productor físico'):
+            self.reset()
+        self.runtime.physical_ownership.retire(permit)
+        with self.assertRaisesRegex(ApplicationError, 'Verificar reposo y recuperar controles'):
+            self.reset()
+        self.assertEqual(before, self.path.read_bytes())
+        self.assertEqual(self.fixture.adapter.started, [])
+
     def test_free_reset_preserves_history(self):
         result = self.reset()
         self.assertEqual(result['current_runs_cleared'], 1)

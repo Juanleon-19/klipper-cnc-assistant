@@ -58,3 +58,12 @@ Recorrido integral de navegador validado con transportes simulados y tres
 operaciones A → A → B. Resultados completos en
 `auditorias/functional-stabilization-20261021/REPORTE_FINAL.md`. No declarar validación física mediante simulación.
 Producción, datos, servicios y hardware quedan fuera del desarrollo.
+
+## Candidata de reparación del flujo principal
+
+`fix/main-flow-20261022`, basada en `a078a2b`: preview/cobertura PCB local sin
+referencia; límites CNC únicamente con transformación y referencia vigente.
+Ausencia de referencia no significa puntos fuera de límites. Reinicio explica
+el flag concreto que bloquea; recuperación sigue siendo explícita y con evidencia
+fresca, nunca implícita en reset. Referencias/sonda físicas pendientes de validación
+supervisada. Evidencia en `auditorias/main-flow-20261022/REPORTE_FINAL.md`.

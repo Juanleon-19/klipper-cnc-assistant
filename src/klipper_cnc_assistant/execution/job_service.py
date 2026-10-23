@@ -2718,8 +2718,9 @@ class JobService:
         return False
 
     def _assert_preparation_reset_safe(self) -> dict[str, Any] | None:
-        if not self._archive_ownership_clear():
-            raise ApplicationError('No se puede reiniciar: ownership, productor, recuperación o movement_lock no están libres y observables.')
+        blocker = self._archive_ownership_blocker()
+        if blocker:
+            raise ApplicationError('No se puede reiniciar: ' + blocker)
         snapshot = self.runtime.snapshot()
         if snapshot.get('recovery_pending') or snapshot.get('active_operation') is not None:
             raise ApplicationError('Operación física o recuperación pendiente.')
@@ -3152,20 +3153,37 @@ class JobService:
         except Exception:
             return None
 
-    def _archive_ownership_clear(self) -> bool:
-        # Absence of a supervisor is not proof that the workflow retired its
-        # producer. Archiving must never orphan a retained physical lease.
+    def _archive_ownership_blocker(self) -> str | None:
+        # Diagnostic explanation of the same fail-closed predicate; no recovery
+        # or lease release is performed by an administrative request.
         try:
             owner = self.runtime.physical_ownership.snapshot()
         except Exception:
-            return False
+            return "no se puede consultar ownership. Revise el diagnóstico antes de continuar."
         if not isinstance(owner, dict):
-            return False
-        return (owner.get("kind") == "IDLE" and owner.get("active") is False and owner.get("recovery_pending") is False
-                and owner.get("producer_active") is False and owner.get("job_updates", 0) == 0
-                and owner.get("children") == 0 and owner.get("dispatching") == 0
-                and self._movement_lock_state() is False
-                and getattr(self.runtime, "_active_operation", None) is None)
+            return "ownership no es observable. Revise el diagnóstico antes de continuar."
+        if owner.get("producer_active") is not False:
+            return "el productor físico sigue activo o no es verificable. Espere su cierre; no fuerce la liberación."
+        if owner.get("dispatching") != 0:
+            return "hay un envío físico en curso o no verificable. Espere su finalización."
+        if owner.get("children") != 0:
+            return "hay operaciones físicas dependientes sin cerrar o no verificables. Espere su finalización."
+        if getattr(self.runtime, "_active_operation", None) is not None:
+            return "hay una operación física local activa. Espere su finalización."
+        lock = self._movement_lock_state()
+        if lock is not False:
+            return ("movement_lock está ocupado. Espere el cierre de la operación física."
+                    if lock is True else "movement_lock no es observable. Revise el diagnóstico; no se asume libre.")
+        if owner.get("recovery_pending") is not False:
+            return "hay recuperación física pendiente o no verificable. Use «Verificar reposo y recuperar controles»; requiere evidencia fresca y no mueve la máquina."
+        if owner.get("kind") != "IDLE" or owner.get("active") is not False:
+            return "ownership conserva una reserva física. Verifique reposo y recupere controles explícitamente; no se liberará durante el reinicio."
+        if owner.get("job_updates", 0) != 0:
+            return "hay una actualización de ejecución en curso. Espere y vuelva a intentar."
+        return None
+
+    def _archive_ownership_clear(self) -> bool:
+        return self._archive_ownership_blocker() is None
 
     def _moonraker_is_idle(self, status: dict[str, Any]) -> bool:
         return (status.get("connected") is True and status.get("klipper_state") == "ready"

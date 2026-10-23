@@ -4,6 +4,8 @@ import { api, type PhysicalMapPlanPayload } from "../../lib/api";
 
 export type MeshSeverity = "SUCCESS" | "INFO" | "WARNING" | "ERROR";
 export type MeshCoverage = {
+  local_coverage_valid?: boolean;
+  physical_limits_valid?: boolean;
   coverage_valid: boolean; validated_at: string; mesh_fingerprint: string;
   operations_checked: number; segments_checked: number;
   blocking_issues: Array<{ code: string; reason: string; recommended_action: string; operation_name?: string; operation_id?: string; segment?: number; x_mm?: number; y_mm?: number }>;

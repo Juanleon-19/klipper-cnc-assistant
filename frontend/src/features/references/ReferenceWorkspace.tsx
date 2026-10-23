@@ -273,6 +273,7 @@ export function ReferenceWorkspace({
     return (
       <div className="stack gap-md">
         {resetActions}
+        {!machine.connected ? <p role="status">Reconectar para continuar: reiniciar proceso desconecta el runtime. Conecte Moonraker, Klipper y Arduino antes del homing o la referencia. La vista previa PCB sigue disponible.</p> : null}
         <article className="panel">
           <div className="section-heading section-heading--stacked">
             <div>
@@ -352,8 +353,8 @@ export function ReferenceWorkspace({
         </article>
 
         <article className="panel">
-          <div className="section-heading"><h3>2. Home, Z de preparación y centro</h3></div>
-          <p className="muted">Hace home, lleva Z a la altura segura de preparación y después posiciona X/Y en el centro calculado de la máquina.</p>
+          <div className="section-heading"><h3>2. Homing y posición de preparación</h3></div>
+          <p className="muted">Homing referencia los ejes. Después, preparación desplaza Z al despeje y X/Y al centro, sin repetir homing.</p>
           <div className="info-grid info-grid--double compact-grid">
             <div className="metric-box"><span>Homing</span><strong>{machine.homedAxes || "pendiente"}</strong></div>
             <div className="metric-box"><span>Posición actual</span><strong>X {formatMillimeters(typeof position?.x === "number" ? Number(position.x) : null, 3)} · Y {formatMillimeters(typeof position?.y === "number" ? Number(position.y) : null, 3)} · Z {formatMillimeters(typeof position?.z === "number" ? Number(position.z) : null, 3)}</strong></div>
@@ -365,6 +366,7 @@ export function ReferenceWorkspace({
             <button className="button" type="button" disabled={!canPrepare || referenceBusy || machine.refreshing} onClick={onInitialize}>Ir a posición de preparación</button>
             <p className="muted">Homing solo referencia los ejes. Preparación desplaza Z al despeje del perfil instalado y después X/Y al centro, sin repetir homing. El punto de referencia guardado se visita con su botón independiente.</p>
           </div>
+          <p className="muted">Velocidades activas: despeje Z {zClearanceFeed} mm/min; traslado X/Y {referencePrepXyFeed} mm/min. Aproximación posterior a referencia Z: {referenceApproachZFeed} mm/min. Ajuste y guarde las velocidades Z en la configuración avanzada; se conservan los límites Klipper.</p>
           {preparationBlock ? <p role="status">No se puede preparar: {preparationBlock}</p> : null}
           {!preparationBlock && !machine.telemetryRecent ? <p role="status">La posición cacheada está obsoleta. Al preparar se obtendrá una observación actual; si no es válida, no habrá movimiento.</p> : null}
           {preparationError ? <div role="alert" className="alert alert--error">{preparationError}</div> : null}

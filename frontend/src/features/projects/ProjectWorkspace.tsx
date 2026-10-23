@@ -1979,7 +1979,7 @@ export function ProjectWorkspace({
         if (requestId !== meshPreviewRequestIdRef.current) return;
         setMeshCoverage(result);
         setMeshMessageSeverity(result.coverage_valid ? "SUCCESS" : "ERROR");
-        setMeshValidationMessage(result.coverage_valid ? `Cobertura válida: ${result.operations_checked} operaciones, ${result.segments_checked} segmentos.` : "Cobertura inválida. Corrija los problemas indicados antes de armar.");
+        setMeshValidationMessage(result.coverage_valid ? `Cobertura válida: ${result.operations_checked} operaciones, ${result.segments_checked} segmentos.` : result.local_coverage_valid ? "Geometría PCB válida. Los límites físicos todavía no están validados; revise la referencia y los requisitos indicados." : "Cobertura inválida. Corrija los problemas indicados antes de armar.");
       } catch (error) {
         if (requestId === meshPreviewRequestIdRef.current) {
           setMeshMessageSeverity("ERROR");

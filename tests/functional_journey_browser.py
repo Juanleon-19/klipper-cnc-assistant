@@ -66,6 +66,7 @@ def ui_post(path, payload=None):
     index = len(responses)
     if path.endswith('/connect'):
         wait(lambda: click('Referencia'))
+        wait(lambda: click('Referencia'))
         wait(lambda: click('Conectar runtime'))
     elif path.endswith('/reset-preparation'):
         js('for(const d of document.querySelectorAll("details"))d.open=true;')
@@ -77,6 +78,8 @@ def ui_post(path, payload=None):
         wait(open_reset)
         wait(lambda: command('GET', f'/session/{session}/alert/text'))
         command('POST', f'/session/{session}/alert/accept')
+    elif path.endswith('/recover-idle-controls'):
+        wait(lambda: click('Verificar reposo y recuperar controles'))
     elif path.endswith('/home'):
         wait(lambda: click('Realizar homing XYZ'))
     elif path.endswith('/prepare-position'):
