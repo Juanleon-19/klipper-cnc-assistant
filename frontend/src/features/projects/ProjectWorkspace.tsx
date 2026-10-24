@@ -62,6 +62,11 @@ type ProjectWorkspaceProps = {
 };
 
 export type WorkspaceView = "archivo" | "trayectoria" | "referencia" | "mapa" | "ejecucion";
+const WORKSPACE_VIEWS: { id: WorkspaceView; label: string }[] = [
+  { id: "archivo", label: "Archivo" }, { id: "trayectoria", label: "Trayectoria" },
+  { id: "referencia", label: "Referencia" }, { id: "mapa", label: "Mapa de alturas" },
+  { id: "ejecucion", label: "Ejecución" },
+];
 type MapTab = "mapa2d" | "superficie3d" | "puntos" | "configuracion";
 type HeightMode = "bruto" | "plano" | "residuo";
 type HeightMapSource = "SIMULATED" | "MEASURED";
@@ -542,6 +547,9 @@ export function ProjectWorkspace({
   const [newOperationTool, setNewOperationTool] = useState("");
   const [newOperationToolReferenceProfile, setNewOperationToolReferenceProfile] = useState<ToolReferenceProfile>("standard");
   const [activeView, setActiveView] = useState<WorkspaceView>(initialView ?? "archivo");
+  const viewIndex = WORKSPACE_VIEWS.findIndex(view => view.id === activeView);
+  const previousView = WORKSPACE_VIEWS[viewIndex - 1];
+  const nextView = WORKSPACE_VIEWS[viewIndex + 1];
   const [activeMapTab, setActiveMapTab] = useState<MapTab>("mapa2d");
   const [heightMode, setHeightMode] = useState<HeightMode>("bruto");
   const [coordinateMode, setCoordinateMode] = useState<"local" | "machine">("local");
@@ -2668,16 +2676,14 @@ export function ProjectWorkspace({
 
       <article className="panel workspace-navigation-panel">
         <div className="toolbar-inline toolbar-inline--scrollable workspace-tabs" role="tablist" aria-label="Navegación del workspace">
-          <button className={`toolbar-pill${activeView === "archivo" ? " toolbar-pill--active" : ""}`} type="button" onClick={() => setActiveView("archivo")}>Archivo</button>
-          <button className={`toolbar-pill${activeView === "trayectoria" ? " toolbar-pill--active" : ""}`} type="button" onClick={() => setActiveView("trayectoria")}>Trayectoria</button>
-          <button className={`toolbar-pill${activeView === "referencia" ? " toolbar-pill--active" : ""}`} type="button" onClick={() => setActiveView("referencia")}>Referencia</button>
-          <button className={`toolbar-pill${activeView === "mapa" ? " toolbar-pill--active" : ""}`} type="button" onClick={() => setActiveView("mapa")}>Mapa de alturas</button>
-                    <button className={`toolbar-pill${activeView === "ejecucion" ? " toolbar-pill--active" : ""}`} type="button" onClick={() => setActiveView("ejecucion")}>Ejecución</button>
+          {WORKSPACE_VIEWS.map(view => <button key={view.id} className={`toolbar-pill${activeView === view.id ? " toolbar-pill--active" : ""}`} type="button" aria-pressed={activeView === view.id} onClick={() => setActiveView(view.id)}>{view.label}</button>)}
         </div>
       </article>
 
       {workspaceError ? <div className="panel alert alert--error">{workspaceError}</div> : null}
 
+      <div className="workspace-side-navigation" role="group" aria-label={`Pestaña seleccionada: ${WORKSPACE_VIEWS[viewIndex].label}`}>
+        <button className="workspace-side-arrow" type="button" aria-label={`Pestaña anterior${previousView ? `: ${previousView.label}` : " (primera pestaña)"}`} title={previousView?.label ?? "Primera pestaña"} disabled={!previousView} onClick={() => { if (previousView) setActiveView(previousView.id); }}>←</button>
       <section className="workspace-view-panel">
         {activeView === "archivo" ? renderArchivo() : null}
         {activeView === "trayectoria" ? renderTrayectoria() : null}
@@ -2685,6 +2691,8 @@ export function ProjectWorkspace({
         {activeView === "mapa" ? renderMapa() : null}
               {activeView === "ejecucion" ? renderEjecucion() : null}
       </section>
+        <button className="workspace-side-arrow" type="button" aria-label={`Pestaña siguiente${nextView ? `: ${nextView.label}` : " (última pestaña)"}`} title={nextView?.label ?? "Última pestaña"} disabled={!nextView} onClick={() => { if (nextView) setActiveView(nextView.id); }}>→</button>
+      </div>
     </div>
   );
 }

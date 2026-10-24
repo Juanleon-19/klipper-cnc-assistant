@@ -2470,3 +2470,32 @@ button {
   min-width: 24px;
   accent-color: var(--color-primary, #2463eb);
 }
+
+/* Dedicated side rails keep navigation reachable without covering controls. */
+.workspace-side-navigation {
+  display: grid;
+  grid-template-columns: 44px minmax(0, 1fr) 44px;
+  gap: 8px;
+  align-items: start;
+  min-width: 0;
+}
+.workspace-side-arrow {
+  position: sticky;
+  top: 50vh;
+  align-self: start;
+  width: 44px;
+  height: 44px;
+  border: 1px solid #35505c;
+  border-radius: 12px;
+  background: #14242c;
+  color: #d6edf3;
+  font-size: 1.4rem;
+  cursor: pointer;
+}
+.workspace-side-arrow:hover:not(:disabled) { background: #21404a; }
+.workspace-side-arrow:focus-visible { outline: 2px solid #63d4cd; outline-offset: 2px; }
+.workspace-side-arrow:disabled { opacity: .35; cursor: default; }
+@media (max-width: 1024px) {
+  .workspace-side-navigation { gap: 4px; }
+  .workspace-side-arrow { border-radius: 8px; }
+}

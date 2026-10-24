@@ -4,6 +4,7 @@ No intercepted frontend responses or physical connections. Uses the same journey
 assertions as the backend regression. Firefox controls only isolated localhost.
 """
 import json
+import base64
 import os
 from pathlib import Path
 import subprocess
@@ -61,6 +62,60 @@ def field(label, value):
               + json.dumps(str(value)) + ');i.dispatchEvent(new Event("input",{bubbles:true}));return true;')
 
 
+def viewport(width, height):
+    # A sized browsing context gives an actual mobile CSS viewport despite
+    # Firefox's desktop minimum window width. It loads the real app unchanged.
+    command('POST', f'/session/{session}/frame', {'id': None})
+    command('POST', f'/session/{session}/window/rect', {'width': max(width, 500), 'height': height + 100})
+    frame = js('document.body.style.margin="0";document.body.style.background="#0b1217";let f=document.querySelector("iframe");if(!f){f=document.createElement("iframe");f.src=' + json.dumps(SITE) + ';f.style.border="0";document.body.appendChild(f);}f.style.width=' + json.dumps(str(width)+'px') + ';f.style.height=' + json.dumps(str(height)+'px') + ';return f;')
+    command('POST', f'/session/{session}/frame', {'id': frame})
+    wait(lambda: js('return innerWidth') == width)
+
+
+def reload_app():
+    js('window.__reloadPending=true; location.reload()')
+    command('POST', f'/session/{session}/frame', {'id': None})
+    command('POST', f'/session/{session}/frame', {'id': 0})
+    wait(lambda: js('return !window.__reloadPending && document.readyState === "complete"'))
+
+
+def navigation_checks():
+    labels = ['Archivo', 'Trayectoria', 'Referencia', 'Mapa de alturas', 'Ejecución']
+    before = list(fixture.transport.scripts)
+    def arrow(direction):
+        return js('const b=document.querySelectorAll(".workspace-side-arrow")[' + str(direction) + '];if(!b||b.disabled)return false;b.click();return true;')
+    for width in (1440, 900, 390):
+        viewport(width, 900)
+        wait(lambda: click('Archivo'))
+        selections = js('return [...document.querySelectorAll(".setup-toolbar select")].map(e=>e.value)')
+        assert js('return document.querySelectorAll(".workspace-side-arrow")[0].disabled')
+        for label in labels[1:]:
+            wait(lambda: arrow(1))
+            wait(lambda: js('return document.querySelector(".workspace-side-navigation")?.getAttribute("aria-label")') == 'Pestaña seleccionada: ' + label)
+        assert js('return document.querySelectorAll(".workspace-side-arrow")[1].disabled')
+        for label in reversed(labels[:-1]):
+            wait(lambda: arrow(0))
+            wait(lambda: js('return document.querySelector(".workspace-side-navigation")?.getAttribute("aria-label")') == 'Pestaña seleccionada: ' + label)
+        assert selections == js('return [...document.querySelectorAll(".setup-toolbar select")].map(e=>e.value)')
+        js('document.querySelector(".workspace-side-navigation").scrollIntoView(); window.scrollBy(0, 250);')
+        assert js('const a=[...document.querySelectorAll(".workspace-side-arrow")].map(e=>e.getBoundingClientRect()); const p=document.querySelector(".workspace-view-panel").getBoundingClientRect();return a.every(r=>r.top>=0&&r.bottom<=innerHeight&&r.left>=0&&r.right<=innerWidth)&&a[0].right<=p.left&&a[1].left>=p.right;'), width
+        assert js('const arrows=[...document.querySelectorAll(".workspace-side-arrow")].map(e=>e.getBoundingClientRect());return [...document.querySelectorAll(".workspace-view-panel button,.workspace-view-panel input,.workspace-view-panel select,.workspace-view-panel canvas")].every(e=>{const r=e.getBoundingClientRect();return !arrows.some(a=>r.width&&r.height&&r.left<a.right&&r.right>a.left&&r.top<a.bottom&&r.bottom>a.top)});'), 'Content overlaps arrows'
+        command('POST', f'/session/{session}/frame', {'id': None})
+        shot = command('GET', f'/session/{session}/screenshot')
+        (ARTIFACTS / f'navigation-{width}.png').write_bytes(base64.b64decode(shot))
+        command('POST', f'/session/{session}/frame', {'id': 0})
+        print('NAVIGATION RESPONSIVE PASS', width, flush=True)
+    wait(lambda: arrow(1))
+    wait(lambda: js('return document.querySelector(".workspace-side-navigation")?.getAttribute("aria-label")') == 'Pestaña seleccionada: Trayectoria')
+    reload_app()
+    wait(lambda: click('Abrir'))
+    wait(lambda: js('return document.querySelector(".workspace-side-navigation")?.getAttribute("aria-label")') == 'Pestaña seleccionada: Trayectoria')
+    assert fixture.transport.scripts == before, 'Navigation emitted physical commands'
+    viewport(1440, 1100)
+    wait(lambda: click('Referencia'))
+    print('NAVIGATION PERSISTENCE / NO MOTION PASS', flush=True)
+
+
 def ui_post(path, payload=None):
     global reject_preparation_once
     index = len(responses)
@@ -108,7 +163,7 @@ def ui_post(path, payload=None):
         wait(lambda: click('4. Iniciar sondeo automático'))
     elif path.endswith('/prepare'):
         # Reload must preserve the saved reference/map and permit next phase.
-        command('POST', f'/session/{session}/refresh')
+        reload_app()
         wait(lambda: click('Abrir'))
         wait(lambda: click('Ejecución'))
         wait(lambda: click('Preparar trabajo'))
@@ -130,6 +185,8 @@ def ui_post(path, payload=None):
     assert result['status'] == 200, result
     if path.endswith('/prepare-position'):
         assert len([r for r in responses if r['path'] == path and r['status'] == 200]) == 1
+    if path.endswith('/connect') and len([r for r in responses if r['path'] == path]) == 1:
+        navigation_checks()
     print('UI PASS', path.rsplit('/', 1)[-1], flush=True)
     return result['body']
 
@@ -167,8 +224,7 @@ try:
     wait(lambda: requests.get(DRIVER + '/status', timeout=1).ok)
     session = command('POST', '/session', {'capabilities': {'alwaysMatch': {
         'browserName': 'firefox', 'unhandledPromptBehavior': 'ignore', 'moz:firefoxOptions': {'args': ['-headless']}}}})['sessionId']
-    command('POST', f'/session/{session}/window/rect', {'width': 1440, 'height': 1100})
-    command('POST', f'/session/{session}/url', {'url': SITE})
+    viewport(1440, 1100)
     wait(lambda: click('Abrir'))
     fixture.post = ui_post
     fixture.test_reset_connect_home_prepare_reference_mesh_execution()
