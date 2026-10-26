@@ -2588,8 +2588,31 @@ class MachineRuntime:
         maximum_clearance = min(configured_clearance_z, safe_z)
         return min(current_gcode_z, maximum_clearance)
 
+    def _arrival_position(self, snapshot: dict[str, Any], coordinate_frame: str, *, label: str) -> tuple[dict[str, float], float | None]:
+        """Express observed trapq position in the target frame, never a queued endpoint.
+
+        gcode_move positions advance when commands are queued, before the machine
+        arrives. Their difference provides the XYZ offset; only live_position
+        can establish progress/arrival. All inputs must remain observable/fresh.
+        """
+        live, live_age = self._frame_position(snapshot, "live_position", label=label)
+        ages = [live_age]
+        if coordinate_frame == "gcode_position":
+            gcode, gcode_age = self._frame_position(snapshot, "gcode_position", label=label)
+            machine = snapshot.get("gcode_move_position")
+            if not isinstance(machine, dict):
+                raise MachineRuntimeError(f"{label}: falta transformación observada entre coordenadas G-code y máquina.")
+            ages.extend([gcode_age, snapshot.get("gcode_move_position_age_s")])
+            live = {axis: live[axis] - (float(machine[axis]) - gcode[axis]) for axis in ("x", "y", "z")}
+        elif coordinate_frame not in {"live_position", "commanded_position"}:
+            raise MachineRuntimeError(f"{label}: frame de llegada no soportado: {coordinate_frame}.")
+        if not all(math.isfinite(value) for value in live.values()):
+            raise MachineRuntimeError(f"{label}: posición observada no finita.")
+        age = None if any(self._frame_is_stale(value) for value in ages) else max(ages)
+        return live, age
+
     def _targets_reached(self, snapshot: dict[str, Any], targets: dict[str, float], *, coordinate_frame: str, label: str) -> tuple[bool, bool, float, dict[str, float], float | None]:
-        observed_position, frame_age = self._frame_position(snapshot, coordinate_frame, label=label)
+        observed_position, frame_age = self._arrival_position(snapshot, coordinate_frame, label=label)
         velocity = abs(float(snapshot["velocity"]))
         positions_ok = all(
             abs(float(observed_position[axis]) - target) <= self.config.settle_tolerance_mm
@@ -2600,7 +2623,7 @@ class MachineRuntime:
         velocity_stamp = snapshot.get("velocity_updated_at")
         observed_after_send = issued_at is None or (velocity_stamp is not None and velocity_stamp >= issued_at)
         stopped = observed_after_send and math.isfinite(velocity) and not self._frame_is_stale(velocity_age) and velocity <= self.config.velocity_tolerance_mm_s
-        return positions_ok and stopped, positions_ok, velocity, observed_position, frame_age
+        return positions_ok and stopped and not self._frame_is_stale(frame_age), positions_ok, velocity, observed_position, frame_age
 
     def _remaining_distance(self, observed_position: dict[str, float], targets: dict[str, float]) -> float:
         return math.sqrt(sum((float(observed_position[axis]) - target) ** 2 for axis, target in targets.items()))
@@ -2609,7 +2632,7 @@ class MachineRuntime:
         return math.sqrt(sum((float(observed_position[axis]) - float(start_position[axis])) ** 2 for axis in targets))
 
     def _wait_diagnostic(self, snapshot: dict[str, Any], targets: dict[str, float], *, coordinate_frame: str, trend: str | None = None) -> str:
-        observed_position, frame_age = self._frame_position(snapshot, coordinate_frame, label="diagnostic")
+        observed_position, frame_age = self._arrival_position(snapshot, coordinate_frame, label="diagnostic")
         observed_z = observed_position.get("z")
         target_z = targets.get("z")
         error_mm = None if observed_z is None or target_z is None else observed_z - target_z
@@ -2617,7 +2640,7 @@ class MachineRuntime:
         homing_origin = snapshot.get("homing_origin") or {}
         offset_z = self._frame_offset_z(snapshot)
         return (
-            f"target_frame={coordinate_frame}; observed_frame={coordinate_frame}; "
+            f"target_frame={coordinate_frame}; observed_frame={coordinate_frame}; arrival_source=motion_report.live_position; "
             f"target_z={None if target_z is None else f'{target_z:.3f}'}; "
             f"observed_z={None if observed_z is None else f'{observed_z:.3f}'}; "
             f"Posición observada: {observed_detail}; "
@@ -2638,7 +2661,7 @@ class MachineRuntime:
         required_stable_samples = max(1, int(self.config.stable_samples))
         start_snapshot = self._machine.get_motion_snapshot()
         last_snapshot = start_snapshot
-        start_position, _start_age = self._frame_position(start_snapshot, coordinate_frame, label=label)
+        start_position, _start_age = self._arrival_position(start_snapshot, coordinate_frame, label=label)
         previous_sample: dict[str, float] | None = None
         previous_offset_z: float | None = None
         last_progress_at = start
@@ -2669,6 +2692,8 @@ class MachineRuntime:
                     self._last_movement.update({
                         "observed_position": {axis: float(observed_position[axis]) for axis in ("x", "y", "z")},
                         "observed_velocity_mm_s": last_velocity,
+                        "arrival_source": "motion_report.live_position",
+                        "velocity_age_s": last_snapshot.get("velocity_age_s"),
                         "position_source": coordinate_frame,
                         "coordinate_frame": coordinate_frame,
                         "target_frame": coordinate_frame,
