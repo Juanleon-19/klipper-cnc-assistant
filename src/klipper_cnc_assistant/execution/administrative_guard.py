@@ -8,6 +8,8 @@ from contextlib import contextmanager
 from functools import wraps
 from uuid import uuid4
 import time
+import logging
+from .administrative_recovery import inventory, transaction_dir
 
 from klipper_cnc_assistant.application.errors import ApplicationError
 from klipper_cnc_assistant.machine.physical_ownership import OwnershipError
@@ -22,6 +24,7 @@ class AdministrativeGuard:
         self.remote = remote
         self.observed_at = observed_at
         self._validate_remote_identity = None
+        self.journal = None
 
     def check(self):
         runtime = self.service.runtime
@@ -55,12 +58,32 @@ class AdministrativeGuard:
         self.observe_before_commit()
         self.check()
         if not self.dirty:
-            atomic_json(self.service.administrative_pending_path, {
-                'id': uuid4().hex, 'action': self.action,
-                'status': 'PENDING', 'evidence': evidence,
-            }, durable=True)
+            before = inventory(self.service.administrative_pending_path.parent)
+            self.check()
+            self.journal = {'schema_version': 2, 'id': uuid4().hex, 'action': self.action,
+                            'status': 'PENDING', 'phase': 'PREPARED', 'evidence': evidence,
+                            'session': self.session, 'before': before, 'completed_steps': []}
+            atomic_json(self.service.administrative_pending_path, self.journal, durable=True)
             self.dirty = True
         self.observe_before_commit()
+
+
+    def checkpoint(self, phase):
+        if not self.dirty:
+            return
+        self.check()
+        after = inventory(self.service.administrative_pending_path.parent)
+        self.check()
+        self.journal.update(phase=phase, verified_after=after)
+        if not phase.startswith('FAILED'):
+            self.journal['completed_steps'].append(phase)
+        before = self.journal['before']
+        self.journal['file_changes'] = {
+            'added': sorted(set(after) - set(before)),
+            'removed': sorted(set(before) - set(after)),
+            'modified': sorted(key for key in before.keys() & after.keys() if before[key] != after[key]),
+        }
+        atomic_json(self.service.administrative_pending_path, self.journal, durable=True)
 
 
 @contextmanager
@@ -86,9 +109,20 @@ def administrative_mutation(service, action, *, allow_started_runs=False):
         yield guard
         guard.check()
         if guard.dirty:
+            guard.checkpoint('COMPLETED')
+            directory = transaction_dir(service, guard.journal)
+            directory.mkdir(parents=True, exist_ok=True)
+            atomic_json(directory / 'completed.json', guard.journal, durable=True)
             service.administrative_pending_path.unlink()
-    except BaseException:
+    except BaseException as error:
         if guard.dirty:
+            try:
+                guard.checkpoint('FAILED_WITH_VERIFIED_FILES')
+                guard.journal['failure'] = {'type': type(error).__name__,
+                    'message': str(error)[:500] if isinstance(error, ApplicationError) else (getattr(error, 'strerror', None) or 'Fallo de persistencia; revisar registro del servicio.')}
+                atomic_json(service.administrative_pending_path, guard.journal, durable=True)
+            except BaseException:
+                logging.getLogger(__name__).exception('No se pudo persistir checkpoint administrativo; se conserva evidencia anterior.')
             coordinator.administration_failed('Mutación administrativa incompleta; conservar histórico y revisar journal pendiente.')
         raise
     finally:

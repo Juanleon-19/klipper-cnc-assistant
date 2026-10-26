@@ -60,6 +60,21 @@ def build_machine_router() -> APIRouter:
     def diagnostic_mode(payload: DiagnosticModeRequest, request: Request) -> MachineRuntimeResponse:
         return MachineRuntimeResponse(**runtime(request).set_diagnostic_mode(payload.enabled))
 
+    @router.get("/administrative-recovery")
+    def administrative_recovery_status(request: Request):
+        from klipper_cnc_assistant.execution.administrative_recovery import status
+        return status(request.app.state.job_service)
+
+    @router.post("/administrative-recovery/{transaction_id}")
+    def recover_administrative_transaction(transaction_id: str, request: Request):
+        from klipper_cnc_assistant.execution.administrative_recovery import recover
+        from klipper_cnc_assistant.machine.physical_ownership import OwnershipError
+        from klipper_cnc_assistant.application.errors import ApplicationError
+        try:
+            return recover(request.app.state.job_service, transaction_id)
+        except OwnershipError as error:
+            raise ApplicationError(str(error)) from error
+
     @router.post("/recover-idle-controls", response_model=MachineRuntimeResponse)
     def recover_idle_controls(request: Request) -> MachineRuntimeResponse:
         return MachineRuntimeResponse(**runtime(request).recover_idle_controls())

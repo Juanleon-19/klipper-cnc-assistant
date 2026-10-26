@@ -4,7 +4,7 @@ import { StatusBadge } from "../../components/StatusBadge";
 import { formatMillimeters } from "../../lib/format";
 import type { HeightMap, MachineRuntime, Operation, ReferenceMoveResult, ReferenceSession, ReferenceStep, CapturedPosition } from "../../types";
 import type { MachineContextValue } from "../system/MachineContext";
-import { reconnectRuntime, recoverIdleControls } from "../system/runtimeApi";
+import { reconnectRuntime, recoverIdleControls, recoverAdministrativeTransaction } from "../system/runtimeApi";
 
 type InputState = { x_mm: string; y_mm: string };
 type ZInputState = { x_mm: string; y_mm: string; z_mm: string };
@@ -212,12 +212,25 @@ export function ReferenceWorkspace({
   const [reconnectingRuntime, setReconnectingRuntime] = useState(false);
   const [runtimeReconnectError, setRuntimeReconnectError] = useState("");
   const [recoveringControls, setRecoveringControls] = useState(false);
+  const [administrativeDetail, setAdministrativeDetail] = useState("");
+  const administrativePending = machine.runtime?.physical_owner?.administrative_incomplete === true;
+  useEffect(() => {
+    let current = true;
+    if (!administrativePending) { setAdministrativeDetail(""); return; }
+    void fetch("/api/machine/administrative-recovery").then(async (response) => {
+      if (!response.ok) return;
+      const detail = await response.json() as { action?: string; phase?: string; failure?: { message?: string } };
+      if (current) setAdministrativeDetail([detail.action, detail.phase, detail.failure?.message].filter(Boolean).join(" — "));
+    }).catch(() => { /* The explicit recovery action presents a request failure. */ });
+    return () => { current = false; };
+  }, [administrativePending]);
   const handleRecoverControls = async () => {
     if (recoveringControls) return;
     setRecoveringControls(true);
     setRuntimeReconnectError("");
     try {
-      await recoverIdleControls();
+      if (machine.runtime?.physical_owner?.administrative_incomplete) await recoverAdministrativeTransaction();
+      else await recoverIdleControls();
       await machine.refreshRuntime();
     } catch (error) {
       setRuntimeReconnectError(error instanceof Error ? error.message : "No se pudo verificar el reposo.");
@@ -311,8 +324,11 @@ export function ReferenceWorkspace({
             ) : null}
           </div>
           {machine.runtime?.recovery_pending ? <div className="alert alert--warning">
-            <p>Hay una recuperación pendiente. Verificar reposo libera los controles solo si terminaron los movimientos y Klipper confirma reposo. No mueve la máquina ni habilita el joystick.</p>
-            <button className="button" type="button" disabled={recoveringControls || Boolean(activeOperation) || referenceBusy} onClick={() => void handleRecoverControls()}>{recoveringControls ? "Verificando reposo…" : "Verificar reposo y recuperar controles"}</button>
+            <p>{machine.runtime?.physical_owner?.administrative_incomplete
+              ? "Transacción administrativa incompleta. Recupérela para verificar los archivos y conservar el journal como historial. Después verifique reposo y use Reiniciar proceso; no se reanudará el trabajo anterior."
+              : "Hay una recuperación pendiente. Verificar reposo libera los controles solo si terminaron los movimientos y Klipper confirma reposo. No mueve la máquina ni habilita el joystick."}</p>
+            {administrativeDetail ? <p>{administrativeDetail}</p> : null}
+            <button className="button" type="button" disabled={recoveringControls || Boolean(activeOperation) || referenceBusy} onClick={() => void handleRecoverControls()}>{recoveringControls ? "Verificando recuperación…" : machine.runtime?.physical_owner?.administrative_incomplete ? "Recuperar transacción administrativa" : "Verificar reposo y recuperar controles"}</button>
           </div> : null}
           {connectAttemptStarted && !runtimeConnected && !showRuntimeRecovery ? <p className="muted">Esperando conexión. Si no queda lista en 10 s aparecerá la recuperación del runtime.</p> : null}
           {showRuntimeRecovery && !runtimeConnected ? <div className="alert alert--warning">La conexión no quedó lista después de 10 s. Puede intentar una reconexión completa del runtime sin reiniciar Klipper ni el servicio.</div> : null}

@@ -79,6 +79,7 @@ function renderReference(options?: {
   machineSettingsRuntimeStatus?: "coherent" | "unconfirmed" | "refresh_failed" | "inconsistent";
   hasReference?: boolean;
   recoveryPending?: boolean;
+  administrativePending?: boolean;
   activeOperation?: Record<string, unknown>;
   homedAxes?: string;
   telemetryRecent?: boolean;
@@ -96,6 +97,7 @@ function renderReference(options?: {
     longToolReferencePrepZ: options?.longToolReferencePrepZ,
   });
   currentRuntime.recovery_pending = options?.recoveryPending;
+  currentRuntime.physical_owner = { administrative_incomplete: options?.administrativePending };
   currentRuntime.active_operation = options?.activeOperation;
   const refreshRuntime = options?.refreshRuntime ?? vi.fn().mockResolvedValue(currentRuntime);
   const consistencyProps = {
@@ -185,6 +187,30 @@ describe("ReferenceWorkspace connection and workflow UI", () => {
     await waitFor(() => expect(refreshRuntime).toHaveBeenCalled());
     expect(fetchMock).toHaveBeenCalledWith("/api/machine/recover-idle-controls", { method: "POST" });
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("recupera el journal explícitamente sin ejecutar recuperación física ni reset", async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce({ ok: true, json: async () => ({ action: "reset_setup_map", phase: "PREPARED" }) })
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ pending: true, id: "abc" }) })
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ status: "reconciled" }) });
+    vi.stubGlobal("fetch", fetchMock);
+    const { refreshRuntime } = renderReference({ connected: true, recoveryPending: true, administrativePending: true });
+    expect(screen.getByText(/Transacción administrativa incompleta/)).toBeInTheDocument();
+    expect(await screen.findByText("reset_setup_map — PREPARED")).toBeInTheDocument();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    fireEvent.click(screen.getByRole("button", { name: "Recuperar transacción administrativa" }));
+    await waitFor(() => expect(refreshRuntime).toHaveBeenCalled());
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(fetchMock).toHaveBeenLastCalledWith("/api/machine/administrative-recovery/abc", { method: "POST" });
+  });
+
+  it("presenta el bloqueo concreto de la recuperación administrativa", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValueOnce({ ok: true, json: async () => ({ action: "reset_setup_map" }) })
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ pending: true, id: "abc" }) })
+      .mockResolvedValueOnce({ ok: false, json: async () => ({ detalle: "Falta observación de Moonraker" }) }));
+    renderReference({ connected: true, recoveryPending: true, administrativePending: true });
+    fireEvent.click(screen.getByRole("button", { name: "Recuperar transacción administrativa" }));
+    expect(await screen.findByText("Falta observación de Moonraker")).toBeInTheDocument();
   });
 
   it("no permite recuperar mientras existe una operación activa", () => {

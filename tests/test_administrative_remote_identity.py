@@ -125,3 +125,19 @@ class AdministrativeIdentityTest(unittest.TestCase):
         self.assertNotEqual(new['run_id'], self.run['run_id'])
         self.assertEqual(self.f.fixture.adapter.started, [])
         self.assertEqual(self.f.fixture.adapter.probe_calls, 0)
+
+    def test_cancelled_run_with_completed_print_evidence_can_be_archived(self):
+        self.run['state'] = 'JOB_CANCELLED'
+        self.run['recovery_state'] = 'CANCEL_RECONCILIATION_REQUIRED'
+        self.f.path.write_text(json.dumps(self.run))
+        result = self.f.reset()
+        self.assertEqual(result['current_runs_cleared'], 1)
+        history = json.loads(next((self.f.path.parent / 'history').glob('*.json')).read_text())
+        self.assertEqual(history['state'], 'JOB_CANCELLED')
+        self.assertEqual(history['operations'][0]['execution_status'], 'COMPLETED')
+
+    def test_cancelled_run_without_confirmed_completion_stays_blocked(self):
+        self.run['state'] = 'JOB_CANCELLED'
+        self.run['operations'][0]['observed_printing'] = False
+        self.f.path.write_text(json.dumps(self.run))
+        self.rejected('No hay evidencia suficiente')

@@ -1,6 +1,7 @@
 """One temporary application, real services/runtime, in-memory physical transports."""
 from dataclasses import replace
 import time
+import json
 import os
 import re
 import asyncio
@@ -159,6 +160,19 @@ class FunctionalJourneyTest(unittest.TestCase):
         self.assertEqual(rejected.status_code, 400)
         self.assertIn('recuperar controles', rejected.text)
         self.assertEqual(before, self.job._run_file(self.context).read_bytes())
+        self.post('/api/machine/recover-idle-controls')
+        # Interrupt administrative preparation before any project/map write.
+        with self.assertRaises(OSError):
+            with self.job.administrative_mutation('reset_setup_map', allow_started_runs=True) as guard:
+                guard.begin_mutation(project_id=self.project, setup_id=self.setup)
+                raise OSError('synthetic administrative interruption')
+        journal = json.loads(self.job.administrative_pending_path.read_text())
+        scripts = list(self.transport.scripts)
+        recovered = self.post('/api/machine/administrative-recovery/' + journal['id'])
+        self.assertTrue(recovered['physical_recovery_required'])
+        self.assertEqual(self.transport.scripts, scripts)
+        self.assertEqual(before, self.job._run_file(self.context).read_bytes())
+        self.assertTrue(self.runtime.physical_ownership.snapshot()['recovery_pending'])
         self.post('/api/machine/recover-idle-controls')
         root = f'/api/projects/{self.project}'
         result = self.post(root + f'/setups/{self.setup}/reset-preparation', {'motivo': 'synthetic restart'})

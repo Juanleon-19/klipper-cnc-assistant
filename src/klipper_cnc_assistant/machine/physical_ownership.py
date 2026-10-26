@@ -254,6 +254,36 @@ class PhysicalMachineCoordinator:
             self._administrative_incomplete = True
             self.enter_recovery(reason)
 
+    def begin_administrative_recovery(self, *, expected_revision):
+        """Exclusive evidence repair, never a physical permit or a lease release."""
+        with self._lock:
+            if (self._shutdown or not self._administrative_incomplete
+                    or expected_revision != self._revision or self._root is not None
+                    or self._producer_active or self._dispatching or self._permits
+                    or self._administrative is not None or self._job_updates or self._project_edits):
+                raise OwnershipError('Recuperación administrativa bloqueada: productor, lease, operación concurrente o revisión cambiada.')
+            self._revision += 1
+            token = (uuid4().hex, self._session, self._revision)
+            self._administrative = token
+            return token
+
+    def validate_administrative_recovery(self, token):
+        with self._lock:
+            if (self._shutdown or token is None or token != self._administrative
+                    or token[1] != self._session or token[2] != self._revision
+                    or self._root is not None or self._producer_active or self._dispatching
+                    or self._permits or self._job_updates or self._project_edits):
+                raise OwnershipError('La reserva de recuperación administrativa cambió.')
+
+    def finish_administrative_recovery(self, token):
+        with self._lock:
+            self.validate_administrative_recovery(token)
+            self._administrative_incomplete = False
+            # Do not certify physical idle, change session, clear cancellation,
+            # or enable controls. The normal explicit idle recovery follows.
+            self._recovery = True
+            self._reason = 'Transacción administrativa conciliada; verifique reposo para recuperar controles.'
+
     def begin_administration(self, *, expected_revision):
         """Reserve exclusivity without creating a movement permit. No IO here."""
         with self._lock:
@@ -296,6 +326,6 @@ class PhysicalMachineCoordinator:
         with self._lock:
             kind = OwnerKind.RECOVERY if self._recovery else (self._root.owner_kind if self._root else (OwnerKind.ADMINISTRATIVE if self._administrative is not None else OwnerKind.IDLE))
             return {'shutdown': self._shutdown, 'kind': kind.value, 'owner_id': None if self._root is None else self._root.owner_id,
-                    'project_edits': len(self._project_edits), 'job_updates': len(self._job_updates), 'active': kind != OwnerKind.IDLE, 'administrative_active': self._administrative is not None, 'recovery_pending': self._recovery,
+                    'administrative_incomplete': self._administrative_incomplete, 'project_edits': len(self._project_edits), 'job_updates': len(self._job_updates), 'active': kind != OwnerKind.IDLE, 'administrative_active': self._administrative is not None, 'recovery_pending': self._recovery,
                     'cancel_requested': self._cancelled, 'reason': self._reason,
                     'session': self._session, 'revision': self._revision, 'producer_active': self._producer_active, 'dispatching': len(self._dispatching), 'children': max(0, len(self._permits) - 1)}

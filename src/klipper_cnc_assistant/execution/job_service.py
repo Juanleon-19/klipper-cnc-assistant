@@ -375,7 +375,7 @@ class JobService:
             # An explicitly empty standby is not a different file. Only retire
             # completed execution evidence; never infer completion from standby.
             completed = (
-                run.get('state') in {'SPINDLE_STOP_REQUIRED', 'JOB_COMPLETE'}
+                run.get('state') in {'SPINDLE_STOP_REQUIRED', 'JOB_COMPLETE', 'JOB_CANCELLED'}
                 and operation.get('execution_status') == 'COMPLETED'
                 and operation.get('observed_printing') is True
                 and bool(operation.get('finished_at'))
@@ -908,6 +908,7 @@ class JobService:
         guard.begin_mutation(validate_remote_identity=lambda: self._assert_administrative_print_identity(run, guard),
                              run_id=run['run_id'], revision=run['revision'])
         archive_path = self._write_archived_run(context, archived, suffix="stale")
+        guard.checkpoint("HISTORY_SAVED")
         guard.observe_before_commit()
         run_file = self._run_file(context)
         if run_file.exists():
@@ -950,8 +951,10 @@ class JobService:
                 archived_runs.append({'run_id': run['run_id'], 'previous_status': run.get('state'),
                     'archive_reason': 'preparation_reset', 'history_already_present': False,
                     'archive_path': self._relative_to_project(project_id, archive_path)})
+            guard.checkpoint("HISTORY_SAVED")
             guard.observe_before_commit()
             dependency_result = reset_dependencies(guard) if reset_dependencies else None
+            guard.checkpoint("DEPENDENCIES_RESET")
             guard.observe_before_commit()
             # No removal until every callback and every expected revision passed.
             current_paths = {str(path) for _, path, _ in self._current_runs_for_setup(project_id, setup_id)}
@@ -962,6 +965,7 @@ class JobService:
             for _, path, run in entries:
                 guard.check()
                 self.run_store.remove(path, run)
+                guard.checkpoint("CURRENT_RUN_ARCHIVED")
             result = {'reason': 'preparation_reset', 'archived_runs': archived_runs,
                       'current_runs_cleared': len(entries), 'can_start_new_run': True}
             if dependency_result is not None:

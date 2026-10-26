@@ -155,13 +155,19 @@ def _administrative_route(function=None, *, persistent=False, independent=False)
             async def wrapped(**kwargs):
                 with scope(kwargs) as guard:
                     mark(guard, kwargs)
-                    return await handler(**kwargs)
+                    result = await handler(**kwargs)
+                    if persistent:
+                        guard.checkpoint(handler.__name__.upper() + "_APPLIED")
+                    return result
         else:
             @wraps(handler)
             def wrapped(**kwargs):
                 with scope(kwargs) as guard:
                     mark(guard, kwargs)
-                    return handler(**kwargs)
+                    result = handler(**kwargs)
+                    if persistent:
+                        guard.checkpoint(handler.__name__.upper() + "_APPLIED")
+                    return result
         return wrapped
     return decorate(function) if function else decorate
 

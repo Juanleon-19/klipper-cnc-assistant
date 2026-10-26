@@ -133,6 +133,8 @@ def ui_post(path, payload=None):
         wait(open_reset)
         wait(lambda: command('GET', f'/session/{session}/alert/text'))
         command('POST', f'/session/{session}/alert/accept')
+    elif '/administrative-recovery/' in path:
+        wait(lambda: click('Recuperar transacción administrativa'))
     elif path.endswith('/recover-idle-controls'):
         wait(lambda: click('Verificar reposo y recuperar controles'))
     elif path.endswith('/home'):

@@ -185,6 +185,8 @@ class RecoverableMachineRuntime(MachineRuntime):
 
     def recover_idle_controls(self) -> dict[str, Any]:
         """Explicit recovery using fresh idle evidence; never sends movement."""
+        if self.physical_ownership.snapshot().get('administrative_incomplete'):
+            raise MachineRuntimeError('Transacción administrativa incompleta. Use Recuperar transacción administrativa antes de verificar reposo.')
         self._require_physical_ready()
         with self._lock:
             self._manual_enabled = False
