@@ -1216,7 +1216,7 @@ class MachineRuntime:
             clearance = self.tool_change_clearance_z(tool_reference_profile)
             travel_z = (max if self.config.tool_change_z_positive_up else min)(float(current_snapshot["z"]), clearance, preparation_z, self.config.safe_z_mm)
             self._validate_machine_target(z=travel_z, label="despeje de referencia")
-            self._event("info", f"REFERENCE_MOVE_SAFE_Z: moviendo Z a preparación {preparation_z:.3f} mm.")
+            self._event("info", f"REFERENCE_MOVE_SAFE_Z: despeje Z {travel_z:.3f} mm; aproximación posterior Z {preparation_z:.3f} mm.")
             self._move_absolute(
                 z=travel_z,
                 label="reference_move_safe_z",
@@ -1275,9 +1275,8 @@ class MachineRuntime:
     ) -> dict[str, Any]:
         """Leave the tool-change station safely, then approach the reference.
 
-        The installed (incoming) tool determines only the clearance used before
-        XY travel.  Once XY has reached the saved reference, every tool uses the
-        same reference preparation Z before probing.
+        The incoming profile selects travel clearance and its reference approach
+        (custom long-tool height or inherited standard height). Contact Z is measured.
         """
         self._require_physical_ready()
         context = self._begin_motion_operation("tool_change_to_reference", permit=permit)
@@ -1431,11 +1430,18 @@ class MachineRuntime:
             self._event("info", "REFERENCE_ARMED: pulse el botón externo para sondear la referencia.")
         return self.snapshot()
 
-    def confirm_probe(self, *, permit: PhysicalPermit | None = None, reference_context: dict[str, Any] | None = None) -> dict[str, Any]:
+    def confirm_probe(self, *, permit: PhysicalPermit | None = None, reference_context: dict[str, Any] | None = None,
+                      expected_xy: tuple[float, float] | None = None, probe_config: dict[str, Any] | None = None) -> dict[str, Any]:
         self._require_physical_ready()
         evidence = self._probe_capture_evidence(reference_context)
         context = self._begin_motion_operation("reference_z", permit=permit)
         try:
+            if expected_xy is not None:
+                self._refresh_machine(require_valid_observation=True)
+                observed = self._machine.get_motion_snapshot()
+                if any(not math.isfinite(float(target)) or abs(float(observed[axis]) - float(target)) > self.config.settle_tolerance_mm
+                       for axis, target in zip(("x", "y"), expected_xy)):
+                    raise MachineRuntimeError("La herramienta no está en el punto X/Y de referencia; no se inicia sondeo.")
             with self._lock:
                 if self._state in {MachineRuntimeState.WAITING_FOR_XY_REFERENCE, MachineRuntimeState.REFERENCE_CAPTURED}:
                     self._probe_requested = True
@@ -1448,7 +1454,7 @@ class MachineRuntime:
                 self._manual_enabled = False
                 self._diagnostic_input_only = True
                 self._state = MachineRuntimeState.PROBING_REFERENCE
-            probe = self._perform_probe_descent(label="reference_probe", profile=self._reference_probe_profile())
+            probe = self._perform_probe_descent(label="reference_probe", profile=self._resolve_probe_profile(probe_config) if probe_config is not None else self._reference_probe_profile())
             if evidence != self._probe_capture_evidence(reference_context):
                 raise MachineRuntimeError("La sesión o configuración cambió durante probe; repita la medición.")
             probe.evidence = evidence
@@ -1488,7 +1494,7 @@ class MachineRuntime:
             self._move_absolute(
                 z=safe_z,
                 label="mesh_z_segura",
-                feed_mm_min=AUXILIARY_DEFAULT_TRAVEL_FEED_MM_MIN,
+                feed_mm_min=self._reference_target_z_feed(current_z=float(start_snapshot["z"]), target_z=safe_z),
             )
             safe_observed = machine.get_motion_snapshot()
             self._notify_probe_progress(progress_callback, "POINT_CONFIRM_SAFE_Z", safe_z_mm=safe_z, observed_z_mm=float(safe_observed["z"]))

@@ -273,13 +273,12 @@ class MoonrakerJobAdapter:
         )
 
     def probe_tool_reference(self, *, x_mm: float, y_mm: float, probe_config: dict[str, Any] | None) -> dict[str, Any]:
-        point = {
-            "index": 0,
-            "role": "REFERENCE",
-            "x_machine": x_mm,
-            "y_machine": y_mm,
-        }
-        return self.runtime.probe_mesh_point(point, probe_config=probe_config, permit=self.permit)
+        # The return sequence already verified clearance, XY and the incoming
+        # approach height. A reference is not a mesh point: do not move again
+        # to the old tool's map reference Z + mesh clearance.
+        observation = self.runtime.confirm_probe(permit=self.permit, expected_xy=(x_mm, y_mm), probe_config=probe_config)
+        return {"probe": observation["last_probe_result"]}
+
 
 
 class JobService:
