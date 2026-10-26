@@ -80,3 +80,13 @@ Al cambiar herramienta: despeje entrante → XY original → aproximación de su
 La malla conserva referencia medida + separación relativa, con feeds auxiliares Z
 configurados; contacto y retracto mantienen su perfil. Recuperación física del
 incidente y validación real pendientes; ningún test simulado las sustituye.
+
+### Recuperación administrativa (26 octubre)
+
+Un journal incompleto ya tiene conciliación explícita: inspección/recuperación en
+Referencia, evidencia de archivos, reserva exclusiva y observación remota fresca.
+El original se archiva como evidencia; no se restauran JobRun ni referencias. La
+conciliación administrativa conserva RECOVERY físico. Luego verificar reposo y
+Reiniciar proceso mediante los controles existentes. Un journal antiguo requiere
+importación local de respaldo verificado; cambios no explicados bloquean. Véase
+`auditorias/administrative-map-recovery-20261026/REPORTE_FINAL.md`.
