@@ -210,4 +210,3 @@ def import_legacy_evidence(data_dir, backup_dir):
                        'proven_reset_write_set': proven, 'preserved_validation_reports': preserved_reports,
                        'phase': 'LEGACY_NO_DATA_CHANGE'}, durable=True)
     return {'status': 'evidence_imported', 'dependencies': len(snapshot)}
-
