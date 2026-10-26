@@ -471,13 +471,13 @@ describe("ExecutionConsole", () => {
       />,
     );
 
-    expect(screen.getByRole("region", { name: "Nueva referencia Z lista" })).toHaveTextContent("Broca 0.8 mm");
-    expect(screen.getByRole("region", { name: "Nueva referencia Z lista" })).toHaveTextContent("Herramienta larga");
+    expect(screen.getByRole("region", { name: "Referencia Z vigente" })).toHaveTextContent("Broca 0.8 mm");
+    expect(screen.getByRole("region", { name: "Referencia Z vigente" })).toHaveTextContent("Herramienta larga");
     expect(screen.getAllByText("Perfil de cambio").length).toBeGreaterThan(0);
     expect(screen.getByText("Z segura durante cambio").parentElement).toHaveTextContent("130.000 mm");
     expect(screen.getByText("Z de aproximación a referencia").parentElement).toHaveTextContent("105.000 mm");
     expect(screen.getByText(/La Z segura se usa solo durante el cambio de herramienta/i)).toBeInTheDocument();
-    expect(screen.getByText("Nueva referencia Z lista")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Referencia Z vigente" })).toBeInTheDocument();
     expect(screen.getByText(/generará automáticamente una nueva compensación Legacy/i)).toBeInTheDocument();
     expect(screen.getByText(/No es necesario volver a la sección Compensación/i)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Spindle preparado — continuar" })).toBeInTheDocument();
@@ -813,4 +813,34 @@ it("consume el contrato live de recovery y retira retry antes de confirmar spind
     status: "RECOVERY_REQUIRED", available_actions: ["cancel"] } }}
     error={null} busy={false} onPrepare={vi.fn()} onStart={vi.fn()} onAction={onAction} onArchiveStale={vi.fn()} />);
   expect(screen.queryByRole("button", { name: "Reintentar transición de herramienta" })).not.toBeInTheDocument();
+});
+
+it("espera confirmación explícita antes de iniciar otra operación con referencia vigente", () => {
+  const onAction = vi.fn();
+  const snapshot = { ...baseSnapshot,
+    run: { ...baseSnapshot.run, status: "READY_TO_RESUME", available_actions: ["continue", "cancel"] },
+    transition: { ...baseSnapshot.transition, state: "READY_TO_RESUME", operator_confirmation_required: true },
+    job_run: { ...baseSnapshot.job_run!, state: "READY_TO_RESUME", available_actions: ["continue", "cancel"] },
+  };
+  const props = { snapshot, error: null, busy: false, onPrepare: vi.fn(), onStart: vi.fn(), onAction, onArchiveStale: vi.fn() };
+  const { rerender } = render(<ExecutionConsole {...props} />);
+  const button = screen.getByRole("button", { name: "Spindle preparado — continuar" });
+  expect(button).toBeDisabled();
+  expect(onAction).not.toHaveBeenCalled();
+  rerender(<ExecutionConsole {...props} />);
+  expect(onAction).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole("checkbox", { name: /Confirmo que el spindle está preparado/ }));
+  fireEvent.click(button);
+  expect(onAction).toHaveBeenCalledTimes(1);
+  expect(onAction).toHaveBeenCalledWith("continue");
+});
+
+it("distingue preparación lógica pendiente de un bloqueo físico real", () => {
+  const props = { snapshot: { ...baseSnapshot, run: { ...baseSnapshot.run, status: "JOB_DRAFT" }, job_run: null },
+    error: null, busy: false, onPrepare: vi.fn(), onStart: vi.fn(), onAction: vi.fn(), onArchiveStale: vi.fn() };
+  const readiness = readyExecution({can_start:false, blocking_reasons:[{code:"JOB_NOT_PREPARED", category:"execution", message:"Prepare el trabajo antes de iniciar.", action:"Preparar trabajo."}]});
+  const { rerender } = render(<ExecutionConsole {...props} readiness={readiness} />);
+  expect(screen.getByText("PENDIENTE DE PREPARAR")).toBeInTheDocument();
+  rerender(<ExecutionConsole {...props} readiness={{...readiness, conditions_ready:false, blocking_reasons:[...readiness.blocking_reasons,{code:"MAP_NOT_READY",category:"geometry",message:"Falta mapa físico válido",action:"Medir mapa"}]}} />);
+  expect(screen.getByText("NO PUEDE INICIAR")).toBeInTheDocument();
 });

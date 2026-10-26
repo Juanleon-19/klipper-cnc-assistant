@@ -51,7 +51,7 @@ const TOOL_WAIT_STATES = new Set(["SPINDLE_STOP_REQUIRED", "TOOL_CHANGE_REQUIRED
 const ACTIVE_EXECUTION_STATES = new Set(["JOB_STARTING", "OPERATION_PREFLIGHT", "OPERATION_UPLOADING", "WAITING_FOR_KLIPPER", "PRINT_QUEUED", "OPERATION_RUNNING", "OPERATION_PAUSED", "JOB_PAUSED"]);
 const REFERENCE_TRANSITION_STATES = new Set(["TOOL_CHANGE_CONFIRMED", "RETURNING_TO_REFERENCE_SAFE_Z", "RETURNING_TO_REFERENCE_XY", "MOVING_TO_REFERENCE", "CALIBRATING_TOOL"]);
 const AUTOMATIC_FLOW_STEPS = [
-  { state: "READY_TO_RESUME", label: "Referencia Z medida" },
+  { state: "READY_TO_RESUME", label: "Referencia Z vigente" },
   { state: "OPERATION_PREFLIGHT", label: "Generar Legacy JIT" },
   { state: "OPERATION_UPLOADING", label: "Subir a Moonraker" },
   { state: "WAITING_FOR_KLIPPER", label: "Esperar confirmación de Klipper" },
@@ -59,7 +59,7 @@ const AUTOMATIC_FLOW_STEPS = [
   { state: "OPERATION_RUNNING", label: "Ejecutar operación" },
 ] as const;
 const AUTOMATIC_FLOW_DESCRIPTIONS: Record<string, string> = {
-  READY_TO_RESUME: "Nueva referencia lista; esperando confirmación para continuar",
+  READY_TO_RESUME: "Referencia vigente; esperando confirmación para iniciar la siguiente operación",
   OPERATION_PREFLIGHT: "Generando compensación Legacy JIT",
   OPERATION_UPLOADING: "Subiendo archivo compensado a Moonraker",
   WAITING_FOR_KLIPPER: "Esperando confirmación de Klipper",
@@ -206,12 +206,15 @@ export function ExecutionConsole({ snapshot, readiness: suppliedReadiness, error
   const failedChecks = checks.filter((check) => !check.ok);
   const showPreflightSummary = true;
   const initial = ["JOB_DRAFT", "JOB_VALIDATING", "JOB_READY"].includes(runStatus) && !jobRun?.started_at;
+  const preparationOnly = initial && !settingsBlocked && !error && readiness?.can_prepare === true
+    && readiness?.conditions_ready === true && readiness.blocking_reasons.length > 0
+    && readiness.blocking_reasons.every(reason => reason.code === "JOB_NOT_PREPARED");
   const health = snapshot?.active_execution_health;
   const activeTitle = health?.title ?? (runStatus === "OPERATION_PREFLIGHT" || runStatus === "JOB_STARTING" || runStatus === "OPERATION_UPLOADING" ? "PREPARANDO"
     : runStatus === "OPERATION_RUNNING" ? "EJECUTANDO" : runStatus === "JOB_COMPLETE" ? "COMPLETADO"
     : runStatus === "JOB_ERROR" ? "ERROR" : runStatus === "RECOVERY_REQUIRED" ? "RECUPERACIÓN REQUERIDA"
     : runStatus.includes("PAUSED") ? "PAUSADO" : "ESPERANDO OPERADOR");
-  const readinessTitle = initial ? (canStart ? "PUEDE INICIAR" : "NO PUEDE INICIAR") : `${activeTitle}${runStatus === "OPERATION_PREFLIGHT" && activeTitle === "PREPARANDO" ? ` — ${currentOperationLabel(snapshot)}` : ""}`;
+  const readinessTitle = initial ? (preparationOnly ? "PENDIENTE DE PREPARAR" : canStart ? "PUEDE INICIAR" : "NO PUEDE INICIAR") : `${activeTitle}${runStatus === "OPERATION_PREFLIGHT" && activeTitle === "PREPARANDO" ? ` — ${currentOperationLabel(snapshot)}` : ""}`;
   const readinessDetail = !initial ? (health?.detail ?? automaticFlowDescription ?? snapshot?.run.next_action) : settingsBlocked ? settingsBlockReason : error?.message ?? readiness?.blocking_reasons[0]?.message
     ?? (canStart ? "Confirme que el spindle está preparado antes de iniciar." : "Actualice el diagnóstico para verificar el estado actual.");
 
@@ -229,7 +232,7 @@ export function ExecutionConsole({ snapshot, readiness: suppliedReadiness, error
       {showPreflightSummary ? (
         <section className="execution-panel" aria-label="Preparación del trabajo">
           <div className="section-heading"><h4>Preparación del trabajo</h4></div>
-          <div className={`alert ${!initial ? (health?.severity === "ERROR" ? "alert--error" : health?.severity === "WARNING" ? "alert--warning" : health?.severity === "SUCCESS" ? "alert--success" : "alert--info") : canStart ? "alert--success" : "alert--warning"}`}>
+          <div className={`alert ${!initial ? (health?.severity === "ERROR" ? "alert--error" : health?.severity === "WARNING" ? "alert--warning" : health?.severity === "SUCCESS" ? "alert--success" : "alert--info") : preparationOnly ? "alert--info" : canStart ? "alert--success" : "alert--warning"}`}>
             <strong>{readinessTitle}</strong>
             <p>{readinessDetail}</p>
             <p>{initial ? readiness?.blocking_reasons[0]?.action : snapshot?.recovery?.action}</p>
@@ -297,14 +300,14 @@ export function ExecutionConsole({ snapshot, readiness: suppliedReadiness, error
       ) : null}
 
       {showReadyToResume ? (
-        <section className="alert alert--success execution-console-v2__resume-card" aria-label="Nueva referencia Z lista">
-          <h4>Nueva referencia Z lista</h4>
+        <section className="alert alert--success execution-console-v2__resume-card" aria-label="Referencia Z vigente">
+          <h4>Referencia Z vigente</h4>
           <div className="info-grid info-grid--double compact-grid">
             <div className="metric-box"><span>Herramienta</span><strong>{transitionTool}</strong></div>
             <div className="metric-box"><span>Perfil de cambio</span><strong>{transitionProfileLabel}</strong></div>
             <div className="metric-box execution-console-v2__resume-next"><span>Siguiente paso</span><strong>Spindle preparado — continuar</strong></div>
           </div>
-          <p>Al continuar, el sistema generará automáticamente una nueva compensación Legacy para la siguiente operación usando la referencia Z recién medida, la subirá a Moonraker y comenzará la ejecución cuando Klipper la acepte.</p>
+          <p>Al continuar, el sistema generará automáticamente una nueva compensación Legacy para la siguiente operación usando la referencia Z vigente de la instalación actual, la subirá a Moonraker y comenzará la ejecución cuando Klipper la acepte.</p>
           <p><strong>No es necesario volver a la sección Compensación.</strong></p>
         </section>
       ) : null}

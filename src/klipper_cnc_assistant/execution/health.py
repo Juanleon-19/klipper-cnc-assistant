@@ -102,6 +102,10 @@ def execution_health(run, status, readiness, worker_alive):
                     'action': 'Actualizar referencia de herramienta' if safe and not ref['valid'] else
                               'Reintentar preparación de operación' if safe else
                               'Verifique identidad remota y recuperación física; no se reintentará start automáticamente.'}
+        transition_error = run.get('last_transition_error') or {}
+        if state == 'RECOVERY_REQUIRED' and transition_error.get('code') == 'TOOL_CHANGE_TRANSITION_FAILED':
+            recovery = {'code': transition_error['code'], 'message': transition_error.get('message') or 'Transición de herramienta sin confirmación de llegada.',
+                        'action': 'Conserve el estado. Verifique reposo y recuperación física antes de habilitar un reintento explícito; no repita el movimiento automáticamente.'}
         actions = ['cancel']
         if safe:
             actions.insert(0, 'retry-operation-preparation' if ref['valid'] else 'update-tool-reference')

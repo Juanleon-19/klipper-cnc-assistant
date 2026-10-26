@@ -48,6 +48,10 @@ class FinalWorkflowApiTest(unittest.TestCase):
         self.post('/job-run/prepare')
         self.post('/job-run/start', spindle_prepared=True)
         self.join()
+        self.assertEqual(self.current()['state'], 'READY_TO_RESUME')
+        self.assertEqual(len(self.adapter.started), 1)
+        self.post('/job-run/action', action='continue')
+        self.join()
         self.assertEqual(self.current()['state'], 'SPINDLE_STOP_REQUIRED')
         for index in (2, 3):
             self.post('/job-run/action', action='confirm-spindle-stopped')

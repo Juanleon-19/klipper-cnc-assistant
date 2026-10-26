@@ -140,6 +140,14 @@ class ExecutionStateMachineTest(unittest.TestCase):
         with patch.object(self.job,'_start_worker'), patch.object(f.compensated_service,'generate',wraps=f.compensated_service.generate) as generate:
             self.job.start_run(**self.args,spindle_prepared=True)
             self.job._run_worker(self.context)
+            self.assertEqual(len(f.adapter.started),1)
+            waiting=self.job.get_run(**self.args)
+            self.assertEqual(waiting['state'],'READY_TO_RESUME')
+            self.assertIsNone(waiting['operations'][1].get('generated_file'))
+            self.job._run_worker(self.context)
+            self.assertEqual(len(f.adapter.started),1)
+            self.job.run_action(**self.args,action='continue')
+            self.job._run_worker(self.context)
             self.assertEqual(len(f.adapter.started),2)
             self.assertEqual(f.adapter.probe_calls,0)
             for expected in (4,5):
@@ -149,6 +157,11 @@ class ExecutionStateMachineTest(unittest.TestCase):
                 self.job._run_worker(self.context)
                 self.job.run_action(**self.args,action='continue')
                 self.job._run_worker(self.context)
+                if expected == 4:
+                    self.assertEqual(len(f.adapter.started),3)
+                    self.assertEqual(self.job.get_run(**self.args)['state'],'READY_TO_RESUME')
+                    self.job.run_action(**self.args,action='continue')
+                    self.job._run_worker(self.context)
                 self.assertEqual(len(f.adapter.started),expected)
             self.assertEqual(generate.call_count,5)
         run=self.job.get_run(**self.args)
@@ -171,6 +184,59 @@ class ExecutionStateMachineTest(unittest.TestCase):
         after=f.physical_map_service.get_active(f.project_id,ops[0].id)
         for key in ('map_id','points','height_map','machine_origin_x','machine_origin_y'):
             self.assertEqual(after[key],map_before[key])
+
+    def test_uncertain_transition_reports_motion_cause_not_pending_reference(self):
+        from klipper_cnc_assistant.execution.health import execution_health
+        run = {'state':'RECOVERY_REQUIRED', 'operations':[], 'available_actions':['retry-tool-change-transition','cancel'],
+               'last_transition_error':{'code':'TOOL_CHANGE_TRANSITION_FAILED','message':'Llegada física no confirmada'}}
+        readiness={'reference':{'valid':False,'code':'REFERENCE_MEASUREMENT_REQUIRED','message':'Falta nueva Z'},
+                   'blocking_reasons':[{'category':'runtime','code':'PHYSICAL_RECOVERY_REQUIRED'}]}
+        health=execution_health(run,{'connected':True,'is_active':False,'print_state':'complete'},readiness,False)
+        self.assertEqual(health['recovery']['code'],'TOOL_CHANGE_TRANSITION_FAILED')
+        self.assertEqual(health['detail'],'Llegada física no confirmada')
+        self.assertEqual(health['available_actions'],['cancel'])
+
+    def test_five_distinct_tools_require_four_explicit_continuations(self):
+        f = self.fixture
+        project = self.repo.load_project(f.project_id)
+        ops = sorted(project.operations_for_setup(f.setup_id), key=lambda o:o.orden)
+        for index, op in enumerate(ops[1:], 1):
+            project = project.replace_operation(replace(op, tool_id=f"unique-{index}",
+                tool_reference_profile='long_tool' if index % 2 else 'standard'))
+        self.repo.save_project(project)
+        f._create_operation('Final fifth', 'corte exterior', 4, 'unique-4', 'Fifth',
+            'G21\nG90\nG0 X12 Y12\nG1 X18 Y18 Z-0.120 F120\n')
+        active = f.physical_map_service.get_active(f.project_id, ops[0].id)
+        active['operation_ids'] = [o.id for o in self.repo.load_project(f.project_id).operations_for_setup(f.setup_id)]
+        self.repo.save_height_map_payload(f.project_id, active['map_id'], active)
+        self.job.prepare_run(**self.args)
+        with patch.object(self.job, '_start_worker'), patch.object(f.compensated_service, 'generate', wraps=f.compensated_service.generate) as generate:
+            self.job.start_run(**self.args, spindle_prepared=True)
+            self.job._run_worker(self.context)
+            for completed in range(1, 5):
+                self.assertEqual(len(f.adapter.started), completed)
+                self.assertEqual(self.job.get_run(**self.args)['state'], 'SPINDLE_STOP_REQUIRED')
+                self.job.run_action(**self.args, action='confirm-spindle-stopped')
+                self.job._run_worker(self.context)
+                live = self.job.live_execution(**self.args)
+                self.assertEqual(live['run']['status'], 'TOOL_CHANGE_REQUIRED')
+                self.assertEqual(live['active_execution_health']['title'], 'ESPERANDO OPERADOR')
+                self.assertEqual(len(f.adapter.started), completed)
+                self.job.run_action(**self.args, action='confirm-tool-change')
+                self.job._run_worker(self.context)
+                self.assertEqual(self.job.get_run(**self.args)['state'], 'READY_TO_RESUME')
+                self.job._run_worker(self.context)  # A re-observation/reload cannot start.
+                self.assertEqual(generate.call_count, completed)
+                self.assertEqual(len(f.adapter.started), completed)
+                self.job.run_action(**self.args, action='continue')
+                self.job._run_worker(self.context)
+            self.assertEqual(generate.call_count, 5)
+        run = self.job.get_run(**self.args)
+        self.assertEqual(run['state'], 'JOB_COMPLETE')
+        self.assertEqual(f.adapter.probe_calls, 4)
+        self.assertEqual(len(set(f.adapter.started)), 5)
+        self.assertEqual(len({o['physical_reference_token']['installation_id'] for o in run['operations']}), 5)
+        self.assertEqual(f.adapter.reference_moves, [(active['machine_origin_x'], active['machine_origin_y'])] * 4)
 
     def test_live_inspection_error_does_not_hide_monitor(self):
         self.started()

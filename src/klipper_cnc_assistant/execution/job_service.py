@@ -1573,6 +1573,15 @@ class JobService:
             return
         operation.update(installation_revision=token['installation_id'], physical_reference_token=token,
                          reference_status='LISTA')
+        if run.get("state") == "NEXT_OPERATION_READY":
+            # Completion authorizes preparation, never a new print. Even when
+            # the installation is reusable, require a new explicit Continue.
+            run["state"] = "READY_TO_RESUME"
+            run["next_action"] = "Instalación vigente; confirme spindle preparado para iniciar la siguiente operación"
+            run["available_actions"] = ["continue", "cancel"]
+            self._append_event(run, "info", "Operación siguiente pendiente de inicio explícito; se reutiliza la referencia vigente.")
+            self._save_run(context, run)
+            return
         adapter = self._motion_adapter(context)
         self._require_spindle_confirmation(context, run, "prepared", index)
         reference_token = self._require_operation_reference(context, operation)
@@ -1932,6 +1941,13 @@ class JobService:
                 "code": "TOOL_CHANGE_TRANSITION_FAILED",
                 "message": safe_error,
                 "occurred_at": _iso_now(),
+            }
+            movement = self.runtime.snapshot().get("last_movement") or {}
+            run["last_transition_error"]["motion_observation"] = {
+                key: movement.get(key) for key in (
+                    "label", "coordinate_frame", "arrival_source", "expected_time_s", "elapsed_s",
+                    "observed_velocity_mm_s", "velocity_age_s", "frame_age_s", "progress_remaining_mm",
+                )
             }
             run["recovery_state"] = "RECOVERY_REQUIRED"
             self._append_event(run, "error", f"Falló la transición segura de herramienta: {safe_error}")

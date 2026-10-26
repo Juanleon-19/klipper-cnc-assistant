@@ -187,6 +187,18 @@ def ui_post(path, payload=None):
         assert len([r for r in responses if r['path'] == path and r['status'] == 200]) == 1
     if path.endswith('/connect') and len([r for r in responses if r['path'] == path]) == 1:
         navigation_checks()
+    if path.endswith('/action') and payload['action'] in {'confirm-spindle-stopped', 'confirm-tool-change'}:
+        waiting_label = 'Herramienta cambiada' if payload['action'] == 'confirm-spindle-stopped' else 'Spindle preparado — continuar'
+        visible = 'return [...document.querySelectorAll("button")].some(b=>b.textContent.trim()===' + json.dumps(waiting_label) + ');'
+        wait(lambda: js(visible))
+        emissions, starts = list(fixture.transport.scripts), list(fixture.transport.started)
+        reload_app()
+        wait(lambda: click('Abrir'))
+        wait(lambda: click('Ejecución'))
+        wait(lambda: js(visible))
+        assert fixture.transport.scripts == emissions, 'Reload at operator wait emitted motion'
+        assert fixture.transport.started == starts, 'Reload duplicated start'
+        print('WAIT STATE RELOAD PASS', waiting_label, flush=True)
     print('UI PASS', path.rsplit('/', 1)[-1], flush=True)
     return result['body']
 

@@ -421,6 +421,9 @@ class JobServiceTest(unittest.TestCase):
         self.job_service.prepare_run(project_id=self.project_id, setup_id=self.setup_id, face="superior")
         self.job_service.start_run(spindle_prepared=True, project_id=self.project_id, setup_id=self.setup_id, face="superior")
         self.job_service._threads[(self.project_id, self.setup_id, "superior")].join(timeout=5)  # type: ignore[attr-defined]
+        self.job_service.run_action(project_id=self.project_id, setup_id=self.setup_id, face="superior", action="continue")
+        worker = self.job_service._threads.get((self.project_id, self.setup_id, "superior"))
+        if worker: worker.join(timeout=5)
         run = self.job_service.get_run(project_id=self.project_id, setup_id=self.setup_id, face="superior")
 
         self.assertEqual(run["state"], "SPINDLE_STOP_REQUIRED")
@@ -436,6 +439,9 @@ class JobServiceTest(unittest.TestCase):
         self.job_service.prepare_run(project_id=self.project_id, setup_id=self.setup_id, face="superior")
         self.job_service.start_run(spindle_prepared=True, project_id=self.project_id, setup_id=self.setup_id, face="superior")
         self.job_service._threads[(self.project_id, self.setup_id, "superior")].join(timeout=5)  # type: ignore[attr-defined]
+        self.job_service.run_action(project_id=self.project_id, setup_id=self.setup_id, face="superior", action="continue")
+        worker = self.job_service._threads.get((self.project_id, self.setup_id, "superior"))
+        if worker: worker.join(timeout=5)
         self.adapter.status_sequence = [{"state": "printing", "is_active": True}]
 
         with self.assertRaisesRegex(Exception, "sigue imprimiendo"):
@@ -451,6 +457,9 @@ class JobServiceTest(unittest.TestCase):
         self.job_service.prepare_run(project_id=self.project_id, setup_id=self.setup_id, face="superior")
         self.job_service.start_run(spindle_prepared=True, project_id=self.project_id, setup_id=self.setup_id, face="superior")
         self.job_service._threads[(self.project_id, self.setup_id, "superior")].join(timeout=5)  # type: ignore[attr-defined]
+        self.job_service.run_action(project_id=self.project_id, setup_id=self.setup_id, face="superior", action="continue")
+        worker = self.job_service._threads.get((self.project_id, self.setup_id, "superior"))
+        if worker: worker.join(timeout=5)
         self.runtime.snapshot_payload["klipper"]["homed_axes"] = "xy"
 
         with self.assertRaisesRegex(Exception, "Falta homing XYZ"):
@@ -466,6 +475,9 @@ class JobServiceTest(unittest.TestCase):
         self.job_service.prepare_run(project_id=self.project_id, setup_id=self.setup_id, face="superior")
         self.job_service.start_run(spindle_prepared=True, project_id=self.project_id, setup_id=self.setup_id, face="superior")
         self.job_service._threads[(self.project_id, self.setup_id, "superior")].join(timeout=5)  # type: ignore[attr-defined]
+        self.job_service.run_action(project_id=self.project_id, setup_id=self.setup_id, face="superior", action="continue")
+        worker = self.job_service._threads.get((self.project_id, self.setup_id, "superior"))
+        if worker: worker.join(timeout=5)
 
         self.job_service.run_action(project_id=self.project_id, setup_id=self.setup_id, face="superior", action="confirm-spindle-stopped")
         self.job_service._threads[(self.project_id, self.setup_id, "superior")].join(timeout=5)  # type: ignore[attr-defined]
@@ -644,6 +656,13 @@ class JobServiceTest(unittest.TestCase):
         self.job_service.start_run(spindle_prepared=True, project_id=self.project_id, setup_id=self.setup_id, face="superior")
         self.job_service._threads[(self.project_id, self.setup_id, "superior")].join(timeout=5)  # type: ignore[attr-defined]
         run = self.job_service.get_run(project_id=self.project_id, setup_id=self.setup_id, face="superior")
+        self.assertEqual(run["state"], "READY_TO_RESUME")
+        self.assertIsNone(run["operations"][1]["generated_file"])
+        self.assertEqual(len(self.adapter.started), 1)
+        self.job_service.run_action(project_id=self.project_id, setup_id=self.setup_id, face="superior", action="continue")
+        worker = self.job_service._threads.get((self.project_id, self.setup_id, "superior"))
+        if worker: worker.join(timeout=5)
+        run = self.job_service.get_run(project_id=self.project_id, setup_id=self.setup_id, face="superior")
         self.assertEqual(run["state"], "SPINDLE_STOP_REQUIRED")
         self.assertIsNotNone(run["operations"][0]["generated_file"])
         self.assertIsNotNone(run["operations"][1]["generated_file"])
@@ -764,6 +783,9 @@ class JobServiceTest(unittest.TestCase):
         self.job_service.prepare_run(project_id=self.project_id, setup_id=self.setup_id, face="superior")
         self.job_service.start_run(spindle_prepared=True, project_id=self.project_id, setup_id=self.setup_id, face="superior")
         self.job_service._threads[(self.project_id, self.setup_id, "superior")].join(timeout=5)  # type: ignore[attr-defined]
+        self.job_service.run_action(project_id=self.project_id, setup_id=self.setup_id, face="superior", action="continue")
+        worker = self.job_service._threads.get((self.project_id, self.setup_id, "superior"))
+        if worker: worker.join(timeout=5)
         self.job_service.run_action(project_id=self.project_id, setup_id=self.setup_id, face="superior", action="confirm-spindle-stopped")
         self.job_service._threads[(self.project_id, self.setup_id, "superior")].join(timeout=5)  # type: ignore[attr-defined]
         run = self.job_service.get_run(project_id=self.project_id, setup_id=self.setup_id, face="superior")
