@@ -18,7 +18,8 @@ Abrir proyecto/montaje → reinicio explícito y seguro, si corresponde → cone
 homing XYZ → preparar altura y centro → joystick XY → guardar conjuntamente XY
 actual y referencia Z → preview → validar cobertura → armar → medir malla → preparar
 JobRun → confirmar spindle → Legacy JIT por operación → upload → start autorizado.
-Misma herramienta: reutilizar instalación vigente y generar JIT nuevo. Cambio:
+Misma herramienta: reutilizar instalación vigente, esperar confirmación explícita
+de continuar y generar JIT nuevo. Nunca iniciar automáticamente otra operación. Cambio:
 SPINDLE_STOP_REQUIRED → confirmación → despeje saliente → TOOL_CHANGE_REQUIRED →
 instalación entrante → retorno al XY del mapa → una Z → READY_TO_RESUME → confirmación
 → JIT. No remallar ni rehabilitar tokens históricos.
@@ -67,3 +68,15 @@ Ausencia de referencia no significa puntos fuera de límites. Reinicio explica
 el flag concreto que bloquea; recuperación sigue siendo explícita y con evidencia
 fresca, nunca implícita en reset. Referencias/sonda físicas pendientes de validación
 supervisada. Evidencia en `auditorias/main-flow-20261022/REPORTE_FINAL.md`.
+
+## Transición y llegada observada
+
+Candidata `fix/operation-transition-reference-20261025`, base `0ccfa475`: llegar
+requiere motion_report.live_position, transformada al frame objetivo con offsets
+XYZ vigentes. gcode_position es el destino encolado, no evidencia de llegada.
+No arrancar el plazo de estabilización mientras la herramienta sigue en tránsito.
+Al cambiar herramienta: despeje entrante → XY original → aproximación de su perfil
+→ una medición Z; no ejecutar de nuevo el traslado de un punto de malla.
+La malla conserva referencia medida + separación relativa, con feeds auxiliares Z
+configurados; contacto y retracto mantienen su perfil. Recuperación física del
+incidente y validación real pendientes; ningún test simulado las sustituye.
