@@ -188,3 +188,92 @@ class AdministrativeIdentityTest(unittest.TestCase):
         self.assertEqual(first, second)
         self.assertEqual(before, second.read_bytes())
         self.assertEqual(len(list(first.parent.glob('*.json'))), 1)
+
+    def select_unsent_second_operation(self):
+        from copy import deepcopy
+        second = deepcopy(self.run['operations'][0])
+        second.update(operation_id='synthetic-second', remote_file=None,
+                      execution_status='PENDING', observed_printing=False,
+                      finished_at=None, moonraker_filename=None)
+        self.run['operations'] = [self.run['operations'][0], second]
+        self.run['current_operation_index'] = 1
+        self.f.path.write_text(json.dumps(self.run))
+
+    def cancel_and_close_selected_pending_operation(self, *, rejected=False):
+        cancelled = self.s._cancel_run(self.f.context, self.run)
+        self.assertEqual(cancelled['state'], 'JOB_CANCELLED')
+        self.assertNotEqual(cancelled['cancel_remote_status'], 'no_expected_print_no_remote_action')
+        before = self.f.path.read_bytes()
+        close = lambda: self.s.archive_stale_run(project_id=self.f.fixture.project_id,
+            setup_id=self.f.fixture.setup_id, face='superior')
+        if rejected:
+            with self.assertRaises(ApplicationError):
+                close()
+            self.assertEqual(before, self.f.path.read_bytes())
+            self.rejected()
+        else:
+            result = close()
+            archived = json.loads((self.f.fixture.repository.project_dir(
+                self.f.fixture.project_id) / result['archive_path']).read_text())
+            self.assertEqual(archived['operations'], cancelled['operations'])
+            self.assertEqual(archived['start_attempt'], cancelled['start_attempt'])
+            self.assertFalse(self.f.path.exists())
+        self.assertEqual(self.f.fixture.adapter.started, [])
+        self.assertEqual(self.f.fixture.adapter.cancel_calls, 0)
+
+    def test_selected_unsent_operation_closes_previous_completed_emission(self):
+        self.select_unsent_second_operation()
+        self.cancel_and_close_selected_pending_operation()
+
+    def test_selected_unsent_operation_blocks_incomplete_previous_evidence(self):
+        self.run['operations'][0]['observed_printing'] = False
+        self.select_unsent_second_operation()
+        self.cancel_and_close_selected_pending_operation(rejected=True)
+
+    def test_selected_unsent_operation_blocks_different_remote_identity(self):
+        self.remote['filename'] = 'synthetic/unrelated.gcode'
+        self.select_unsent_second_operation()
+        self.cancel_and_close_selected_pending_operation(rejected=True)
+
+    def test_selected_unsent_operation_blocks_uncertain_previous_emission(self):
+        self.run['start_attempt']['status'] = 'uncertain'
+        self.select_unsent_second_operation()
+        self.cancel_and_close_selected_pending_operation(rejected=True)
+
+    def test_selected_unsent_operation_blocks_missing_attempt_binding(self):
+        self.run['start_attempt']['operation_id'] = 'missing-operation'
+        self.select_unsent_second_operation()
+        self.cancel_and_close_selected_pending_operation(rejected=True)
+
+    def test_reset_selected_pending_operation_checks_each_completion_field(self):
+        self.select_unsent_second_operation()
+        operation = self.run['operations'][0]
+        for key, bad in [('observed_printing', False), ('finished_at', None),
+                         ('execution_status', 'PENDING'), ('moonraker_filename', 'other')]:
+            with self.subTest(key=key):
+                original = operation[key]
+                operation[key] = bad
+                self.f.path.write_text(json.dumps(self.run))
+                self.rejected('No hay evidencia suficiente')
+                operation[key] = original
+        self.f.path.write_text(json.dumps(self.run))
+        self.assertEqual(self.f.reset()['current_runs_cleared'], 1)
+
+    def test_previous_sent_binding_cannot_be_hidden_by_new_uploaded_file(self):
+        self.select_unsent_second_operation()
+        self.run['operations'][1]['remote_file'] = 'synthetic/uploaded-not-started.gcode'
+        self.f.path.write_text(json.dumps(self.run))
+        self.remote['filename'] = 'synthetic/uploaded-not-started.gcode'
+        self.rejected('archivo distinto')
+        self.remote['filename'] = 'synthetic/completed.gcode'
+        self.assertEqual(self.f.reset()['current_runs_cleared'], 1)
+
+    def test_previous_sent_binding_rejects_duplicate_or_mismatched_operation(self):
+        self.select_unsent_second_operation()
+        self.run['operations'][1]['operation_id'] = self.run['operations'][0]['operation_id']
+        self.f.path.write_text(json.dumps(self.run))
+        self.rejected('No hay evidencia suficiente')
+        self.run['operations'][1]['operation_id'] = 'synthetic-second'
+        self.run['start_attempt']['remote_file'] = 'synthetic/not-bound.gcode'
+        self.f.path.write_text(json.dumps(self.run))
+        self.rejected('No hay evidencia suficiente')

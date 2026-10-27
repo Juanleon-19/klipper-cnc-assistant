@@ -350,6 +350,31 @@ class JobService:
     def administrative_mutation(self, action, *, allow_started_runs=False):
         return administrative_mutation(self, action, allow_started_runs=allow_started_runs)
 
+    def _last_print_operation(self, run):
+        """Resolve physical emission independently of the next selected operation.
+
+        A sent journal must bind to exactly one persisted operation and file.
+        Selection/upload alone cannot hide that evidence. Legacy records retain
+        their last remote identity but cannot claim the empty-standby exception.
+        """
+        attempt = run.get('start_attempt') or {}
+        if attempt.get('status') in {'sending', 'dispatching', 'uncertain'}:
+            raise ApplicationError('Intento de inicio ambiguo; se conserva la ejecución. Verifique el archivo remoto y resuelva la recuperación antes de archivar o reiniciar.')
+        if attempt.get('status') == 'sent' or attempt.get('may_have_been_sent'):
+            matches = [op for op in run.get('operations', [])
+                       if op.get('operation_id') == attempt.get('operation_id')]
+            if (attempt.get('status') != 'sent'
+                    or attempt.get('may_have_been_sent') is not True
+                    or len(matches) != 1 or not attempt.get('remote_file')
+                    or matches[0].get('remote_file') != attempt.get('remote_file')):
+                raise ApplicationError('No hay evidencia suficiente para vincular la última emisión con su operación y archivo; se conserva la ejecución.')
+            return matches[0]
+        operation = self.run_store._operation(run)
+        if operation.get('remote_file'):
+            return operation
+        return next((op for op in reversed(run.get('operations', []))
+                     if op.get('remote_file')), operation)
+
     def _assert_administrative_print_identity(self, run, guard):
         if guard.remote is None:
             return
@@ -362,7 +387,7 @@ class JobService:
             PrintIdentity.require_status(remote)
         except PrintIdentityError as error:
             raise ApplicationError('Identidad remota no verificable: Moonraker no confirma conexión y Klipper ready. Se conserva la ejecución; revise la conexión y la recuperación antes de reintentar.') from error
-        operation = self.run_store._operation(run)
+        operation = self._last_print_operation(run)
         expected = operation.get('remote_file')
         if not expected:
             return
@@ -1290,7 +1315,7 @@ class JobService:
         adapter = self.adapter_factory(self.runtime)
         result = 'identity_unverified'
         try:
-            operation = self.run_store._operation(cancelled)
+            operation = self._last_print_operation(cancelled)
             expected = operation.get('remote_file')
             if expected:
                 identity = PrintIdentity(expected)

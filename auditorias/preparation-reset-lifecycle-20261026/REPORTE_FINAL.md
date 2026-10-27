@@ -111,3 +111,52 @@ caché aislada o deshabilitada para evitar ese efecto auxiliar.
 Verificación final de 802 archivos operativos/protegidos: hashes sin cambios durante el cierre de validación. Main productivo permanece en la base; no se han ejecutado acciones físicas, resets productivos ni reinicios.
 
 Resultado: CANDIDATA VALIDADA EN SIMULACIÓN — LISTA PARA REVISIÓN EXTERNA. No autoriza pruebas físicas ni despliegue.
+
+## Revisión externa: última emisión con selección adelantada (27 octubre)
+
+Base revisada: `b5edae39a21c1b17d580000fed7d763765cb5f4f`.
+Brecha confirmada: `_assert_administrative_print_identity` retornaba cuando la
+operación seleccionada no tenía `remote_file`, aunque `start_attempt=sent` aún
+identificara la operación anterior. `_cancel_run` también clasificaba ese caso
+como ausencia de impresión esperada. La reproducción con el método original,
+almacenamiento temporal y transportes falsos confirmó que el reset retiraba
+`current_run` con `observed_printing=False` en la operación anterior.
+
+Corrección limitada a `execution/job_service.py`: cancelación y validación
+administrativa resuelven la operación vinculada a la última emisión registrada,
+independientemente de la selección siguiente o de su upload. Un intento enviado
+exige vínculo único de operación y archivo; una emisión ambigua o un vínculo
+incompleto bloquean. Sin journal de envío se conserva la identidad remota conocida,
+sin conceder la excepción de standby vacío. Cancelar persiste la intención como
+antes; no envía cancelación remota si la identidad no es verificable. El cierre
+requiere además las barreras existentes de reposo, ownership, reserva, sesión y CAS.
+No se cambia el journal, el transporte, la máquina de estados ni otro subsistema.
+
+Ocho regresiones nuevas en `tests/test_administrative_remote_identity.py` cubren:
+operación 1 enviada/completada y operación 2 pendiente seleccionada; cancelación y
+cierre explícito en standby vacío; evidencia anterior incompleta; archivo remoto
+diferente; envío incierto; vínculo ausente, duplicado o divergente; cada campo de
+finalización en reset directo; upload siguiente que no sustituye la última emisión.
+Los rechazos conservan exactamente los bytes de `current_run`; el cierre permitido
+conserva operaciones y `start_attempt` en histórico. No se emiten start ni cancel
+remotos en los escenarios nuevos de cancelación con standby vacío o discrepante.
+
+Reproducción anterior: cinco regresiones fallaron por clasificación de cancelación;
+una reproducción independiente del reset original demostró retirada indebida con
+evidencia incompleta. Evidencia temporal: `/tmp/kca-last-emission-before.log` y
+`/tmp/kca-last-emission-original-proof.log` (solo fixtures sintéticos).
+
+Validación final de esta observación: **148/148 PASS** (229.642 s), incluyendo las
+8 regresiones nuevas, recorrido integrado de cinco operaciones, API E2E y contratos
+compartidos de cancelación/archivo. Comando: `python -m unittest
+ tests.test_administrative_remote_identity tests.test_execution_state_machine
+ tests.test_administrative_exclusion tests.test_administrative_recovery
+ tests.test_job_run_store tests.test_job_service tests.test_functional_journey
+ tests.test_final_workflow_api -q`, con el entorno simulado indicado arriba.
+Log: `/tmp/kca-last-emission-final.log`. Los errores de sesión/checkpoint registrados
+son fallos deliberados de las pruebas negativas; la suite termina OK.
+`git diff --check`: PASS. Frontend y suite backend completa no repetidos: no hay
+cambios en frontend ni otros subsistemas; se amplió solo la validación de los dos
+consumidores del selector compartido. Producción no consultada ni modificada, sin
+servicios, conexiones físicas ni despliegue. Lista para revisión e instalación
+posterior autorizada, no instalada.
