@@ -104,7 +104,7 @@ class AdministrativeResetTest(unittest.TestCase):
 
     def test_incomplete_remote_or_http_failure_preserves_current(self):
         valid = self.fixture.adapter.print_status()
-        cases = [{'homed_axes_observed': ''}, {'is_active_observed': None},
+        cases = [{'is_active_observed': None},
                  {'live_velocity': float('nan')}, {'state': 'unknown'},
                  {'connected': False}]
         before = self.path.read_bytes()
@@ -264,3 +264,23 @@ class AdministrativeRoutesTest(unittest.TestCase):
             self.assertEqual(response.status_code, 400, response.text)
             self.assertEqual(before, repository.project_dir(project).joinpath('project.json').read_bytes())
             self.assertEqual(files_before, {p: p.read_bytes() for p in repository.project_dir(project).rglob('*') if p.is_file()})
+
+    def test_partial_reset_requires_explicit_closure_of_cancelled_attempt(self):
+        f = api_fixture.ApiTest(); f.setUp()
+        self.addCleanup(f.doCleanups)
+        project = f._create_project()
+        setup = f.client.get(f'/api/projects/{project}').json()['montajes'][0]['id']
+        operation = f._create_operation(project)
+        f._upload_and_analyze_operation(project, operation)
+        service = f.app.state.job_service
+        args = dict(project_id=project, setup_id=setup, face='superior')
+        run = service.prepare_run(**args)
+        path = service._run_file(service._context(project, setup, 'superior'))
+        service.run_store.cancel(path, run['run_id'])
+        before = path.read_bytes()
+        for action in ('reset-map', 'reset-reference'):
+            response = f.client.post(f'/api/projects/{project}/setups/{setup}/{action}', json={})
+            self.assertEqual(response.status_code, 400, response.text)
+            self.assertIn('Cerrar intento', response.text)
+            self.assertEqual(before, path.read_bytes())
+            self.assertFalse(service.administrative_pending_path.exists())

@@ -82,8 +82,9 @@ def evaluate_readiness(plan, run, snapshot, ownership, physical_session, *, obse
           or 'Archivos, análisis y cobertura verificados.',
           'Corrija los archivos, análisis o cobertura indicados.', 'geometry', 'GEOMETRY_BLOCKED')
     check('compensacion_jit', True, 'Legacy se generará al iniciar cada operación.', '', 'geometry')
-    index = pending_index(run) if run else (0 if operations else None)
-    candidate = reference_candidate(run, index) if run and index is not None else None
+    historical = bool(run and run.get("state") in {"JOB_CANCELLED", "JOB_COMPLETE", "JOB_ERROR"})
+    index = pending_index(run) if run and not historical else (0 if operations else None)
+    candidate = reference_candidate(run, index) if run and not historical and index is not None else None
     operation_id = candidate.get('operation_id') if candidate else (operations[0]['operation_id'] if operations else None)
     row = next((op for op in operations if op['operation_id'] == operation_id), None)
     reference = deepcopy((row or {}).get('reference_diagnostic') or {

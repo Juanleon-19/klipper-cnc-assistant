@@ -14,6 +14,7 @@ from tests import test_api, test_machine_runtime as machine_fakes
 from klipper_cnc_assistant.execution.job_service import MoonrakerJobAdapter
 from klipper_cnc_assistant.machine.state import MachineState, MachinePosition, AxisLimits
 from klipper_cnc_assistant.machine.config import MachineMode
+from klipper_cnc_assistant.machine.process_lock import PhysicalProcessLock
 from klipper_cnc_assistant.machine.recoverable_runtime import RecoverableMachineRuntime
 
 
@@ -27,7 +28,7 @@ class FunctionalJourneyTest(unittest.TestCase):
         self.operation = self.fixture._create_operation(self.project)
         self.fixture._upload_and_analyze_operation(self.project, self.operation,
             content='G21\nG90\nG0 X10 Y10 F120\nG1 X20 Y10 Z-0.050 F120\n')
-        for index, tool in [(2, 'tool-label-v-bit-30'), (3, 'synthetic-tool-b')]:
+        for index, tool in [(2, 'tool-label-v-bit-30'), (3, 'synthetic-tool-b'), (4, 'synthetic-tool-c'), (5, 'synthetic-tool-d')]:
             created = self.client.post(f'/api/projects/{self.project}/operations',
                 json={'nombre': f'Synthetic operation {index}', 'tipo': 'aislamiento',
                       'cara': 'superior', 'orden': index, 'herramienta': 'V-bit 30'})
@@ -116,6 +117,7 @@ class FunctionalJourneyTest(unittest.TestCase):
                 moonraker_ws='ws://fake.invalid', serial_port='/tmp/kca-fake-serial',
                 reference_prep_z_mm=31, tool_change_clearance_z_mm=35,
                 tool_change_work_z_mm=35, long_tool_change_clearance_z_mm=40),
+            process_lock=PhysicalProcessLock(directory=self.repo.projects_dir.parent),
             client_factory=lambda *a, **kw: self.transport,
             telemetry_factory=Telemetry, serial_factory=Driver,
             discovery=observe)
@@ -142,43 +144,7 @@ class FunctionalJourneyTest(unittest.TestCase):
         self.assertEqual(response.status_code, 200, response.text)
         return response.json()
 
-    def test_reset_connect_home_prepare_reference_mesh_execution(self):
-        self.post('/api/machine/connect')
-        # Synthetic completed history, never copied from productive data.
-        run = self.job.prepare_run(**self.args)
-        op = run['operations'][0]
-        op.update(execution_status='COMPLETED', observed_printing=True,
-                  finished_at='2026-01-01T00:00:00Z', remote_file='synthetic/old.gcode',
-                  moonraker_filename='synthetic/old.gcode')
-        run.update(state='SPINDLE_STOP_REQUIRED', start_attempt=dict(status='sent',
-            may_have_been_sent=True, operation_id=op['operation_id'], remote_file=op['remote_file']))
-        self.job._save_run(self.context, run)
-        self.transport.filename = ''
-        self.runtime.physical_ownership.enter_recovery('Synthetic retired operation')
-        before = self.job._run_file(self.context).read_bytes()
-        rejected = self.client.post(f'/api/projects/{self.project}/setups/{self.setup}/reset-preparation', json={})
-        self.assertEqual(rejected.status_code, 400)
-        self.assertIn('recuperar controles', rejected.text)
-        self.assertEqual(before, self.job._run_file(self.context).read_bytes())
-        self.post('/api/machine/recover-idle-controls')
-        # Interrupt administrative preparation before any project/map write.
-        with self.assertRaises(OSError):
-            with self.job.administrative_mutation('reset_setup_map', allow_started_runs=True) as guard:
-                guard.begin_mutation(project_id=self.project, setup_id=self.setup)
-                raise OSError('synthetic administrative interruption')
-        journal = json.loads(self.job.administrative_pending_path.read_text())
-        scripts = list(self.transport.scripts)
-        recovered = self.post('/api/machine/administrative-recovery/' + journal['id'])
-        self.assertTrue(recovered['physical_recovery_required'])
-        self.assertEqual(self.transport.scripts, scripts)
-        self.assertEqual(before, self.job._run_file(self.context).read_bytes())
-        self.assertTrue(self.runtime.physical_ownership.snapshot()['recovery_pending'])
-        self.post('/api/machine/recover-idle-controls')
-        root = f'/api/projects/{self.project}'
-        result = self.post(root + f'/setups/{self.setup}/reset-preparation', {'motivo': 'synthetic restart'})
-        self.assertEqual(result['execution_reset']['current_runs_cleared'], 1)
-        self.assertEqual(self.runtime.snapshot()['state'], 'DISCONNECTED')
-        self.assertEqual(len(self.job.history(**self.args)), 1)
+    def _prepare_current_context(self, root):
         local_base = root + f'/operations/{self.operation}/physical-map'
         local_config = dict(grid_mode='manual', rows=2, columns=2, margin_mm=0, safe_z_mm=5,
             edge_margin_left_mm=0, edge_margin_right_mm=0, edge_margin_bottom_mm=0, edge_margin_top_mm=0)
@@ -245,6 +211,47 @@ class FunctionalJourneyTest(unittest.TestCase):
         for worker in self.app.state.mesh_execution_service.application_workers():
             worker.join(5)
             self.assertFalse(worker.is_alive())
+
+    def test_reset_connect_home_prepare_reference_mesh_execution(self):
+        self.post('/api/machine/connect')
+        # Synthetic completed history, never copied from productive data.
+        run = self.job.prepare_run(**self.args)
+        op = run['operations'][0]
+        op.update(execution_status='COMPLETED', observed_printing=True,
+                  finished_at='2026-01-01T00:00:00Z', remote_file='synthetic/old.gcode',
+                  moonraker_filename='synthetic/old.gcode')
+        run.update(state='SPINDLE_STOP_REQUIRED', start_attempt=dict(status='sent',
+            may_have_been_sent=True, operation_id=op['operation_id'], remote_file=op['remote_file']))
+        self.job._save_run(self.context, run)
+        self.transport.filename = ''
+        self.runtime.physical_ownership.enter_recovery('Synthetic retired operation')
+        before = self.job._run_file(self.context).read_bytes()
+        rejected = self.client.post(f'/api/projects/{self.project}/setups/{self.setup}/reset-preparation', json={})
+        self.assertEqual(rejected.status_code, 400)
+        self.assertIn('recuperar controles', rejected.text)
+        self.assertEqual(before, self.job._run_file(self.context).read_bytes())
+        self.post('/api/machine/recover-idle-controls')
+        # Interrupt after durable history, before dependencies. Retry must not
+        # duplicate that historical record or remove the current run early.
+        def fail_dependencies(guard):
+            raise OSError('synthetic administrative interruption')
+        with self.assertRaises(OSError):
+            self.job.reset_runs_for_preparation(project_id=self.project, setup_id=self.setup,
+                                               reset_dependencies=fail_dependencies)
+        journal = json.loads(self.job.administrative_pending_path.read_text())
+        scripts = list(self.transport.scripts)
+        recovered = self.post('/api/machine/administrative-recovery/' + journal['id'])
+        self.assertTrue(recovered['physical_recovery_required'])
+        self.assertEqual(self.transport.scripts, scripts)
+        self.assertEqual(before, self.job._run_file(self.context).read_bytes())
+        self.assertTrue(self.runtime.physical_ownership.snapshot()['recovery_pending'])
+        self.post('/api/machine/recover-idle-controls')
+        root = f'/api/projects/{self.project}'
+        result = self.post(root + f'/setups/{self.setup}/reset-preparation', {'motivo': 'synthetic restart'})
+        self.assertEqual(result['execution_reset']['current_runs_cleared'], 1)
+        self.assertEqual(self.runtime.snapshot()['state'], 'DISCONNECTED')
+        self.assertEqual(len(self.job.history(**self.args)), 1)
+        self._prepare_current_context(root)
         target = dict(setup_id=self.setup, face='superior')
         prepared = self.post(root + '/job-run/prepare', target)
         self.assertEqual(prepared['state'], 'JOB_READY', prepared['checks'])
@@ -256,6 +263,28 @@ class FunctionalJourneyTest(unittest.TestCase):
         current = self.job._load_run(self.context)
         self.assertEqual(current['state'], 'READY_TO_RESUME', current)
         self.assertEqual(len(self.transport.started), 1)
+        # Real cancellation after operation 1, followed by a complete reset and
+        # a new physical preparation through the same HTTP/UI path.
+        first_run_id = current['run_id']
+        first_token = current['operations'][0].get('physical_reference_token')
+        self.post(root + '/job-run/action', dict(target, action='cancel'))
+        self.post('/api/machine/recover-idle-controls')
+        self.post(root + f'/setups/{self.setup}/reset-preparation')
+        self.assertIsNone(self.job.live_execution(**self.args)['job_run'])
+        self.assertTrue(any(item['run_id'] == first_run_id for item in self.job.history(**self.args)))
+        self._prepare_current_context(root)
+        restarted = self.post(root + '/job-run/prepare', target)
+        self.assertNotEqual(restarted['run_id'], first_run_id)
+        self.assertEqual(len(restarted['operations']), 5)
+        self.assertTrue(all(op['execution_status'] == 'PENDING' for op in restarted['operations']))
+        self.assertFalse(restarted.get('start_attempt'))
+        self.assertNotEqual(restarted['operations'][0].get('physical_reference_token'), first_token)
+        self.post(root + '/job-run/start', dict(target, spindle_prepared=True))
+        worker = self.job._threads.get((self.project, self.setup, 'superior'))
+        worker.join(15)
+        self.assertFalse(worker.is_alive())
+        current = self.job._load_run(self.context)
+        self.assertEqual(current['state'], 'READY_TO_RESUME')
         self.post(root + '/job-run/action', dict(target, action='continue'))
         worker = self.job._threads.get((self.project, self.setup, 'superior'))
         if worker:
@@ -263,19 +292,53 @@ class FunctionalJourneyTest(unittest.TestCase):
             self.assertFalse(worker.is_alive())
         current = self.job._load_run(self.context)
         self.assertEqual(current['state'], 'SPINDLE_STOP_REQUIRED', current)
-        self.assertEqual(len(self.transport.started), 2)
-        self.assertEqual([op['execution_status'] for op in current['operations'][:2]], ['COMPLETED', 'COMPLETED'])
-        for action, expected in [('confirm-spindle-stopped', 'TOOL_CHANGE_REQUIRED'),
-                                 ('confirm-tool-change', 'READY_TO_RESUME'),
-                                 ('continue', 'JOB_COMPLETE')]:
-            self.post(root + '/job-run/action', dict(target, action=action))
-            worker = self.job._threads.get((self.project, self.setup, 'superior'))
-            if worker:
-                worker.join(20)
-                self.assertFalse(worker.is_alive())
-            current = self.job._load_run(self.context)
-            self.assertEqual(current['state'], expected, current)
         self.assertEqual(len(self.transport.started), 3)
-        self.assertEqual(len(set(self.transport.started)), 3)
+        self.assertEqual([op['execution_status'] for op in current['operations'][:2]], ['COMPLETED', 'COMPLETED'])
+        for count in (3, 4, 5):
+            for action, expected in [('confirm-spindle-stopped', 'TOOL_CHANGE_REQUIRED'),
+                                     ('confirm-tool-change', 'READY_TO_RESUME'),
+                                     ('continue', 'JOB_COMPLETE' if count == 5 else 'SPINDLE_STOP_REQUIRED')]:
+                self.post(root + '/job-run/action', dict(target, action=action))
+                worker = self.job._threads.get((self.project, self.setup, 'superior'))
+                if worker:
+                    worker.join(20)
+                    self.assertFalse(worker.is_alive())
+                current = self.job._load_run(self.context)
+                self.assertEqual(current['state'], expected, current)
+        self.assertEqual(len(self.transport.started), 6)
+        self.assertEqual(len(set(self.transport.started)), 6)
         self.assertFalse(any('M5' in script or 'M3' in script for script in self.transport.scripts))
         self.assertTrue(current['operations'][0]['generated_file'])
+
+        scripts_before_close = list(self.transport.scripts)
+        self.post(root + '/job-run/archive-stale', target)
+        self.assertIsNone(self.job.live_execution(**self.args)['job_run'])
+        new = self.post(root + '/job-run/prepare', target)
+        self.assertNotEqual(new['run_id'], current['run_id'])
+        self.assertEqual(len(new['operations']), 5)
+        self.assertTrue(all(op['execution_status'] == 'PENDING' for op in new['operations']))
+        self.assertFalse(new.get('start_attempt'))
+        self.post(root + '/job-run/action', dict(target, action='cancel'))
+        if self.runtime.snapshot()['recovery_pending']:
+            self.post('/api/machine/recover-idle-controls')
+        self.post(root + '/job-run/archive-stale', target)
+        self.assertIsNone(self.job.live_execution(**self.args)['job_run'])
+        self.assertEqual(self.transport.scripts, scripts_before_close)
+        same_map = self.app.state.physical_map_service.get_active(self.project, self.operation)['map_id']
+        another = self.post(root + '/job-run/prepare', target)
+        self.assertNotEqual(another['run_id'], new['run_id'])
+        self.assertEqual(len(another['operations']), 5)
+        self.assertTrue(all(op['execution_status'] == 'PENDING' for op in another['operations']))
+        self.assertEqual(self.app.state.physical_map_service.get_active(self.project, self.operation)['map_id'], same_map)
+        self.post(root + '/job-run/action', dict(target, action='cancel'))
+        if self.runtime.snapshot()['recovery_pending']:
+            self.post('/api/machine/recover-idle-controls')
+        self.post(root + '/job-run/archive-stale', target)
+        self.post(root + f'/setups/{self.setup}/reset-map')
+        from klipper_cnc_assistant.application.errors import NotFoundError
+        with self.assertRaises(NotFoundError):
+            self.app.state.physical_map_service.get_active(self.project, self.operation)
+        self.assertTrue(self.repo.load_project(self.project).get_setup(self.setup).preparacion.referencia_z)
+        self.post(root + f'/setups/{self.setup}/reset-preparation')
+        self.assertIsNone(self.job.live_execution(**self.args)['job_run'])
+        self.assertIsNone(self.repo.load_project(self.project).get_setup(self.setup).preparacion.referencia_z)

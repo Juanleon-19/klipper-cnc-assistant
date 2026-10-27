@@ -1935,7 +1935,14 @@ class PhysicalIntegrationTest(unittest.TestCase):
                 config=PhysicalMeshConfig(grid_mode="manual", rows=2, columns=2),
             )
             setup_id = operation.setup_id
+            # Unassociated old version must not reappear through the fallback read.
+            old = dict(plan, map_id=plan['map_id'] + '-old', archived_at=None)
+            service._save(project.id, old['map_id'], old)
             service.reset_map(project_id=project.id, setup_id=setup_id)
+            from klipper_cnc_assistant.application.errors import NotFoundError
+            with self.assertRaises(NotFoundError):
+                service.get_active(project.id, operation.id)
+            self.assertTrue(service.get_by_id(project.id, old['map_id'])['archived_at'])
             loaded = project_service.get_project(project.id)
             self.assertEqual(len(loaded.operaciones), 1)
             self.assertIsNotNone(loaded.operaciones[0].archivo_gcode)

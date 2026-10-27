@@ -1088,6 +1088,21 @@ describe("ProjectWorkspace", () => {
     expect(apiMock.resetSetupPreparation).not.toHaveBeenCalled();
   });
 
+  it("descarta un error tardío de ejecución anterior al reset", async () => {
+    const pending = deferred<typeof liveExecution>();
+    apiMock.getLiveExecution.mockReturnValueOnce(pending.promise);
+    apiMock.getLiveExecution.mockResolvedValue(null);
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    renderWorkspace(physicalMachine);
+    await waitFor(() => expect(apiMock.getLiveExecution).toHaveBeenCalled());
+    fireEvent.click(screen.getByText(/Más acciones/i));
+    fireEvent.click(await screen.findByRole("button", {name: /Reiniciar proceso/i}));
+    await waitFor(() => expect(apiMock.resetSetupPreparation).toHaveBeenCalled());
+    await act(async () => pending.reject(new Error("Error de la ejecución histórica")));
+    fireEvent.click(screen.getByRole("button", {name: /^Ejecución$/i}));
+    expect(screen.queryByText(/Error de la ejecución histórica/)).not.toBeInTheDocument();
+  });
+
   it("reiniciar proceso refresca el proyecto activo y el runtime", async () => {
     const onRefreshProject = vi.fn().mockResolvedValue(undefined);
     vi.spyOn(window, "confirm").mockReturnValue(true);
@@ -1663,6 +1678,10 @@ describe("ProjectWorkspace", () => {
     fireEvent.click(screen.getByRole("button", { name: /Reiniciar solo mapa/i }));
     await waitFor(() => expect(apiMock.resetSetupMap).toHaveBeenCalledWith("proj_1", "setup-main"));
     expect(confirmSpy).toHaveBeenCalledWith(expect.stringContaining("conservará origen X/Y"));
+    await waitFor(() => expect(screen.getByLabelText(/^Filas$/i)).toHaveValue("7"));
+    expect(screen.getByLabelText(/^Columnas$/i)).toHaveValue("6");
+    fireEvent.click(screen.getByRole("button", { name: /Sugerida automáticamente/i }));
+    expect(screen.getByLabelText(/Separación objetivo recomendada/)).toHaveValue("10");
     confirmSpy.mockRestore();
   });
 
@@ -2247,7 +2266,7 @@ describe("ProjectWorkspace", () => {
     expect(await screen.findByText(/CONSOLA DE EJECUCIÓN EN VIVO — V2/i)).toBeInTheDocument();
     expect(screen.queryByText(/Secuencia automática por operaciones/i)).toBeNull();
     expect(screen.getByText(/Observación Moonraker/i)).toBeInTheDocument();
-    expect(screen.getByText(/Orquestador JobRun/i)).toBeInTheDocument();
+    expect(screen.getByText(/Diagnóstico avanzado de ejecución/i)).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: /Generar artefacto Legacy de inspección/i }));
     await waitFor(() => expect(apiMock.generateCompensatedGCode).toHaveBeenCalledWith(project.id, project.operaciones[0].id, "legacy", true));

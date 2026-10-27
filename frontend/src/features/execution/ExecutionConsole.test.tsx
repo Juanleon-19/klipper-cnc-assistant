@@ -195,7 +195,7 @@ describe("ExecutionConsole", () => {
     expect(screen.getByText(/13.8 %/i)).toBeInTheDocument();
     expect(screen.getByText(/0 de 4 operaciones terminadas/i)).toBeInTheDocument();
     expect(screen.getByText(/Observación Moonraker/i)).toBeInTheDocument();
-    expect(screen.getByText(/Orquestador JobRun/i)).toBeInTheDocument();
+    expect(screen.getByText(/Diagnóstico avanzado de ejecución/i)).toBeInTheDocument();
     expect(screen.queryByText(/^info$/i)).toBeNull();
   });
 
@@ -844,3 +844,17 @@ it("distingue preparación lógica pendiente de un bloqueo físico real", () => 
   rerender(<ExecutionConsole {...props} readiness={{...readiness, conditions_ready:false, blocking_reasons:[...readiness.blocking_reasons,{code:"MAP_NOT_READY",category:"geometry",message:"Falta mapa físico válido",action:"Medir mapa"}]}} />);
   expect(screen.getByText("NO PUEDE INICIAR")).toBeInTheDocument();
 });
+
+  it("ofrece cerrar un intento cancelado sin presentar requisitos de la operación pendiente", () => {
+    const archive = vi.fn();
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    render(<ExecutionConsole snapshot={{...baseSnapshot,
+      run: {...baseSnapshot.run, status: "JOB_CANCELLED", stale_candidate: true,
+        worker_alive: false, watcher_alive: false, supervisor_registered: false},
+      moonraker: {...baseSnapshot.moonraker, is_active: false, print_state: "standby"}
+    }} error={null} busy={false} onPrepare={vi.fn()} onStart={vi.fn()} onAction={vi.fn()} onArchiveStale={archive} />);
+    expect(screen.getByText("Intento anterior finalizado")).toBeInTheDocument();
+    expect(screen.queryByText("Referencia herramienta actual")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", {name: "Cerrar intento y preparar otro"}));
+    expect(archive).toHaveBeenCalledTimes(1);
+  });

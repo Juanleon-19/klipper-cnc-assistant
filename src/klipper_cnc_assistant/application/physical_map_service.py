@@ -2284,16 +2284,28 @@ class PhysicalMapService:
                 reconciled += 1
         return reconciled
 
+    def _archive_setup_maps(self, project_id: str, setup_id: str) -> None:
+        # Retire every measured version for this setup, including legacy/fallback
+        # candidates; a reload must not resurrect an older unassociated map.
+        active_id = self._load_project(project_id).get_setup(setup_id).active_map_id
+        if active_id:
+            active = self.get_by_id(project_id, active_id)
+            if not active.get("archived_at"):
+                self._archive_payload(project_id, active, replaced_by=None)
+        for path in (self.repository.project_dir(project_id) / "maps" / "measured").rglob("height_map.json"):
+            payload = self._load_file(path)
+            if payload.get("setup_id") == setup_id and not payload.get("archived_at"):
+                self._archive_payload(project_id, payload, replaced_by=None)
+
     def reset_map(self, *, project_id: str, setup_id: str, reason: str | None = None, user_session: str | None = None) -> dict[str, Any]:
         project = self._load_project(project_id)
         setup = project.get_setup(setup_id)
-        if setup.active_map_id:
-            active = self.get_by_id(project_id, setup.active_map_id)
-            self._archive_payload(project_id, active, replaced_by=None)
+        self._archive_setup_maps(project_id, setup_id)
         updated_setup = replace(
             setup,
             active_map_id=None,
-            preparation_status=PreparationState.REFERENCIA_Z_CONFIRMADA,
+            preparation_status=(PreparationState.REFERENCIA_Z_CONFIRMADA if setup.preparacion.referencia_z is not None
+                                else PreparationState.SIN_INICIAR),
             preparacion=replace(
                 setup.preparacion,
                 region_sondeable_configurada_en=None,
@@ -2309,9 +2321,7 @@ class PhysicalMapService:
     def reset_reference(self, *, project_id: str, setup_id: str, reason: str | None = None, user_session: str | None = None) -> dict[str, Any]:
         project = self._load_project(project_id)
         setup = project.get_setup(setup_id)
-        if setup.active_map_id:
-            active = self.get_by_id(project_id, setup.active_map_id)
-            self._archive_payload(project_id, active, replaced_by=None)
+        self._archive_setup_maps(project_id, setup_id)
         next_revision = self._next_revision(setup.placement_revision)
         updated_setup = replace(
             setup,

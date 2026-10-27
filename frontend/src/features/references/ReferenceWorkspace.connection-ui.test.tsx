@@ -195,10 +195,10 @@ describe("ReferenceWorkspace connection and workflow UI", () => {
       .mockResolvedValueOnce({ ok: true, json: async () => ({ status: "reconciled" }) });
     vi.stubGlobal("fetch", fetchMock);
     const { refreshRuntime } = renderReference({ connected: true, recoveryPending: true, administrativePending: true });
-    expect(screen.getByText(/Transacción administrativa incompleta/)).toBeInTheDocument();
+    expect(screen.getByText(/Preparación interrumpida/)).toBeInTheDocument();
     expect(await screen.findByText("reset_setup_map — PREPARED")).toBeInTheDocument();
     expect(fetchMock).toHaveBeenCalledTimes(1);
-    fireEvent.click(screen.getByRole("button", { name: "Recuperar transacción administrativa" }));
+    fireEvent.click(screen.getByRole("button", { name: "Recuperar preparación interrumpida" }));
     await waitFor(() => expect(refreshRuntime).toHaveBeenCalled());
     expect(fetchMock).toHaveBeenCalledTimes(3);
     expect(fetchMock).toHaveBeenLastCalledWith("/api/machine/administrative-recovery/abc", { method: "POST" });
@@ -209,7 +209,7 @@ describe("ReferenceWorkspace connection and workflow UI", () => {
       .mockResolvedValueOnce({ ok: true, json: async () => ({ pending: true, id: "abc" }) })
       .mockResolvedValueOnce({ ok: false, json: async () => ({ detalle: "Falta observación de Moonraker" }) }));
     renderReference({ connected: true, recoveryPending: true, administrativePending: true });
-    fireEvent.click(screen.getByRole("button", { name: "Recuperar transacción administrativa" }));
+    fireEvent.click(screen.getByRole("button", { name: "Recuperar preparación interrumpida" }));
     expect(await screen.findByText("Falta observación de Moonraker")).toBeInTheDocument();
   });
 

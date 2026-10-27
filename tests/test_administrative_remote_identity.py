@@ -90,7 +90,7 @@ class AdministrativeIdentityTest(unittest.TestCase):
         valid = dict(self.remote)
         for changes in [{'connected': False}, {'klipper_state': 'shutdown'},
                         {'is_active_observed': None}, {'is_active_observed': True},
-                        {'homed_axes_observed': ''}, {'live_velocity': 1.0}]:
+                        {'live_velocity': 1.0}]:
             self.remote = dict(valid, **changes)
             self.rejected()
 
@@ -141,3 +141,50 @@ class AdministrativeIdentityTest(unittest.TestCase):
         self.run['operations'][0]['observed_printing'] = False
         self.f.path.write_text(json.dumps(self.run))
         self.rejected('No hay evidencia suficiente')
+
+    def test_cancelled_archive_then_new_attempt_preserves_map(self):
+        self.run['state'] = 'JOB_CANCELLED'
+        self.f.path.write_text(json.dumps(self.run))
+        project_dir = self.f.fixture.repository.project_dir(self.f.fixture.project_id)
+        protected = {p: p.read_bytes() for p in project_dir.rglob('*')
+                     if p.is_file() and 'reports' not in p.relative_to(project_dir).parts}
+        result = self.s.archive_stale_run(project_id=self.f.fixture.project_id,
+            setup_id=self.f.fixture.setup_id, face='superior')
+        self.assertTrue(result['can_start_new_run'])
+        for path, content in protected.items():
+            self.assertEqual(path.read_bytes(), content)
+        new = self.s.prepare_run(project_id=self.f.fixture.project_id,
+            setup_id=self.f.fixture.setup_id, face='superior')
+        self.assertNotEqual(new['run_id'], self.run['run_id'])
+        self.assertTrue(all(op['execution_status'] == 'PENDING' for op in new['operations']))
+        self.assertFalse(new.get('start_attempt'))
+        self.assertEqual(self.f.fixture.adapter.started, [])
+
+    def test_logical_reset_without_homing_still_requires_observed_idle(self):
+        self.remote['homed_axes_observed'] = ''
+        self.assertEqual(self.f.reset()['current_runs_cleared'], 1)
+        self.assertEqual(self.f.fixture.adapter.started, [])
+
+    def test_cancelled_archive_rejects_uncertain_attempt_and_retained_owner(self):
+        self.run['state'] = 'JOB_CANCELLED'
+        self.run['start_attempt']['status'] = 'uncertain'
+        self.f.path.write_text(json.dumps(self.run))
+        before = self.f.path.read_bytes()
+        with self.assertRaises(ApplicationError):
+            self.s.archive_stale_run(project_id=self.f.fixture.project_id,
+                setup_id=self.f.fixture.setup_id, face='superior')
+        self.assertEqual(before, self.f.path.read_bytes())
+        self.f.runtime.physical_ownership.acquire(OwnerKind.JOB_EXECUTION, 'retained')
+        with self.assertRaises(ApplicationError):
+            self.s.archive_stale_run(project_id=self.f.fixture.project_id,
+                setup_id=self.f.fixture.setup_id, face='superior')
+        self.assertEqual(before, self.f.path.read_bytes())
+
+    def test_history_retry_does_not_duplicate_same_revision(self):
+        context = self.f.context
+        first = self.s._write_archived_run(context, self.run, suffix='preparation-reset')
+        before = first.read_bytes()
+        second = self.s._write_archived_run(context, dict(self.run, updated_at='different'), suffix='preparation-reset')
+        self.assertEqual(first, second)
+        self.assertEqual(before, second.read_bytes())
+        self.assertEqual(len(list(first.parent.glob('*.json'))), 1)

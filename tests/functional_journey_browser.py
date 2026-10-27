@@ -116,6 +116,15 @@ def navigation_checks():
     print('NAVIGATION PERSISTENCE / NO MOTION PASS', flush=True)
 
 
+def confirm_click(label):
+    def open_dialog():
+        try:
+            return click(label)
+        except requests.HTTPError:
+            return command('GET', f'/session/{session}/alert/text')
+    wait(open_dialog)
+
+
 def ui_post(path, payload=None):
     global reject_preparation_once
     index = len(responses)
@@ -123,6 +132,17 @@ def ui_post(path, payload=None):
         wait(lambda: click('Referencia'))
         wait(lambda: click('Referencia'))
         wait(lambda: click('Conectar runtime'))
+    elif path.endswith('/reset-map'):
+        wait(lambda: click('Referencia'))
+        js('for(const d of document.querySelectorAll("details"))d.open=true;')
+        confirm_click('Reiniciar solo mapa')
+        wait(lambda: command('GET', f'/session/{session}/alert/text'))
+        command('POST', f'/session/{session}/alert/accept')
+    elif path.endswith('/archive-stale'):
+        wait(lambda: click('Ejecución'))
+        confirm_click('Cerrar intento y preparar otro')
+        wait(lambda: command('GET', f'/session/{session}/alert/text'))
+        command('POST', f'/session/{session}/alert/accept')
     elif path.endswith('/reset-preparation'):
         js('for(const d of document.querySelectorAll("details"))d.open=true;')
         def open_reset():
@@ -134,8 +154,9 @@ def ui_post(path, payload=None):
         wait(lambda: command('GET', f'/session/{session}/alert/text'))
         command('POST', f'/session/{session}/alert/accept')
     elif '/administrative-recovery/' in path:
-        wait(lambda: click('Recuperar transacción administrativa'))
+        wait(lambda: click('Recuperar preparación interrumpida'))
     elif path.endswith('/recover-idle-controls'):
+        wait(lambda: click('Referencia'))
         wait(lambda: click('Verificar reposo y recuperar controles'))
     elif path.endswith('/home'):
         wait(lambda: click('Realizar homing XYZ'))
@@ -175,9 +196,10 @@ def ui_post(path, payload=None):
         wait(lambda: click('Iniciar trabajo'))
     elif path.endswith('/action'):
         labels = {'confirm-spindle-stopped': 'Spindle detenido',
-                  'confirm-tool-change': 'Herramienta cambiada', 'continue': 'Spindle preparado — continuar'}
+                  'confirm-tool-change': 'Herramienta cambiada', 'continue': 'Spindle preparado — continuar', 'cancel': 'Cancelar'}
         label = labels[payload['action']]
-        wait(lambda: js('const b=[...document.querySelectorAll("button")].find(e=>e.textContent.trim()==='
+        if payload['action'] != 'cancel':
+            wait(lambda: js('const b=[...document.querySelectorAll("button")].find(e=>e.textContent.trim()==='
             + json.dumps(label) + ');const i=b?.parentElement.querySelector("input[type=checkbox]");'
             'if(!i||i.disabled)return false;if(!i.checked)i.click();return true;'))
         wait(lambda: click(label))
@@ -186,7 +208,7 @@ def ui_post(path, payload=None):
     result = wait(lambda: next((r for r in responses[index:] if r['path'] == path), None))
     assert result['status'] == 200, result
     if path.endswith('/prepare-position'):
-        assert len([r for r in responses if r['path'] == path and r['status'] == 200]) == 1
+        assert len([r for r in responses[index:] if r['path'] == path and r['status'] == 200]) == 1
     if path.endswith('/connect') and len([r for r in responses if r['path'] == path]) == 1:
         navigation_checks()
     if path.endswith('/action') and payload['action'] in {'confirm-spindle-stopped', 'confirm-tool-change'}:
@@ -242,7 +264,11 @@ try:
     wait(lambda: click('Abrir'))
     fixture.post = ui_post
     fixture.test_reset_connect_home_prepare_reference_mesh_execution()
-    wait(lambda: 'COMPLETADO' in js('return document.body.innerText'))
+    reload_app()
+    wait(lambda: click('Abrir'))
+    wait(lambda: click('Ejecución'))
+    wait(lambda: 'NO_EXECUTION' in js('return document.body.innerText'))
+    assert fixture.job.live_execution(**fixture.args)['job_run'] is None
     (ARTIFACTS / 'result.json').write_text(json.dumps({'result': 'PASS',
         'actions': [{'path': r['path'], 'status': r['status']} for r in responses]}, indent=2))
     print('FUNCTIONAL_JOURNEY_BROWSER PASS', flush=True)

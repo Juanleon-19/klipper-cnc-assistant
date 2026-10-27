@@ -168,3 +168,18 @@ class AdministrativeRecoveryTest(unittest.TestCase):
             self.assertEqual(result['dependencies'],2)
             self.assertTrue(pending.exists())
             with self.assertRaises(ApplicationError): import_legacy_evidence(data,backup)
+
+    def test_recovered_reset_retry_keeps_one_administrative_history(self):
+        identity = self.fail(partial=True)
+        history = self.fixture.path.parent / 'history'
+        originals = {p.name: p.read_bytes() for p in history.glob('*.json')}
+        recover(self.service, identity)
+        self.service._observe_administrative_remote()  # Explicit fresh fake idle evidence.
+        owner = self.runtime.physical_ownership
+        snapshot = owner.snapshot()
+        owner.reconcile_quiescent(expected_session=snapshot['session'],
+            expected_revision=snapshot['revision'], quiescent=True)
+        self.fixture.reset()
+        self.assertFalse(self.fixture.path.exists())
+        self.assertEqual({p.name: p.read_bytes() for p in history.glob('*.json')}, originals)
+        self.assertFalse(self.path.exists())

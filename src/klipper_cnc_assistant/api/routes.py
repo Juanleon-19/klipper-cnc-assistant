@@ -146,6 +146,10 @@ def _administrative_route(function=None, *, persistent=False, independent=False)
             if persistent:
                 project = guard.service.repository.load_project(kwargs['project_id'])
                 project.get_setup(kwargs['setup_id'])
+                if handler.__name__ in {'reset_setup_map', 'reset_setup_reference'}:
+                    for _, _, run in guard.service._current_runs_for_setup(kwargs['project_id'], kwargs['setup_id']):
+                        if run.get('state') in {'JOB_CANCELLED', 'JOB_COMPLETE', 'JOB_ERROR'}:
+                            raise ApplicationError('El intento anterior conserva esta preparación. En Ejecución, use «Cerrar intento y preparar otro» después de verificar reposo, o use «Reiniciar proceso» para reiniciar todo. El mapa y la referencia se conservan hasta entonces.')
                 guard.begin_mutation(project_id=kwargs['project_id'], setup_id=kwargs['setup_id'])
             elif not independent:
                 guard.observe_before_commit()

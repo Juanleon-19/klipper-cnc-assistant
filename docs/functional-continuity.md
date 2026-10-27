@@ -90,3 +90,19 @@ conciliación administrativa conserva RECOVERY físico. Luego verificar reposo y
 Reiniciar proceso mediante los controles existentes. Un journal antiguo requiere
 importación local de respaldo verificado; cambios no explicados bloquean. Véase
 `auditorias/administrative-map-recovery-20261026/REPORTE_FINAL.md`.
+
+### Cierre y nueva preparación (26 octubre)
+
+Los intentos terminales se conservan hasta un cierre explícito. «Cerrar intento y
+preparar otro» archiva con reserva, identidad remota, velocidad, sesión y CAS; no
+reutiliza el permiso local retirado. Una preparación nueva crea otra identidad y
+cinco operaciones pendientes cuando el proyecto tiene cinco operaciones. Homing
+sigue siendo obligatorio para movimiento, no para invalidación administrativa sin
+movimiento. Desconexión, impresión activa e identidad incierta no acreditan reposo.
+
+Reset de mapa archiva todas las versiones vigentes del montaje; la receta vuelve a
+los defaults de la UI, sin tocar ajustes globales. Reset completo retira también la
+asociación de ejecución y las referencias. Respuestas de un contexto anterior no
+pueden repoblar paneles después del reset. Reintentar un reset reconciliado reutiliza
+el histórico administrativo de la misma revisión, sin duplicarlo ni sobrescribirlo.
+Validación y límites: `auditorias/preparation-reset-lifecycle-20261026/REPORTE_FINAL.md`.

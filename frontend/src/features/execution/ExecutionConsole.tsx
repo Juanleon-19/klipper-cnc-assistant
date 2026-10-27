@@ -46,7 +46,7 @@ const CHECK_LABELS: Record<string, string> = {
 };
 
 const STARTABLE_STATES = new Set(["JOB_READY"]);
-const ARCHIVE_CANDIDATE_STATES = new Set(["JOB_VALIDATING", "JOB_STARTING", "OPERATION_PREFLIGHT", "OPERATION_UPLOADING", "WAITING_FOR_KLIPPER", "PRINT_QUEUED", "OPERATION_RUNNING", "RECOVERY_REQUIRED", "SPINDLE_STOP_REQUIRED", "TOOL_CHANGE_REQUIRED", "READY_TO_RESUME", "OPERATION_PAUSED", "JOB_PAUSED", "NEXT_OPERATION_READY"]);
+const ARCHIVE_CANDIDATE_STATES = new Set(["JOB_CANCELLED", "JOB_COMPLETE", "JOB_ERROR", "JOB_VALIDATING", "JOB_STARTING", "OPERATION_PREFLIGHT", "OPERATION_UPLOADING", "WAITING_FOR_KLIPPER", "PRINT_QUEUED", "OPERATION_RUNNING", "RECOVERY_REQUIRED", "SPINDLE_STOP_REQUIRED", "TOOL_CHANGE_REQUIRED", "READY_TO_RESUME", "OPERATION_PAUSED", "JOB_PAUSED", "NEXT_OPERATION_READY"]);
 const TOOL_WAIT_STATES = new Set(["SPINDLE_STOP_REQUIRED", "TOOL_CHANGE_REQUIRED", "TOOL_CHANGE_CONFIRMED", "MOVING_TO_REFERENCE", "CALIBRATING_TOOL", "REGENERATING_COMPENSATION", "VALIDATING_REGENERATED_PLAN", "READY_TO_RESUME"]);
 const ACTIVE_EXECUTION_STATES = new Set(["JOB_STARTING", "OPERATION_PREFLIGHT", "OPERATION_UPLOADING", "WAITING_FOR_KLIPPER", "PRINT_QUEUED", "OPERATION_RUNNING", "OPERATION_PAUSED", "JOB_PAUSED"]);
 const REFERENCE_TRANSITION_STATES = new Set(["TOOL_CHANGE_CONFIRMED", "RETURNING_TO_REFERENCE_SAFE_Z", "RETURNING_TO_REFERENCE_XY", "MOVING_TO_REFERENCE", "CALIBRATING_TOOL"]);
@@ -204,8 +204,9 @@ export function ExecutionConsole({ snapshot, readiness: suppliedReadiness, error
   const automaticFlowStepIndex = AUTOMATIC_FLOW_STEPS.findIndex((step) => step.state === runStatus);
   const checks = readiness?.checks ?? [];
   const failedChecks = checks.filter((check) => !check.ok);
-  const showPreflightSummary = true;
-  const initial = ["JOB_DRAFT", "JOB_VALIDATING", "JOB_READY"].includes(runStatus) && !jobRun?.started_at;
+  const historical = ["JOB_CANCELLED", "JOB_COMPLETE", "JOB_ERROR"].includes(runStatus);
+  const showPreflightSummary = !historical;
+  const initial = ["NO_EXECUTION", "JOB_DRAFT", "JOB_VALIDATING", "JOB_READY"].includes(runStatus) && !jobRun?.started_at;
   const preparationOnly = initial && !settingsBlocked && !error && readiness?.can_prepare === true
     && readiness?.conditions_ready === true && readiness.blocking_reasons.length > 0
     && readiness.blocking_reasons.every(reason => reason.code === "JOB_NOT_PREPARED");
@@ -229,6 +230,7 @@ export function ExecutionConsole({ snapshot, readiness: suppliedReadiness, error
         <StatusBadge tone={executionTone(runStatus)}>{snapshot?.run.status ?? "JOB_DRAFT"}</StatusBadge>
       </div>
 
+      {historical ? <div className="alert alert--info"><strong>Intento anterior finalizado</strong><p>El progreso mostrado pertenece al historial. Cierre este intento para preparar otro desde la primera operación conservando la malla y las referencias válidas. Si hay recuperación pendiente, verifique primero el reposo en Referencia.</p></div> : null}
       {showPreflightSummary ? (
         <section className="execution-panel" aria-label="Preparación del trabajo">
           <div className="section-heading"><h4>Preparación del trabajo</h4></div>
@@ -270,7 +272,7 @@ export function ExecutionConsole({ snapshot, readiness: suppliedReadiness, error
         </section>
       ) : null}
 
-      {desync ? <div className="alert alert--danger"><strong>DESINCRONIZACIÓN:</strong> Moonraker está ejecutando el archivo, pero JobRun no lo está siguiendo.</div> : null}
+      {desync ? <div className="alert alert--danger"><strong>DESINCRONIZACIÓN:</strong> Moonraker está ejecutando el archivo, pero la ejecución guardada no lo está siguiendo.</div> : null}
       {settingsBlocked ? <div className="alert alert--warning"><strong>Ejecución bloqueada por configuración</strong><p>{settingsBlockReason}</p></div> : null}
       {showSpindleStopRequired ? (
         <div className="alert alert--warning">
@@ -456,7 +458,7 @@ export function ExecutionConsole({ snapshot, readiness: suppliedReadiness, error
               }
             }}
           >
-            Cerrar ejecución obsoleta
+            {historical ? "Cerrar intento y preparar otro" : "Cerrar ejecución obsoleta"}
           </button>
         ) : null}
       </div>
@@ -486,8 +488,8 @@ export function ExecutionConsole({ snapshot, readiness: suppliedReadiness, error
           </div>
         </section>
 
-        <section className="execution-panel">
-          <div className="section-heading"><h4>Orquestador JobRun</h4></div>
+        <details className="execution-panel">
+          <summary>Diagnóstico avanzado de ejecución</summary>
           <div className="info-grid info-grid--double compact-grid">
             <div className="metric-box"><span>Run ID</span><strong className="mono-text execution-console-v2__file">{snapshot?.run.run_id ?? "-"}</strong></div>
             <div className="metric-box"><span>Status</span><strong>{snapshot?.run.status ?? "JOB_DRAFT"}</strong></div>
@@ -500,7 +502,7 @@ export function ExecutionConsole({ snapshot, readiness: suppliedReadiness, error
             <div className="metric-box"><span>Última persistencia</span><strong>{snapshot?.run.updated_at ? formatDate(snapshot.run.updated_at) : "-"}</strong></div>
             <div className="metric-box execution-console-v2__error"><span>Error de transición activo</span><strong>{snapshot?.transition.last_error?.message ?? "ninguno"}</strong></div>
           </div>
-        </section>
+        </details>
       </div>
 
       <section className="execution-panel">

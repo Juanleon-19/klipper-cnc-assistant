@@ -555,6 +555,7 @@ export function ProjectWorkspace({
   const [coordinateMode, setCoordinateMode] = useState<"local" | "machine">("local");
   const [mapSource, setMapSource] = useState<HeightMapSource>("SIMULATED");
   const [heightMap, setHeightMap] = useState<HeightMap | null>(null);
+  const preparationGeneration = useRef(0);
   const [meshPreview, setMeshPreview] = useState<PhysicalMapPayload | null>(null);
   const [physicalMap, setPhysicalMap] = useState<PhysicalMapPayload | null>(null);
   const [physicalMapHistory, setPhysicalMapHistory] = useState<Array<Record<string, unknown>>>([]);
@@ -745,6 +746,8 @@ export function ProjectWorkspace({
       return;
     }
 
+    let cancelled = false;
+    const generation = preparationGeneration.current;
     const run = async () => {
       setWorkspaceError("");
       try {
@@ -771,6 +774,7 @@ export function ProjectWorkspace({
             throw error;
           });
         }
+        if (cancelled || generation !== preparationGeneration.current) return;
         setReferenceSession(referencePayload);
         setPhysicalMap(maybePhysicalMap);
         setPhysicalMapHistory(history);
@@ -779,11 +783,13 @@ export function ProjectWorkspace({
           setMapSource("MEASURED");
         }
       } catch (error) {
+        if (cancelled || generation !== preparationGeneration.current) return;
         setWorkspaceError(error instanceof Error ? error.message : "No fue posible cargar el espacio de trabajo técnico.");
       }
     };
 
     void run();
+    return () => { cancelled = true; };
   }, [machine.isPhysical, project, selectedOperation]);
 
   useEffect(() => {
@@ -800,9 +806,10 @@ export function ProjectWorkspace({
         return;
       }
       physicalMapPollInFlight.current = true;
+      const generation = preparationGeneration.current;
       try {
         const nextMap = (await api.getPhysicalMap(project.id, selectedOperation.id)).payload;
-        if (cancelled) {
+        if (cancelled || generation !== preparationGeneration.current) {
           return;
         }
         setPhysicalMap(nextMap);
@@ -812,7 +819,7 @@ export function ProjectWorkspace({
             api.getPhysicalHeightMap(project.id, selectedOperation.id),
             api.getReferenceSession(project.id, selectedOperation.id),
           ]);
-          if (cancelled) {
+          if (cancelled || generation !== preparationGeneration.current) {
             return;
           }
           setHeightMap(measured);
@@ -821,7 +828,7 @@ export function ProjectWorkspace({
           setMeshMessageSeverity(nextMap?.validation?.status === "VALID" ? "SUCCESS" : "WARNING");
           setMeshValidationMessage(nextMap?.validation?.status === "VALID" ? "Mapa completado. Cobertura válida." : "Medición completada. Revise la cobertura antes de ejecutar.");
           void api.getPhysicalMapHistory(project.id, selectedOperation.id).then((history) => {
-            if (!cancelled) {
+            if (!cancelled && generation === preparationGeneration.current) {
               setPhysicalMapHistory(history);
             }
           }).catch(() => undefined);
@@ -868,16 +875,17 @@ export function ProjectWorkspace({
     }
     let cancelled = false;
     const loadJobState = async () => {
+      const generation = preparationGeneration.current;
       try {
         const diagnostic = await api.inspectExecution(project.id, selectedSetup.id, activeJobFace);
-        if (cancelled) {
+        if (generation !== preparationGeneration.current || cancelled) {
           return;
         }
         setJobPlan(diagnostic.plan);
         setExecutionReadiness(diagnostic.readiness);
         setExecutionError(null);
       } catch {
-        if (!cancelled) {
+        if (!cancelled && generation === preparationGeneration.current) {
           setJobPlan(null);
           setExecutionReadiness(null);
         }
@@ -898,15 +906,16 @@ export function ProjectWorkspace({
     const poll = async () => {
       if (inFlight) return;
       inFlight = true;
+      const generation = preparationGeneration.current;
       try {
         const live = await api.getLiveExecution(project.id, selectedSetup.id, activeJobFace);
-        if (cancelled) {
+        if (generation !== preparationGeneration.current || cancelled) {
           return;
         }
         setLiveExecution(live);
         setLiveExecutionError(null);
       } catch (error) {
-        if (!cancelled) setLiveExecutionError(error instanceof ApiError ? new ApiError(`[GET /execution/live] ${error.message}`, error.status, error.fieldErrors, error.detail, error.errors) : new ApiError(
+        if (!cancelled && generation === preparationGeneration.current) setLiveExecutionError(error instanceof ApiError ? new ApiError(`[GET /execution/live] ${error.message}`, error.status, error.fieldErrors, error.detail, error.errors) : new ApiError(
           error instanceof Error ? error.message : "No se recibió respuesta del monitor de ejecución.", 0,
           {}, { code: "EXECUTION_MONITOR_UNAVAILABLE", endpoint: "/execution/live" }));
       } finally {
@@ -1136,7 +1145,7 @@ export function ProjectWorkspace({
 
   const saveMachineSettings = async () => {
     if (machineSettingsLockedByJobRun) {
-      setMachineSettingsMessage("La configuración física no puede editarse mientras existe un JobRun activo.");
+      setMachineSettingsMessage("La configuración física no puede editarse mientras existe un trabajo activo.");
       return;
     }
     const labels: Record<keyof typeof machineSettingsInput, string> = {
@@ -2304,6 +2313,7 @@ export function ProjectWorkspace({
     const referenceMessage = "Reiniciar origen/Z invalida también la malla/mapa y las compensaciones dependientes. Conserva originales e historial.";
     const confirmed = window.confirm(scope === "preparation" ? completeMessage : scope === "map" ? mapMessage : referenceMessage);
     if (!confirmed) return;
+    preparationGeneration.current += 1;
     setReferenceBusy(true);
     setWorkspaceError("");
     try {
@@ -2314,9 +2324,31 @@ export function ProjectWorkspace({
       } else {
         await api.resetSetupPreparation(project.id, selectedSetup.id);
       }
+      preparationGeneration.current += 1;
       if (onRefreshProject) {
         await onRefreshProject();
       }
+      setSafeZInput("10");
+      setGridDefinitionMode("manual");
+      setProbeStepInput("0.05");
+      setProbeSpeedInput("60");
+      setProbeRetractInput("1.0");
+      setPointFilter("ALL");
+      setMeshRowsInput("7");
+      setMeshColumnsInput("6");
+      setUseUniformEdgeRetreat(true);
+      setUniformEdgeRetreatInput("2.0");
+      setEdgeRetreatLeftInput("2.0");
+      setEdgeRetreatRightInput("2.0");
+      setEdgeRetreatBottomInput("2.0");
+      setEdgeRetreatTopInput("2.0");
+      setMeshSpacingInput("10");
+      setMeshExclusions([]);
+      setProbeProfileMode("machine_reference_profile");
+      setMeshRecipeDirty(false);
+      setMeshCoverage(null);
+      setLiveExecutionError(null);
+      hydratedPhysicalMapIdRef.current = null;
       setMeshPreview(null);
       setMeshPreviewFingerprint(null);
       setPhysicalMap(null);
@@ -2333,7 +2365,7 @@ export function ProjectWorkspace({
         setReferenceSession(await api.getReferenceSession(project.id, selectedOperation.id));
       }
       setMeshMessageSeverity("INFO");
-      setMeshValidationMessage(scope === "map" ? "Mapa activo reiniciado. G-codes y operaciones siguen presentes. Genere la vista previa para volver a medir." : "Referencias y mapa invalidados. G-codes, operaciones y receta se conservan; complete de nuevo la referencia antes de medir.");
+      setMeshValidationMessage(scope === "map" ? "Mapa activo reiniciado. G-codes y operaciones siguen presentes. Genere la vista previa para volver a medir." : "Referencias y mapa invalidados. G-codes y operaciones se conservan; complete de nuevo la referencia antes de medir.");
     } catch (error) {
       setWorkspaceError(error instanceof Error ? error.message : "No fue posible reiniciar la preparación.");
     } finally {
@@ -2612,7 +2644,7 @@ export function ProjectWorkspace({
                 <strong>Reiniciar...</strong>
                 <button className="button button--ghost" type="button" disabled={referenceBusy || !selectedSetup} onClick={() => void resetPreparation("reference")} title="Invalida también mapa y compensaciones dependientes">Reiniciar origen/Z y dependencias</button>
                 <button className="button button--ghost" type="button" disabled={referenceBusy || !selectedSetup} onClick={() => void resetPreparation("map")}>Reiniciar solo mapa</button>
-                <button className="button button--ghost button--danger" type="button" disabled={referenceBusy || !selectedSetup} onClick={() => void resetPreparation("preparation")} title="Desconecta Arduino, invalida origen X/Y, referencias Z y mapa activo; conserva G-code, operaciones y receta de malla.">Reiniciar proceso</button>
+                <button className="button button--ghost button--danger" type="button" disabled={referenceBusy || !selectedSetup} onClick={() => void resetPreparation("preparation")} title="Desconecta Arduino, invalida origen X/Y, referencias Z y mapa activo; conserva G-code, operaciones e historial; restablece la receta de malla.">Reiniciar proceso</button>
               </div>
             </details>
           </div>

@@ -487,7 +487,7 @@ class JobService:
         ready = readiness['conditions_ready']
         run.update(checks=readiness['checks'], state='JOB_READY' if ready else 'JOB_VALIDATING',
                    ready=ready, next_action='Iniciar trabajo' if ready else 'Resolver bloqueos',
-                   available_actions=['start'] if ready else [], updated_at=_iso_now())
+                   available_actions=['start', 'cancel'] if ready else ['cancel'], updated_at=_iso_now())
         run['readiness'] = self._execution_readiness(context, plan, run)
         saved = self.run_store.create(self._run_file(context), run, previous=current)
         run.update(revision=saved['revision'], cancellation_epoch=saved['cancellation_epoch'])
@@ -892,7 +892,7 @@ class JobService:
             raise ApplicationError("La ejecución actual no cumple el criterio real de obsolescencia; primero revalide el plan o espere a que el estado se estabilice.")
         guard.check()
         self._assert_administrative_print_identity(run, guard)
-        self.run_store.validate(self._run_file(context), run)
+        self.run_store.validate(self._run_file(context), run, allow_cancelled=True)
         released = self._release_stale_supervisor(context, run, diagnosis)
         previous_status = str(run.get("state") or "JOB_DRAFT")
         archived = json.loads(json.dumps(run))
@@ -913,6 +913,7 @@ class JobService:
         run_file = self._run_file(context)
         if run_file.exists():
             self.run_store.remove(run_file, run)
+            self._physical_leases.pop((context.project_id, context.setup_id, context.face), None)
             released.append("job_run.current_run")
         return {
             "archived_run_id": archived.get("run_id"),
@@ -962,10 +963,17 @@ class JobService:
                 raise JobRunConflict('Cambió el conjunto de ejecuciones durante el reset.')
             for _, path, run in entries:
                 self.run_store.validate(path, run, allow_cancelled=True)
-            for _, path, run in entries:
+            for context, path, run in entries:
                 guard.check()
                 self.run_store.remove(path, run)
+                # Administrative reservation already proves no physical owner.
+                # Forget the retired local handle, never release/replace a lease.
+                self._physical_leases.pop((context.project_id, context.setup_id, context.face), None)
                 guard.checkpoint("CURRENT_RUN_ARCHIVED")
+            guard.check()
+            for key in list(self._physical_leases):
+                if key[:2] == (project_id, setup_id):
+                    self._physical_leases.pop(key, None)
             result = {'reason': 'preparation_reset', 'archived_runs': archived_runs,
                       'current_runs_cleared': len(entries), 'can_start_new_run': True}
             if dependency_result is not None:
@@ -2765,8 +2773,8 @@ class JobService:
                 'print_state': remote.get('state'),
                 'is_active': remote.get('is_active_observed')}):
             raise ApplicationError('Se requiere Moonraker conectado, Klipper ready e is_active observado false; shutdown/estado desconocido bloquean.')
-        if not set('xyz').issubset(str(remote.get('homed_axes_observed') or '')):
-            raise ApplicationError('Falta homing XYZ observado; reset rechazado.')
+        # Logical archival/reset never authorizes motion. Homing is checked by
+        # motion guards, not required to retire an old preparation.
         speed = self._observed_speed(remote.get('live_velocity'))
         tolerance = float(self.runtime.config.velocity_tolerance_mm_s)
         if speed is None or not math.isfinite(speed) or speed > tolerance:
@@ -2968,10 +2976,12 @@ class JobService:
 
     def _is_stale_run(self, run: dict[str, Any], state: str | None = None) -> bool:
         run_state = str(state or run.get("status") or run.get("state") or "")
-        if run_state not in RUN_MARKED_ACTIVE_STATES:
+        if run_state not in RUN_MARKED_ACTIVE_STATES | RUN_TERMINAL_STATES:
             return False
         if bool(run.get("worker_alive")) or bool(run.get("watcher_alive")) or bool(run.get("supervisor_registered")):
             return False
+        if run_state in RUN_TERMINAL_STATES:
+            return True  # Candidate only; reservation, remote identity and CAS still gate archival.
         updated_at = _parse_iso_datetime(run.get("updated_at"))
         if updated_at is None:
             return False
@@ -3018,7 +3028,18 @@ class JobService:
     def _write_archived_run(self, context: JobContext, run: dict[str, Any], *, suffix: str | None = None) -> Path:
         stamp = _utc_now().strftime("%Y%m%d-%H%M%S")
         base = str(run["run_id"]).replace("/", "_")
-        filename = f"{base}__{suffix}_{stamp}.json" if suffix else f"{base}__{stamp}.json"
+        if suffix in {'preparation-reset', 'stale'}:
+            # A retry of the same persisted revision reuses its archival receipt.
+            filename = f"{base}__{suffix}_r{int(run.get('revision', 0))}.json"
+            existing = self._history_dir(context) / filename
+            if existing.exists():
+                saved = json.loads(existing.read_text())
+                for key in ('run_id', 'revision', 'cancellation_epoch', 'operations', 'start_attempt'):
+                    if saved.get(key) != run.get(key):
+                        raise JobRunConflict('El histórico existente no coincide con la ejecución que se intenta cerrar.')
+                return existing
+        else:
+            filename = f"{base}__{suffix}_{stamp}.json" if suffix else f"{base}__{stamp}.json"
         history_file = self._history_dir(context) / filename
         atomic_json(history_file, run, durable=True)
         return history_file

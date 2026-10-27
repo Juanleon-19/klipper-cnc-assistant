@@ -65,7 +65,7 @@ def execution_health(run, status, readiness, worker_alive):
     actions = list(run.get('available_actions') or [])
     if state in INITIAL and not run.get('started_at'):
         if not readiness['reference']['valid'] and preparation_retry_safe(run, status):
-            actions = ['update-tool-reference']
+            actions = ['update-tool-reference', 'cancel']
         return {'phase': 'START', 'title': 'PUEDE INICIAR' if readiness['can_start'] else 'NO PUEDE INICIAR',
                 'severity': 'SUCCESS' if readiness['can_start'] else 'WARNING', 'recovery': None,
                 'available_actions': actions, 'detail': ''}

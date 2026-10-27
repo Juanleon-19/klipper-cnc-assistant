@@ -325,10 +325,10 @@ export function ReferenceWorkspace({
           </div>
           {machine.runtime?.recovery_pending ? <div className="alert alert--warning">
             <p>{machine.runtime?.physical_owner?.administrative_incomplete
-              ? "Transacción administrativa incompleta. Recupérela para verificar los archivos y conservar el journal como historial. Después verifique reposo y use Reiniciar proceso; no se reanudará el trabajo anterior."
+              ? "Preparación interrumpida. Recupérela para verificar los archivos y conservar el historial. Después verifique reposo y use Reiniciar proceso; no se reanudará el trabajo anterior."
               : "Hay una recuperación pendiente. Verificar reposo libera los controles solo si terminaron los movimientos y Klipper confirma reposo. No mueve la máquina ni habilita el joystick."}</p>
-            {administrativeDetail ? <p>{administrativeDetail}</p> : null}
-            <button className="button" type="button" disabled={recoveringControls || Boolean(activeOperation) || referenceBusy} onClick={() => void handleRecoverControls()}>{recoveringControls ? "Verificando recuperación…" : machine.runtime?.physical_owner?.administrative_incomplete ? "Recuperar transacción administrativa" : "Verificar reposo y recuperar controles"}</button>
+            {administrativeDetail ? <details><summary>Diagnóstico avanzado</summary><p>{administrativeDetail}</p></details> : null}
+            <button className="button" type="button" disabled={recoveringControls || Boolean(activeOperation) || referenceBusy} onClick={() => void handleRecoverControls()}>{recoveringControls ? "Verificando recuperación…" : machine.runtime?.physical_owner?.administrative_incomplete ? "Recuperar preparación interrumpida" : "Verificar reposo y recuperar controles"}</button>
           </div> : null}
           {connectAttemptStarted && !runtimeConnected && !showRuntimeRecovery ? <p className="muted">Esperando conexión. Si no queda lista en 10 s aparecerá la recuperación del runtime.</p> : null}
           {showRuntimeRecovery && !runtimeConnected ? <div className="alert alert--warning">La conexión no quedó lista después de 10 s. Puede intentar una reconexión completa del runtime sin reiniciar Klipper ni el servicio.</div> : null}
