@@ -1,3 +1,4 @@
+import type { AbandonedRunConfirmation } from "../types";
 import type { MeshCoverage, MeshArmReadiness } from "../features/height-map/MeshWorkflow";
 import type {
   CompensationAudit,
@@ -355,8 +356,8 @@ export const api = {
     request<Record<string, unknown>>(`/api/projects/${projectId}/setups/${setupId}/reset-reference`, { method: "POST", body: JSON.stringify({ motivo }) }),
   resetSetupMap: (projectId: string, setupId: string, motivo?: string) =>
     request<Record<string, unknown>>(`/api/projects/${projectId}/setups/${setupId}/reset-map`, { method: "POST", body: JSON.stringify({ motivo }) }),
-  resetSetupPreparation: (projectId: string, setupId: string, motivo?: string) =>
-    request<Record<string, unknown>>(`/api/projects/${projectId}/setups/${setupId}/reset-preparation`, { method: "POST", body: JSON.stringify({ motivo }) }),
+  resetSetupPreparation: (projectId: string, setupId: string, motivo?: string, abandoned_run?: AbandonedRunConfirmation) =>
+    request<Record<string, unknown>>(`/api/projects/${projectId}/setups/${setupId}/reset-preparation`, { method: "POST", body: JSON.stringify({ motivo, abandoned_run }) }),
   getPhysicalMap: (projectId: string, operationId: string) =>
     request<PhysicalMapResponse>(`/api/projects/${projectId}/operations/${operationId}/physical-map`),
   getPhysicalHeightMap: (projectId: string, operationId: string) =>

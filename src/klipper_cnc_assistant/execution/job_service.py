@@ -423,6 +423,48 @@ class JobService:
         if observed != identity.filename:
             raise ApplicationError('Moonraker informa un archivo distinto al de la ejecución guardada. Se conserva el trabajo; revise qué archivo se ejecutó y complete la recuperación antes de archivar o reiniciar.')
 
+    def _assert_abandoned_cancelled_run(self, run, guard, confirmation):
+        """Only the full preparation reset may retire an incomplete cancelled print.
+
+        This proves present idle, not historical completion or successful cancel.
+        The caller retains the original emission and invalidates all dependencies
+        under the same administrative reservation before removing current_run.
+        """
+        guard.check()
+        if (confirmation.get('abandon_incomplete') is not True
+                or confirmation.get('run_id') != run.get('run_id')
+                or confirmation.get('revision') != run.get('revision')
+                or run.get('state') != 'JOB_CANCELLED'):
+            raise ApplicationError('La ejecución cancelada cambió o falta confirmar su abandono. Actualice la vista y confirme de nuevo.')
+        operation = self._last_print_operation(run)
+        attempt = run.get('start_attempt') or {}
+        if (attempt.get('status') != 'sent' or attempt.get('may_have_been_sent') is not True
+                or not attempt.get('id')
+                or operation.get('execution_status') != 'RUNNING'
+                or operation.get('observed_printing') is not True
+                or operation.get('finished_at') or operation.get('completed_at')
+                or operation.get('moonraker_filename') != attempt.get('remote_file')):
+            raise ApplicationError('No hay evidencia inequívoca de la última emisión incompleta; se conserva la ejecución.')
+        PrintIdentity(attempt.get('remote_file'))
+        remote = guard.remote
+        if (remote is None or remote.get('connected') is not True
+                or remote.get('klipper_state') != 'ready'
+                or remote.get('state') != 'standby' or remote.get('filename') != ''
+                or remote.get('is_active_observed') is not False
+                or remote.get('is_active') is True or remote.get('active') is True
+                or remote.get('file_path') not in (None, '')):
+            raise ApplicationError('Para abandonar este intento se requiere Moonraker en standby, sin archivo seleccionado ni impresión activa verificable.')
+        velocity = remote.get('live_velocity')
+        components = list(velocity.values()) if isinstance(velocity, dict) else velocity if isinstance(velocity, (list, tuple)) else [velocity]
+        speed = self._observed_speed(velocity)
+        position = remote.get('live_position')
+        if (speed is None or any(isinstance(v, bool) for v in components)
+                or speed > float(self.runtime.config.velocity_tolerance_mm_s)
+                or not isinstance(position, (list, tuple)) or len(position) < 3
+                or any(isinstance(v, bool) or not isinstance(v, (float, int)) or not math.isfinite(v) for v in position[:3])):
+            raise ApplicationError('Falta observación física válida de posición y reposo; se conserva la ejecución.')
+        return operation
+
     def _assert_no_started_runs(self):
         for path in self.repository.projects_dir.glob('*/reports/jobs/*/*/current_run.json'):
             run = self.run_store.load(path)
@@ -948,18 +990,27 @@ class JobService:
             "can_start_new_run": not self._run_file(context).exists(),
         }
 
-    def reset_runs_for_preparation(self, *, project_id: str, setup_id: str, reset_dependencies=None) -> dict[str, Any]:
+    def reset_runs_for_preparation(self, *, project_id: str, setup_id: str, reset_dependencies=None, abandoned_run=None) -> dict[str, Any]:
         """Keep current runs until all dependency callbacks succeed; never fake rollback."""
         if not setup_id or setup_id in {'.', '..'} or '/' in setup_id or '\\' in setup_id:
             raise ApplicationError('Identificador de montaje inválido.')
         with self.administrative_mutation('reset-preparation', allow_started_runs=True) as guard:
             self.repository.load_project(project_id).get_setup(setup_id)
             entries = list(self._current_runs_for_setup(project_id, setup_id))
+            if abandoned_run is not None and (reset_dependencies is None or
+                    sum(r.get('run_id') == abandoned_run.get('run_id') for _, _, r in entries) != 1):
+                raise ApplicationError('El abandono requiere la ejecución esperada y un reinicio completo de sus dependencias.')
+            def validate_identity(run):
+                if abandoned_run is not None and run.get('run_id') == abandoned_run.get('run_id'):
+                    self._assert_abandoned_cancelled_run(run, guard, abandoned_run)
+                else:
+                    self._assert_administrative_print_identity(run, guard)
             for _context, path, run in entries:
-                self._assert_administrative_print_identity(run, guard)
+                validate_identity(run)
                 self.run_store.validate(path, run, allow_cancelled=True)
             guard.begin_mutation(
-                validate_remote_identity=lambda: [self._assert_administrative_print_identity(r, guard) for _, _, r in entries],
+                validate_remote_identity=lambda: [validate_identity(r) for _, _, r in entries],
+                abandoned_run=deepcopy(abandoned_run),
                 project_id=project_id, setup_id=setup_id,
                                  runs=[{'run_id': r['run_id'], 'revision': r['revision']} for _, _, r in entries])
             archived_runs = []
@@ -969,6 +1020,20 @@ class JobService:
                 archived.update(previous_status=run.get('state'), archive_reason='preparation_reset',
                                 completed_at=run.get('completed_at') or _iso_now(), updated_at=_iso_now(),
                                 available_actions=[], next_action='Ejecución archivada por reinicio de preparación')
+                if abandoned_run is not None and run.get('run_id') == abandoned_run.get('run_id'):
+                    # Preserve all historical operation/cancel evidence verbatim.
+                    if 'completed_at' in run:
+                        archived['completed_at'] = run['completed_at']
+                    else:
+                        archived.pop('completed_at', None)
+                    archived['administrative_closure'] = {
+                        'outcome': 'INCOMPLETE_UNVERIFIED', 'confirmed_by_operator': True,
+                        'confirmed_run': deepcopy(abandoned_run), 'archived_at': _iso_now(),
+                        'last_emission': deepcopy(run['start_attempt']),
+                        'remote_observation': deepcopy(guard.remote),
+                        'physical_session': guard.session,
+                        'warning': 'Pieza posiblemente mecanizada parcialmente; finalización y cancelación física no acreditadas.'}
+                    archived['next_action'] = 'Intento incompleto archivado; requiere preparación nueva'
                 if run.get('state') not in RUN_TERMINAL_STATES:
                     archived.update(state='PREPARATION_RESET_ARCHIVED', recovery_state='PREPARATION_RESET_ARCHIVED')
                 self._append_event(archived, "warning", "El operador reinició la preparación; se conserva el historial de ejecución.")
@@ -1187,6 +1252,13 @@ class JobService:
                     run.update(state='JOB_READY', available_actions=['start'], next_action='Confirme spindle preparado e inicie el trabajo.')
                     self._save_run(context, run)
             except Exception as error:
+                # This synchronous producer has returned from all motion/probe calls.
+                # Retire only its own root; keep recovery/children/dispatch evidence.
+                key = (context.project_id, context.setup_id, context.face)
+                permit = self._physical_leases.get(key)
+                if permit is not None:
+                    self.runtime.physical_ownership.retire(permit)
+                    self._physical_leases.pop(key, None)
                 self.runtime.physical_ownership.enter_recovery('Medición de referencia interrumpida; verifique el estado físico.')
                 self._identity_failure(context, run, error)
                 raise
@@ -1565,6 +1637,14 @@ class JobService:
                         pass
         finally:
             current = self._load_run(context)
+            if (not self._shutdown.is_set() and permit is not None and current is not None
+                    and current.get('run_id') == run_id and current.get('state') == 'RECOVERY_REQUIRED'
+                    and self.runtime.physical_ownership.snapshot()['recovery_pending']):
+                # Worker is exiting a physical recovery; no further commands originate here.
+                # A retryable pre-dispatch transition retains its existing contract.
+                # Keep global recovery until explicit fresh-idle reconciliation.
+                self.runtime.physical_ownership.retire(permit)
+                self._physical_leases.pop(key, None)
             if not self._shutdown.is_set() and (current is None or (current.get('run_id') == run_id and current.get('state') in RUN_TERMINAL_STATES)):
                 if (permit is not None and current is not None and current.get('state') == 'JOB_COMPLETE'
                         and self.runtime.complete_physical_workflow(permit)):
@@ -2346,6 +2426,13 @@ class JobService:
             entry = self._reference_entry(active_map, operation, initial_reference_binding)
             token = None if entry is None else entry.get('physical_reference_token')
             if not token:
+                binding = active_map.get('initial_reference_binding') or {}
+                measured_tool = binding.get('tool_id')
+                if measured_tool and measured_tool != _tool_key(operation):
+                    raise PhysicalReferenceError(
+                        f'La referencia inicial corresponde a {measured_tool}; la operación {operation.id} '
+                        f'requiere {_tool_key(operation)}. Instale la herramienta indicada y mida su referencia explícitamente.',
+                        'REFERENCE_MEASUREMENT_REQUIRED')
                 raise PhysicalReferenceError('Se requiere una medición con evidencia vigente para esta herramienta.', 'REFERENCE_MEASUREMENT_REQUIRED')
             require_current_reference(self.repository, self.runtime, active_map['project_id'], operation.id,
                                       active_map, project=project, expected_token=token)
@@ -3062,6 +3149,9 @@ class JobService:
                 for key in ('run_id', 'revision', 'cancellation_epoch', 'operations', 'start_attempt'):
                     if saved.get(key) != run.get(key):
                         raise JobRunConflict('El histórico existente no coincide con la ejecución que se intenta cerrar.')
+                saved_closure, closure = saved.get('administrative_closure') or {}, run.get('administrative_closure') or {}
+                if any(saved_closure.get(key) != closure.get(key) for key in ('outcome', 'confirmed_run', 'last_emission')):
+                    raise JobRunConflict('El histórico existente corresponde a otra decisión de cierre; se conserva la ejecución.')
                 return existing
         else:
             filename = f"{base}__{suffix}_{stamp}.json" if suffix else f"{base}__{stamp}.json"

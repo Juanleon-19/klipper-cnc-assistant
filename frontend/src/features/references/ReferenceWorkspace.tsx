@@ -208,6 +208,7 @@ export function ReferenceWorkspace({
   const httpStatusLabel = httpState === "STALE" && moonraker.http_connected === true
     ? "STALE (conectado; sin consulta HTTP reciente)"
     : String(moonraker.http_state ?? "DISCONNECTED");
+  const physicalOwnerId = runtime?.physical_owner?.owner_id;
   const runtimeConnected = machine.isPhysical && machine.runtimeState !== "DISCONNECTED" && moonrakerHttpConnected && websocketConnected && machine.klipperReady && arduinoConnected;
   const runtimeReconnectBlocked = !machine.isPhysical || referenceBusy || Boolean(activeOperation) || ["HOMING", "MOVING_TO_SAFE_Z", "MOVING_TO_CENTER", "PROBING_REFERENCE", "MESH_PROBING", "STOPPING"].includes(machine.runtimeState);
   const [connectAttemptStarted, setConnectAttemptStarted] = useState(false);
@@ -314,6 +315,7 @@ export function ReferenceWorkspace({
           <div className="section-heading">
             <h3>1. Conexión</h3>
             <StatusBadge tone={connectionTone}>{connectionLabel}</StatusBadge>
+            {physicalOwnerId ? <p role="status">Control físico global: {runtime?.physical_owner?.kind}. Responsable: proyecto {physicalOwnerId.split("/")[0]}, montaje/cara {physicalOwnerId.split("/").slice(1).join("/")}. Una ejecución cancelada de otro proyecto no libera este control.</p> : null}
           </div>
           <p className="muted">Conecta Moonraker, telemetría, Klipper y Arduino. La conexión no habilita movimiento por sí sola.</p>
           <div className="action-grid action-grid--inline">

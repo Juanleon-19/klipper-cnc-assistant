@@ -84,6 +84,7 @@ function renderReference(options?: {
   recoveryPending?: boolean;
   administrativePending?: boolean;
   activeOperation?: Record<string, unknown>;
+  ownerId?: string;
   homedAxes?: string;
   telemetryRecent?: boolean;
   activeJob?: boolean;
@@ -101,7 +102,7 @@ function renderReference(options?: {
     longApproachZ: options?.longApproachZ,
   });
   currentRuntime.recovery_pending = options?.recoveryPending;
-  currentRuntime.physical_owner = { administrative_incomplete: options?.administrativePending };
+  currentRuntime.physical_owner = { administrative_incomplete: options?.administrativePending, owner_id: options?.ownerId, kind: options?.ownerId ? "RECOVERY" : undefined };
   currentRuntime.active_operation = options?.activeOperation;
   const refreshRuntime = options?.refreshRuntime ?? vi.fn().mockResolvedValue(currentRuntime);
   const consistencyProps = {
@@ -454,4 +455,9 @@ describe("Main preparation sequence", () => {
     expect(screen.getByLabelText(/Velocidad Z de despeje/)).not.toBeDisabled();
     expect(screen.getByLabelText(/Velocidad Z de aproximación/)).not.toBeDisabled();
   });
+});
+
+it("identifica el proyecto responsable del control global sin atribuirlo a la selección", () => {
+  renderReference({ connected: true, recoveryPending: true, ownerId: "project-A/setup-A/superior" });
+  expect(screen.getByText(/Responsable: proyecto project-A, montaje\/cara setup-A\/superior/)).toBeInTheDocument();
 });

@@ -814,7 +814,11 @@ export type JobRunEvent = {
   message: string;
 };
 
+export type AbandonedRunConfirmation = { run_id: string; revision: number; abandon_incomplete: true };
+
 export type JobRun = {
+  revision?: number;
+  start_attempt?: { id?: string; status?: string; operation_id?: string; remote_file?: string; may_have_been_sent?: boolean };
   readiness?: ExecutionReadiness;
   schema_version: string;
   run_id: string;

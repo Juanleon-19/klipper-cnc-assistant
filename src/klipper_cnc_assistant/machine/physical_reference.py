@@ -134,13 +134,20 @@ def require_current_reference(repository, runtime, project_id, operation_id, phy
         if not all(math.isfinite(float(position[axis])) for axis in ('x_mm', 'y_mm', 'z_mm')):
             raise ValueError('nonfinite')
         if (float(position['z_mm']) != float(reference['reference_z'])
-                or float(position['z_mm']) != float(reference['tool_reference_z'])
-                or [float(position['x_mm']), float(position['y_mm'])] != [float(reference['reference_x']), float(reference['reference_y'])]
-                or token['measured_at'] != reference['measured_at']
-                or [float(position['x_mm']), float(position['y_mm'])] != context['reference_point']):
-            raise ValueError('measurement mismatch')
+                or float(position['z_mm']) != float(reference['tool_reference_z'])):
+            raise ValueError('Z medida difiere de la referencia guardada')
+        if [float(position['x_mm']), float(position['y_mm'])] != [float(reference['reference_x']), float(reference['reference_y'])]:
+            raise ValueError('X/Y medidos difieren de la referencia guardada')
+        if token['measured_at'] != reference['measured_at']:
+            raise ValueError('fecha de medición diferente')
+        # Only compare observation to the commanded reference point with a
+        # numerical-roundoff allowance, NOT a physical positioning tolerance.
+        # Preserve token/reference measurement equality and all stored evidence.
+        if any(not math.isclose(float(position[axis]), float(target), rel_tol=0.0, abs_tol=1e-12)
+               for axis, target in zip(('x_mm', 'y_mm'), context['reference_point'])):
+            raise ValueError('X/Y medidos no corresponden al punto de referencia del mapa')
     except (KeyError, TypeError, ValueError) as error:
-        raise PhysicalReferenceError('El token no corresponde a la medición canónica.') from error
+        raise PhysicalReferenceError(f'El token no corresponde a la medición canónica: {error}.') from error
     if expected_token is not None and token != expected_token:
         raise PhysicalReferenceError('La medición de herramienta cambió durante la preparación de ejecución.')
     return token

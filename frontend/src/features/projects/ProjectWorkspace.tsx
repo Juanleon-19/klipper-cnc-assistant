@@ -704,6 +704,14 @@ export function ProjectWorkspace({
   );
 
   const activeJobFace = useMemo(() => selectedOperation?.cara ?? processOperations[0]?.cara ?? null, [processOperations, selectedOperation]);
+  useEffect(() => {
+    setLiveExecution(null);
+    setLiveExecutionError(null);
+    setExecutionError(null);
+    setJobPlan(null);
+    setExecutionReadiness(null);
+  }, [project?.id, selectedSetup?.id, activeJobFace]);
+
 
   useEffect(() => {
     if (!project) {
@@ -2313,6 +2321,20 @@ export function ProjectWorkspace({
     const referenceMessage = "Reiniciar origen/Z invalida también la malla/mapa y las compensaciones dependientes. Conserva originales e historial.";
     const confirmed = window.confirm(scope === "preparation" ? completeMessage : scope === "map" ? mapMessage : referenceMessage);
     if (!confirmed) return;
+    const cancelled = liveExecution?.job_run;
+    const lastEmission = cancelled?.start_attempt;
+    const incomplete = scope === "preparation" && cancelled?.state === "JOB_CANCELLED"
+      && lastEmission?.status === "sent"
+      && cancelled.operations.some(op => op.operation_id === lastEmission.operation_id && op.execution_status === "RUNNING");
+    let abandonedRun: { run_id: string; revision: number; abandon_incomplete: true } | undefined;
+    if (incomplete) {
+      if (typeof cancelled.revision !== "number") {
+        setWorkspaceError("Actualice la vista para identificar la ejecución cancelada antes de abandonarla.");
+        return;
+      }
+      if (!window.confirm("Abandonar ejecución incompleta y reiniciar: la pieza puede haber quedado parcialmente mecanizada. Se conservará el historial sin declarar finalización ni cancelación física exitosa. Se invalidarán mapa, referencias y compensaciones anteriores. ¿Confirma que abandona este intento y comenzará una preparación nueva?")) return;
+      abandonedRun = { run_id: cancelled.run_id, revision: cancelled.revision, abandon_incomplete: true };
+    }
     preparationGeneration.current += 1;
     setReferenceBusy(true);
     setWorkspaceError("");
@@ -2322,7 +2344,8 @@ export function ProjectWorkspace({
       } else if (scope === "reference") {
         await api.resetSetupReference(project.id, selectedSetup.id);
       } else {
-        await api.resetSetupPreparation(project.id, selectedSetup.id);
+        if (abandonedRun) await api.resetSetupPreparation(project.id, selectedSetup.id, undefined, abandonedRun);
+        else await api.resetSetupPreparation(project.id, selectedSetup.id);
       }
       preparationGeneration.current += 1;
       if (onRefreshProject) {

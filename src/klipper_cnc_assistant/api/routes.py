@@ -52,6 +52,7 @@ from .schemas import (
     ReferenceZRequest,
     SetupCreateRequest,
     SetupResetRequest,
+    PreparationResetRequest,
     SetupResponse,
     SetupUpdateRequest,
     SystemInfoResponse,
@@ -296,7 +297,7 @@ def build_router() -> APIRouter:
         return request.app.state.physical_map_service.reset_map(project_id=project_id, setup_id=setup_id, reason=payload.motivo, user_session=payload.session)
 
     @router.post("/projects/{project_id}/setups/{setup_id}/reset-preparation", response_model=dict[str, object])
-    def reset_setup_preparation(project_id: str, setup_id: str, payload: SetupResetRequest, request: Request) -> dict[str, object]:
+    def reset_setup_preparation(project_id: str, setup_id: str, payload: PreparationResetRequest, request: Request) -> dict[str, object]:
         def reset_dependencies(guard):
             guard.check()
             result = request.app.state.physical_map_service.reset_preparation(
@@ -312,7 +313,8 @@ def build_router() -> APIRouter:
             guard.disconnected = True
             return result
         execution_reset = request.app.state.job_service.reset_runs_for_preparation(
-            project_id=project_id, setup_id=setup_id, reset_dependencies=reset_dependencies)
+            project_id=project_id, setup_id=setup_id, reset_dependencies=reset_dependencies,
+            abandoned_run=payload.abandoned_run.model_dump() if payload.abandoned_run else None)
         result = execution_reset.pop('dependency_result')
         result['execution_reset'] = execution_reset
         return result

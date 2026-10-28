@@ -1106,6 +1106,37 @@ describe("ProjectWorkspace", () => {
     expect(screen.queryByText(/Error de la ejecución histórica/)).not.toBeInTheDocument();
   });
 
+  it("retira el error de A al abrir B aunque la nueva consulta siga pendiente", async () => {
+    apiMock.getLiveExecution.mockRejectedValueOnce(new Error("Error exclusivo del proyecto A"));
+    const view = renderWorkspace(physicalMachine);
+    fireEvent.click(screen.getByRole("button", {name: /^Ejecución$/i}));
+    await screen.findByText(/Error exclusivo del proyecto A/);
+    const pending = deferred<typeof liveExecution>();
+    apiMock.getLiveExecution.mockReturnValue(pending.promise);
+    view.refreshProject({ ...project, id: "project-B", nombre: "Proyecto B" });
+    await waitFor(() => expect(screen.queryByText(/Error exclusivo del proyecto A/)).not.toBeInTheDocument());
+    await act(async () => pending.resolve(liveExecution));
+  });
+
+  it.each([false, true])("requiere confirmación adicional vinculada para abandonar un intento incompleto (%s)", async (accept) => {
+    vi.mocked(physicalMachine.runMachineAction).mockClear();
+    const incompleteRun = { ...jobRun, revision: 30, state: "JOB_CANCELLED",
+      start_attempt: { id: "attempt-2", status: "sent", operation_id: "op_2", remote_file: "synthetic/second.gcode", may_have_been_sent: true },
+      operations: jobRun.operations.map(op => ({ ...op, execution_status: op.operation_id === "op_2" ? "RUNNING" : "COMPLETED" })) };
+    apiMock.getLiveExecution.mockResolvedValue({ ...liveExecution, job_run: incompleteRun, run: { ...liveExecution.run, status: "JOB_CANCELLED" } });
+    const confirmation = vi.spyOn(window, "confirm").mockReturnValueOnce(true).mockReturnValueOnce(accept);
+    renderWorkspace(physicalMachine);
+    await waitFor(() => expect(apiMock.getLiveExecution).toHaveBeenCalled());
+    fireEvent.click(screen.getByText(/Más acciones/i));
+    fireEvent.click(await screen.findByRole("button", { name: /Reiniciar proceso/i }));
+    await waitFor(() => expect(confirmation).toHaveBeenCalledTimes(2));
+    expect(confirmation.mock.calls[1][0]).toContain("parcialmente mecanizada");
+    if (accept) await waitFor(() => expect(apiMock.resetSetupPreparation).toHaveBeenCalledWith(project.id, project.montajes[0].id, undefined,
+      { run_id: jobRun.run_id, revision: 30, abandon_incomplete: true }));
+    else expect(apiMock.resetSetupPreparation).not.toHaveBeenCalled();
+    expect(physicalMachine.runMachineAction).not.toHaveBeenCalled();
+  });
+
   it("reiniciar proceso refresca el proyecto activo y el runtime", async () => {
     const onRefreshProject = vi.fn().mockResolvedValue(undefined);
     vi.spyOn(window, "confirm").mockReturnValue(true);

@@ -115,7 +115,16 @@ def recover(service, transaction_id):
         for file in service.repository.projects_dir.glob('*/reports/jobs/*/*/current_run.json'):
             run = service.run_store.load(file)
             if run:
-                service._assert_administrative_print_identity(run, guard)
+                reset_evidence = journal.get('evidence') or {}
+                abandoned = reset_evidence.get('abandoned_run')
+                if (journal.get('schema_version') == 2 and journal.get('action') == 'reset-preparation'
+                        and abandoned and run.get('run_id') == abandoned.get('run_id')):
+                    if (run.get('project_id') != reset_evidence.get('project_id')
+                            or run.get('setup_id') != reset_evidence.get('setup_id')):
+                        raise ApplicationError('La confirmación de abandono no pertenece a esta preparación.')
+                    service._assert_abandoned_cancelled_run(run, guard, abandoned)
+                else:
+                    service._assert_administrative_print_identity(run, guard)
         check()
         directory.mkdir(parents=True, exist_ok=True)
         receipt = {'id': transaction_id, 'outcome': outcome, 'status': 'ARCHIVE_PREPARED',

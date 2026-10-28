@@ -107,6 +107,18 @@ class ProjectPermanentDeleteRequest(BaseModel):
     confirm_name: str = Field(min_length=1)
 
 
+class AbandonedRunConfirmation(BaseModel):
+    run_id: str = Field(min_length=1)
+    revision: int = Field(ge=0, strict=True)
+    abandon_incomplete: bool = Field(strict=True)
+
+
+class PreparationResetRequest(BaseModel):
+    motivo: str | None = None
+    session: str | None = None
+    abandoned_run: AbandonedRunConfirmation | None = None
+
+
 class SetupResetRequest(BaseModel):
     motivo: str | None = None
     session: str | None = None
