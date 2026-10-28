@@ -116,3 +116,33 @@ ownership y cancelación existentes. La aproximación larga puede seleccionarse
 explícitamente como115 y guardarse; null conserva herencia, sin migrar producción.
 El cambio de herramienta y la captura/sonda mantienen sus contratos existentes.
 Validación: `auditorias/tool-approach-profile-20261028/REPORTE_FINAL.md`.
+
+### Abandono explícito de intento cancelado incompleto (28 octubre; no desplegado)
+
+Solo Reiniciar proceso admite confirmación humana vinculada a run_id/revisión para
+archivar una última emisión sent inequívoca, observada imprimiendo pero sin final
+acreditado. Exige standby vacío y reposo HTTP verificable, exclusión física, sesión
+y CAS. Conserva toda la evidencia como INCOMPLETE_UNVERIFIED; no inventa completion
+ni cancelación física exitosa. Invalida dependencias dentro del mismo reset antes de
+retirar current_run. El journal conserva la confirmación para recuperación explícita
+con inventarios y reposo renovados; no libera ownership ni reanuda trabajos.
+Regresión obligatoria: fallo parcial→recuperación→reconfirmación sin duplicar histórico.
+Informe: `auditorias/cancelled-run-standby-reconciliation-20261028/REPORTE_FINAL.md`.
+
+La ejecución cancelada de un proyecto no es la ejecución activa de otro. El control
+físico es global y su owner_id identifica el proyecto/montaje/cara responsable.
+Una referencia inicial solo evita sondeo duplicado si coinciden herramienta,
+instalación, sesión y vínculo canónico con el mapa; nunca retaggear tokens. La
+comparación XY observado/punto objetivo admite solo redondeo numérico de 1e-12 mm;
+token y medición persistida siguen siendo exactamente iguales. El productor de una
+medición fallida o de un supervisor terminado con recuperación física pendiente se
+retira, conservando RECOVERY hasta comprobación explícita de reposo. Un rechazo
+reintentable previo a emisión no se convierte por ello en nueva recuperación física.
+Regresiones obligatorias: dos proyectos con A cancelado/B libre, dueño global activo
+o recuperándose, referencia ajena, redondeo XY y primera operación sin sondeo duplicado.
+
+Última implementación validada en simulación: `8e92d4795ae850e23b7c95fc1e03cdbf5bc6f9ee`
+(895 backend, 213 frontend, API y navegador integrados). Informe:
+`auditorias/cancelled-run-standby-reconciliation-20261028/REPORTE_FINAL.md`.
+Pendiente: revisión/despliegue autorizado y recuperación física explícita del incidente;
+no se ha reparado ni migrado automáticamente ningún token ni ejecución productiva.
