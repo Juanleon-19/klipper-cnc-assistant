@@ -9,6 +9,7 @@ function runtime(connected: boolean, options?: {
   state?: string;
   referencePrepZ?: number;
   longToolReferencePrepZ?: number;
+  longApproachZ?: number;
 }): MachineRuntime {
   const state = options?.state ?? (connected ? "DIAGNOSTIC" : "DISCONNECTED");
   return {
@@ -33,6 +34,7 @@ function runtime(connected: boolean, options?: {
     controller: {},
     preparation: {
       reference_prep_z_mm: options?.referencePrepZ ?? 115,
+      long_tool_reference_approach_z_mm: options?.longApproachZ,
     },
     tool_change: {
       clearance_z_mm: 115,
@@ -72,6 +74,7 @@ function renderReference(options?: {
   runtimeState?: string;
   referencePrepZ?: number;
   longToolReferencePrepZ?: number;
+  longApproachZ?: number;
   referencePrepZInput?: string;
   longToolReferencePrepZInput?: string;
   machineSettingsDirty?: boolean;
@@ -95,6 +98,7 @@ function renderReference(options?: {
     state: options?.runtimeState,
     referencePrepZ: options?.referencePrepZ,
     longToolReferencePrepZ: options?.longToolReferencePrepZ,
+    longApproachZ: options?.longApproachZ,
   });
   currentRuntime.recovery_pending = options?.recoveryPending;
   currentRuntime.physical_owner = { administrative_incomplete: options?.administrativePending };
@@ -393,6 +397,21 @@ describe("standalone tool-change position guards", () => {
 
 
 describe("Preparation authorization and feedback", () => {
+  beforeEach(() => { vi.spyOn(window, "confirm").mockReturnValue(true); });
+  afterEach(() => { vi.restoreAllMocks(); });
+  it.each([["standard", "105.000"], ["long_tool", "115.000"]] as const)("shows selected %s final approach", (toolReferenceProfile, z) => {
+    renderReference({ connected: true, homedAxes: "xyz", referencePrepZ: 105, longApproachZ: 115, toolReferenceProfile });
+    expect(screen.getByText("Objetivo de preparación").parentElement).toHaveTextContent(`Z ${z}`);
+    fireEvent.click(screen.getByRole("button", { name: "Ir a posición de preparación" }));
+    expect(window.confirm).toHaveBeenCalledWith(expect.stringContaining("libres de obstáculos"));
+  });
+  it("does not request preparation when the operator declines clear-area confirmation", () => {
+    vi.mocked(window.confirm).mockReturnValue(false);
+    const onInitialize = vi.fn();
+    renderReference({ connected: true, homedAxes: "xyz", onInitialize });
+    fireEvent.click(screen.getByRole("button", { name: "Ir a posición de preparación" }));
+    expect(onInitialize).not.toHaveBeenCalled();
+  });
   it.each([true, false])("allows an explicit preparation request with cached freshness %s", (telemetryRecent) => {
     const onInitialize = vi.fn();
     renderReference({ connected: true, homedAxes: "xyz", runtimeState: "HOMED", telemetryRecent, onInitialize });

@@ -164,11 +164,15 @@ def ui_post(path, payload=None):
         # A real HTTP rejection must reach the local step, not only App's banner.
         wait(lambda: 'La posición cacheada está obsoleta' in js('return document.body.innerText'))
         reject_preparation_once = True
-        wait(lambda: click('Ir a posición de preparación'))
+        confirm_click('Ir a posición de preparación')
+        wait(lambda: command('GET', f'/session/{session}/alert/text'))
+        command('POST', f'/session/{session}/alert/accept')
         wait(lambda: any(r['path'] == path and r['status'] == 400 for r in responses[index:]))
         wait(lambda: js('const b=[...document.querySelectorAll("button")].find(e=>e.textContent.trim()==="Ir a posición de preparación"); return b?.closest("article")?.textContent.includes("Observación simulada rechazada");'))
         index = len(responses)
-        wait(lambda: click('Ir a posición de preparación'))
+        confirm_click('Ir a posición de preparación')
+        wait(lambda: command('GET', f'/session/{session}/alert/text'))
+        command('POST', f'/session/{session}/alert/accept')
     elif path.endswith('/manual-control'):
         wait(lambda: click('Habilitar joystick X/Y'))
     elif path.endswith('/probe-and-capture'):

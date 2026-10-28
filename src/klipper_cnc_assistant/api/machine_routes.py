@@ -10,6 +10,7 @@ from .machine_schemas import (
     JogModeRequest,
     MachineInitializationRequest,
     ToolProfileRequest,
+    PreparationPositionRequest,
     MachineRuntimeResponse,
     MachineSettingsRequest,
     ManualControlRequest,
@@ -90,9 +91,9 @@ def build_machine_router() -> APIRouter:
         return MachineRuntimeResponse(**runtime(request).home_xyz())
 
     @router.post("/prepare-position", response_model=MachineRuntimeResponse)
-    def prepare_position(payload: ToolProfileRequest, request: Request) -> MachineRuntimeResponse:
+    def prepare_position(payload: PreparationPositionRequest, request: Request) -> MachineRuntimeResponse:
         request.app.state.job_service.assert_machine_settings_update_allowed()
-        return MachineRuntimeResponse(**runtime(request).prepare_position(payload.tool_reference_profile))
+        return MachineRuntimeResponse(**runtime(request).prepare_position(payload.tool_reference_profile, preparation_area_clear=payload.preparation_area_clear))
 
     @router.post("/manual-control", response_model=MachineRuntimeResponse)
     def manual_control(payload: ManualControlRequest, request: Request) -> MachineRuntimeResponse:

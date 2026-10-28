@@ -52,6 +52,10 @@ class ToolProfileRequest(BaseModel):
     tool_reference_profile: str = Field(default="standard", pattern="^(standard|long_tool)$")
 
 
+class PreparationPositionRequest(ToolProfileRequest):
+    preparation_area_clear: bool = False
+
+
 class MachineInitializationRequest(BaseModel):
     target_z_mm: float | None = None
 

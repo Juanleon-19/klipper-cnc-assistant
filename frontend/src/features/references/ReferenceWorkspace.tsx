@@ -147,6 +147,9 @@ export function ReferenceWorkspace({
   const selectedToolReferenceProfileLabel = selectedToolReferenceProfile === "long_tool" ? "Herramienta larga" : "Estándar";
   const selectedToolChangeClearanceZ = selectedToolReferenceProfile === "long_tool" ? longToolChangeClearanceZ : standardToolChangeClearanceZ;
   const selectedReferencePrepZ = selectedToolReferenceProfile === "long_tool" && typeof preparation.long_tool_reference_approach_z_mm === "number" ? preparation.long_tool_reference_approach_z_mm : referencePrepZ;
+  const handlePreparePosition = () => {
+    if (window.confirm(`Preparar ${selectedToolReferenceProfileLabel}: despeje Z, traslado al centro X ${centerX ?? "?"} / Y ${centerY ?? "?"} y aproximación final Z ${selectedReferencePrepZ} mm. Confirme que la herramienta instalada, la zona del centro y todo el recorrido vertical hasta esa altura están libres de obstáculos. No se realizará sondeo.`)) onInitialize();
+  };
   const editedReferencePrepZ = Number(machineSettingsInput.reference_prep_z_mm);
   const editedLongToolChangeClearanceZ = Number(machineSettingsInput.long_tool_change_clearance_z_mm);
   const editedReferencePrepZDiffers = Number.isFinite(editedReferencePrepZ) && editedReferencePrepZ !== referencePrepZ;
@@ -370,19 +373,20 @@ export function ReferenceWorkspace({
 
         <article className="panel">
           <div className="section-heading"><h3>2. Homing y posición de preparación</h3></div>
-          <p className="muted">Homing referencia los ejes. Después, preparación desplaza Z al despeje y X/Y al centro, sin repetir homing.</p>
+          <p className="muted">Homing referencia los ejes. Después, preparación desplaza Z al despeje, X/Y al centro y Z a la aproximación del perfil, sin repetir homing.</p>
           <div className="info-grid info-grid--double compact-grid">
             <div className="metric-box"><span>Homing</span><strong>{machine.homedAxes || "pendiente"}</strong></div>
             <div className="metric-box"><span>Posición actual</span><strong>X {formatMillimeters(typeof position?.x === "number" ? Number(position.x) : null, 3)} · Y {formatMillimeters(typeof position?.y === "number" ? Number(position.y) : null, 3)} · Z {formatMillimeters(typeof position?.z === "number" ? Number(position.z) : null, 3)}</strong></div>
-            <div className="metric-box"><span>Objetivo de preparación</span><strong>X {formatMillimeters(centerX, 3)} · Y {formatMillimeters(centerY, 3)} · Z {formatMillimeters(referencePrepZ, 3)}</strong></div>
+            <div className="metric-box"><span>Objetivo de preparación</span><strong>X {formatMillimeters(centerX, 3)} · Y {formatMillimeters(centerY, 3)} · Z {formatMillimeters(selectedReferencePrepZ, 3)}</strong></div>
             <div className="metric-box"><span>Etapa actual</span><strong>{String(preparationStage?.name ?? "pendiente")}</strong></div>
           </div>
+          <p className="muted">Perfil seleccionado: {selectedToolReferenceProfileLabel}. Aproximación final efectiva: {formatMillimeters(selectedReferencePrepZ, 3)} mm. Despeje de traslado: {formatMillimeters(selectedToolChangeClearanceZ, 3)} mm (se conserva una Z actual más despejada).</p>
           <div className="action-grid action-grid--inline">
             <button className="button" type="button" disabled={!canInitialize || referenceBusy || machine.refreshing || machineSettingsDirty || machineSettingsLockedByJobRun} onClick={onHome}>Realizar homing XYZ</button>
-            <button className="button" type="button" disabled={!canPrepare || referenceBusy || machine.refreshing} onClick={onInitialize}>Ir a posición de preparación</button>
-            <p className="muted">Homing solo referencia los ejes. Preparación desplaza Z al despeje del perfil instalado y después X/Y al centro, sin repetir homing. El punto de referencia guardado se visita con su botón independiente.</p>
+            <button className="button" type="button" disabled={!canPrepare || referenceBusy || machine.refreshing} onClick={handlePreparePosition}>Ir a posición de preparación</button>
+            <p className="muted">Homing solo referencia los ejes. Preparación viaja al despeje del perfil instalado, centra X/Y y termina en la altura de aproximación. Confirme antes que el centro y el recorrido vertical están libres; no se detectan obstáculos automáticamente. El punto de referencia guardado se visita con su botón independiente.</p>
           </div>
-          <p className="muted">Velocidades activas: despeje Z {zClearanceFeed} mm/min; traslado X/Y {referencePrepXyFeed} mm/min. Aproximación posterior a referencia Z: {referenceApproachZFeed} mm/min. Ajuste y guarde las velocidades Z en la configuración avanzada; se conservan los límites Klipper.</p>
+          <p className="muted">Velocidades activas: despeje Z {zClearanceFeed} mm/min; traslado X/Y {referencePrepXyFeed} mm/min. Aproximación Z final: {referenceApproachZFeed} mm/min. Ajuste y guarde las velocidades Z en la configuración avanzada; se conservan los límites Klipper.</p>
           {preparationBlock ? <p role="status">No se puede preparar: {preparationBlock}</p> : null}
           {!preparationBlock && !machine.telemetryRecent ? <p role="status">La posición cacheada está obsoleta. Al preparar se obtendrá una observación actual; si no es válida, no habrá movimiento.</p> : null}
           {preparationError ? <div role="alert" className="alert alert--error">{preparationError}</div> : null}
@@ -436,7 +440,7 @@ export function ReferenceWorkspace({
             {!machineSettingsHasUnsavedChanges && machineSettingsRuntimeStatus === "inconsistent" && editedLongToolChangeClearanceZDiffers ? <p className="muted">Despeje de herramienta larga · Valor activo: {formatMillimeters(longToolChangeClearanceZ, 3)} · Valor confirmado por PUT: {formatMillimeters(editedLongToolChangeClearanceZ, 3)}</p> : null}
             <div className="action-grid action-grid--inline">
               <button className="button" type="button" disabled={!machine.isPhysical || settingsInputsDisabled || machine.refreshing || !machineSettingsHasUnsavedChanges} onClick={onSaveMachineSettings}>Guardar configuración</button>
-              <button className="button button--ghost" type="button" disabled={!canPrepare || referenceBusy || machine.refreshing} onClick={onInitialize}>Repetir preparación</button>
+              <button className="button button--ghost" type="button" disabled={!canPrepare || referenceBusy || machine.refreshing} onClick={handlePreparePosition}>Repetir preparación</button>
             </div>
             {machineSettingsMessage ? <p className="muted">{machineSettingsMessage}</p> : null}
             <div className="workflow-steps-grid">
@@ -480,6 +484,8 @@ export function ReferenceWorkspace({
           <div className="form-grid form-grid--dense">
             <label>Aproximación de herramienta larga<select value={machineSettingsInput.long_tool_reference_approach_z_mm == null ? "inherit" : "custom"} disabled={settingsInputsDisabled} onChange={(event) => onMachineSettingChange("long_tool_reference_approach_z_mm", event.target.value === "inherit" ? null : machineSettingsInput.reference_prep_z_mm)}><option value="inherit">Heredar Z estándar</option><option value="custom">Usar altura personalizada</option></select></label>
             <label>Z de aproximación para herramienta larga (mm)<input value={machineSettingsInput.long_tool_reference_approach_z_mm ?? machineSettingsInput.reference_prep_z_mm} inputMode="decimal" readOnly={machineSettingsInput.long_tool_reference_approach_z_mm == null} disabled={settingsInputsDisabled} onChange={(event) => onMachineSettingChange("long_tool_reference_approach_z_mm", event.target.value)} /></label>
+            <button type="button" className="button button--ghost" disabled={settingsInputsDisabled} onClick={() => onMachineSettingChange("long_tool_reference_approach_z_mm", "115")}>Seleccionar aproximación larga de 115 mm</button>
+            <p className="muted">La selección de 115 mm es explícita y queda pendiente de guardar. Verifique su seguridad para la herramienta instalada; no cambia el despeje.</p>
             <p className="muted">Z larga efectiva de esta configuración: {machineSettingsInput.long_tool_reference_approach_z_mm ?? machineSettingsInput.reference_prep_z_mm} mm. {machineSettingsInput.long_tool_reference_approach_z_mm == null ? "Heredada: sigue los cambios de la Z estándar." : "Personalizada: independiente de la Z estándar."} Los cambios requieren guardar y confirmar el runtime antes de mover.</p>
             <p className="muted">La aproximación larga es independiente del despeje de traslado y de la Z de contacto. Configure una altura verificada para la herramienta instalada; el mapa y la compensación no cambian.</p>
             <label>Paso de sonda (mm)<input value={machineSettingsInput.reference_probe_step_mm} inputMode="decimal" disabled={settingsInputsDisabled || machine.runtimeState === "PROBING_REFERENCE"} onChange={(event) => onMachineSettingChange("reference_probe_step_mm", event.target.value)} /></label>

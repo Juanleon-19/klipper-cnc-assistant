@@ -963,6 +963,7 @@ describe("ProjectWorkspace", () => {
   });
 
   it("separa homing y preparación y transmite el perfil largo a preparación y estación", async () => {
+    const confirmPreparation = vi.spyOn(window, "confirm").mockReturnValue(true);
     const machine = { ...physicalMachine, runtimeState: "HOMED", runMachineAction: vi.fn().mockResolvedValue(undefined) };
     renderWorkspace(machine, { project: longToolProject });
     fireEvent.click(screen.getByRole("button", { name: /^Referencia$/i }));
@@ -970,11 +971,13 @@ describe("ProjectWorkspace", () => {
     await waitFor(() => expect(machine.runMachineAction).toHaveBeenCalledWith("home"));
     await waitFor(() => expect(screen.getByRole("button", { name: "Ir a posición de preparación" })).toBeEnabled());
     fireEvent.click(screen.getByRole("button", { name: "Ir a posición de preparación" }));
-    await waitFor(() => expect(machine.runMachineAction).toHaveBeenCalledWith("prepare-position", undefined, "long_tool"));
+    await waitFor(() => expect(machine.runMachineAction).toHaveBeenCalledWith("prepare-position", undefined, "long_tool", true));
     await waitFor(() => expect(screen.getByRole("button", { name: "Probar posición de cambio" })).toBeEnabled());
     fireEvent.click(screen.getByRole("button", { name: "Probar posición de cambio" }));
     await waitFor(() => expect(machine.runMachineAction).toHaveBeenCalledWith("tool-change-position", undefined, "long_tool"));
     expect(machine.runMachineAction).not.toHaveBeenCalledWith("initialize", expect.anything());
+    expect(confirmPreparation).toHaveBeenCalledTimes(1);
+    confirmPreparation.mockRestore();
   });
 
   it("va una sola vez al punto guardado y muestra el diagnóstico", async () => {

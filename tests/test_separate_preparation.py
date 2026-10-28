@@ -14,15 +14,121 @@ class SeparatePreparationTest(unittest.TestCase):
         self.assertEqual(runtime.snapshot()['state'],'HOMED')
 
     def test_prepare_standard_and_long_without_home(self):
-        for profile,z in [('standard',115),('long_tool',130)]:
+        for profile, approach in [('standard',105),('long_tool',115)]:
             with self.subTest(profile=profile):
                 runtime, client = self.runtime()
-                runtime.config=replace(runtime.config,long_tool_change_clearance_z_mm=130)
-                runtime.prepare_position(profile)
-                self.assertEqual(len(client.scripts),2)
-                self.assertIn(f'Z{z:.6f}',client.scripts[0])
+                runtime.config=replace(runtime.config,reference_prep_z_mm=105,
+                    long_tool_reference_approach_z_mm=115,long_tool_change_clearance_z_mm=130)
+                runtime.prepare_position(profile, preparation_area_clear=True)
+                self.assertEqual(len(client.scripts),3)
+                self.assertIn(f'Z{115 if profile == "standard" else 130:.6f}',client.scripts[0])
+                self.assertIn('X',client.scripts[1])
+                self.assertIn(f'Z{approach:.6f}',client.scripts[2])
                 self.assertNotIn('G28',' '.join(client.scripts))
                 self.assertEqual(runtime.snapshot()['state'],'WAITING_FOR_XY_REFERENCE')
+                self.assertAlmostEqual(runtime._machine.position.z, approach)
+
+    def test_descending_preparation_requires_explicit_clear_area_before_motion(self):
+        runtime,client=self.runtime()
+        runtime.config=replace(runtime.config,reference_prep_z_mm=105)
+        with self.assertRaisesRegex(Exception,'libres de obstáculos'):
+            runtime.prepare_position()
+        self.assertEqual(client.scripts,[])
+
+    def test_invalid_approach_emits_nothing(self):
+        runtime,client=self.runtime()
+        runtime.config=replace(runtime.config,long_tool_reference_approach_z_mm=500)
+        with self.assertRaises(Exception):runtime.prepare_position('long_tool', preparation_area_clear=True)
+        self.assertEqual(client.scripts,[])
+
+    def test_switch_selected_profile_keeps_distinct_approach(self):
+        runtime,client=self.runtime()
+        runtime.config=replace(runtime.config,reference_prep_z_mm=105,long_tool_reference_approach_z_mm=115)
+        for profile,z in [('standard',105),('long_tool',115),('standard',105)]:
+            runtime.prepare_position(profile, preparation_area_clear=True)
+            self.assertAlmostEqual(runtime._machine.position.z,z)
+
+    def test_failed_xy_never_starts_approach(self):
+        from unittest.mock import patch
+        runtime,client=self.runtime()
+        runtime.config=replace(runtime.config,reference_prep_z_mm=105)
+        original=runtime._move_absolute
+        def move(**kwargs):
+            if 'x' in kwargs:raise RuntimeError('fake XY failure')
+            return original(**kwargs)
+        with patch.object(runtime,'_move_absolute',side_effect=move):
+            with self.assertRaisesRegex(RuntimeError,'fake XY failure'):
+                runtime.prepare_position(preparation_area_clear=True)
+        self.assertEqual(len(client.scripts),1)
+        self.assertEqual(runtime.snapshot()['state'],'ERROR')
+
+    def test_cancel_after_center_blocks_final_approach(self):
+        from unittest.mock import patch
+        runtime,client=self.runtime()
+        runtime.config=replace(runtime.config,reference_prep_z_mm=105)
+        original=runtime._move_absolute
+        def move(**kwargs):
+            result=original(**kwargs)
+            if 'x' in kwargs:runtime._active_operation.cancel_event.set()
+            return result
+        with patch.object(runtime,'_move_absolute',side_effect=move):
+            with self.assertRaises(Exception):runtime.prepare_position(preparation_area_clear=True)
+        self.assertEqual(len(client.scripts),2)
+        self.assertNotEqual(runtime.snapshot()['state'],'WAITING_FOR_XY_REFERENCE')
+
+    def test_config_change_before_reservation_blocks_all_motion(self):
+        from unittest.mock import patch
+        runtime,client=self.runtime()
+        original=runtime.initialize
+        def changed(*args, **kwargs):
+            runtime.config=replace(runtime.config,reference_prep_z_mm=100)
+            return original(*args,**kwargs)
+        with patch.object(runtime,'initialize',side_effect=changed):
+            with self.assertRaisesRegex(Exception,'configuración cambió'):
+                runtime.prepare_position(preparation_area_clear=True)
+        self.assertEqual(client.scripts,[])
+
+    def test_final_approach_failure_does_not_publish_ready(self):
+        from unittest.mock import patch
+        runtime,client=self.runtime()
+        runtime.config=replace(runtime.config,reference_prep_z_mm=105)
+        original=runtime._move_absolute
+        def move(**kwargs):
+            if kwargs['label']=='z_aproximacion_preparacion':raise RuntimeError('approach failed')
+            return original(**kwargs)
+        with patch.object(runtime,'_move_absolute',side_effect=move):
+            with self.assertRaisesRegex(RuntimeError,'approach failed'):
+                runtime.prepare_position(preparation_area_clear=True)
+        self.assertEqual(len(client.scripts),2)
+        self.assertEqual(runtime.snapshot()['state'],'ERROR')
+        self.assertFalse(any(s['name']=='PREPARATION_APPROACH_DONE' for s in runtime.snapshot()['initialization_steps']))
+
+    def test_missing_fresh_observation_after_center_blocks_descent(self):
+        from unittest.mock import patch
+        runtime,client=self.runtime()
+        runtime.config=replace(runtime.config,reference_prep_z_mm=105)
+        original=runtime._refresh_machine
+        def refresh(**kwargs):
+            if len(client.scripts)>=2:raise RuntimeError('fresh position unavailable')
+            return original(**kwargs)
+        with patch.object(runtime,'_refresh_machine',side_effect=refresh):
+            with self.assertRaisesRegex(RuntimeError,'fresh position unavailable'):
+                runtime.prepare_position(preparation_area_clear=True)
+        self.assertEqual(len(client.scripts),2)
+
+    def test_cancel_during_final_observation_cannot_publish_ready(self):
+        from unittest.mock import patch
+        runtime,client=self.runtime()
+        runtime.config=replace(runtime.config,reference_prep_z_mm=105)
+        original=runtime._refresh_machine
+        def refresh(**kwargs):
+            result=original(**kwargs)
+            if len(client.scripts)==3:runtime._active_operation.cancel_event.set()
+            return result
+        with patch.object(runtime,'_refresh_machine',side_effect=refresh):
+            with self.assertRaises(Exception):runtime.prepare_position(preparation_area_clear=True)
+        self.assertEqual(len(client.scripts),3)
+        self.assertNotEqual(runtime.snapshot()['state'],'WAITING_FOR_XY_REFERENCE')
 
     def test_prepare_without_homing_emits_nothing(self):
         runtime,client=self.runtime(homed_axes='')
@@ -59,7 +165,7 @@ class SeparatePreparationTest(unittest.TestCase):
     def test_negative_z_direction_does_not_lower_for_travel(self):
         runtime,client=self.runtime()
         runtime.config=replace(runtime.config,tool_change_z_positive_up=False,tool_change_clearance_z_mm=100,long_tool_change_clearance_z_mm=80,safe_z_mm=100)
-        runtime.prepare_position('long_tool')
+        runtime.prepare_position('long_tool', preparation_area_clear=True)
         self.assertIn('Z30.000000',client.scripts[0])
         self.assertEqual(runtime.snapshot()['state'],'WAITING_FOR_XY_REFERENCE')
 

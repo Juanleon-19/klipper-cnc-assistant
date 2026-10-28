@@ -975,14 +975,20 @@ class MachineRuntime:
         """Home only; never travel to center or start probing."""
         return self.initialize(permit=permit, _home_only=True)
 
-    def prepare_position(self, tool_reference_profile: str = "standard", *, permit: PhysicalPermit | None = None) -> dict[str, Any]:
-        """Travel at configured clearance without homing; keep Z there at center."""
+    def prepare_position(self, tool_reference_profile: str = "standard", *, preparation_area_clear: bool = False, permit: PhysicalPermit | None = None) -> dict[str, Any]:
+        """Travel at clearance, then approach the confirmed clear center by profile."""
+        preparation_config = self.config
         target = self.tool_change_clearance_z(tool_reference_profile)
-        return self.initialize(target, permit=permit, _skip_home=True)
+        approach = self.reference_preparation_z(tool_reference_profile)
+        return self.initialize(target, permit=permit, _skip_home=True,
+                               _approach_z_mm=approach, preparation_area_clear=preparation_area_clear,
+                               _preparation_config=preparation_config)
 
     def initialize(self, target_z_mm: float | None = None, *, permit: PhysicalPermit | None = None,
-                   _home_only: bool = False, _skip_home: bool = False) -> dict[str, Any]:
-        """Prepare the machine in strict HOME → configured absolute Z → center order."""
+                   _home_only: bool = False, _skip_home: bool = False,
+                   _approach_z_mm: float | None = None, preparation_area_clear: bool = False,
+                   _preparation_config: MachineRuntimeConfig | None = None) -> dict[str, Any]:
+        """Home or travel Z → center; optionally approach the explicitly cleared center."""
         self._require_physical_ready()
         context = self._begin_motion_operation("preparation", permit=permit)
         started = time.monotonic()
@@ -990,6 +996,8 @@ class MachineRuntime:
         center_y: float | None = None
         configured_z = self.config.reference_prep_z_mm if target_z_mm is None else float(target_z_mm)
         try:
+            if _preparation_config is not None and self.config is not _preparation_config:
+                raise MachineRuntimeError("La configuración cambió al preparar; revise la altura y confirme de nuevo.")
             with self._lock:
                 self._state = MachineRuntimeState.HOMED if _skip_home else MachineRuntimeState.HOMING
                 self._manual_enabled = False
@@ -1030,7 +1038,8 @@ class MachineRuntime:
             if _skip_home:
                 # Never lower toward the surface merely to reach a clearance.
                 current_z = float(homed_snapshot["z"])
-                configured_z = (max if self.config.tool_change_z_positive_up else min)(current_z, configured_z, self.config.safe_z_mm)
+                configured_z = (max if self.config.tool_change_z_positive_up else min)(current_z, configured_z, self.config.safe_z_mm,
+                    configured_z if _approach_z_mm is None else _approach_z_mm)
 
             # preparation_z is an absolute machine coordinate.  It is intentionally
             # independent of mesh safe-Z, probing clearance, retract and PCB reference Z.
@@ -1038,6 +1047,12 @@ class MachineRuntime:
             center_x = (machine.x_limits.minimum + machine.x_limits.maximum) / 2.0
             center_y = (machine.y_limits.minimum + machine.y_limits.maximum) / 2.0
             self._validate_machine_target(x=center_x, y=center_y, label="centro de máquina")
+            if _approach_z_mm is not None:
+                self._validate_machine_target(z=_approach_z_mm, label="Z final de aproximación de preparación")
+                toward_surface = ((_approach_z_mm < configured_z) if self.config.tool_change_z_positive_up
+                                  else (_approach_z_mm > configured_z))
+                if toward_surface and preparation_area_clear is not True:
+                    raise MachineRuntimeError("Confirme que la zona del centro y el recorrido vertical hasta la Z de aproximación están libres de obstáculos antes de preparar.")
             self._step("actualizar_limites", "ok", f"Límites Klipper X={machine.x_limits.minimum:.3f}..{machine.x_limits.maximum:.3f} Y={machine.y_limits.minimum:.3f}..{machine.y_limits.maximum:.3f} Z={machine.z_limits.minimum:.3f}..{machine.z_limits.maximum:.3f}.")
             self._step("calcular_centro", "ok", f"Centro real calculado X={center_x:.3f} Y={center_y:.3f}.")
 
@@ -1075,10 +1090,36 @@ class MachineRuntime:
             center_snapshot = machine.get_motion_snapshot()
             if abs(float(center_snapshot["x"]) - center_x) > self.config.settle_tolerance_mm or abs(float(center_snapshot["y"]) - center_y) > self.config.settle_tolerance_mm:
                 raise MachineRuntimeError(f"Centro no alcanzado: objetivo X={center_x:.3f} Y={center_y:.3f}; observada X={float(center_snapshot["x"]):.3f} Y={float(center_snapshot["y"]):.3f}.")
+
+            self._raise_if_cancelled()
+            if _approach_z_mm is not None and abs(float(center_snapshot["z"]) - _approach_z_mm) > self.config.settle_tolerance_mm:
+                approach_context = self._motion_context("z_aproximacion_preparacion")
+                observed_x, observed_y, observed_z = approach_context.frame.position
+                if (abs(observed_x - center_x) > self.config.settle_tolerance_mm
+                        or abs(observed_y - center_y) > self.config.settle_tolerance_mm
+                        or abs(observed_z - configured_z) > self.config.settle_tolerance_mm):
+                    raise MachineRuntimeError("La posición de despeje en el centro cambió; no se autoriza la aproximación final.")
+                toward_surface = ((_approach_z_mm < observed_z) if self.config.tool_change_z_positive_up
+                                  else (_approach_z_mm > observed_z))
+                if toward_surface and preparation_area_clear is not True:
+                    raise MachineRuntimeError("Falta confirmación de zona libre para la aproximación final.")
+                self._step("PREPARATION_APPROACH_START", "ok", f"Aproximando Z a {_approach_z_mm:.3f} mm en el centro confirmado libre por el operador.")
+                self._move_absolute(z=_approach_z_mm, label="z_aproximacion_preparacion", source_context=approach_context,
+                    feed_mm_min=self._reference_target_z_feed(current_z=float(center_snapshot["z"]), target_z=_approach_z_mm))
+                self._refresh_machine(require_valid_observation=True)
+                center_snapshot = machine.get_motion_snapshot()
+                if (abs(float(center_snapshot["z"]) - _approach_z_mm) > self.config.settle_tolerance_mm
+                        or abs(float(center_snapshot["x"]) - center_x) > self.config.settle_tolerance_mm
+                        or abs(float(center_snapshot["y"]) - center_y) > self.config.settle_tolerance_mm):
+                    raise MachineRuntimeError("No se confirmó la llegada a la posición final de preparación.")
+                self._step("PREPARATION_APPROACH_DONE", "ok", "Llegada a aproximación final confirmada.")
+            if _approach_z_mm is not None:
+                configured_z = _approach_z_mm
             self._step("centro_confirmado", "ok", f"Máquina preparada en X={center_x:.3f} Y={center_y:.3f} Z={configured_z:.3f} mm.")
             self._step("PREPARATION_CENTER_DONE", "ok", f"Centro confirmado X={float(center_snapshot["x"]):.3f} Y={float(center_snapshot["y"]):.3f}.")
             self._log_preparation_transition("PREPARATION_CENTER_DONE", target_z=configured_z, center_x=center_x, center_y=center_y, observed=center_snapshot, started=started)
             with self._lock:
+                self._raise_if_cancelled()
                 self._state = MachineRuntimeState.WAITING_FOR_XY_REFERENCE
                 self._event("info", "Inicialización física completada; posicione X/Y del origen 0,0 y arme la referencia.")
             return self.snapshot()

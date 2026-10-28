@@ -17,7 +17,7 @@ export type MachineContextValue = {
   telemetryRecent: boolean;
   movementAuthorized: boolean;
   lastError: string | null;
-  runMachineAction: (action: MachineAction, targetZ?: number, toolProfile?: string) => Promise<void>;
+  runMachineAction: (action: MachineAction, targetZ?: number, toolProfile?: string, preparationAreaClear?: boolean) => Promise<void>;
   refreshRuntime: () => Promise<MachineRuntime | null>;
 };
 

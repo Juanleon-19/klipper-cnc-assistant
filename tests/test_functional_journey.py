@@ -160,9 +160,9 @@ class FunctionalJourneyTest(unittest.TestCase):
         self.assertTrue(self.position_samples_paused.wait(2))
         self.machine.live_position_updated_at -= 60
         self.assertFalse(self.runtime.snapshot()['safety']['telemetry_recent'])
-        self.post('/api/machine/prepare-position', {'tool_reference_profile': 'standard'})
+        self.post('/api/machine/prepare-position', {'tool_reference_profile': 'standard', 'preparation_area_clear': True})
         self.pause_position_samples.clear()
-        self.assertEqual(self.machine.position.z, 35)
+        self.assertEqual(self.machine.position.z, 31)
         self.post('/api/machine/manual-control', {'enabled': True})
         from klipper_cnc_assistant.input.command_mapper import CommandMapper
         from klipper_cnc_assistant.input.serial_driver import ControllerPacket

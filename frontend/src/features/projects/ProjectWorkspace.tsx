@@ -1720,7 +1720,7 @@ export function ProjectWorkspace({
       onReconnectArduino={() => void machine.runMachineAction("reconnect-arduino")}
       onSaveMachineSettings={() => void saveMachineSettings()}
       onHome={() => { if (referenceSettingsAllowMovement()) void withPhysicalReferenceAction(async () => { await machine.runMachineAction("home"); }); }}
-      onInitialize={() => { if (referenceSettingsAllowMovement()) void withPhysicalReferenceAction(async () => { setPreparationError(""); try { await machine.runMachineAction("prepare-position", undefined, selectedOperation?.tool_reference_profile ?? "standard"); } catch (error) { setPreparationError(error instanceof Error ? error.message : "No fue posible preparar la máquina."); throw error; } }); }}
+      onInitialize={() => { if (referenceSettingsAllowMovement()) void withPhysicalReferenceAction(async () => { setPreparationError(""); try { await machine.runMachineAction("prepare-position", undefined, selectedOperation?.tool_reference_profile ?? "standard", true); } catch (error) { setPreparationError(error instanceof Error ? error.message : "No fue posible preparar la máquina."); throw error; } }); }}
       onEnableManual={() => void machine.runMachineAction("manual-on")}
       onCapturePhysicalWorkOrigin={() => void withPhysicalReferenceAction(() => api.capturePhysicalWorkOrigin(project.id, selectedOperation!.id))}
       onCancelOperation={() => void machine.runMachineAction("cancel")}

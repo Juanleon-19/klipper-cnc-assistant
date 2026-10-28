@@ -572,7 +572,7 @@ Después deberá volver a conectar el Arduino, hacer homing, posicionar X0/Y0 y 
     }
   }, [loadSystem]);
 
-  const handleMachineAction = async (action: MachineAction | string, targetZ?: number, toolProfile?: string) => {
+  const handleMachineAction = async (action: MachineAction | string, targetZ?: number, toolProfile?: string, preparationAreaClear = false) => {
     setRefreshingSystem(true);
     setError("");
     try {
@@ -582,7 +582,7 @@ Después deberá volver a conectar el Arduino, hacer homing, posicionar X0/Y0 y 
       else if (action === "diagnostic") runtime = await api.setMachineDiagnosticMode(true);
       else if (action === "reconnect-arduino") runtime = await api.reconnectArduino();
       else if (action === "home") runtime = await api.homeMachine();
-      else if (action === "prepare-position") runtime = await api.prepareMachinePosition(toolProfile);
+      else if (action === "prepare-position") runtime = await api.prepareMachinePosition(toolProfile, preparationAreaClear);
       else if (action === "initialize") runtime = await api.initializeMachine(targetZ ?? 0);
       else if (action === "manual-on") runtime = await api.setManualControl(true);
       else if (action === "manual-off") runtime = await api.setManualControl(false);

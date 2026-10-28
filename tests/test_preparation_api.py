@@ -13,7 +13,7 @@ class PreparationAPITest(unittest.TestCase):
             with self.subTest(route=route), patch.object(self.runtime,method,return_value=self.runtime.snapshot()) as move:
                 response=self.fixture.client.post('/api/machine'+route,json=payload)
                 self.assertEqual(response.status_code,200,response.text)
-                move.assert_called_once_with(*args)
+                move.assert_called_once_with(*args, **({"preparation_area_clear": False} if route == "/prepare-position" else {}))
 
     def test_active_job_blocks_every_standalone_route(self):
         with patch.object(self.fixture.app.state.job_service,'assert_machine_settings_update_allowed',side_effect=ApplicationError('Trabajo activo')):
@@ -34,3 +34,10 @@ class PreparationAPITest(unittest.TestCase):
             snapshot=self.fixture.client.get('/api/machine/status')
             self.assertEqual(snapshot.status_code,200,snapshot.text)
             self.assertEqual(snapshot.json()['settings']['long_tool_reference_approach_z_mm'],expected)
+
+    def test_explicit_clear_area_confirmation_reaches_runtime(self):
+        with patch.object(self.runtime, 'prepare_position', return_value=self.runtime.snapshot()) as move:
+            response=self.fixture.client.post('/api/machine/prepare-position',json={
+                'tool_reference_profile':'long_tool','preparation_area_clear':True})
+            self.assertEqual(response.status_code,200,response.text)
+            move.assert_called_once_with('long_tool',preparation_area_clear=True)

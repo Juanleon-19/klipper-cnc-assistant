@@ -106,3 +106,13 @@ asociación de ejecución y las referencias. Respuestas de un contexto anterior 
 pueden repoblar paneles después del reset. Reintentar un reset reconciliado reutiliza
 el histórico administrativo de la misma revisión, sin duplicarlo ni sobrescribirlo.
 Validación y límites: `auditorias/preparation-reset-lifecycle-20261026/REPORTE_FINAL.md`.
+
+### Preparación inicial por perfil (28 octubre; candidata, no desplegada)
+
+La preparación independiente viaja al despeje y al centro antes de aproximar Z a
+la altura efectiva del perfil seleccionado. Un descenso final requiere confirmación
+humana de zona/recorrido libre, además de evidencia física, homing, límites,
+ownership y cancelación existentes. La aproximación larga puede seleccionarse
+explícitamente como115 y guardarse; null conserva herencia, sin migrar producción.
+El cambio de herramienta y la captura/sonda mantienen sus contratos existentes.
+Validación: `auditorias/tool-approach-profile-20261028/REPORTE_FINAL.md`.
