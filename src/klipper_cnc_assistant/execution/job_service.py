@@ -643,7 +643,8 @@ class JobService:
         self._validate_run_context(context, run)
         diagnosis = self._diagnose_run(context, run)
         status = diagnosis["moonraker"]
-        self._reconcile_standby(context, run, status)
+        # GET /execution/live is observational. Only the JOB supervisor may
+        # reconcile standby against a dispatched start attempt.
         diagnosis["run"]["status"] = run["state"]
         worker_alive = bool(diagnosis["run"].get("worker_alive"))
         operations = list(run.get("operations") or [])
