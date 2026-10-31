@@ -56,6 +56,8 @@ class AdministrativeIdentityTest(unittest.TestCase):
             start_attempt=None,
             start_attempt_history=None,
             updated_at='2020-01-01T00:00:00+00:00',
+            events=[{'stage': 'OPERATION_UPLOADING',
+                     'message': f"Archivo subido a Moonraker: {op['remote_file']}."}],
         )
         self.remote.update(
             state='standby', filename='', file_path=None,
@@ -95,6 +97,8 @@ class AdministrativeIdentityTest(unittest.TestCase):
             ('start_attempt_history', [dict(status='sent')]),
             ('current_operation_index', 1),
             ('current_operation_id', 'other'),
+            ('events', []),
+            ('summary', {'operations_completed': 1}),
         ]
         for key, value in changes:
             with self.subTest(key=key):
@@ -107,6 +111,8 @@ class AdministrativeIdentityTest(unittest.TestCase):
             ('observed_printing', True), ('started_at', 'historical'),
             ('finished_at', 'historical'), ('progress', 0.1),
             ('execution_status', 'RUNNING'),
+            ('moonraker_state', 'printing'),
+            ('moonraker_filename', 'old.gcode'),
         ]:
             with self.subTest(key=key):
                 self.run.clear()
