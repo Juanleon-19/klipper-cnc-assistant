@@ -47,6 +47,8 @@ class AdministrativeIdentityTest(unittest.TestCase):
             finished_at=None,
             completed_at=None,
             progress=0.0,
+            moonraker_state=None,
+            moonraker_filename=None,
         )
         self.run.update(
             state='RECOVERY_REQUIRED',
