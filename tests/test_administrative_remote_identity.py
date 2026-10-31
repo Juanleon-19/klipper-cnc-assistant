@@ -38,6 +38,109 @@ class AdministrativeIdentityTest(unittest.TestCase):
         self.assertEqual(self.f.fixture.adapter.started, [])
         self.assertEqual(self.f.fixture.adapter.cancel_calls, 0)
 
+    def uploaded_without_start(self):
+        op = self.run['operations'][0]
+        op.update(
+            execution_status='WAITING_FOR_KLIPPER',
+            observed_printing=False,
+            started_at=None,
+            finished_at=None,
+            completed_at=None,
+            progress=0.0,
+        )
+        self.run.update(
+            state='RECOVERY_REQUIRED',
+            recovery_state='PRINT_IDENTITY_REQUIRED',
+            current_operation_index=0,
+            current_operation_id=op['operation_id'],
+            start_attempt=None,
+            start_attempt_history=None,
+            updated_at='2020-01-01T00:00:00+00:00',
+        )
+        self.remote.update(
+            state='standby', filename='', file_path=None,
+            file_position=0, print_duration=0.0,
+            is_active_observed=False, connected=True, klipper_state='ready',
+            live_velocity=[0.0, 0.0, 0.0],
+        )
+        self.f.path.write_text(json.dumps(self.run))
+
+    def test_first_upload_without_start_can_archive_with_explicit_evidence(self):
+        self.uploaded_without_start()
+        project_dir = self.f.fixture.repository.project_dir(self.f.fixture.project_id)
+        protected = {p: p.read_bytes() for p in project_dir.rglob('*')
+                     if p.is_file() and 'reports' not in p.relative_to(project_dir).parts}
+        original = json.loads(self.f.path.read_text())
+        result = self.s.archive_stale_run(
+            project_id=self.f.fixture.project_id,
+            setup_id=self.f.fixture.setup_id, face='superior')
+        archived = json.loads((project_dir / result['archive_path']).read_text())
+        self.assertEqual(archived['administrative_closure']['outcome'],
+                         'UPLOAD_WITHOUT_RECORDED_START')
+        self.assertEqual(archived['operations'], original['operations'])
+        self.assertIsNone(archived['start_attempt'])
+        self.assertNotIn('COMPLETED', [op['execution_status'] for op in archived['operations']])
+        self.assertFalse(self.f.path.exists())
+        self.assertEqual(self.f.fixture.adapter.started, [])
+        self.assertEqual(self.f.fixture.adapter.cancel_calls, 0)
+        for path, content in protected.items():
+            self.assertEqual(path.read_bytes(), content)
+
+    def test_first_upload_without_start_rejects_ambiguous_local_evidence(self):
+        self.uploaded_without_start()
+        original = json.loads(self.f.path.read_text())
+        changes = [
+            ('start_attempt', dict(id='ambiguous', status='sending',
+                                   may_have_been_sent=True)),
+            ('start_attempt_history', [dict(status='sent')]),
+            ('current_operation_index', 1),
+            ('current_operation_id', 'other'),
+        ]
+        for key, value in changes:
+            with self.subTest(key=key):
+                self.run.clear()
+                self.run.update(json.loads(json.dumps(original)))
+                self.run[key] = value
+                self.f.path.write_text(json.dumps(self.run))
+                self.rejected()
+        for key, value in [
+            ('observed_printing', True), ('started_at', 'historical'),
+            ('finished_at', 'historical'), ('progress', 0.1),
+            ('execution_status', 'RUNNING'),
+        ]:
+            with self.subTest(key=key):
+                self.run.clear()
+                self.run.update(json.loads(json.dumps(original)))
+                self.run['operations'][0][key] = value
+                self.f.path.write_text(json.dumps(self.run))
+                self.rejected()
+
+    def test_first_upload_without_start_rejects_uncertain_remote(self):
+        self.uploaded_without_start()
+        original = dict(self.remote)
+        for changes in (
+            {'filename': 'other.gcode'}, {'state': 'printing'},
+            {'state': 'complete'}, {'is_active_observed': True},
+            {'is_active_observed': None}, {'file_path': 'external.gcode'},
+            {'file_position': 8}, {'print_duration': 0.5},
+            {'connected': False}, {'klipper_state': 'shutdown'},
+            {'live_velocity': [0.0, 0.0, 1.0]},
+        ):
+            with self.subTest(changes=changes):
+                self.remote = dict(original, **changes)
+                self.rejected()
+
+    def test_first_upload_without_start_rejects_other_operation_activity(self):
+        self.uploaded_without_start()
+        original = json.loads(self.f.path.read_text())
+        op = dict(original['operations'][1])
+        op.update(execution_status='COMPLETED', observed_printing=True)
+        original['operations'][1] = op
+        self.run.clear()
+        self.run.update(original)
+        self.f.path.write_text(json.dumps(self.run))
+        self.rejected()
+
     def test_completed_empty_standby_archives_without_faking_identity(self):
         before = json.loads(self.f.path.read_text())
         result = self.f.reset()
