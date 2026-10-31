@@ -375,6 +375,44 @@ class JobService:
         return next((op for op in reversed(run.get('operations', []))
                      if op.get('remote_file')), operation)
 
+    @staticmethod
+    def _uploaded_without_dispatch_evidence(run, operation, remote):
+        """Strict archive-only case: uploaded first operation, no start journal.
+
+        This proves no start through the JOB dispatcher, not that external
+        Moonraker clients have never moved the machine. Fresh remote idle,
+        exclusive administrative ownership and CAS remain mandatory.
+        """
+        operations = run.get('operations') or []
+        if (run.get('state') not in {'RECOVERY_REQUIRED', 'WAITING_FOR_KLIPPER'}
+                or run.get('current_operation_index') != 0
+                or not operations or operation is not operations[0]
+                or run.get('current_operation_id') != operation.get('operation_id')
+                or run.get('start_attempt') is not None
+                or run.get('start_attempt_history') not in (None, [])
+                or operation.get('execution_status') != 'WAITING_FOR_KLIPPER'
+                or not operation.get('remote_file')
+                or operation.get('observed_printing') is not False
+                or operation.get('started_at') is not None
+                or operation.get('finished_at') is not None
+                or operation.get('completed_at') is not None
+                or operation.get('progress') not in (0, 0.0, None)
+                or any(item.get('execution_status') != 'PENDING'
+                       or item.get('remote_file')
+                       or item.get('observed_printing')
+                       or item.get('started_at')
+                       or item.get('completed_at')
+                       for item in operations[1:])):
+            return False
+        return (remote.get('connected') is True
+                and remote.get('klipper_state') == 'ready'
+                and remote.get('state') == 'standby'
+                and remote.get('filename') == ''
+                and remote.get('is_active_observed') is False
+                and remote.get('file_path') in (None, '')
+                and remote.get('file_position') == 0
+                and remote.get('print_duration') == 0)
+
     def _assert_administrative_print_identity(self, run, guard):
         if guard.remote is None:
             return
@@ -414,6 +452,10 @@ class JobService:
                     and remote.get('is_active_observed') is False and completed):
                 # The existing administrative reservation, idle/homing/velocity
                 # checks and CAS remain mandatory. No physical identity changes.
+                return
+            if self._uploaded_without_dispatch_evidence(run, operation, remote):
+                # No dispatcher journal and no observed print, but never claim
+                # the machine has historically been idle or the job completed.
                 return
             raise ApplicationError('Moonraker no tiene un archivo seleccionado. No hay evidencia suficiente para archivar esta ejecución con seguridad; se conserva el trabajo. Revise su finalización y la recuperación, sin volver a iniciarlo.')
         try:
@@ -972,6 +1014,13 @@ class JobService:
         archived["available_actions"] = []
         archived["next_action"] = "Ejecución obsoleta archivada"
         archived["moonraker_snapshot"] = moonraker
+        if (guard.remote is not None
+                and self._uploaded_without_dispatch_evidence(run, self._last_print_operation(run), guard.remote)):
+            archived["administrative_closure"] = {
+                "outcome": "UPLOAD_WITHOUT_RECORDED_START",
+                "remote_observation": deepcopy(guard.remote),
+                "warning": "Sin inicio acreditado por Assistant; reposo actual no prueba ausencia histórica de movimiento.",
+            }
         self._append_event(archived, "warning", "Ejecución obsoleta archivada manualmente tras confirmar que Moonraker estaba inactivo.")
         guard.begin_mutation(validate_remote_identity=lambda: self._assert_administrative_print_identity(run, guard),
                              run_id=run['run_id'], revision=run['revision'])
