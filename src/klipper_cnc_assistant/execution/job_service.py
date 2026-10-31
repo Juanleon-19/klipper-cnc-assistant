@@ -396,12 +396,21 @@ class JobService:
                 or operation.get('started_at') is not None
                 or operation.get('finished_at') is not None
                 or operation.get('completed_at') is not None
-                or operation.get('progress') not in (0, 0.0, None)
+                or operation.get('moonraker_state') not in (None, '', 'standby')
+                or operation.get('moonraker_filename') not in (None, '')
+                or operation.get('progress') != 0
+                or (run.get('summary') or {}).get('operations_completed') != 0
+                or not any(event.get('stage') == 'OPERATION_UPLOADING'
+                           and event.get('message') ==
+                           f"Archivo subido a Moonraker: {operation['remote_file']}."
+                           for event in run.get('events') or [])
                 or any(item.get('execution_status') != 'PENDING'
                        or item.get('remote_file')
                        or item.get('observed_printing')
                        or item.get('started_at')
+                       or item.get('finished_at')
                        or item.get('completed_at')
+                       or item.get('progress') not in (0, 0.0, None)
                        for item in operations[1:])):
             return False
         return (remote.get('connected') is True
