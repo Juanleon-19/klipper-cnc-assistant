@@ -986,6 +986,38 @@ class JobServiceTest(unittest.TestCase):
             self.job_service.reset_runs_for_preparation(project_id=self.project_id, setup_id=self.setup_id)
         self.assertEqual(self.job_service._run_file(context).read_text(encoding="utf-8"), before)
 
+    def test_live_execution_polling_does_not_enter_recovery_before_start_dispatch(self) -> None:
+        # A polling GET must not race the supervisor while its uploaded file
+        # still waits for the explicit, durable start dispatch.
+        context = self.job_service._context(self.project_id, self.setup_id, "superior")
+        run = self.job_service.prepare_run(
+            project_id=self.project_id, setup_id=self.setup_id, face="superior"
+        )
+        operation = run["operations"][0]
+        operation["remote_file"] = "klipper-cnc-assistant/uploaded-not-started.gcode"
+        operation["execution_status"] = "WAITING_FOR_KLIPPER"
+        operation["observed_printing"] = False
+        run["state"] = "WAITING_FOR_KLIPPER"
+        run["current_operation_id"] = operation["operation_id"]
+        run["current_tool_key"] = operation["tool_key"]
+        run["started_at"] = "2026-10-31T15:39:47+00:00"
+        self.assertIsNone(run.get("start_attempt"))
+        self.job_service._save_run(context, run)
+        self.adapter.state = "standby"
+        self.adapter.current_filename = None
+        self.job_service.remote_standby_grace_s = 0.0
+        path = self.job_service._run_file(context)
+        original_bytes = path.read_bytes()
+
+        for _ in range(3):
+            live = self.job_service.live_execution(
+                project_id=self.project_id, setup_id=self.setup_id, face="superior"
+            )
+            self.assertEqual(live["run"]["status"], "WAITING_FOR_KLIPPER")
+
+        self.assertEqual(path.read_bytes(), original_bytes)
+        self.assertFalse(self.runtime.physical_ownership.snapshot()["recovery_pending"])
+
     def test_live_execution_reports_running_progress_from_current_run(self) -> None:
         self.job_service.generate_project_compensation(project_id=self.project_id, setup_id=self.setup_id, face="superior")
         original_start = self.adapter.start_file
