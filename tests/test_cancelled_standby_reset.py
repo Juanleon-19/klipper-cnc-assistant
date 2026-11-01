@@ -183,7 +183,16 @@ class CancelledStandbyApiTest(unittest.TestCase):
         self.assertEqual(f.client.post(url,json={}).status_code,400)
         self.assertEqual(path.read_bytes(),before)
         payload={'abandoned_run':dict(run_id=run['run_id'],revision=run['revision'],abandon_incomplete=True)}
-        result=f.post(url,payload)
+        # Simulate serial generation advancing during the authorized teardown.
+        original_stop = f.runtime._stop_locked
+        def stop_with_serial_turnover(*, administrative_token=None):
+            output = original_stop(administrative_token=administrative_token)
+            with f.runtime._lock:
+                f.runtime._serial_generation += 1
+            return output
+        with patch.object(f.runtime, '_stop_locked', side_effect=stop_with_serial_turnover):
+            result=f.post(url,payload)
+        self.assertFalse(f.job.administrative_pending_path.exists())
         self.assertEqual(result['execution_reset']['current_runs_cleared'],1)
         self.assertFalse(path.exists())
         self.assertEqual(f.runtime.snapshot()['state'],'DISCONNECTED')
