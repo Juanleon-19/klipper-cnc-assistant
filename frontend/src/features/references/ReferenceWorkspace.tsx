@@ -35,6 +35,7 @@ type ReferenceWorkspaceProps = {
   referenceSession: ReferenceSession | null;
   referenceBusy: boolean;
   selectedOperation: Operation | null;
+  preparationOperation: Operation | null;
   heightMap: HeightMap | null;
   machineSettingsInput: MachineSettingsInput;
   machineSettingsMessage: string;
@@ -85,6 +86,7 @@ export function ReferenceWorkspace({
   referenceSession,
   referenceBusy,
   selectedOperation,
+  preparationOperation,
   heightMap,
   machineSettingsInput,
   machineSettingsMessage,
@@ -147,8 +149,14 @@ export function ReferenceWorkspace({
   const selectedToolReferenceProfileLabel = selectedToolReferenceProfile === "long_tool" ? "Herramienta larga" : "Estándar";
   const selectedToolChangeClearanceZ = selectedToolReferenceProfile === "long_tool" ? longToolChangeClearanceZ : standardToolChangeClearanceZ;
   const selectedReferencePrepZ = selectedToolReferenceProfile === "long_tool" && typeof preparation.long_tool_reference_approach_z_mm === "number" ? preparation.long_tool_reference_approach_z_mm : referencePrepZ;
+  // Preparation follows the first operation; reference/tool-change details
+  // continue to follow the selected operation.
+  const preparationToolReferenceProfile = preparationOperation?.tool_reference_profile ?? "standard";
+  const preparationToolReferenceProfileLabel = preparationToolReferenceProfile === "long_tool" ? "Herramienta larga" : "Estándar";
+  const preparationReferencePrepZ = preparationToolReferenceProfile === "long_tool" && typeof preparation.long_tool_reference_approach_z_mm === "number" ? preparation.long_tool_reference_approach_z_mm : referencePrepZ;
+  const preparationToolChangeClearanceZ = preparationToolReferenceProfile === "long_tool" ? longToolChangeClearanceZ : standardToolChangeClearanceZ;
   const handlePreparePosition = () => {
-    if (window.confirm(`Preparar ${selectedToolReferenceProfileLabel}: despeje Z, traslado al centro X ${centerX ?? "?"} / Y ${centerY ?? "?"} y aproximación final Z ${selectedReferencePrepZ} mm. Confirme que la herramienta instalada, la zona del centro y todo el recorrido vertical hasta esa altura están libres de obstáculos. No se realizará sondeo.`)) onInitialize();
+    if (window.confirm(`Preparar primera operación (${preparationOperation?.nombre ?? "sin operación"}) con perfil ${preparationToolReferenceProfileLabel}: despeje Z, traslado al centro X ${centerX ?? "?"} / Y ${centerY ?? "?"} y aproximación final Z ${preparationReferencePrepZ} mm. Confirme que la herramienta instalada, la zona del centro y todo el recorrido vertical hasta esa altura están libres de obstáculos. No se realizará sondeo.`)) onInitialize();
   };
   const editedReferencePrepZ = Number(machineSettingsInput.reference_prep_z_mm);
   const editedLongToolChangeClearanceZ = Number(machineSettingsInput.long_tool_change_clearance_z_mm);
@@ -379,10 +387,10 @@ export function ReferenceWorkspace({
           <div className="info-grid info-grid--double compact-grid">
             <div className="metric-box"><span>Homing</span><strong>{machine.homedAxes || "pendiente"}</strong></div>
             <div className="metric-box"><span>Posición actual</span><strong>X {formatMillimeters(typeof position?.x === "number" ? Number(position.x) : null, 3)} · Y {formatMillimeters(typeof position?.y === "number" ? Number(position.y) : null, 3)} · Z {formatMillimeters(typeof position?.z === "number" ? Number(position.z) : null, 3)}</strong></div>
-            <div className="metric-box"><span>Objetivo de preparación</span><strong>X {formatMillimeters(centerX, 3)} · Y {formatMillimeters(centerY, 3)} · Z {formatMillimeters(selectedReferencePrepZ, 3)}</strong></div>
+            <div className="metric-box"><span>Objetivo de preparación</span><strong>X {formatMillimeters(centerX, 3)} · Y {formatMillimeters(centerY, 3)} · Z {formatMillimeters(preparationReferencePrepZ, 3)}</strong></div>
             <div className="metric-box"><span>Etapa actual</span><strong>{String(preparationStage?.name ?? "pendiente")}</strong></div>
           </div>
-          <p className="muted">Perfil seleccionado: {selectedToolReferenceProfileLabel}. Aproximación final efectiva: {formatMillimeters(selectedReferencePrepZ, 3)} mm. Despeje de traslado: {formatMillimeters(selectedToolChangeClearanceZ, 3)} mm (se conserva una Z actual más despejada).</p>
+          <p className="muted">Primera operación para preparación: {preparationOperation?.nombre ?? "sin operación"}. Perfil: {preparationToolReferenceProfileLabel}. Aproximación final efectiva: {formatMillimeters(preparationReferencePrepZ, 3)} mm. Despeje de traslado: {formatMillimeters(preparationToolChangeClearanceZ, 3)} mm (se conserva una Z actual más despejada).</p>
           <div className="action-grid action-grid--inline">
             <button className="button" type="button" disabled={!canInitialize || referenceBusy || machine.refreshing || machineSettingsDirty || machineSettingsLockedByJobRun} onClick={onHome}>Realizar homing XYZ</button>
             <button className="button" type="button" disabled={!canPrepare || referenceBusy || machine.refreshing} onClick={handlePreparePosition}>Ir a posición de preparación</button>
