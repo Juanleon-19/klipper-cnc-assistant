@@ -1000,6 +1000,32 @@ describe("ProjectWorkspace", () => {
     expect(machine.runMachineAction).not.toHaveBeenCalledWith("prepare-position", undefined, "standard", true);
   });
 
+  it("actualiza el perfil de preparación al cambiar el primer proceso del orden", async () => {
+    const initial: Project = {
+      ...projectWithSecondOperation,
+      operaciones: projectWithSecondOperation.operaciones.map((operation, index) => ({
+        ...operation,
+        tool_reference_profile: index === 0 ? "long_tool" : "standard",
+      })),
+    };
+    const machine = { ...physicalMachine, runtimeState: "HOMED", runMachineAction: vi.fn().mockResolvedValue(undefined) };
+    const workspace = renderWorkspace(machine, { project: initial });
+    const reordered: Project = {
+      ...initial,
+      operaciones: initial.operaciones.map((operation) => ({
+        ...operation,
+        orden: operation.id === "op_2" ? 0 : 1,
+      })),
+    };
+    workspace.refreshProject(reordered);
+    expect(screen.getByRole("status")).toHaveTextContent("Taladrado 1,0 mm");
+    expect(screen.getByRole("status")).toHaveTextContent("Estándar");
+    fireEvent.click(screen.getByRole("button", { name: /^Referencia$/i }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Ir a posición de preparación" })).toBeEnabled());
+    fireEvent.click(screen.getByRole("button", { name: "Ir a posición de preparación" }));
+    await waitFor(() => expect(machine.runMachineAction).toHaveBeenCalledWith("prepare-position", undefined, "standard", true));
+  });
+
   it("va una sola vez al punto guardado y muestra el diagnóstico", async () => {
     apiMock.goToReferencePoint.mockResolvedValue({ accepted: true, reference_x: 10, reference_y: 8, preparation_z: 115, final_state: "REFERENCE_MOVE_COMPLETE", message: "Máquina ubicada en el punto de referencia." });
     renderWorkspace(physicalMachine);
