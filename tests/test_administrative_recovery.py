@@ -75,6 +75,80 @@ class AdministrativeRecoveryTest(unittest.TestCase):
         self.assertTrue(self.runtime.physical_ownership.snapshot()['administrative_incomplete'])
         return journal, other, original_other
 
+    def _interrupted_after_run_removed_before_checkpoint(self):
+        """Actual last-write gap: current_run removed, journal still DEPENDENCIES_RESET."""
+        from klipper_cnc_assistant.execution.administrative_guard import AdministrativeGuard
+        checkpoint = AdministrativeGuard.checkpoint
+
+        def interrupt(guard, phase):
+            if phase in {'CURRENT_RUN_ARCHIVED', 'FAILED_WITH_VERIFIED_FILES'}:
+                raise OSError('synthetic crash between run unlink and checkpoint')
+            return checkpoint(guard, phase)
+
+        with patch.object(AdministrativeGuard, 'checkpoint', interrupt):
+            with self.assertRaisesRegex(OSError, 'between run unlink and checkpoint'):
+                self.fixture.reset()
+        journal = json.loads(self.path.read_text())
+        self.assertEqual(journal['phase'], 'DEPENDENCIES_RESET')
+        self.assertEqual(journal['completed_steps'], ['HISTORY_SAVED', 'DEPENDENCIES_RESET'])
+        self.assertFalse(self.fixture.path.exists())
+        self.assertTrue(list((self.fixture.path.parent / 'history').glob('*__preparation-reset_*.json')))
+        self.assertTrue(self.runtime.physical_ownership.snapshot()['administrative_incomplete'])
+        return journal
+
+    def test_uncheckpointed_retirement_reconciles_only_verified_archived_run(self):
+        journal = self._interrupted_after_run_removed_before_checkpoint()
+        from klipper_cnc_assistant.execution.administrative_recovery import digest
+        current = inventory(self.path.parent)
+        expected = journal['verified_after']
+        self.assertEqual(set(expected) - set(current), {
+            str(self.fixture.path.relative_to(self.path.parent))})
+        self.assertTrue(all(expected[k] == v for k, v in current.items()))
+        original = self.path.read_bytes()
+        result = recover(self.service, journal['id'])
+        self.assertEqual(result['outcome'], 'CURRENT_RUN_RETIRED_WITH_VERIFIED_ARCHIVE')
+        self.assertEqual(result['status'], 'reconciled')
+        self.assertFalse(self.fixture.path.exists())
+        self.assertEqual(inventory(self.path.parent), current)
+        self.assertFalse(self.path.exists())
+        self.assertEqual((self.path.parent / 'administrative-transactions' /
+                          journal['id'] / 'original.json').read_bytes(), original)
+        self.assertEqual(digest(original), digest((self.path.parent / 'administrative-transactions' /
+                                                   journal['id'] / 'original.json').read_bytes()))
+        self.assertTrue(self.runtime.physical_ownership.snapshot()['recovery_pending'])
+        self.assertFalse(self.runtime.physical_ownership.snapshot()['administrative_incomplete'])
+        self.assertEqual(self.fixture.fixture.adapter.started, [])
+        self.assertEqual(self.fixture.fixture.adapter.cancel_calls, 0)
+        self.assertEqual(recover(self.service, journal['id'])['status'], 'already_reconciled')
+
+    def test_uncheckpointed_retirement_rejects_unrelated_write(self):
+        journal = self._interrupted_after_run_removed_before_checkpoint()
+        unexpected = self.path.parent / 'unrelated.json'
+        unexpected.write_text('{"unexpected": true}')
+        with self.assertRaisesRegex(ApplicationError, 'checkpoint'):
+            recover(self.service, journal['id'])
+        self.assertTrue(self.path.exists())
+        self.assertTrue(self.runtime.physical_ownership.snapshot()['administrative_incomplete'])
+
+    def test_uncheckpointed_retirement_rejects_changed_archival_identity(self):
+        journal = self._interrupted_after_run_removed_before_checkpoint()
+        # An otherwise identical inventory cannot authorize a different run.
+        journal['evidence']['runs'][0]['run_id'] = 'unrelated-run'
+        self.path.write_text(json.dumps(journal))
+        with self.assertRaisesRegex(ApplicationError, 'checkpoint'):
+            recover(self.service, journal['id'])
+        self.assertTrue(self.path.exists())
+
+    def test_uncheckpointed_retirement_rejects_unarchived_extra_run(self):
+        journal = self._interrupted_after_run_removed_before_checkpoint()
+        # No arbitrary file deletion, even another current_run, is accepted.
+        other = self.path.parent / 'projects' / 'other' / 'reports' / 'jobs' / 'another' / 'superior' / 'current_run.json'
+        other.parent.mkdir(parents=True, exist_ok=True)
+        other.write_text('{"run_id": "unrelated"}')
+        with self.assertRaisesRegex(ApplicationError, 'checkpoint'):
+            recover(self.service, journal['id'])
+        self.assertTrue(self.path.exists())
+
     def test_fully_archived_reset_reconciles_with_unrelated_unselected_run(self):
         journal, other, original = self._interrupted_after_current_run_archived()
         result = recover(self.service, journal['id'])
