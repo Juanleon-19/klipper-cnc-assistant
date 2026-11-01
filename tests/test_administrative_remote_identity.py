@@ -90,6 +90,36 @@ class AdministrativeIdentityTest(unittest.TestCase):
         for path, content in protected.items():
             self.assertEqual(path.read_bytes(), content)
 
+    def test_cancel_after_upload_without_start_can_archive_without_resetting_map(self):
+        self.uploaded_without_start()
+        args = dict(project_id=self.f.fixture.project_id,
+                    setup_id=self.f.fixture.setup_id, face='superior')
+        project_dir = self.f.fixture.repository.project_dir(self.f.fixture.project_id)
+        before = {p: p.read_bytes() for p in project_dir.rglob('*')
+                  if p.is_file() and 'reports' not in p.relative_to(project_dir).parts}
+        cancelled = self.s.run_action(**args, action='cancel')
+        self.assertEqual(cancelled['state'], 'JOB_CANCELLED')
+        self.assertEqual(cancelled['cancel_remote_status'],
+                         'identity_or_transport_error_requires_reconciliation')
+        self.assertIsNone(cancelled.get('start_attempt'))
+        result = self.s.archive_stale_run(**args)
+        archived = json.loads((project_dir / result['archive_path']).read_text())
+        self.assertEqual(archived['previous_status'], 'JOB_CANCELLED')
+        self.assertEqual(archived['administrative_closure']['outcome'],
+                         'UPLOAD_WITHOUT_RECORDED_START')
+        self.assertFalse(self.f.path.exists())
+        self.assertEqual(self.f.fixture.adapter.started, [])
+        self.assertEqual(self.f.fixture.adapter.cancel_calls, 0)
+        for path, original in before.items():
+            self.assertEqual(path.read_bytes(), original)
+
+    def test_cancelled_upload_with_remote_cancel_attempt_is_not_archivable(self):
+        self.uploaded_without_start()
+        self.run['state'] = 'JOB_CANCELLED'
+        self.run['cancel_remote_status'] = 'cancel_sent_requires_reconciliation'
+        self.f.path.write_text(json.dumps(self.run))
+        self.rejected()
+
     def test_first_upload_without_start_rejects_ambiguous_local_evidence(self):
         self.uploaded_without_start()
         original = json.loads(self.f.path.read_text())
