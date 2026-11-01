@@ -1018,8 +1018,11 @@ describe("ProjectWorkspace", () => {
       })),
     };
     workspace.refreshProject(reordered);
-    expect(screen.getByRole("status")).toHaveTextContent("Taladrado 1,0 mm");
-    expect(screen.getByRole("status")).toHaveTextContent("Estándar");
+    const firstProcessNotice = screen.getAllByRole("status")
+      .find((element) => element.textContent?.includes("Primera operación para preparación"));
+    expect(firstProcessNotice).toBeDefined();
+    expect(firstProcessNotice).toHaveTextContent("Taladrado 1,0 mm");
+    expect(firstProcessNotice).toHaveTextContent("Estándar");
     fireEvent.click(screen.getByRole("button", { name: /^Referencia$/i }));
     await waitFor(() => expect(screen.getByRole("button", { name: "Ir a posición de preparación" })).toBeEnabled());
     fireEvent.click(screen.getByRole("button", { name: "Ir a posición de preparación" }));
