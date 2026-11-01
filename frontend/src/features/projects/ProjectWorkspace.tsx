@@ -631,6 +631,7 @@ export function ProjectWorkspace({
     [machineSettingsInput, savedMachineSettings],
   );
   const machineSettingsDirty = machineSettingsHasUnsavedChanges || machineSettingsRuntimeStatus !== "coherent";
+  const operationMovePending = busyKey === "operation:move";
   const liveJobState = liveExecution?.run.status ?? liveExecution?.job_run?.state ?? "JOB_DRAFT";
   const machineSettingsLockedByJobRun = Boolean(
     liveExecution?.job_run?.started_at && !TERMINAL_JOB_STATES.has(liveJobState),
@@ -1508,8 +1509,8 @@ export function ProjectWorkspace({
                       </select>
                     </label>
                     <div className="operation-row__actions">
-                      <button type="button" className="icon-button" aria-label={"Mover arriba " + operation.nombre} disabled={index === 0} onClick={() => void onMoveOperation(operation.id, "up")}>↑</button>
-                      <button type="button" className="icon-button" aria-label={"Mover abajo " + operation.nombre} disabled={index === operations.length - 1} onClick={() => void onMoveOperation(operation.id, "down")}>↓</button>
+                      <button type="button" className="icon-button" aria-label={"Mover arriba " + operation.nombre} disabled={index === 0 || operationMovePending} onClick={() => void onMoveOperation(operation.id, "up")}>↑</button>
+                      <button type="button" className="icon-button" aria-label={"Mover abajo " + operation.nombre} disabled={index === operations.length - 1 || operationMovePending} onClick={() => void onMoveOperation(operation.id, "down")}>↓</button>
                       <button type="button" className="button button--ghost" onClick={async () => {
                         const name = window.prompt("Nuevo nombre de la operación", operation.nombre)?.trim();
                         if (name) {
@@ -1712,7 +1713,7 @@ export function ProjectWorkspace({
       runtime={runtime}
       referenceSession={referenceSession}
       preparationError={preparationError}
-      referenceBusy={referenceBusy}
+      referenceBusy={referenceBusy || operationMovePending}
       selectedOperation={selectedOperation}
       heightMap={heightMap}
       machineSettingsInput={machineSettingsInput}
@@ -1736,7 +1737,7 @@ export function ProjectWorkspace({
       onReconnectArduino={() => void machine.runMachineAction("reconnect-arduino")}
       onSaveMachineSettings={() => void saveMachineSettings()}
       onHome={() => { if (referenceSettingsAllowMovement()) void withPhysicalReferenceAction(async () => { await machine.runMachineAction("home"); }); }}
-      onInitialize={() => { if (referenceSettingsAllowMovement()) void withPhysicalReferenceAction(async () => { setPreparationError(""); try { await machine.runMachineAction("prepare-position", undefined, processOperations[0]?.tool_reference_profile ?? "standard", true); } catch (error) { setPreparationError(error instanceof Error ? error.message : "No fue posible preparar la máquina."); throw error; } }); }}
+      onInitialize={() => { if (!operationMovePending && referenceSettingsAllowMovement()) void withPhysicalReferenceAction(async () => { setPreparationError(""); try { await machine.runMachineAction("prepare-position", undefined, processOperations[0]?.tool_reference_profile ?? "standard", true); } catch (error) { setPreparationError(error instanceof Error ? error.message : "No fue posible preparar la máquina."); throw error; } }); }}
       onEnableManual={() => void machine.runMachineAction("manual-on")}
       onCapturePhysicalWorkOrigin={() => void withPhysicalReferenceAction(() => api.capturePhysicalWorkOrigin(project.id, selectedOperation!.id))}
       onCancelOperation={() => void machine.runMachineAction("cancel")}
