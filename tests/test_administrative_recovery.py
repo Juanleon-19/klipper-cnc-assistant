@@ -41,6 +41,60 @@ class AdministrativeRecoveryTest(unittest.TestCase):
         self.assertEqual(self.fixture.fixture.adapter.started, [])
         self.assertTrue(self.fixture.path.exists())
 
+    def _interrupted_after_current_run_archived(self):
+        """Create a real checkpointed archive alongside unrelated job evidence."""
+        from klipper_cnc_assistant.execution.administrative_guard import AdministrativeGuard
+        other = self.service.repository.projects_dir / 'proj_other' / 'reports' / 'jobs' / 'other-setup' / 'superior' / 'current_run.json'
+        other.parent.mkdir(parents=True, exist_ok=True)
+        payload = json.loads(self.fixture.path.read_text())
+        operation = payload['operations'][0]
+        operation.update(remote_file='other/previous-file.gcode',
+                         moonraker_filename='other/previous-file.gcode')
+        payload.update(project_id='proj_other', setup_id='other-setup',
+                       state='JOB_CANCELLED')
+        other.write_text(json.dumps(payload))
+        original_other = other.read_bytes()
+
+        original_checkpoint = AdministrativeGuard.checkpoint
+        def interrupted(guard, phase):
+            if phase == 'FAILED_WITH_VERIFIED_FILES':
+                # Reproduce the real failure path: the prior durable checkpoint
+                # survives when the failure checkpoint cannot be written.
+                raise OSError('synthetic unavailable failure checkpoint')
+            result = original_checkpoint(guard, phase)
+            if phase == 'CURRENT_RUN_ARCHIVED':
+                raise OSError('synthetic interruption after archive checkpoint')
+            return result
+        with patch.object(AdministrativeGuard, 'checkpoint', interrupted):
+            with self.assertRaisesRegex(OSError, 'after archive checkpoint'):
+                self.fixture.reset()
+        journal = json.loads(self.path.read_text())
+        self.assertEqual(journal['phase'], 'CURRENT_RUN_ARCHIVED')
+        self.assertFalse(self.fixture.path.exists())
+        self.assertEqual(other.read_bytes(), original_other)
+        self.assertTrue(self.runtime.physical_ownership.snapshot()['administrative_incomplete'])
+        return journal, other, original_other
+
+    def test_fully_archived_reset_reconciles_with_unrelated_unselected_run(self):
+        journal, other, original = self._interrupted_after_current_run_archived()
+        result = recover(self.service, journal['id'])
+        self.assertEqual(result['status'], 'reconciled')
+        self.assertEqual(result['outcome'], 'PARTIAL_PRESERVED_RETRY_RESET')
+        self.assertEqual(other.read_bytes(), original)
+        self.assertFalse(self.path.exists())
+        self.assertTrue(self.runtime.physical_ownership.snapshot()['recovery_pending'])
+        self.assertFalse(self.runtime.physical_ownership.snapshot()['administrative_incomplete'])
+        self.assertEqual(self.fixture.fixture.adapter.started, [])
+        self.assertEqual(self.fixture.fixture.adapter.cancel_calls, 0)
+
+    def test_fully_archived_reset_rejects_uncheckpointed_unrelated_change(self):
+        journal, other, _original = self._interrupted_after_current_run_archived()
+        other.write_text(other.read_text() + ' ')
+        with self.assertRaisesRegex(ApplicationError, 'checkpoint'):
+            recover(self.service, journal['id'])
+        self.assertTrue(self.path.exists())
+        self.assertTrue(self.runtime.physical_ownership.snapshot()['administrative_incomplete'])
+
     def test_http_failure_retains_journal(self):
         identity = self.fail(); original = self.path.read_bytes()
         with patch.object(self.service, '_observe_administrative_remote', side_effect=ApplicationError('Moonraker no verificable')):
