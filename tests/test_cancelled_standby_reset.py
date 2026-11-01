@@ -208,3 +208,33 @@ class CancelledStandbyApiTest(unittest.TestCase):
         self.assertIsNone(live.json()['job_run'])
         self.assertEqual(f.client.post(url,json=payload).status_code,400)
         self.assertEqual(len(list((path.parent/'history').glob('*.json'))),1)
+
+    def test_order_can_change_only_after_full_reset_retires_current_run(self):
+        """Full reset unlocks project metadata without any CNC motion or G-code."""
+        from tests import test_functional_journey as journey
+        f = journey.FunctionalJourneyTest()
+        f.setUp()
+        self.addCleanup(f.doCleanups)
+        f.post('/api/machine/connect')
+        f.job.prepare_run(**f.args)
+        ordered = list(f.repo.load_project(f.project).operations_for_setup(f.setup))
+        self.assertGreaterEqual(len(ordered), 2)
+        second_id = ordered[1].id
+        move_url = f'/api/projects/{f.project}/operations/{second_id}/move'
+        blocked = f.client.post(move_url, json={'direccion': 'up'})
+        self.assertEqual(blocked.status_code, 400, blocked.text)
+
+        reset_url = f'/api/projects/{f.project}/setups/{f.setup}/reset-preparation'
+        result = f.client.post(reset_url, json={})
+        self.assertEqual(result.status_code, 200, result.text)
+        self.assertFalse(f.job.administrative_pending_path.exists())
+        self.assertEqual(f.runtime.snapshot()['state'], 'DISCONNECTED')
+        self.assertIsNone(f.repo.load_project(f.project).get_setup(f.setup).preparacion.physical_reference)
+
+        moved = f.client.post(move_url, json={'direccion': 'up'})
+        self.assertEqual(moved.status_code, 200, moved.text)
+        actual = list(f.repo.load_project(f.project).operations_for_setup(f.setup))
+        self.assertEqual(actual[0].id, second_id)
+        self.assertEqual([op.orden for op in actual], list(range(len(actual))))
+        self.assertEqual(f.transport.started, [])
+
