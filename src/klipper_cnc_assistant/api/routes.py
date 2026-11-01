@@ -310,7 +310,7 @@ def build_router() -> APIRouter:
             runtime = request.app.state.machine_runtime
             guard.observe_before_commit()
             result["runtime"] = runtime.reset_physical_session(administrative_token=guard.token)
-            guard.disconnected = True
+            guard.record_disconnected()
             return result
         execution_reset = request.app.state.job_service.reset_runs_for_preparation(
             project_id=project_id, setup_id=setup_id, reset_dependencies=reset_dependencies,
