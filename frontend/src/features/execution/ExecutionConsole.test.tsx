@@ -845,6 +845,31 @@ it("distingue preparación lógica pendiente de un bloqueo físico real", () => 
   expect(screen.getByText("NO PUEDE INICIAR")).toBeInTheDocument();
 });
 
+  it("no ofrece archivar en shutdown, desconexión, estado remoto incierto o impresión activa", () => {
+    const props = { error: null, busy: false, onPrepare: vi.fn(), onStart: vi.fn(),
+      onAction: vi.fn(), onArchiveStale: vi.fn() };
+    const safeRun = { ...baseSnapshot.run, status: "RECOVERY_REQUIRED",
+      stale_candidate: true, worker_alive: false, watcher_alive: false,
+      supervisor_registered: false };
+    const candidates = [
+      { klipper_state: "shutdown" },
+      { connected: false },
+      { is_active: true },
+      { print_state: "printing" },
+      { print_state: "unknown" },
+    ];
+    for (const remoteChange of candidates) {
+      const view = render(<ExecutionConsole {...props} snapshot={{
+        ...baseSnapshot, run: safeRun,
+        moonraker: { ...baseSnapshot.moonraker,
+          print_state: "standby", filename: "", is_active: false, ...remoteChange },
+      }} />);
+      expect(screen.queryByRole("button", { name: /Cerrar ejecución obsoleta/i }))
+        .not.toBeInTheDocument();
+      view.unmount();
+    }
+  });
+
   it("ofrece cerrar un intento cancelado sin presentar requisitos de la operación pendiente", () => {
     const archive = vi.fn();
     vi.spyOn(window, "confirm").mockReturnValue(true);
