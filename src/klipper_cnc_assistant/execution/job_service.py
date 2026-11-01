@@ -384,7 +384,9 @@ class JobService:
         exclusive administrative ownership and CAS remain mandatory.
         """
         operations = run.get('operations') or []
-        if (run.get('state') not in {'RECOVERY_REQUIRED', 'WAITING_FOR_KLIPPER'}
+        if (run.get('state') not in {'RECOVERY_REQUIRED', 'WAITING_FOR_KLIPPER', 'JOB_CANCELLED'}
+                or (run.get('state') == 'JOB_CANCELLED'
+                    and run.get('cancel_remote_status') != 'identity_or_transport_error_requires_reconciliation')
                 or run.get('current_operation_index') != 0
                 or not operations or operation is not operations[0]
                 or run.get('current_operation_id') != operation.get('operation_id')
