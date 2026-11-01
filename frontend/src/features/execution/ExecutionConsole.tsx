@@ -112,15 +112,18 @@ function isConflictDetail(value: unknown): value is JobRunConflictDetail {
 }
 
 function canArchiveStale(snapshot: LiveExecutionSnapshot | null, detail: JobRunConflictDetail | null): boolean {
-  if (detail?.can_archive_stale) {
-    return true;
-  }
-  if (!snapshot) {
+  // This is only a UI hint. The backend always rechecks ownership, fresh
+  // Moonraker idle/velocity evidence, print identity, and CAS at archival.
+  if (!snapshot) return false;
+  const remote = snapshot.moonraker;
+  const printState = String(remote.print_state ?? "").toLowerCase();
+  if (remote.connected !== true || remote.klipper_state !== "ready"
+      || remote.is_active !== false
+      || !["standby", "complete", "cancelled", "error"].includes(printState)) {
     return false;
   }
+  if (detail) return detail.can_archive_stale === true;
   return snapshot.run.stale_candidate === true
-    && !snapshot.moonraker.is_active
-    && String(snapshot.moonraker.print_state ?? "").toLowerCase() !== "printing"
     && ARCHIVE_CANDIDATE_STATES.has(snapshot.run.status)
     && snapshot.run.worker_alive === false
     && snapshot.run.watcher_alive === false
