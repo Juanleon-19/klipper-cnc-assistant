@@ -26,16 +26,40 @@ class AdministrativeGuard:
         self._validate_remote_identity = None
         self.journal = None
 
+    def _require_transport_closed(self):
+        """Authorized teardown may rotate serial generations, but never reconnect."""
+        runtime = self.service.runtime
+        if (runtime.snapshot().get('state') != 'DISCONNECTED'
+                or getattr(runtime, '_client', None) is not None
+                or getattr(runtime, '_connection_manager', None) is not None
+                or getattr(runtime, '_telemetry', None) is not None):
+            raise ApplicationError('El acceso físico volvió a estar activo tras la desconexión administrativa.')
+
     def check(self):
         runtime = self.service.runtime
         try:
-            runtime.physical_ownership.validate_administration(self.token, disconnected=self.disconnected)
+            if self.disconnected:
+                runtime.physical_ownership.validate_administrative_disconnection(self.token)
+            else:
+                runtime.physical_ownership.validate_administration(self.token)
         except OwnershipError as error:
             raise ApplicationError(str(error)) from error
-        if runtime.current_physical_session_id() != self.session:
+        if self.disconnected:
+            self._require_transport_closed()
+        elif runtime.current_physical_session_id() != self.session:
             raise ApplicationError('La sesión física cambió durante la administración.')
         if self.service._movement_lock_state() is not False or getattr(runtime, '_active_operation', None) is not None:
             raise ApplicationError('No se puede verificar movement_lock libre durante administración.')
+
+    def record_disconnected(self):
+        """Only accept the exact closure recorded under this administrative token."""
+        try:
+            self.service.runtime.physical_ownership.validate_administrative_disconnection(self.token)
+        except OwnershipError as error:
+            raise ApplicationError(str(error)) from error
+        self._require_transport_closed()
+        self.disconnected = True
+        self.check()
 
     def observe_before_commit(self):
         """Acquire evidence at mutation boundaries, never rejuvenate a cache.
