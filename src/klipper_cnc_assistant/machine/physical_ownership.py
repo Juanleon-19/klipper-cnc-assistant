@@ -304,6 +304,13 @@ class PhysicalMachineCoordinator:
                     or (not closed and (token[2] != self._revision or self._recovery))):
                 raise OwnershipError('La reserva administrativa cambió; mutación rechazada.')
 
+    def validate_administrative_disconnection(self, token):
+        """Prove the same reservation owns a completed transport closure."""
+        with self._lock:
+            self.validate_administration(token, disconnected=True)
+            if self._administrative_closed_revision != self._revision or not self._recovery:
+                raise OwnershipError('La desconexión administrativa no está acreditada.')
+
     def administrative_disconnected(self, token):
         """Record the exact authorized transport closure, without clearing recovery."""
         with self._lock:
