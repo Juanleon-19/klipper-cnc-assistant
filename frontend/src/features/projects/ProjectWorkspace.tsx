@@ -1364,6 +1364,7 @@ export function ProjectWorkspace({
             <h3>Flujo ordenado de procesos</h3>
           </div>
           <p className="muted">Cada operación conserva su propio archivo, análisis, trayectoria, advertencias, herramienta y estado.</p>
+          <p className="muted">El orden se puede editar cuando el intento anterior esté cerrado. Si necesita cambiarlo después de iniciar un trabajo, use «Reiniciar proceso» para invalidar la preparación física antes de volver a medir.</p>
         </div>
 
         <div className="setup-toolbar">
@@ -1455,6 +1456,13 @@ export function ProjectWorkspace({
           <button className="button" type="submit" disabled={!selectedSetup || !newOperationName.trim() || busyKey === "operation:add"}>Agregar operación</button>
         </form>
 
+        {processOperations.length > 0 ? (
+          <p className="muted" role="status">
+            Primera operación para preparación: <strong>{processOperations[0].nombre}</strong>
+            {" · "}Perfil: <strong>{processOperations[0].tool_reference_profile === "long_tool" ? "Herramienta larga" : "Estándar"}</strong>.
+            El perfil de preparación seguirá el primer proceso del orden, no la fila seleccionada.
+          </p>
+        ) : null}
         <div className="setup-operation-tree" aria-label="Operaciones por montaje">
           {project.montajes.map((setup) => {
             const operations = project.operaciones
@@ -1728,7 +1736,7 @@ export function ProjectWorkspace({
       onReconnectArduino={() => void machine.runMachineAction("reconnect-arduino")}
       onSaveMachineSettings={() => void saveMachineSettings()}
       onHome={() => { if (referenceSettingsAllowMovement()) void withPhysicalReferenceAction(async () => { await machine.runMachineAction("home"); }); }}
-      onInitialize={() => { if (referenceSettingsAllowMovement()) void withPhysicalReferenceAction(async () => { setPreparationError(""); try { await machine.runMachineAction("prepare-position", undefined, selectedOperation?.tool_reference_profile ?? "standard", true); } catch (error) { setPreparationError(error instanceof Error ? error.message : "No fue posible preparar la máquina."); throw error; } }); }}
+      onInitialize={() => { if (referenceSettingsAllowMovement()) void withPhysicalReferenceAction(async () => { setPreparationError(""); try { await machine.runMachineAction("prepare-position", undefined, processOperations[0]?.tool_reference_profile ?? "standard", true); } catch (error) { setPreparationError(error instanceof Error ? error.message : "No fue posible preparar la máquina."); throw error; } }); }}
       onEnableManual={() => void machine.runMachineAction("manual-on")}
       onCapturePhysicalWorkOrigin={() => void withPhysicalReferenceAction(() => api.capturePhysicalWorkOrigin(project.id, selectedOperation!.id))}
       onCancelOperation={() => void machine.runMachineAction("cancel")}
@@ -2350,6 +2358,12 @@ export function ProjectWorkspace({
       preparationGeneration.current += 1;
       if (onRefreshProject) {
         await onRefreshProject();
+      }
+      if (scope === "preparation") {
+        const first = [...project.operaciones]
+          .filter((operation) => operation.setup_id === selectedSetup.id)
+          .sort((a, b) => a.orden - b.orden)[0];
+        setSelectedOperationId(first?.id ?? null);
       }
       setSafeZInput("10");
       setGridDefinitionMode("manual");
