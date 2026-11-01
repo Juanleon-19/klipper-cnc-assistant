@@ -704,7 +704,8 @@ export function ProjectWorkspace({
     [project, selectedOperation, selectedSetup]
   );
 
-  const activeJobFace = useMemo(() => selectedOperation?.cara ?? processOperations[0]?.cara ?? null, [processOperations, selectedOperation]);
+  const firstProcessOperation = processOperations[0] ?? null;
+  const activeJobFace = useMemo(() => selectedOperation?.cara ?? firstProcessOperation?.cara ?? null, [firstProcessOperation, selectedOperation]);
   useEffect(() => {
     setLiveExecution(null);
     setLiveExecutionError(null);
@@ -1715,6 +1716,7 @@ export function ProjectWorkspace({
       preparationError={preparationError}
       referenceBusy={referenceBusy || operationMovePending}
       selectedOperation={selectedOperation}
+      preparationOperation={firstProcessOperation}
       heightMap={heightMap}
       machineSettingsInput={machineSettingsInput}
       machineSettingsMessage={machineSettingsMessage}
@@ -1737,7 +1739,7 @@ export function ProjectWorkspace({
       onReconnectArduino={() => void machine.runMachineAction("reconnect-arduino")}
       onSaveMachineSettings={() => void saveMachineSettings()}
       onHome={() => { if (referenceSettingsAllowMovement()) void withPhysicalReferenceAction(async () => { await machine.runMachineAction("home"); }); }}
-      onInitialize={() => { if (!operationMovePending && referenceSettingsAllowMovement()) void withPhysicalReferenceAction(async () => { setPreparationError(""); try { await machine.runMachineAction("prepare-position", undefined, processOperations[0]?.tool_reference_profile ?? "standard", true); } catch (error) { setPreparationError(error instanceof Error ? error.message : "No fue posible preparar la máquina."); throw error; } }); }}
+      onInitialize={() => { if (!operationMovePending && referenceSettingsAllowMovement()) void withPhysicalReferenceAction(async () => { setPreparationError(""); try { await machine.runMachineAction("prepare-position", undefined, firstProcessOperation?.tool_reference_profile ?? "standard", true); } catch (error) { setPreparationError(error instanceof Error ? error.message : "No fue posible preparar la máquina."); throw error; } }); }}
       onEnableManual={() => void machine.runMachineAction("manual-on")}
       onCapturePhysicalWorkOrigin={() => void withPhysicalReferenceAction(() => api.capturePhysicalWorkOrigin(project.id, selectedOperation!.id))}
       onCancelOperation={() => void machine.runMachineAction("cancel")}
