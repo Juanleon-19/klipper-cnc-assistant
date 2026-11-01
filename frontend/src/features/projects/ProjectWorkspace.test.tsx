@@ -981,52 +981,94 @@ describe("ProjectWorkspace", () => {
   });
 
   it("prepara con el perfil de la primera operación aunque esté seleccionada la segunda", async () => {
-    const mixedProject: Project = {
-      ...projectWithSecondOperation,
-      operaciones: projectWithSecondOperation.operaciones.map((operation, index) => ({
-        ...operation,
-        tool_reference_profile: index === 0 ? "long_tool" : "standard",
-      })),
-    };
-    const machine = { ...physicalMachine, runtimeState: "HOMED", runMachineAction: vi.fn().mockResolvedValue(undefined) };
-    renderWorkspace(machine, { project: mixedProject });
-    const secondOperation = screen.getAllByText("Taladrado 1,0 mm")[0].closest("button");
-    expect(secondOperation).not.toBeNull();
-    fireEvent.click(secondOperation!);
-    fireEvent.click(screen.getByRole("button", { name: /^Referencia$/i }));
-    await waitFor(() => expect(screen.getByRole("button", { name: "Ir a posición de preparación" })).toBeEnabled());
-    fireEvent.click(screen.getByRole("button", { name: "Ir a posición de preparación" }));
-    await waitFor(() => expect(machine.runMachineAction).toHaveBeenCalledWith("prepare-position", undefined, "long_tool", true));
-    expect(machine.runMachineAction).not.toHaveBeenCalledWith("prepare-position", undefined, "standard", true);
+    const confirmPreparation = vi.spyOn(window, "confirm").mockReturnValue(true);
+    try {
+      const mixedProject: Project = {
+        ...projectWithSecondOperation,
+        operaciones: projectWithSecondOperation.operaciones.map((operation, index) => ({
+          ...operation,
+          tool_reference_profile: index === 0 ? "long_tool" : "standard",
+        })),
+      };
+      const machine = { ...physicalMachine, runtimeState: "HOMED", runMachineAction: vi.fn().mockResolvedValue(undefined) };
+      renderWorkspace(machine, { project: mixedProject });
+      const secondOperation = screen.getAllByText("Taladrado 1,0 mm")[0].closest("button");
+      expect(secondOperation).not.toBeNull();
+      fireEvent.click(secondOperation!);
+      fireEvent.click(screen.getByRole("button", { name: /^Referencia$/i }));
+      expect(screen.getByText(/Perfil de preparación \(primera operación:/)).toHaveTextContent("Fresado superior");
+      expect(screen.getByText(/Perfil de preparación \(primera operación:/)).toHaveTextContent("Herramienta larga");
+      await waitFor(() => expect(screen.getByRole("button", { name: "Ir a posición de preparación" })).toBeEnabled());
+      fireEvent.click(screen.getByRole("button", { name: "Ir a posición de preparación" }));
+      await waitFor(() => expect(machine.runMachineAction).toHaveBeenCalledWith("prepare-position", undefined, "long_tool", true));
+      expect(machine.runMachineAction).not.toHaveBeenCalledWith("prepare-position", undefined, "standard", true);
+      expect(confirmPreparation).toHaveBeenCalledWith(expect.stringContaining("Preparar Herramienta larga (primera operación: Fresado superior)"));
+      fireEvent.click(screen.getByRole("button", { name: "Probar posición de cambio" }));
+      await waitFor(() => expect(machine.runMachineAction).toHaveBeenCalledWith("tool-change-position", undefined, "standard"));
+    } finally {
+      confirmPreparation.mockRestore();
+    }
   });
 
   it("actualiza el perfil de preparación al cambiar el primer proceso del orden", async () => {
-    const initial: Project = {
-      ...projectWithSecondOperation,
-      operaciones: projectWithSecondOperation.operaciones.map((operation, index) => ({
-        ...operation,
-        tool_reference_profile: index === 0 ? "long_tool" : "standard",
-      })),
-    };
-    const machine = { ...physicalMachine, runtimeState: "HOMED", runMachineAction: vi.fn().mockResolvedValue(undefined) };
-    const workspace = renderWorkspace(machine, { project: initial });
-    const reordered: Project = {
-      ...initial,
-      operaciones: initial.operaciones.map((operation) => ({
-        ...operation,
-        orden: operation.id === "op_2" ? 0 : 1,
-      })),
-    };
-    workspace.refreshProject(reordered);
-    const firstProcessNotice = screen.getAllByRole("status")
-      .find((element) => element.textContent?.includes("Primera operación para preparación"));
-    expect(firstProcessNotice).toBeDefined();
-    expect(firstProcessNotice).toHaveTextContent("Taladrado 1,0 mm");
-    expect(firstProcessNotice).toHaveTextContent("Estándar");
-    fireEvent.click(screen.getByRole("button", { name: /^Referencia$/i }));
-    await waitFor(() => expect(screen.getByRole("button", { name: "Ir a posición de preparación" })).toBeEnabled());
-    fireEvent.click(screen.getByRole("button", { name: "Ir a posición de preparación" }));
-    await waitFor(() => expect(machine.runMachineAction).toHaveBeenCalledWith("prepare-position", undefined, "standard", true));
+    const confirmPreparation = vi.spyOn(window, "confirm").mockReturnValue(true);
+    try {
+      const initial: Project = {
+        ...projectWithSecondOperation,
+        operaciones: projectWithSecondOperation.operaciones.map((operation, index) => ({
+          ...operation,
+          tool_reference_profile: index === 0 ? "long_tool" : "standard",
+        })),
+      };
+      const machine = { ...physicalMachine, runtimeState: "HOMED", runMachineAction: vi.fn().mockResolvedValue(undefined) };
+      const workspace = renderWorkspace(machine, { project: initial });
+      const reordered: Project = {
+        ...initial,
+        operaciones: initial.operaciones.map((operation) => ({
+          ...operation,
+          orden: operation.id === "op_2" ? 0 : 1,
+        })),
+      };
+      workspace.refreshProject(reordered);
+      const firstProcessNotice = screen.getAllByRole("status")
+        .find((element) => element.textContent?.includes("Primera operación para preparación"));
+      expect(firstProcessNotice).toBeDefined();
+      expect(firstProcessNotice).toHaveTextContent("Taladrado 1,0 mm");
+      expect(firstProcessNotice).toHaveTextContent("Estándar");
+      fireEvent.click(screen.getByRole("button", { name: /^Referencia$/i }));
+      expect(screen.getByText(/Perfil de preparación \(primera operación:/)).toHaveTextContent("Taladrado 1,0 mm");
+      expect(screen.getByText(/Perfil de preparación \(primera operación:/)).toHaveTextContent("Estándar");
+      await waitFor(() => expect(screen.getByRole("button", { name: "Ir a posición de preparación" })).toBeEnabled());
+      fireEvent.click(screen.getByRole("button", { name: "Ir a posición de preparación" }));
+      await waitFor(() => expect(machine.runMachineAction).toHaveBeenCalledWith("prepare-position", undefined, "standard", true));
+      expect(confirmPreparation).toHaveBeenCalledWith(expect.stringContaining("Preparar Estándar (primera operación: Taladrado 1,0 mm)"));
+      fireEvent.click(screen.getByRole("button", { name: "Probar posición de cambio" }));
+      await waitFor(() => expect(machine.runMachineAction).toHaveBeenCalledWith("tool-change-position", undefined, "long_tool"));
+    } finally {
+      confirmPreparation.mockRestore();
+    }
+  });
+
+  it("no prepara cuando se cancela la confirmación de la primera operación", async () => {
+    const confirmPreparation = vi.spyOn(window, "confirm").mockReturnValue(false);
+    try {
+      const mixedProject: Project = {
+        ...projectWithSecondOperation,
+        operaciones: projectWithSecondOperation.operaciones.map((operation, index) => ({
+          ...operation,
+          tool_reference_profile: index === 0 ? "long_tool" : "standard",
+        })),
+      };
+      const machine = { ...physicalMachine, runtimeState: "HOMED", runMachineAction: vi.fn().mockResolvedValue(undefined) };
+      renderWorkspace(machine, { project: mixedProject });
+      fireEvent.click(screen.getByRole("button", { name: /^Referencia$/i }));
+      await waitFor(() => expect(screen.getByRole("button", { name: "Ir a posición de preparación" })).toBeEnabled());
+      fireEvent.click(screen.getByRole("button", { name: "Ir a posición de preparación" }));
+      expect(confirmPreparation).toHaveBeenCalledTimes(1);
+      expect(machine.runMachineAction).not.toHaveBeenCalled();
+    } finally {
+      confirmPreparation.mockRestore();
+    }
   });
 
   it("va una sola vez al punto guardado y muestra el diagnóstico", async () => {
