@@ -44,6 +44,9 @@ jobs:
             tests.test_gcode_analysis \
             tests.test_heightmap \
             tests.test_job_service \
+            tests.test_administrative_exclusion \
+            tests.test_administrative_recovery \
+            tests.test_cancelled_standby_reset \
             tests.test_job_plan_hotfix \
             tests.test_machine_runtime \
             tests.test_runtime_reconnect_hotfix \

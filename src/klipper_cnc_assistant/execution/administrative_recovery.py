@@ -102,6 +102,98 @@ def _fully_archived_preparation_reset(service, journal, current, after):
     return found == expected
 
 
+
+def _verified_uncheckpointed_run_retirement(service, journal, current, after):
+    """Recognize only a completed, identity-proven current_run removal gap.
+
+    The reset writes HISTORY_SAVED, resets dependencies, checkpoints
+    DEPENDENCIES_RESET and *then* removes current_run before the next
+    checkpoint. A crash in that window is not a new or arbitrary file
+    mutation: it is reconcilable only if every expected run was retired,
+    every archived receipt is already checkpointed, and no other byte changed.
+    This function has no writes and never authorizes physical actions.
+    """
+    if (journal.get('schema_version') != 2
+            or journal.get('action') != 'reset-preparation'
+            or journal.get('phase') != 'DEPENDENCIES_RESET'
+            or journal.get('completed_steps') != ['HISTORY_SAVED', 'DEPENDENCIES_RESET']
+            or not isinstance(after, dict)
+            or not isinstance(journal.get('before'), dict)):
+        return False
+    evidence = journal.get('evidence')
+    if not isinstance(evidence, dict):
+        return False
+    project_id, setup_id, runs = (evidence.get('project_id'),
+                                   evidence.get('setup_id'), evidence.get('runs'))
+    if (not isinstance(project_id, str) or not isinstance(setup_id, str)
+            or any(not v or v in {'.', '..'} or '/' in v or '\\' in v
+                   for v in (project_id, setup_id))
+            or not isinstance(runs, list) or not runs
+            or any(not isinstance(run, dict)
+                   or not isinstance(run.get('run_id'), str) or not run['run_id']
+                   or not isinstance(run.get('revision'), int) or isinstance(run['revision'], bool)
+                   for run in runs)):
+        return False
+    expected_ids = {run['run_id'] for run in runs}
+    if len(expected_ids) != len(runs):
+        return False
+
+    # All surviving files must match the durable DEPENDENCIES_RESET inventory.
+    # Nothing may be added, modified or removed except one recorded current_run
+    # per archived operation, in this exact project and setup.
+    if any(after.get(path) != value for path, value in current.items()):
+        return False
+    missing = set(after) - set(current)
+    if len(missing) != len(runs) or not missing:
+        return False
+    before = journal['before']
+    faces = set()
+    for rel in missing:
+        parts = tuple(Path(rel).parts)
+        if (len(parts) != 7
+                or parts[:5] != ('projects', project_id, 'reports', 'jobs', setup_id)
+                or parts[5] not in {'superior', 'inferior'}
+                or parts[6] != 'current_run.json'
+                or before.get(rel) != after[rel]):
+            return False
+        faces.add(parts[5])
+    if len(faces) != len(missing):
+        return False
+
+    # The existing archive must bind *exactly* to each (run_id, revision,
+    # project, setup, face). Its byte hash must be the one already preserved
+    # in the checkpoint, not an unverified or subsequently changed file.
+    matched_ids = set()
+    for face in faces:
+        archive_dir = (service.repository.projects_dir / project_id / 'reports'
+                       / 'jobs' / setup_id / face / 'history')
+        for run in runs:
+            run_id, revision = run['run_id'], run['revision']
+            archive_name = f"{run_id.replace('/', '_')}__preparation-reset_r{revision}.json"
+            archive = archive_dir / archive_name
+            rel = str(archive.relative_to(service.administrative_pending_path.parent))
+            if rel not in current or rel not in after or not archive.is_file():
+                continue
+            try:
+                payload = json.loads(archive.read_text(encoding='utf-8'))
+            except (OSError, ValueError):
+                return False
+            if (payload.get('archive_reason') == 'preparation_reset'
+                    and payload.get('run_id') == run_id
+                    and payload.get('revision') == revision
+                    and payload.get('project_id') == project_id
+                    and payload.get('setup_id') == setup_id
+                    and payload.get('face') == face):
+                if run_id in matched_ids:
+                    return False
+                matched_ids.add(run_id)
+    if matched_ids != expected_ids:
+        return False
+    # No unlisted current run of this setup may remain.
+    target = service.repository.projects_dir / project_id / 'reports' / 'jobs' / setup_id
+    return not any(target.glob('*/current_run.json'))
+
+
 def recover(service, transaction_id):
     path = service.administrative_pending_path
     coordinator = service.runtime.physical_ownership
@@ -153,13 +245,16 @@ def recover(service, transaction_id):
             outcome = 'NO_DATA_CHANGE'
         elif after is not None and current == after:
             outcome = 'PARTIAL_PRESERVED_RETRY_RESET' if evidence.get('phase') != 'COMPLETED' else 'COMPLETED'
+        elif _verified_uncheckpointed_run_retirement(service, journal, current, after):
+            outcome = 'CURRENT_RUN_RETIRED_WITH_VERIFIED_ARCHIVE'
         else:
             raise ApplicationError('Archivos cambiados sin checkpoint verificable; se conserva el journal y el histórico. Requiere conciliación específica del respaldo.')
         check()
         # Fresh physical evidence is obtained AFTER expensive disk verification.
         remote = service._observe_administrative_remote()
         guard = SimpleNamespace(remote=remote, check=check)
-        if not _fully_archived_preparation_reset(service, journal, current, after):
+        if not (_fully_archived_preparation_reset(service, journal, current, after)
+                or outcome == 'CURRENT_RUN_RETIRED_WITH_VERIFIED_ARCHIVE'):
             # For earlier/partial phases, preserve the original remote-identity
             # checks for every current run. No historical completion is inferred.
             for file in service.repository.projects_dir.glob('*/reports/jobs/*/*/current_run.json'):
