@@ -55,6 +55,53 @@ def status(service):
             'next_action': 'Recuperar transacción administrativa; después verificar reposo y reiniciar proceso.'}
 
 
+def _fully_archived_preparation_reset(service, journal, current, after):
+    """Recognize a fully checkpointed reset, without forgiving other mutations.
+
+    This only permits journal reconciliation. It does not authorize motion,
+    release physical recovery, or retire any unrelated current execution.
+    """
+    if (journal.get('schema_version') != 2
+            or journal.get('action') != 'reset-preparation'
+            or journal.get('phase') != 'CURRENT_RUN_ARCHIVED'
+            or not isinstance(after, dict) or current != after):
+        return False
+    evidence = journal.get('evidence')
+    if not isinstance(evidence, dict):
+        return False
+    project_id, setup_id = evidence.get('project_id'), evidence.get('setup_id')
+    runs = evidence.get('runs')
+    if (not isinstance(project_id, str) or not isinstance(setup_id, str)
+            or not project_id or not setup_id
+            or any(c in project_id for c in '/\\')
+            or any(c in setup_id for c in '/\\')
+            or project_id in {'.', '..'} or setup_id in {'.', '..'}
+            or not isinstance(runs, list) or not runs
+            or any(not isinstance(r, dict) or not isinstance(r.get('run_id'), str)
+                   or not r.get('run_id') or not isinstance(r.get('revision'), int)
+                   for r in runs)):
+        return False
+    expected = {r['run_id'] for r in runs}
+    if len(expected) != len(runs):
+        return False
+
+    project_dir = service.repository.projects_dir / project_id
+    setup_dir = project_dir / 'reports' / 'jobs' / setup_id
+    if any(setup_dir.glob('*/current_run.json')):
+        # CURRENT_RUN_ARCHIVED is written once per face; another face may
+        # remain after an interrupted multi-face reset.
+        return False
+    found = set()
+    for history_file in setup_dir.glob('*/history/*.json'):
+        relative = str(history_file.relative_to(service.administrative_pending_path.parent))
+        if relative not in current:
+            continue
+        item = json.loads(history_file.read_text(encoding='utf-8'))
+        if item.get('archive_reason') == 'preparation_reset' and item.get('run_id') in expected:
+            found.add(item['run_id'])
+    return found == expected
+
+
 def recover(service, transaction_id):
     path = service.administrative_pending_path
     coordinator = service.runtime.physical_ownership
@@ -112,19 +159,25 @@ def recover(service, transaction_id):
         # Fresh physical evidence is obtained AFTER expensive disk verification.
         remote = service._observe_administrative_remote()
         guard = SimpleNamespace(remote=remote, check=check)
-        for file in service.repository.projects_dir.glob('*/reports/jobs/*/*/current_run.json'):
-            run = service.run_store.load(file)
-            if run:
-                reset_evidence = journal.get('evidence') or {}
-                abandoned = reset_evidence.get('abandoned_run')
-                if (journal.get('schema_version') == 2 and journal.get('action') == 'reset-preparation'
-                        and abandoned and run.get('run_id') == abandoned.get('run_id')):
-                    if (run.get('project_id') != reset_evidence.get('project_id')
-                            or run.get('setup_id') != reset_evidence.get('setup_id')):
-                        raise ApplicationError('La confirmación de abandono no pertenece a esta preparación.')
-                    service._assert_abandoned_cancelled_run(run, guard, abandoned)
-                else:
-                    service._assert_administrative_print_identity(run, guard)
+        if not _fully_archived_preparation_reset(service, journal, current, after):
+            # For earlier/partial phases, preserve the original remote-identity
+            # checks for every current run. No historical completion is inferred.
+            for file in service.repository.projects_dir.glob('*/reports/jobs/*/*/current_run.json'):
+                run = service.run_store.load(file)
+                if run:
+                    reset_evidence = journal.get('evidence') or {}
+                    abandoned = reset_evidence.get('abandoned_run')
+                    if (journal.get('schema_version') == 2 and journal.get('action') == 'reset-preparation'
+                            and abandoned and run.get('run_id') == abandoned.get('run_id')):
+                        if (run.get('project_id') != reset_evidence.get('project_id')
+                                or run.get('setup_id') != reset_evidence.get('setup_id')):
+                            raise ApplicationError('La confirmación de abandono no pertenece a esta preparación.')
+                        service._assert_abandoned_cancelled_run(run, guard, abandoned)
+                    else:
+                        service._assert_administrative_print_identity(run, guard)
+        # A fully archived reset is checked against the exact durable inventory
+        # and archived identities. Other projects' current runs are untouched
+        # and cannot be required to match Moonraker's empty standby filename.
         check()
         directory.mkdir(parents=True, exist_ok=True)
         receipt = {'id': transaction_id, 'outcome': outcome, 'status': 'ARCHIVE_PREPARED',
