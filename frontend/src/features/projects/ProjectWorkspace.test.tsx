@@ -521,7 +521,7 @@ const longToolProject: Project = {
   })),
 };
 
-function renderWorkspace(machine?: MachineContextValue, options?: { onRefreshProject?: () => Promise<void>; onProjectStateChange?: (project: Project) => void; project?: Project; initialView?: "archivo" | "referencia" }) {
+function renderWorkspace(machine?: MachineContextValue, options?: { onRefreshProject?: () => Promise<void>; onProjectStateChange?: (project: Project) => void; onMoveOperation?: (operationId: string, direction: "up" | "down") => Promise<void>; project?: Project; initialView?: "archivo" | "referencia" }) {
   let workspaceProject = options?.project ?? project;
   const buildWorkspace = () => (
     <ProjectWorkspace
@@ -534,7 +534,7 @@ function renderWorkspace(machine?: MachineContextValue, options?: { onRefreshPro
       onAddOperation={vi.fn()}
       onUpdateOperation={vi.fn()}
       onDuplicateOperation={vi.fn()}
-      onMoveOperation={vi.fn()}
+      onMoveOperation={options?.onMoveOperation ?? vi.fn()}
       onDeleteOperation={vi.fn()}
       onRemoveFile={vi.fn()}
       onAnalyze={vi.fn()}
@@ -981,6 +981,7 @@ describe("ProjectWorkspace", () => {
   });
 
   it("prepara con el perfil de la primera operación aunque esté seleccionada la segunda", async () => {
+    const confirmPreparation = vi.spyOn(window, "confirm").mockReturnValue(true);
     const mixedProject: Project = {
       ...projectWithSecondOperation,
       operaciones: projectWithSecondOperation.operaciones.map((operation, index) => ({
@@ -998,9 +999,15 @@ describe("ProjectWorkspace", () => {
     fireEvent.click(screen.getByRole("button", { name: "Ir a posición de preparación" }));
     await waitFor(() => expect(machine.runMachineAction).toHaveBeenCalledWith("prepare-position", undefined, "long_tool", true));
     expect(machine.runMachineAction).not.toHaveBeenCalledWith("prepare-position", undefined, "standard", true);
+    expect(String(confirmPreparation.mock.calls[0]?.[0])).toContain("Fresado superior");
+    expect(String(confirmPreparation.mock.calls[0]?.[0])).toContain("Herramienta larga");
+    expect(screen.getByText("Perfil de cambio: Estándar")).toBeInTheDocument();
+    confirmPreparation.mockRestore();
   });
 
   it("actualiza el perfil de preparación al cambiar el primer proceso del orden", async () => {
+    const confirmPreparation = vi.spyOn(window, "confirm").mockReturnValue(true);
+    const moveOperation = vi.fn().mockResolvedValue(undefined);
     const initial: Project = {
       ...projectWithSecondOperation,
       operaciones: projectWithSecondOperation.operaciones.map((operation, index) => ({
@@ -1009,7 +1016,13 @@ describe("ProjectWorkspace", () => {
       })),
     };
     const machine = { ...physicalMachine, runtimeState: "HOMED", runMachineAction: vi.fn().mockResolvedValue(undefined) };
-    const workspace = renderWorkspace(machine, { project: initial });
+    const workspace = renderWorkspace(machine, { project: initial, onMoveOperation: moveOperation });
+    const moveButton = screen.getByRole("button", { name: "Mover arriba Taladrado 1,0 mm" });
+    expect(moveButton).toBeEnabled();
+    fireEvent.click(moveButton);
+    await waitFor(() => expect(moveOperation).toHaveBeenCalledWith("op_2", "up"));
+    expect(machine.runMachineAction).not.toHaveBeenCalled();
+    // Emulate the server-confirmed order received after the move request.
     const reordered: Project = {
       ...initial,
       operaciones: initial.operaciones.map((operation) => ({
@@ -1027,6 +1040,9 @@ describe("ProjectWorkspace", () => {
     await waitFor(() => expect(screen.getByRole("button", { name: "Ir a posición de preparación" })).toBeEnabled());
     fireEvent.click(screen.getByRole("button", { name: "Ir a posición de preparación" }));
     await waitFor(() => expect(machine.runMachineAction).toHaveBeenCalledWith("prepare-position", undefined, "standard", true));
+    expect(String(confirmPreparation.mock.calls[0]?.[0])).toContain("Taladrado 1,0 mm");
+    expect(String(confirmPreparation.mock.calls[0]?.[0])).toContain("Estándar");
+    confirmPreparation.mockRestore();
   });
 
   it("va una sola vez al punto guardado y muestra el diagnóstico", async () => {

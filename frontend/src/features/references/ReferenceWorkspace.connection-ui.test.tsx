@@ -105,6 +105,7 @@ function renderReference(options?: {
   currentRuntime.physical_owner = { administrative_incomplete: options?.administrativePending, owner_id: options?.ownerId, kind: options?.ownerId ? "RECOVERY" : undefined };
   currentRuntime.active_operation = options?.activeOperation;
   const refreshRuntime = options?.refreshRuntime ?? vi.fn().mockResolvedValue(currentRuntime);
+  const firstOperation = { id: "op-1", nombre: "Primera operación", herramienta: "Broca 0.8 mm", tool_reference_profile: options?.toolReferenceProfile ?? "standard" } as unknown as Operation;
   const consistencyProps = {
     machineSettingsDirty: options?.machineSettingsDirty ?? false,
     machineSettingsHasUnsavedChanges: options?.machineSettingsHasUnsavedChanges ?? false,
@@ -120,7 +121,8 @@ function renderReference(options?: {
       runtime={currentRuntime}
       referenceSession={(options?.hasReference ? { referencia_z: { z_mm: 0 } } : null) as ReferenceSession | null}
       referenceBusy={options?.referenceBusy ?? false}
-      selectedOperation={{ id: "op-1", herramienta: "Broca 0.8 mm", tool_reference_profile: options?.toolReferenceProfile ?? "standard" } as unknown as Operation}
+      selectedOperation={firstOperation}
+      preparationOperation={firstOperation}
       heightMap={null}
       machineSettingsInput={{
         reference_prep_z_mm: options?.referencePrepZInput ?? "115",

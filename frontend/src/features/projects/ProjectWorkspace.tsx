@@ -1715,6 +1715,7 @@ export function ProjectWorkspace({
       preparationError={preparationError}
       referenceBusy={referenceBusy || operationMovePending}
       selectedOperation={selectedOperation}
+      preparationOperation={processOperations[0] ?? null}
       heightMap={heightMap}
       machineSettingsInput={machineSettingsInput}
       machineSettingsMessage={machineSettingsMessage}
