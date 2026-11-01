@@ -105,8 +105,6 @@ export default function App() {
   const [refreshingSystem, setRefreshingSystem] = useState(false);
   const [error, setError] = useState("");
   const runtimePollInFlight = useRef(false);
-  const operationMoveQueue = useRef<Promise<void>>(Promise.resolve());
-  const optimisticOperationOrders = useRef<Record<string, string[]>>({});
   const [busyKey, setBusyKey] = useState<string | null>(null);
   const [creatingProject, setCreatingProject] = useState(false);
   const [savingProject, setSavingProject] = useState(false);
@@ -324,62 +322,27 @@ export default function App() {
   };
 
   const handleMoveOperation = async (operationId: string, direction: "up" | "down") => {
-    if (!selectedProjectId || !selectedProject) {
+    if (!selectedProjectId || busyKey) {
       return;
     }
-    const selectedOperation = selectedProject.operaciones.find((item) => item.id === operationId);
-    if (!selectedOperation) {
-      return;
-    }
-    const setupId = selectedOperation.setup_id;
-    const visibleSetupOperations = selectedProject.operaciones
-      .filter((item) => item.setup_id === setupId)
-      .sort((left, right) => left.orden - right.orden);
-    const visibleIds = visibleSetupOperations.map((item) => item.id);
-    const storedIds = optimisticOperationOrders.current[setupId];
-    const storedStillValid = Boolean(
-      storedIds
-      && storedIds.length === visibleIds.length
-      && storedIds.every((id) => visibleIds.includes(id))
-    );
-    const baseIds = storedStillValid ? [...storedIds!] : visibleIds;
-    const index = baseIds.indexOf(operationId);
-    const target = direction === "up" ? index - 1 : index + 1;
-    if (index < 0 || target < 0 || target >= baseIds.length) {
-      return;
-    }
-    [baseIds[index], baseIds[target]] = [baseIds[target], baseIds[index]];
-    optimisticOperationOrders.current[setupId] = baseIds;
-    const orderById = new Map(baseIds.map((id, order) => [id, order]));
+    const projectId = selectedProjectId;
+    setBusyKey("operation:move");
     setError("");
-    setProjects((current) => current.map((project) => {
-      if (project.id !== selectedProjectId) {
-        return project;
+    try {
+      // Commit the order before refreshing the view. Do not display an
+      // unacknowledged order as the machine's first tool.
+      await api.moveOperation(projectId, operationId, direction);
+      await syncProject(projectId);
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : "No fue posible reordenar la operación.");
+      try {
+        await syncProject(projectId);
+      } catch {
+        // Preserve the error; a fresh load remains necessary.
       }
-      return {
-        ...project,
-        operaciones: project.operaciones.map((item) => {
-          const nextOrder = orderById.get(item.id);
-          return nextOrder === undefined || nextOrder === item.orden ? item : { ...item, orden: nextOrder };
-        }),
-      };
-    }));
-
-    operationMoveQueue.current = operationMoveQueue.current
-      .then(async () => {
-        await api.moveOperation(selectedProjectId, operationId, direction);
-      })
-      .catch(async (requestError) => {
-        delete optimisticOperationOrders.current[setupId];
-        try {
-          await syncProject(selectedProjectId);
-        } catch {
-          // Preserve the latest optimistic UI if the resync also fails.
-        }
-        setError(requestError instanceof Error ? requestError.message : "No fue posible reordenar la operación.");
-      });
-
-    await Promise.resolve();
+    } finally {
+      setBusyKey(null);
+    }
   };
 
   const handleDeleteOperation = async (operation: Operation) => {
