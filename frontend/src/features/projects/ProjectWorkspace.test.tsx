@@ -1003,6 +1003,7 @@ describe("ProjectWorkspace", () => {
       await waitFor(() => expect(machine.runMachineAction).toHaveBeenCalledWith("prepare-position", undefined, "long_tool", true));
       expect(machine.runMachineAction).not.toHaveBeenCalledWith("prepare-position", undefined, "standard", true);
       expect(confirmPreparation).toHaveBeenCalledWith(expect.stringContaining("Preparar Herramienta larga (primera operación: Fresado superior)"));
+      await waitFor(() => expect(screen.getByRole("button", { name: "Probar posición de cambio" })).toBeEnabled());
       fireEvent.click(screen.getByRole("button", { name: "Probar posición de cambio" }));
       await waitFor(() => expect(machine.runMachineAction).toHaveBeenCalledWith("tool-change-position", undefined, "standard"));
     } finally {
@@ -1042,6 +1043,7 @@ describe("ProjectWorkspace", () => {
       fireEvent.click(screen.getByRole("button", { name: "Ir a posición de preparación" }));
       await waitFor(() => expect(machine.runMachineAction).toHaveBeenCalledWith("prepare-position", undefined, "standard", true));
       expect(confirmPreparation).toHaveBeenCalledWith(expect.stringContaining("Preparar Estándar (primera operación: Taladrado 1,0 mm)"));
+      await waitFor(() => expect(screen.getByRole("button", { name: "Probar posición de cambio" })).toBeEnabled());
       fireEvent.click(screen.getByRole("button", { name: "Probar posición de cambio" }));
       await waitFor(() => expect(machine.runMachineAction).toHaveBeenCalledWith("tool-change-position", undefined, "long_tool"));
     } finally {
