@@ -92,6 +92,31 @@ class AdministrativeResetTest(unittest.TestCase):
         self.assertEqual(before, self.path.read_bytes())
         self.assertTrue(self.service.administrative_pending_path.exists())
 
+    def test_authorized_disconnect_accepts_serial_turnover_without_losing_reservation(self):
+        original = self.runtime.current_physical_session_id()
+        coordinator = self.runtime.physical_ownership
+        with self.service.administrative_mutation('test-closed-session', allow_started_runs=True) as guard:
+            guard.begin_mutation()
+            coordinator.administrative_disconnected(guard.token)
+            self.runtime.snapshot_payload['state'] = 'DISCONNECTED'
+            self.runtime.current_physical_session_id = lambda: original + '-serial-rotated'
+            guard.record_disconnected()
+            guard.check()
+        self.assertFalse(self.service.administrative_pending_path.exists())
+        self.assertTrue(coordinator.snapshot()['recovery_pending'])
+
+    def test_reconnection_after_authorized_disconnect_still_fails_closed(self):
+        coordinator = self.runtime.physical_ownership
+        with self.assertRaisesRegex(ApplicationError, 'acceso físico volvió a estar activo'):
+            with self.service.administrative_mutation('test-reconnected', allow_started_runs=True) as guard:
+                guard.begin_mutation()
+                coordinator.administrative_disconnected(guard.token)
+                self.runtime.snapshot_payload['state'] = 'DISCONNECTED'
+                guard.record_disconnected()
+                self.runtime.snapshot_payload['state'] = 'DIAGNOSTIC'
+        self.assertTrue(self.service.administrative_pending_path.exists())
+        self.assertTrue(coordinator.snapshot()['recovery_pending'])
+
     def test_lock_unknown_busy_and_error_fail_closed(self):
         for lock in (None, Mock(locked=lambda: None), Mock(locked=Mock(side_effect=RuntimeError('unobservable')))):
             self.runtime._movement_lock = lock
