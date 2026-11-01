@@ -980,6 +980,26 @@ describe("ProjectWorkspace", () => {
     confirmPreparation.mockRestore();
   });
 
+  it("prepara con el perfil de la primera operación aunque esté seleccionada la segunda", async () => {
+    const mixedProject: Project = {
+      ...projectWithSecondOperation,
+      operaciones: projectWithSecondOperation.operaciones.map((operation, index) => ({
+        ...operation,
+        tool_reference_profile: index === 0 ? "long_tool" : "standard",
+      })),
+    };
+    const machine = { ...physicalMachine, runtimeState: "HOMED", runMachineAction: vi.fn().mockResolvedValue(undefined) };
+    renderWorkspace(machine, { project: mixedProject });
+    const secondOperation = screen.getAllByText("Taladrado 1,0 mm")[0].closest("button");
+    expect(secondOperation).not.toBeNull();
+    fireEvent.click(secondOperation!);
+    fireEvent.click(screen.getByRole("button", { name: /^Referencia$/i }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Ir a posición de preparación" })).toBeEnabled());
+    fireEvent.click(screen.getByRole("button", { name: "Ir a posición de preparación" }));
+    await waitFor(() => expect(machine.runMachineAction).toHaveBeenCalledWith("prepare-position", undefined, "long_tool", true));
+    expect(machine.runMachineAction).not.toHaveBeenCalledWith("prepare-position", undefined, "standard", true);
+  });
+
   it("va una sola vez al punto guardado y muestra el diagnóstico", async () => {
     apiMock.goToReferencePoint.mockResolvedValue({ accepted: true, reference_x: 10, reference_y: 8, preparation_z: 115, final_state: "REFERENCE_MOVE_COMPLETE", message: "Máquina ubicada en el punto de referencia." });
     renderWorkspace(physicalMachine);
