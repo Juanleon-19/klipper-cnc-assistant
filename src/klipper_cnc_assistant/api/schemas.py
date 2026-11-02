@@ -102,6 +102,19 @@ class OperationUpdateRequest(BaseModel):
 class OperationMoveRequest(BaseModel):
     direccion: str
 
+class OperationOrderItem(BaseModel):
+    id: str
+    orden: int
+
+
+class OperationOrderPatchResponse(BaseModel):
+    project_id: str
+    setup_id: str
+    orders: list[OperationOrderItem]
+    actualizado_en: str
+    storage_revision: int
+    moved: bool
+
 
 class ProjectPermanentDeleteRequest(BaseModel):
     confirm_name: str = Field(min_length=1)

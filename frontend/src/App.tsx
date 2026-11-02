@@ -8,7 +8,7 @@ import { StatusBadge } from "./components/StatusBadge";
 import { SystemBanner } from "./features/system/SystemBanner";
 import { MachineContext, buildMachineContextValue, type MachineAction } from "./features/system/MachineContext";
 import { SystemPage } from "./features/system/SystemPage";
-import { api, type OperationInput, type OperationUpdateInput } from "./lib/api";
+import { api, type OperationInput, type OperationUpdateInput, type OperationOrderPatch } from "./lib/api";
 import { getRecentProject, toneForStatus, translateStatus } from "./lib/ui";
 import type {
   HealthResponse,
@@ -51,6 +51,28 @@ function replaceOperationInProjects(
       operaciones: project.operaciones.map((operation) => operation.id === operationId ? replacement : operation),
     }
     : project);
+}
+
+/** Apply only a server-acknowledged order to the exact displayed setup.
+ * Avoid full analysis/trajectory reload on every arrow click. If IDs differ,
+ * refuse the patch; the caller reloads the authoritative project instead.
+ */
+function applyConfirmedOperationOrder(project: Project, patch: OperationOrderPatch): Project | null {
+  if (project.id !== patch.project_id) return null;
+  const subset = project.operaciones.filter((op) => op.setup_id === patch.setup_id);
+  const indexed = new Map(patch.orders.map(({ id, orden }) => [id, orden]));
+  if (subset.length !== patch.orders.length || indexed.size !== subset.length) return null;
+  if (subset.some((op) => !indexed.has(op.id))) return null;
+  if (patch.orders.some(({ orden }) => !Number.isSafeInteger(orden) || orden < 0)) return null;
+  if (new Set(patch.orders.map(({ orden }) => orden)).size !== patch.orders.length) return null;
+  return {
+    ...project,
+    actualizado_en: patch.actualizado_en,
+    updated_at: patch.actualizado_en,
+    operaciones: project.operaciones.map((op) => op.setup_id === patch.setup_id
+      ? { ...op, orden: indexed.get(op.id)! }
+      : op),
+  };
 }
 
 function applyOperationUpdate(operation: Operation, payload: OperationUpdateInput): Operation {
@@ -329,10 +351,19 @@ export default function App() {
     setBusyKey("operation:move");
     setError("");
     try {
-      // Commit the order before refreshing the view. Do not display an
-      // unacknowledged order as the machine's first tool.
-      await api.moveOperation(projectId, operationId, direction);
-      await syncProject(projectId);
+      // No optimistic order: show the new first tool only after the durable
+      // backend write and compact order acknowledgement succeed.
+      const patch = await api.moveOperationOrder(projectId, operationId, direction);
+      const current = projects.find((project) => project.id === projectId);
+      const confirmed = current ? applyConfirmedOperationOrder(current, patch) : null;
+      if (confirmed) {
+        setProjects((all) => all.map((project) => project.id === projectId
+          ? applyConfirmedOperationOrder(project, patch) ?? project
+          : project));
+      } else {
+        // A different tab or project mutation changed the setup: do not guess.
+        await syncProject(projectId);
+      }
     } catch (requestError) {
       setError(requestError instanceof Error ? requestError.message : "No fue posible reordenar la operación.");
       try {

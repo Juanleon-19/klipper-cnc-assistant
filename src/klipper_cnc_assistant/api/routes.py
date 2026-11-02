@@ -39,6 +39,7 @@ from .schemas import (
     OperationAnalysisResponse,
     OperationCreateRequest,
     OperationMoveRequest,
+    OperationOrderPatchResponse,
     OperationUpdateRequest,
     ProjectPermanentDeleteRequest,
     OperationResponse,
@@ -135,12 +136,12 @@ def _reject_active_motion(request: Request) -> None:
     service._assert_no_started_runs()
 
 
-def _administrative_route(function=None, *, persistent=False, independent=False):
+def _administrative_route(function=None, *, persistent=False, independent=False, metadata_only=False):
     def decorate(handler):
         def scope(kwargs):
             service = kwargs['request'].app.state.job_service
             if independent:
-                return project_mutation(service, kwargs['project_id'])
+                return project_mutation(service, kwargs['project_id'], metadata_only=metadata_only)
             return service.administrative_mutation(handler.__name__)
 
         def mark(guard, kwargs):
@@ -373,6 +374,19 @@ def build_router() -> APIRouter:
                 direction=payload.direccion,
             )
         )
+
+    @router.post("/projects/{project_id}/operations/{operation_id}/move-order", response_model=OperationOrderPatchResponse)
+    @_administrative_route(independent=True, metadata_only=True)
+    def move_operation_order_metadata(
+        project_id: str, operation_id: str, payload: OperationMoveRequest, request: Request,
+    ) -> OperationOrderPatchResponse:
+        # The established /move endpoint remains backwards-compatible. The UI
+        # uses this compact result to avoid replaying megabytes of G-code analysis.
+        result = request.app.state.project_service.move_operation_order_metadata(
+            project_id=project_id, operation_id=operation_id,
+            direction=payload.direccion,
+        )
+        return OperationOrderPatchResponse(**result)
 
     @router.delete("/projects/{project_id}/operations/{operation_id}", response_model=dict[str, str])
     @_administrative_route(independent=True)

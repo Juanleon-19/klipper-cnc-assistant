@@ -170,7 +170,7 @@ def execution_write(function):
 
 
 @contextmanager
-def project_mutation(service, project_id, *, read_only_fallback=False):
+def project_mutation(service, project_id, *, read_only_fallback=False, metadata_only=False):
     """Offline project IO, excluded from execution of the same project.
 
     No HTTP, movement permit, recovery clearing or physical evidence mutation.
@@ -182,7 +182,7 @@ def project_mutation(service, project_id, *, read_only_fallback=False):
         if service.administrative_pending_path.exists():
             raise ApplicationError('Journal administrativo pendiente; escritura bloqueada.')
         token = coordinator.begin_project_edit(project_id)
-        service.assert_project_edit_safe(project_id)
+        service.assert_project_edit_safe(project_id, metadata_only=metadata_only)
     except (OwnershipError, ApplicationError) as error:
         if token is not None:
             coordinator.end_project_edit(token)

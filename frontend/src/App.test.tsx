@@ -67,13 +67,19 @@ const operationProfileProject: Project = {
 function seedOperationProfileApi(initialProject: Project, options: { persistPatch?: boolean } = {}) {
   let persistedProject = initialProject;
   let patchPayload: Record<string, unknown> | null = null;
+  let movePayload: Record<string, unknown> | null = null;
   let projectGets = 0;
   const patchResponse = deferred<FetchResult>();
+  const moveResponse = deferred<FetchResult>();
 
   mockFetch.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
     const method = init?.method ?? "GET";
 
+    if (url.endsWith("/move-order") && method === "POST") {
+      movePayload = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      return moveResponse.promise;
+    }
     if (url === "/api/projects/proj_1/operations/op_1" && method === "PATCH") {
       patchPayload = JSON.parse(String(init?.body)) as Record<string, unknown>;
       if (options.persistPatch !== false) {
@@ -147,6 +153,8 @@ function seedOperationProfileApi(initialProject: Project, options: { persistPatc
 
   return {
     patchResponse,
+    moveResponse,
+    get movePayload() { return movePayload; },
     get patchPayload() {
       return patchPayload;
     },
@@ -303,6 +311,47 @@ describe("App", () => {
     } else {
       expect(screen.getAllByRole("button", { name: /Cerrar menú/i })[0]).toHaveAttribute("aria-expanded", "true");
     }
+  });
+
+  it("muestra el nuevo orden solo tras el POST confirmado sin descargar otra vez las trayectorias", async () => {
+    window.innerWidth = 1440;
+    window.history.replaceState(null, "", "/?view=proyectos&project=proj_1&workspace=archivo");
+    const project: Project = {
+      ...operationProfileProject,
+      operaciones: [
+        { ...operationProfileProject.operaciones[0], nombre: "Primer taladrado", tool_reference_profile: "long_tool" },
+        { ...operationProfileProject.operaciones[0],
+          id: "op_2", nombre: "Fresado superior", tipo: "fresado_superior",
+          orden: 1, tool_reference_profile: "standard",
+        },
+      ],
+    };
+    const scenario = seedOperationProfileApi(project);
+    render(<App />);
+    const move = await screen.findByRole("button", { name: "Mover arriba Fresado superior" });
+    expect(move).toBeEnabled();
+    fireEvent.click(move);
+    expect(scenario.movePayload).toEqual({ direccion: "up" });
+    expect(scenario.projectGets).toBe(0);
+
+    // The active first tool cannot switch while a request is outstanding.
+    expect(move).toBeDisabled();
+    await act(async () => {
+      scenario.moveResponse.resolve(jsonResponse({
+        project_id: "proj_1",
+        setup_id: "setup-main",
+        orders: [{ id: "op_1", orden: 1 }, { id: "op_2", orden: 0 }],
+        actualizado_en: "2026-11-01T22:00:00Z",
+        storage_revision: 14,
+        moved: true,
+      }));
+      await scenario.moveResponse.promise;
+    });
+    await waitFor(() => expect(screen.getByRole("button", { name: "Mover arriba Fresado superior" })).toBeDisabled());
+    expect(scenario.projectGets).toBe(0);
+    const firstNotice = screen.getAllByRole("status").find((el) => el.textContent?.includes("Primera operación para preparación"));
+    expect(firstNotice).toHaveTextContent("Fresado superior");
+    expect(firstNotice).toHaveTextContent("Estándar");
   });
 
   it("mantiene el perfil largo durante el PATCH, el sync y una recarga", async () => {

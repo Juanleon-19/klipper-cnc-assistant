@@ -5,7 +5,7 @@ import json
 import re
 import shutil
 from dataclasses import asdict
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 from .safe_persistence import atomic_write, dispatch_mutation, atomic_json, merge_snapshot, remember_snapshot, storage_lock, forget_snapshots, PersistenceConflict
@@ -108,6 +108,75 @@ class JsonProjectRepository:
             atomic_json(path, payload, durable=True)
             remember_snapshot(path, payload)
             return saved
+
+    def move_operation_order_metadata(self, project_id: str, operation_id: str, direction: str) -> dict:
+        """Atomic, analysis-preserving reorder; do not deserialize preview geometry.
+
+        Only two `orden` fields, the project timestamps and storage revision
+        are written. The existing per-project storage lock, dispatch-invalidation
+        and durable atomic replace are retained. Physical ownership is checked
+        separately by project_mutation before this method is called.
+        """
+        if direction not in {'up', 'down'}:
+            raise ProjectValidationError('La direccion debe ser up o down.')
+        path = self.project_dir(project_id) / 'project.json'
+        with storage_lock(path):
+            if not path.is_file():
+                raise FileNotFoundError(f"El proyecto '{project_id}' no existe.")
+            payload = json.loads(path.read_text(encoding='utf-8'))
+            if not isinstance(payload, dict) or payload.get('id') != project_id:
+                raise PersistenceConflict('La identidad del proyecto no coincide.')
+            if self._needs_project_migration(payload):
+                raise PersistenceConflict('El proyecto requiere migración; recargue el proyecto antes de ordenar.')
+            operations = payload.get('operaciones')
+            setups = payload.get('montajes')
+            if not isinstance(operations, list) or not isinstance(setups, list):
+                raise PersistenceConflict('Las operaciones o montajes no son verificables.')
+            setup_ids = {setup.get('id') for setup in setups if isinstance(setup, dict)}
+            ids, orders, selected = set(), set(), None
+            for item in operations:
+                if not isinstance(item, dict):
+                    raise PersistenceConflict('Operación inválida.')
+                identity, setup, number = item.get('id'), item.get('setup_id'), item.get('orden')
+                if (not isinstance(identity, str) or not identity
+                        or not isinstance(setup, str) or setup not in setup_ids
+                        or type(number) is not int or number < 0
+                        or identity in ids or (setup, number) in orders):
+                    raise PersistenceConflict('Identidad u orden de operación inválido o duplicado.')
+                ids.add(identity)
+                orders.add((setup, number))
+                if identity == operation_id:
+                    selected = item
+            if selected is None:
+                raise ProjectValidationError('La operación no existe en el proyecto.')
+            setup_id = selected['setup_id']
+            ordered = sorted(
+                (item for item in operations if item['setup_id'] == setup_id),
+                key=lambda item: item['orden'],
+            )
+            index = next(i for i, item in enumerate(ordered) if item['id'] == operation_id)
+            neighbor_index = index - 1 if direction == 'up' else index + 1
+            moved = 0 <= neighbor_index < len(ordered)
+            if moved:
+                neighbor = ordered[neighbor_index]
+                selected['orden'], neighbor['orden'] = neighbor['orden'], selected['orden']
+                timestamp = datetime.now(timezone.utc).isoformat()
+                payload['actualizado_en'] = timestamp
+                payload['updated_at'] = timestamp
+                revision = payload.get('storage_revision', 0)
+                if type(revision) is not int or revision < 0:
+                    raise PersistenceConflict('Revisión de proyecto inválida.')
+                payload['storage_revision'] = revision + 1
+                atomic_json(path, payload, durable=True)
+                remember_snapshot(path, payload)
+            return {
+                'project_id': project_id,
+                'setup_id': setup_id,
+                'orders': [{'id': item['id'], 'orden': item['orden']} for item in ordered],
+                'actualizado_en': payload.get('actualizado_en'),
+                'storage_revision': payload.get('storage_revision', 0),
+                'moved': moved,
+            }
 
     def load_project(self, project_id: str) -> ProyectoPCB:
         path = self.project_dir(project_id) / "project.json"

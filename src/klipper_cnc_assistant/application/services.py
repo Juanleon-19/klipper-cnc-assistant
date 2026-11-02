@@ -281,6 +281,14 @@ class ProjectService:
             max_z_error_mm=source.max_z_error_mm,
         )
 
+    def move_operation_order_metadata(
+        self, *, project_id: str, operation_id: str, direction: str,
+    ) -> dict:
+        """Fast metadata-only reorder; route still enforces project ownership."""
+        return self.repository.move_operation_order_metadata(
+            project_id, operation_id, direction
+        )
+
     def move_operation(
         self,
         *,
