@@ -187,7 +187,7 @@ def snapshot_stats():
                 "max_count": SNAPSHOT_MAX_COUNT, "max_bytes": SNAPSHOT_MAX_BYTES}
 
 
-def remember_snapshot(path, payload):
+def remember_snapshot(path, payload, *, encoded=None):
     """LRU merge bases: 512 versions / 8 MiB globally, 32 versions per path.
 
     Immutable JSON bytes bound actual retained payload size. Active transaction
@@ -195,11 +195,19 @@ def remember_snapshot(path, payload):
     base is oversized), skip admission. Missing historical bases always cause a
     stale-write conflict, never an unchecked overwrite. Current-revision saves
     do not depend on cached history.
+
+    A writer that already generated immutable compact JSON bytes for the same
+    payload can pass them as encoded. This avoids encoding the large operation
+    analysis a second time after a durable atomic write. Ordinary writers
+    retain the existing independent encoding behavior.
     """
     global _snapshot_bytes, _snapshot_peak_count
     key = str(Path(path).resolve())
     revision = payload.get('storage_revision', 0)
-    encoded = json.dumps(payload, ensure_ascii=True, separators=(',', ':')).encode('utf-8')
+    if encoded is None:
+        encoded = json.dumps(payload, ensure_ascii=True, separators=(',', ':')).encode('utf-8')
+    elif not isinstance(encoded, bytes):
+        raise TypeError('Snapshot preencoded content must be immutable JSON bytes.')
     if len(encoded) > SNAPSHOT_MAX_BYTES:
         return
     prune_snapshots()
