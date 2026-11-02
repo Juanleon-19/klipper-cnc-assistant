@@ -444,7 +444,7 @@ describe("App", () => {
     fireEvent.click(within(card).getByRole("button", { name: "Mover a Papelera" }));
     expect(await screen.findByText(/conserva una ejecución pendiente o activa/)).toBeInTheDocument();
     expect(scenario.persistedProject.status).not.toBe("trashed");
-    expect(screen.getByText("Proyecto de perfiles")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Abrir Proyecto de perfiles" })).toBeInTheDocument();
     confirm.mockRestore();
   });
 
