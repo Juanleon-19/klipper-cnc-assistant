@@ -329,9 +329,18 @@ class JobService:
                 or self.runtime.physical_ownership.snapshot().get('administrative_active')):
             raise ApplicationError('Administración activa o incompleta; conservar datos y revisar recuperación.')
 
-    def assert_project_edit_safe(self, project_id):
-        """Software-only writes must not change even prepared execution evidence."""
-        self.repository.load_project(project_id)
+    def assert_project_edit_safe(self, project_id, *, metadata_only=False):
+        """Software-only writes must not change prepared execution evidence.
+
+        Metadata-only operation reorder validates the full JSON document in
+        its dedicated repository writer; avoid costly preview deserialization
+        here, without relaxing any current_run or ownership checks.
+        """
+        if metadata_only:
+            if not (self.repository.project_dir(project_id) / 'project.json').is_file():
+                raise ApplicationError('El proyecto no existe.')
+        else:
+            self.repository.load_project(project_id)
         for path in self.repository.project_dir(project_id).glob('reports/jobs/*/*/current_run.json'):
             run = self.run_store.load(path)
             if not run:
