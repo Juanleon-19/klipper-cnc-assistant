@@ -167,8 +167,15 @@ class JsonProjectRepository:
                 if type(revision) is not int or revision < 0:
                     raise PersistenceConflict('Revisión de proyecto inválida.')
                 payload['storage_revision'] = revision + 1
-                atomic_json(path, payload, durable=True)
-                remember_snapshot(path, payload)
+                # Encode ONCE: operation analyses can dominate the project
+                # payload. Retain atomic replace + file/directory fsync and
+                # write-authority invalidation; only omit redundant whitespace,
+                # not durable persistence or optimistic concurrency revision.
+                encoded = json.dumps(
+                    payload, ensure_ascii=True, separators=(',', ':'), sort_keys=True
+                ).encode('utf-8')
+                atomic_write(path, encoded, durable=True)
+                remember_snapshot(path, payload, encoded=encoded)
             return {
                 'project_id': project_id,
                 'setup_id': setup_id,
