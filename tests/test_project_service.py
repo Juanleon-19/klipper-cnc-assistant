@@ -337,15 +337,24 @@ class ProjectServiceTest(unittest.TestCase):
         }
         # The raw-json pathway must not reconstruct large / possibly legacy
         # preview arrays as domain objects, nor call generic save_project.
+        from klipper_cnc_assistant.storage import json_repository as storage_module
+        original_snapshot = storage_module.remember_snapshot
         with patch.object(self.service.repository, '_deserialize_project', side_effect=AssertionError('slow deserialize')):
             with patch.object(self.service.repository, 'save_project', side_effect=AssertionError('generic save')):
-                result = self.service.move_operation_order_metadata(
-                    project_id=project.id, operation_id=b.id, direction='up',
-                )
+                with patch.object(storage_module, 'remember_snapshot', wraps=original_snapshot) as snapshot:
+                    result = self.service.move_operation_order_metadata(
+                        project_id=project.id, operation_id=b.id, direction='up',
+                    )
+                    # No second reserialization for the snapshot registry. The
+                    # exact compact, atomic and fsynced bytes become its base.
+                    snapshot.assert_called_once()
+                    self.assertEqual(snapshot.call_args.kwargs['encoded'], path.read_bytes())
         self.assertTrue(result['moved'])
         self.assertEqual(result['project_id'], project.id)
         self.assertEqual(result['orders'], [{'id': a.id, 'orden': 1}, {'id': b.id, 'orden': 0}])
-        after = json.loads(path.read_text())
+        after_bytes = path.read_bytes()
+        self.assertLess(len(after_bytes), len(json.dumps(before, ensure_ascii=True, indent=2, sort_keys=True).encode('utf-8')))
+        after = json.loads(after_bytes)
         self.assertEqual(
             {op['id']: {k: v for k, v in op.items() if k != 'orden'} for op in after['operaciones']},
             immutable,
