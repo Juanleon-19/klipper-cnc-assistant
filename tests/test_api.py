@@ -860,6 +860,61 @@ class ApiTest(unittest.TestCase):
             client.close()
 
 
+    def test_compact_operation_order_route_commits_without_full_analysis_response(self) -> None:
+        project_id = self._create_project()
+        first_id = self._create_operation(project_id)
+        second = self.client.post(
+            f"/api/projects/{project_id}/operations",
+            json={"nombre": "Taladrado", "tipo": "taladrado", "cara": "superior"},
+        )
+        self.assertEqual(second.status_code, 201, second.text)
+        second_id = second.json()['id']
+        self._upload_and_analyze_operation(project_id, first_id)
+        before = self.client.get(f"/api/projects/{project_id}").json()
+        original_analysis = before['operaciones'][0]['analisis']
+        url = f"/api/projects/{project_id}/operations/{second_id}/move-order"
+        # Backend does not need to deserialize the heavy operation analyses
+        # or build a project response to commit this metadata-only operation.
+        with patch.object(self.app.state.project_service.repository, '_deserialize_project',
+                          side_effect=AssertionError('Full project deserialization forbidden')):
+            response = self.client.post(url, json={"direccion": "up"})
+        self.assertEqual(response.status_code, 200, response.text)
+        patch_data = response.json()
+        self.assertTrue(patch_data['moved'])
+        self.assertEqual(patch_data['setup_id'], 'setup-main')
+        self.assertEqual(
+            {x['id']: x['orden'] for x in patch_data['orders']},
+            {first_id: 1, second_id: 0},
+        )
+        self.assertNotIn('analisis', response.text)
+        after = self.client.get(f"/api/projects/{project_id}").json()
+        self.assertEqual(after['operaciones'][0]['analisis'], original_analysis)
+        self.assertEqual({x['id']: x['orden'] for x in after['operaciones']},
+                         {first_id: 1, second_id: 0})
+        # Old endpoint is not removed or changed.
+        old = self.client.post(
+            f"/api/projects/{project_id}/operations/{first_id}/move",
+            json={"direccion": "up"},
+        )
+        self.assertEqual(old.status_code, 200, old.text)
+        final = self.client.get(f"/api/projects/{project_id}").json()
+        self.assertEqual({x['id']: x['orden'] for x in final['operaciones']},
+                         {first_id: 0, second_id: 1})
+
+    def test_compact_order_route_keeps_project_ownership_barrier(self) -> None:
+        project_id = self._create_project()
+        operation_id = self._create_operation(project_id)
+        coordinator = self.app.state.machine_runtime.physical_ownership
+        lease = coordinator.begin_project_edit(project_id)
+        try:
+            rejected = self.client.post(
+                f"/api/projects/{project_id}/operations/{operation_id}/move-order",
+                json={"direccion": "down"},
+            )
+            self.assertEqual(rejected.status_code, 400, rejected.text)
+        finally:
+            coordinator.end_project_edit(lease)
+
     def test_setup_operations_api_and_shared_references(self) -> None:
         project_id = self._create_project()
         project = self.client.get(f"/api/projects/{project_id}").json()
