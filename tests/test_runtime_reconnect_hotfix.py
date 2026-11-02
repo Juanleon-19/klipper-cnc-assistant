@@ -134,6 +134,17 @@ class AdministrativeConnectExclusionTest(unittest.TestCase):
         self.assertTrue(coordinator.snapshot()['recovery_pending'])
         self.assertFalse(coordinator.snapshot()['connection_active'])
 
+    def test_redundant_connection_does_not_change_active_revision(self):
+        coordinator = PhysicalMachineCoordinator()
+        runtime = RecoverableMachineRuntime(physical_config(), coordinator=coordinator)
+        runtime._client = object()  # Existing fake session, no hardware IO.
+        before = coordinator.snapshot()['revision']
+        with patch.object(runtime, '_connect_locked', return_value={'connected': True}) as startup:
+            self.assertEqual(runtime.connect(), {'connected': True})
+            startup.assert_called_once()
+        self.assertEqual(coordinator.snapshot()['revision'], before)
+        self.assertFalse(coordinator.snapshot()['connection_active'])
+
     def test_connection_lease_closed_after_transport_failure(self):
         coordinator = PhysicalMachineCoordinator()
         runtime = RecoverableMachineRuntime(physical_config(), coordinator=coordinator)
