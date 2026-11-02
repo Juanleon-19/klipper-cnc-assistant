@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Request
+from pydantic import BaseModel
 
 from klipper_cnc_assistant.application import ApplicationError
 
@@ -16,6 +17,16 @@ from .machine_schemas import (
     ManualControlRequest,
     ProbeContextRequest,
 )
+
+
+
+class PartialResetAttestationRequest(BaseModel):
+    """One explicit, hash-bound operator acknowledgement, never implicit UI recovery."""
+    journal_sha256: str
+    project_sha256: str
+    operations_sha256: str
+    operation_count: int
+    acknowledgement: str
 
 
 def build_machine_router() -> APIRouter:
@@ -67,12 +78,18 @@ def build_machine_router() -> APIRouter:
         return status(request.app.state.job_service)
 
     @router.post("/administrative-recovery/{transaction_id}")
-    def recover_administrative_transaction(transaction_id: str, request: Request):
+    def recover_administrative_transaction(
+        transaction_id: str, request: Request,
+        attestation: PartialResetAttestationRequest | None = None,
+    ):
         from klipper_cnc_assistant.execution.administrative_recovery import recover
         from klipper_cnc_assistant.machine.physical_ownership import OwnershipError
         from klipper_cnc_assistant.application.errors import ApplicationError
         try:
-            return recover(request.app.state.job_service, transaction_id)
+            return recover(
+                request.app.state.job_service, transaction_id,
+                partial_reset_attestation=(attestation.model_dump() if attestation else None),
+            )
         except OwnershipError as error:
             raise ApplicationError(str(error)) from error
 
