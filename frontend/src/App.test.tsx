@@ -64,7 +64,7 @@ const operationProfileProject: Project = {
   estado_general: "incompleto",
 };
 
-function seedOperationProfileApi(initialProject: Project, options: { persistPatch?: boolean } = {}) {
+function seedOperationProfileApi(initialProject: Project, options: { persistPatch?: boolean; trashReject?: boolean } = {}) {
   let persistedProject = initialProject;
   let patchPayload: Record<string, unknown> | null = null;
   let movePayload: Record<string, unknown> | null = null;
@@ -76,6 +76,13 @@ function seedOperationProfileApi(initialProject: Project, options: { persistPatc
     const url = String(input);
     const method = init?.method ?? "GET";
 
+    if (url === "/api/projects/proj_1/trash" && method === "POST") {
+      if (options.trashReject) return Promise.resolve(jsonResponse(
+        { detalle: "La ejecución actual conserva dependencias de este proyecto." }, false, 400
+      ));
+      persistedProject = { ...persistedProject, status: "trashed", trashed_at: "2026-11-02T18:00:00Z" };
+      return Promise.resolve(jsonResponse(persistedProject));
+    }
     if (url.endsWith("/move-order") && method === "POST") {
       movePayload = JSON.parse(String(init?.body)) as Record<string, unknown>;
       return moveResponse.promise;
@@ -404,6 +411,39 @@ describe("App", () => {
     expect(await screen.findByText("El perfil no pudo guardarse.")).toBeInTheDocument();
     expect(selector).toHaveValue("standard");
     expect(scenario.projectGets).toBe(0);
+  });
+
+  it("confirma traslado a Papelera y cierra la vista activa solo tras el OK", async () => {
+    window.innerWidth = 1440;
+    window.history.replaceState(null, "", "/?view=proyectos&project=proj_1");
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+    const scenario = seedOperationProfileApi(operationProfileProject);
+    render(<App />);
+    expect(await screen.findByRole("button", { name: /Mover arriba/i })).toBeInTheDocument();
+    fireEvent.click(screen.getByText("Más acciones"));
+    fireEvent.click(screen.getByRole("button", { name: "Mover a Papelera" }));
+    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("se movió a la Papelera"));
+    expect(scenario.persistedProject.status).toBe("trashed");
+    expect(screen.queryByLabelText("Perfil de cambio de Taladrado 0.8 mm")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Papelera" }));
+    expect(screen.getByText("Proyecto de perfiles")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Restaurar" })).toBeInTheDocument();
+    confirm.mockRestore();
+  });
+
+  it("no oculta ni mueve el proyecto con ejecución pendiente", async () => {
+    window.innerWidth = 1440;
+    window.history.replaceState(null, "", "/?view=proyectos&project=proj_1");
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+    const scenario = seedOperationProfileApi(operationProfileProject, { trashReject: true });
+    render(<App />);
+    expect(await screen.findByRole("button", { name: /Mover arriba/i })).toBeInTheDocument();
+    fireEvent.click(screen.getByText("Más acciones"));
+    fireEvent.click(screen.getByRole("button", { name: "Mover a Papelera" }));
+    expect(await screen.findByText(/conserva una ejecución pendiente o activa/)).toBeInTheDocument();
+    expect(scenario.persistedProject.status).not.toBe("trashed");
+    expect(screen.getByText("Proyecto de perfiles")).toBeInTheDocument();
+    confirm.mockRestore();
   });
 
   it("persiste el cambio de herramienta larga a estándar", async () => {
