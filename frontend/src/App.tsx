@@ -126,6 +126,7 @@ export default function App() {
   const [loading, setLoading] = useState(true);
   const [refreshingSystem, setRefreshingSystem] = useState(false);
   const [error, setError] = useState("");
+  const [projectNotice, setProjectNotice] = useState("");
   const runtimePollInFlight = useRef(false);
   const [busyKey, setBusyKey] = useState<string | null>(null);
   const [creatingProject, setCreatingProject] = useState(false);
@@ -515,11 +516,24 @@ Después deberá volver a conectar el Arduino, hacer homing, posicionar X0/Y0 y 
     if (!confirmed) return;
     setBusyKey(`project:trash:${project.id}`);
     setError("");
+    setProjectNotice("");
     try {
       const updated = await api.trashProject(project.id);
+      // A successful trash is a reversible status transition, NOT an archive
+      // of the current machine job. Never leave the trashed workspace selected,
+      // which previously looked as if the project had not moved.
+      if (updated.id !== project.id || updated.status !== "trashed") {
+        throw new Error("El servidor no confirmó el traslado a la Papelera.");
+      }
       setProjects((current) => current.map((item) => item.id === project.id ? updated : item));
+      setSelectedProjectId((current) => current === project.id ? null : current);
+      setWorkspaceViewOverride(undefined);
+      setProjectNotice(`«${updated.nombre}» se movió a la Papelera. Para recuperarlo, abra Proyectos → Papelera → Restaurar.`);
     } catch (requestError) {
-      setError(requestError instanceof Error ? requestError.message : "No fue posible mover el proyecto a Papelera.");
+      const message = requestError instanceof Error ? requestError.message : "No fue posible mover el proyecto a Papelera.";
+      setError(message.includes("conserva dependencias")
+        ? "El proyecto conserva una ejecución pendiente o activa. No se movió a la Papelera; termine o cierre el intento desde Ejecución y compruebe el reposo antes de volver a intentarlo."
+        : message);
     } finally {
       setBusyKey(null);
     }
@@ -709,6 +723,7 @@ Después deberá volver a conectar el Arduino, hacer homing, posicionar X0/Y0 y 
         </header>
 
         {error ? <div className="alert alert--error">{error}</div> : null}
+        {projectNotice ? <div className="alert alert--success" role="status">{projectNotice}</div> : null}
         {appIncompatible ? (
           <div className="alert alert--error compatibility-alert" role="alert">
             <div><strong>La aplicación necesita actualizarse</strong><p>Frontend {FRONTEND_BUILD} · esquema {FRONTEND_SCHEMA_VERSION}; backend {systemInfo?.backend_version} · esquema {systemInfo?.schema_version}.</p></div>
