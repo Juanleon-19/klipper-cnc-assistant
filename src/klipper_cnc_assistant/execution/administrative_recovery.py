@@ -194,7 +194,127 @@ def _verified_uncheckpointed_run_retirement(service, journal, current, after):
     return not any(target.glob('*/current_run.json'))
 
 
-def recover(service, transaction_id):
+
+def _audited_partial_preparation_project(service, journal, raw_journal, current, after, attestation):
+    """Explicit operator attestation of a single uncheckpointed project reset.
+
+    Without the SHA-matching preimage, no automatic proof that the project
+    changed *only* by the intended reset is possible. This deliberately does
+    not claim such proof. Accept an operator's exact, locally witnessed
+    project/operation hashes for ONE bounded reset window; retain that fact in
+    a durable audit receipt. All other files MUST still match the checkpoint.
+    """
+    if not isinstance(attestation, dict):
+        return None
+    if (journal.get('schema_version') != 2
+            or journal.get('status') != 'PENDING'
+            or journal.get('action') != 'reset-preparation'
+            or journal.get('phase') != 'HISTORY_SAVED'
+            or journal.get('completed_steps') != ['HISTORY_SAVED']
+            or journal.get('failure') is not None
+            or not isinstance(journal.get('before'), dict)
+            or not isinstance(after, dict)
+            or journal['before'] != after):
+        return None
+    evidence = journal.get('evidence')
+    if not isinstance(evidence, dict) or evidence.get('runs') != [] or evidence.get('abandoned_run'):
+        return None
+    project_id, setup_id = evidence.get('project_id'), evidence.get('setup_id')
+    if (not isinstance(project_id, str) or not isinstance(setup_id, str)
+            or any(not value or value in {'.', '..'} or '/' in value or '\\' in value
+                   for value in (project_id, setup_id))):
+        return None
+
+    project_rel = f'projects/{project_id}/project.json'
+    if project_rel not in after or set(current) != set(after):
+        return None
+    changed = {rel for rel in current if current[rel] != after[rel]}
+    if changed != {project_rel}:
+        return None
+
+    project_path = service.repository.projects_dir / project_id / 'project.json'
+    raw_project = project_path.read_bytes()
+    project_hash = digest(raw_project)
+    if (current[project_rel] != project_hash
+            or attestation.get('journal_sha256') != digest(raw_journal)
+            or attestation.get('project_sha256') != project_hash
+            or attestation.get('acknowledgement') !=
+               'ACEPTO_CONCILIAR_RESET_PARCIAL_SIN_PREIMAGEN'):
+        return None
+
+    try:
+        project = json.loads(raw_project)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(project, dict) or project.get('id') != project_id:
+        return None
+    operations = project.get('operaciones')
+    if not isinstance(operations, list) or not operations:
+        return None
+    count = attestation.get('operation_count')
+    if type(count) is not int or count != len(operations):
+        return None
+    operation_hash = digest(json.dumps(
+        operations, sort_keys=True, separators=(',', ':'), ensure_ascii=True
+    ).encode('utf-8'))
+    if attestation.get('operations_sha256') != operation_hash:
+        return None
+
+    # Check all model invariants (including unique operation identity and
+    # order) without saving, normalizing or restoring any project data.
+    try:
+        domain_project = service.repository.load_project(project_id)
+        setup = domain_project.get_setup(setup_id)
+    except Exception:
+        return None
+    if (len(domain_project.operaciones) != count or
+            str(setup.preparation_status) != 'sin_iniciar' or
+            setup.active_reference_id is not None or setup.active_map_id is not None or
+            setup.last_prepared_at is not None):
+        return None
+    preparation = project.get('montajes')
+    if not isinstance(preparation, list):
+        return None
+    matching = [s for s in preparation if isinstance(s, dict) and s.get('id') == setup_id]
+    if len(matching) != 1:
+        return None
+    raw_setup = matching[0]
+    fields = raw_setup.get('preparacion')
+    if not isinstance(fields, dict):
+        return None
+    must_be_null = (
+        'physical_reference', 'origen_trabajo', 'referencia_z',
+        'region_sondeable_configurada_en', 'mapa_disponible_en',
+        'mapa_validado_en', 'compensacion_previsualizada_en'
+    )
+    if any(fields.get(name, object()) is not None for name in must_be_null):
+        return None
+    if not isinstance(fields.get('motivo_invalidacion'), str) or not fields['motivo_invalidacion']:
+        return None
+    if (not isinstance(raw_setup.get('placement_revision'), str) or
+            not raw_setup['placement_revision'].startswith('placement-') or
+            not raw_setup['placement_revision'].split('-')[-1].isdigit()):
+        return None
+
+    # With no runs recorded, the target setup must not contain an unrecorded
+    # current execution. No attempt is silently retired by this recovery.
+    runs_dir = service.repository.projects_dir / project_id / 'reports' / 'jobs' / setup_id
+    if any(runs_dir.glob('*/current_run.json')):
+        return None
+
+    return {
+        'verification': 'OPERATOR_ATTESTED_NO_EXACT_PREIMAGE',
+        'project': project_rel,
+        'project_before_sha256': after[project_rel],
+        'project_observed_sha256': project_hash,
+        'operations_sha256': operation_hash,
+        'operation_count': count,
+        'setup_id': setup_id,
+        'warning': 'No se dispone de preimagen exacta: se conserva el reset parcial observado; no se certifica igualdad de operaciones con el estado previo.',
+    }
+
+
+def recover(service, transaction_id, *, partial_reset_attestation=None):
     path = service.administrative_pending_path
     coordinator = service.runtime.physical_ownership
     # Idempotent response never clears newly acquired ownership or a newer journal.
@@ -247,6 +367,9 @@ def recover(service, transaction_id):
             outcome = 'PARTIAL_PRESERVED_RETRY_RESET' if evidence.get('phase') != 'COMPLETED' else 'COMPLETED'
         elif _verified_uncheckpointed_run_retirement(service, journal, current, after):
             outcome = 'CURRENT_RUN_RETIRED_WITH_VERIFIED_ARCHIVE'
+        elif (audit := _audited_partial_preparation_project(
+                service, journal, original, current, after, partial_reset_attestation)) is not None:
+            outcome = 'MANUAL_PARTIAL_PROJECT_RESET_ATTESTED'
         else:
             raise ApplicationError('Archivos cambiados sin checkpoint verificable; se conserva el journal y el histórico. Requiere conciliación específica del respaldo.')
         check()
@@ -278,6 +401,8 @@ def recover(service, transaction_id):
         receipt = {'id': transaction_id, 'outcome': outcome, 'status': 'ARCHIVE_PREPARED',
                    'journal_sha256': digest(original), 'files': current,
                    'physical_recovery_required': True}
+        if outcome == 'MANUAL_PARTIAL_PROJECT_RESET_ATTESTED':
+            receipt['audit'] = audit
         atomic_json(directory / 'resolution.json', receipt, durable=True)
         check()
         destination = directory / 'original.json'
@@ -292,8 +417,11 @@ def recover(service, transaction_id):
         coordinator.finish_administrative_recovery(token)
         receipt['status'] = 'RECONCILED'
         atomic_json(directory / 'resolution.json', receipt, durable=True)
+        next_action = ('Verificar reposo y recuperar controles; revisar estado de preparación antes de trabajar. No repetir Reiniciar proceso automáticamente.'
+                       if outcome == 'MANUAL_PARTIAL_PROJECT_RESET_ATTESTED'
+                       else 'Verificar reposo y recuperar controles; después Reiniciar proceso. No se reanuda ningún trabajo.')
         return {'status': 'reconciled', 'outcome': outcome, 'physical_recovery_required': True,
-                'next_action': 'Verificar reposo y recuperar controles; después Reiniciar proceso. No se reanuda ningún trabajo.'}
+                'next_action': next_action}
     finally:
         coordinator.end_administration(token)
 
