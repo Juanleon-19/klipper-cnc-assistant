@@ -420,9 +420,10 @@ describe("App", () => {
     const scenario = seedOperationProfileApi(operationProfileProject);
     render(<App />);
     expect(await screen.findByRole("button", { name: /Mover arriba/i })).toBeInTheDocument();
-    fireEvent.click(screen.getByText("Más acciones"));
-    fireEvent.click(screen.getByRole("button", { name: "Mover a Papelera" }));
-    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("se movió a la Papelera"));
+    const card = screen.getByRole("button", { name: "Abrir Proyecto de perfiles" });
+    fireEvent.click(within(card).getByText("Más acciones"));
+    fireEvent.click(within(card).getByRole("button", { name: "Mover a Papelera" }));
+    expect(await screen.findByText(/se movió a la Papelera/)).toBeInTheDocument();
     expect(scenario.persistedProject.status).toBe("trashed");
     expect(screen.queryByLabelText("Perfil de cambio de Taladrado 0.8 mm")).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Papelera" }));
@@ -438,8 +439,9 @@ describe("App", () => {
     const scenario = seedOperationProfileApi(operationProfileProject, { trashReject: true });
     render(<App />);
     expect(await screen.findByRole("button", { name: /Mover arriba/i })).toBeInTheDocument();
-    fireEvent.click(screen.getByText("Más acciones"));
-    fireEvent.click(screen.getByRole("button", { name: "Mover a Papelera" }));
+    const card = screen.getByRole("button", { name: "Abrir Proyecto de perfiles" });
+    fireEvent.click(within(card).getByText("Más acciones"));
+    fireEvent.click(within(card).getByRole("button", { name: "Mover a Papelera" }));
     expect(await screen.findByText(/conserva una ejecución pendiente o activa/)).toBeInTheDocument();
     expect(scenario.persistedProject.status).not.toBe("trashed");
     expect(screen.getByText("Proyecto de perfiles")).toBeInTheDocument();
