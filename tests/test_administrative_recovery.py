@@ -149,6 +149,121 @@ class AdministrativeRecoveryTest(unittest.TestCase):
             recover(self.service, journal['id'])
         self.assertTrue(self.path.exists())
 
+    def _uncheckpointed_zero_run_project_reset(self):
+        from dataclasses import replace
+        from klipper_cnc_assistant.domain.models import OperationPreparation
+        from klipper_cnc_assistant.execution.administrative_guard import AdministrativeGuard
+
+        # The real reported case: an earlier successful recovery already
+        # retired the run; this new reset has zero runs and changed only
+        # project.json before reconnecting / losing its dependency checkpoint.
+        self.fixture.path.unlink()
+        repo = self.service.repository
+        def reset_project(guard):
+            project = repo.load_project(self.fixture.fixture.project_id)
+            setup = project.get_setup(self.fixture.fixture.setup_id)
+            changed = replace(
+                setup, placement_revision='placement-2',
+                active_reference_id=None, active_map_id=None,
+                last_prepared_at=None, preparation_status='sin_iniciar',
+                preparacion=OperationPreparation(motivo_invalidacion='Preparación reiniciada.'),
+            )
+            repo.save_project(project.replace_setup(changed))
+        checkpoint = AdministrativeGuard.checkpoint
+        def interrupted(guard, phase):
+            if phase in {'DEPENDENCIES_RESET', 'FAILED_WITH_VERIFIED_FILES'}:
+                raise OSError('simulated connection race after project reset')
+            return checkpoint(guard, phase)
+        with patch.object(AdministrativeGuard, 'checkpoint', interrupted):
+            with self.assertRaisesRegex(OSError, 'connection race'):
+                self.fixture.reset(reset_dependencies=reset_project)
+        journal = json.loads(self.path.read_text())
+        self.assertEqual(journal['phase'], 'HISTORY_SAVED')
+        self.assertEqual(journal['evidence']['runs'], [])
+        self.assertEqual(journal['before'], journal['verified_after'])
+        current = inventory(self.path.parent)
+        self.assertEqual(
+            {x for x in current if current[x] != journal['verified_after'][x]},
+            {f'projects/{self.fixture.fixture.project_id}/project.json'})
+        return journal
+
+    def _partial_reset_attestation(self):
+        from klipper_cnc_assistant.execution.administrative_recovery import digest
+        pending = self.path.read_bytes()
+        raw = (self.service.repository.projects_dir /
+               self.fixture.fixture.project_id / 'project.json').read_bytes()
+        data = json.loads(raw)
+        operations = json.dumps(
+            data['operaciones'], sort_keys=True, separators=(',', ':'), ensure_ascii=True
+        ).encode('utf-8')
+        return {
+            'journal_sha256': digest(pending),
+            'project_sha256': digest(raw),
+            'operations_sha256': digest(operations),
+            'operation_count': len(data['operaciones']),
+            'acknowledgement': 'ACEPTO_CONCILIAR_RESET_PARCIAL_SIN_PREIMAGEN',
+        }
+
+    def test_explicit_attested_partial_project_reset_preserves_every_data_file(self):
+        journal = self._uncheckpointed_zero_run_project_reset()
+        attestation = self._partial_reset_attestation()
+        before = inventory(self.path.parent)
+        raw_journal = self.path.read_bytes()
+        result = recover(self.service, journal['id'], partial_reset_attestation=attestation)
+        self.assertEqual(result['status'], 'reconciled')
+        self.assertEqual(result['outcome'], 'MANUAL_PARTIAL_PROJECT_RESET_ATTESTED')
+        self.assertEqual(inventory(self.path.parent), before)
+        self.assertFalse(self.path.exists())
+        path = self.path.parent / 'administrative-transactions' / journal['id']
+        self.assertEqual((path / 'original.json').read_bytes(), raw_journal)
+        receipt = json.loads((path / 'resolution.json').read_text())
+        self.assertEqual(receipt['audit']['verification'], 'OPERATOR_ATTESTED_NO_EXACT_PREIMAGE')
+        self.assertEqual(receipt['audit']['project_observed_sha256'], attestation['project_sha256'])
+        self.assertEqual(receipt['audit']['operations_sha256'], attestation['operations_sha256'])
+        self.assertTrue(self.runtime.physical_ownership.snapshot()['recovery_pending'])
+        self.assertFalse(self.runtime.physical_ownership.snapshot()['administrative_incomplete'])
+
+    def test_unattested_partial_project_reset_is_not_automatically_accepted(self):
+        journal = self._uncheckpointed_zero_run_project_reset()
+        with self.assertRaisesRegex(ApplicationError, 'checkpoint'):
+            recover(self.service, journal['id'])
+        self.assertTrue(self.path.exists())
+        self.assertTrue(self.runtime.physical_ownership.snapshot()['administrative_incomplete'])
+
+    def test_partial_reset_attestation_rejects_wrong_hash_or_acknowledgement(self):
+        journal = self._uncheckpointed_zero_run_project_reset()
+        good = self._partial_reset_attestation()
+        for field, bad in [
+            ('project_sha256', '0' * 64),
+            ('journal_sha256', '1' * 64),
+            ('operations_sha256', '2' * 64),
+            ('operation_count', 100),
+            ('acknowledgement', 'wrong'),
+        ]:
+            attempt = dict(good, **{field: bad})
+            with self.subTest(field=field):
+                with self.assertRaisesRegex(ApplicationError, 'checkpoint'):
+                    recover(self.service, journal['id'], partial_reset_attestation=attempt)
+                self.assertTrue(self.path.exists())
+
+    def test_partial_reset_attestation_rejects_extra_modification(self):
+        journal = self._uncheckpointed_zero_run_project_reset()
+        attestation = self._partial_reset_attestation()
+        extra = self.path.parent / 'unrelated.json'
+        extra.write_text('{"unrelated": true}')
+        with self.assertRaisesRegex(ApplicationError, 'checkpoint'):
+            recover(self.service, journal['id'], partial_reset_attestation=attestation)
+        self.assertTrue(self.path.exists())
+
+    def test_partial_reset_attestation_rejects_new_run(self):
+        journal = self._uncheckpointed_zero_run_project_reset()
+        attestation = self._partial_reset_attestation()
+        run = self.fixture.path
+        run.write_text('{"unexpected": true}')
+        with self.assertRaisesRegex(ApplicationError, 'checkpoint'):
+            recover(self.service, journal['id'], partial_reset_attestation=attestation)
+        self.assertTrue(self.path.exists())
+
     def test_fully_archived_reset_reconciles_with_unrelated_unselected_run(self):
         journal, other, original = self._interrupted_after_current_run_archived()
         result = recover(self.service, journal['id'])
