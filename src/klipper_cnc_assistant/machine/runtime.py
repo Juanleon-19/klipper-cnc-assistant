@@ -776,7 +776,19 @@ class MachineRuntime:
 
     def connect(self) -> dict[str, Any]:
         with self._lifecycle_lock:
-            return self._connect_locked()
+            # A redundant Connect on an existing session is read-only and must
+            # not advance the physical ownership revision of a running job.
+            # New transport startup, however, must be exclusively reserved.
+            if self.config.mode is MachineMode.SIMULATED or self._client is not None:
+                return self._connect_locked()
+            try:
+                connection = self.physical_ownership.begin_runtime_connection()
+            except OwnershipError as error:
+                raise MachineRuntimeError(str(error)) from error
+            try:
+                return self._connect_locked()
+            finally:
+                self.physical_ownership.end_runtime_connection(connection)
 
     def _connect_locked(self) -> dict[str, Any]:
         self.physical_ownership.require_running()

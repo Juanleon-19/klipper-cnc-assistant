@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import unittest
+import threading
+from unittest.mock import patch
 from klipper_cnc_assistant.machine.physical_ownership import PhysicalMachineCoordinator
 
 from klipper_cnc_assistant.api.machine_routes import build_machine_router
@@ -66,6 +68,90 @@ class FakeReconnectRuntime(RecoverableMachineRuntime):
         with self._lock:
             self._state = MachineRuntimeState.DIAGNOSTIC
         return self.snapshot()
+
+
+
+class AdministrativeConnectExclusionTest(unittest.TestCase):
+    """All transport startup IO is mocked; never talk to real machinery."""
+
+    def test_connection_denied_during_administrative_reset_and_disconnect(self):
+        coordinator = PhysicalMachineCoordinator()
+        runtime = RecoverableMachineRuntime(physical_config(), coordinator=coordinator)
+        token = coordinator.begin_administration(expected_revision=coordinator.snapshot()['revision'])
+        try:
+            with patch.object(runtime, '_connect_locked') as connect_impl:
+                with self.assertRaisesRegex(MachineRuntimeError, 'administrativa activa'):
+                    runtime.connect()
+                connect_impl.assert_not_called()
+            coordinator.administrative_disconnected(token)
+            with patch.object(runtime, '_connect_locked') as connect_impl:
+                with self.assertRaisesRegex(MachineRuntimeError, 'administrativa activa'):
+                    runtime.connect()
+                connect_impl.assert_not_called()
+        finally:
+            coordinator.end_administration(token)
+        self.assertFalse(coordinator.snapshot()['connection_active'])
+
+    def test_administration_denied_while_transport_startup_in_progress(self):
+        from klipper_cnc_assistant.machine.physical_ownership import OwnershipError
+        coordinator = PhysicalMachineCoordinator()
+        runtime = RecoverableMachineRuntime(physical_config(), coordinator=coordinator)
+        entered, release = threading.Event(), threading.Event()
+        failures = []
+        def fake_startup():
+            entered.set()
+            if not release.wait(5):
+                raise AssertionError('Fake startup not released')
+            return {'fake': True}
+        def worker():
+            try:
+                runtime.connect()
+            except Exception as error:
+                failures.append(error)
+        with patch.object(runtime, '_connect_locked', side_effect=fake_startup):
+            thread = threading.Thread(target=worker)
+            thread.start()
+            try:
+                self.assertTrue(entered.wait(5))
+                self.assertTrue(coordinator.snapshot()['connection_active'])
+                with self.assertRaisesRegex(OwnershipError, 'bloqueada'):
+                    coordinator.begin_administration(expected_revision=coordinator.snapshot()['revision'])
+                self.assertFalse(coordinator.snapshot()['administrative_active'])
+            finally:
+                release.set()
+                thread.join(timeout=5)
+            self.assertFalse(thread.is_alive())
+            self.assertEqual(failures, [])
+        self.assertFalse(coordinator.snapshot()['connection_active'])
+        token = coordinator.begin_administration(expected_revision=coordinator.snapshot()['revision'])
+        coordinator.end_administration(token)
+
+    def test_connection_possible_for_recovery_when_no_admin_is_active(self):
+        coordinator = PhysicalMachineCoordinator(uncertain=True)
+        runtime = RecoverableMachineRuntime(physical_config(), coordinator=coordinator)
+        with patch.object(runtime, '_connect_locked', return_value={'fake': True}):
+            self.assertEqual(runtime.connect(), {'fake': True})
+        self.assertTrue(coordinator.snapshot()['recovery_pending'])
+        self.assertFalse(coordinator.snapshot()['connection_active'])
+
+    def test_redundant_connection_does_not_change_active_revision(self):
+        coordinator = PhysicalMachineCoordinator()
+        runtime = RecoverableMachineRuntime(physical_config(), coordinator=coordinator)
+        runtime._client = object()  # Existing fake session, no hardware IO.
+        before = coordinator.snapshot()['revision']
+        with patch.object(runtime, '_connect_locked', return_value={'connected': True}) as startup:
+            self.assertEqual(runtime.connect(), {'connected': True})
+            startup.assert_called_once()
+        self.assertEqual(coordinator.snapshot()['revision'], before)
+        self.assertFalse(coordinator.snapshot()['connection_active'])
+
+    def test_connection_lease_closed_after_transport_failure(self):
+        coordinator = PhysicalMachineCoordinator()
+        runtime = RecoverableMachineRuntime(physical_config(), coordinator=coordinator)
+        with patch.object(runtime, '_connect_locked', side_effect=RuntimeError('fake IO failure')):
+            with self.assertRaisesRegex(RuntimeError, 'fake IO failure'):
+                runtime.connect()
+        self.assertFalse(coordinator.snapshot()['connection_active'])
 
 
 class RuntimeReconnectHotfixTest(unittest.TestCase):
