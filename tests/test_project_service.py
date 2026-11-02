@@ -314,6 +314,72 @@ class ProjectServiceTest(unittest.TestCase):
             ("A", "C", "B"),
         )
 
+    def test_metadata_reorder_keeps_analysis_and_gcode_bytes_untouched(self) -> None:
+        """Only 'orden' and top-level revision/timestamps may change."""
+        from unittest.mock import patch
+        from klipper_cnc_assistant.storage.safe_persistence import PersistenceConflict
+        project = self.service.create_project(
+            nombre="Orden rápido", ancho_mm=50.0, alto_mm=40.0,
+        )
+        a = self.service.add_operation(project_id=project.id, nombre="Fresado", tipo="aislamiento")
+        b = self.service.add_operation(project_id=project.id, nombre="Taladrado", tipo="taladrado")
+        path = self.service.repository.project_dir(project.id) / "project.json"
+        before = json.loads(path.read_text())
+        before['operaciones'][0]['analisis'] = {
+            'segmentos_vista_previa': [{'x_mm': 0, 'huella': 'xyz' * 120} for _ in range(250)],
+            'extra_audit': {'immutable': 'checkpoint'},
+        }
+        before['operaciones'][1]['analisis'] = {'segmentos_lineales': list(range(250))}
+        path.write_text(json.dumps(before), encoding='utf-8')
+        immutable = {
+            op['id']: {k: v for k, v in op.items() if k != 'orden'}
+            for op in before['operaciones']
+        }
+        # The raw-json pathway must not reconstruct large / possibly legacy
+        # preview arrays as domain objects, nor call generic save_project.
+        with patch.object(self.service.repository, '_deserialize_project', side_effect=AssertionError('slow deserialize')):
+            with patch.object(self.service.repository, 'save_project', side_effect=AssertionError('generic save')):
+                result = self.service.move_operation_order_metadata(
+                    project_id=project.id, operation_id=b.id, direction='up',
+                )
+        self.assertTrue(result['moved'])
+        self.assertEqual(result['project_id'], project.id)
+        self.assertEqual(result['orders'], [{'id': a.id, 'orden': 1}, {'id': b.id, 'orden': 0}])
+        after = json.loads(path.read_text())
+        self.assertEqual(
+            {op['id']: {k: v for k, v in op.items() if k != 'orden'} for op in after['operaciones']},
+            immutable,
+        )
+        self.assertEqual(after['montajes'], before['montajes'])
+        self.assertEqual(after['storage_revision'], before['storage_revision'] + 1)
+        unchanged = self.service.move_operation_order_metadata(
+            project_id=project.id, operation_id=b.id, direction='up',
+        )
+        self.assertFalse(unchanged['moved'])
+        self.assertEqual(json.loads(path.read_text()), after)
+        with self.assertRaisesRegex((PersistenceConflict, Exception), 'orden'):
+            self.service.move_operation_order_metadata(
+                project_id=project.id, operation_id=b.id, direction='sideways',
+            )
+
+    def test_metadata_reorder_cannot_infer_order_from_duplicate_or_corrupt_data(self) -> None:
+        from klipper_cnc_assistant.storage.safe_persistence import PersistenceConflict
+        project = self.service.create_project(
+            nombre="Orden inválido", ancho_mm=50, alto_mm=40,
+        )
+        a = self.service.add_operation(project_id=project.id, nombre="Uno", tipo="taladrado")
+        self.service.add_operation(project_id=project.id, nombre="Dos", tipo="taladrado")
+        path = self.service.repository.project_dir(project.id) / 'project.json'
+        before = json.loads(path.read_text())
+        before['operaciones'][1]['orden'] = before['operaciones'][0]['orden']
+        path.write_text(json.dumps(before), encoding='utf-8')
+        raw = path.read_bytes()
+        with self.assertRaises(PersistenceConflict):
+            self.service.move_operation_order_metadata(
+                project_id=project.id, operation_id=a.id, direction='down',
+            )
+        self.assertEqual(raw, path.read_bytes())
+
     def test_files_and_analyses_are_independent_per_operation(self) -> None:
         project = self.service.create_project(
             nombre="Trayectorias", ancho_mm=50.0, alto_mm=40.0
