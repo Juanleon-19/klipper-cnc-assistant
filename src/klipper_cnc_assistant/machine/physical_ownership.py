@@ -45,6 +45,7 @@ class PhysicalMachineCoordinator:
         self._job_updates = {}
         self._project_edits = {}
         self._administrative_closed_revision = None
+        self._connecting = None
         self._reason = 'Estado remoto no reconciliado.' if uncertain else None
 
     def begin_shutdown(self):
@@ -214,6 +215,30 @@ class PhysicalMachineCoordinator:
             self._session = uuid4().hex
             self._revision += 1
 
+    def begin_runtime_connection(self):
+        """Reserve transport startup; exclude simultaneous administration without IO locks.
+
+        Connection is permitted during physical RECOVERY to verify idle state,
+        but not during an active administrative transaction or recovery.
+        """
+        with self._lock:
+            self.require_running()
+            if self._connecting is not None or self._administrative is not None:
+                raise OwnershipError(
+                    'Conexión bloqueada: conexión o transacción administrativa activa.'
+                )
+            token = uuid4().hex
+            self._connecting = token
+            self._revision += 1
+            return token
+
+    def end_runtime_connection(self, token):
+        with self._lock:
+            if token is None or token != self._connecting:
+                raise OwnershipError('La reserva de conexión ya no coincide.')
+            self._connecting = None
+            self._revision += 1
+
     def begin_job_update(self, *, project_id=None):
         """Exclude administrative mutation while an execution request is writing."""
         with self._lock:
@@ -260,7 +285,8 @@ class PhysicalMachineCoordinator:
             if (self._shutdown or not self._administrative_incomplete
                     or expected_revision != self._revision or self._root is not None
                     or self._producer_active or self._dispatching or self._permits
-                    or self._administrative is not None or self._job_updates or self._project_edits):
+                    or self._administrative is not None or self._connecting is not None
+                    or self._job_updates or self._project_edits):
                 raise OwnershipError('Recuperación administrativa bloqueada: productor, lease, operación concurrente o revisión cambiada.')
             self._revision += 1
             token = (uuid4().hex, self._session, self._revision)
@@ -289,7 +315,8 @@ class PhysicalMachineCoordinator:
         with self._lock:
             if (self._shutdown or expected_revision != self._revision or self._root is not None
                     or self._recovery or self._administrative is not None
-                    or self._producer_active or self._dispatching or self._permits or self._job_updates or self._project_edits):
+                    or self._producer_active or self._dispatching or self._permits
+                    or self._connecting is not None or self._job_updates or self._project_edits):
                 raise OwnershipError('Administración bloqueada: ownership cambió o no está libre.')
             self._revision += 1
             token = (uuid4().hex, self._session, self._revision)
@@ -333,6 +360,6 @@ class PhysicalMachineCoordinator:
         with self._lock:
             kind = OwnerKind.RECOVERY if self._recovery else (self._root.owner_kind if self._root else (OwnerKind.ADMINISTRATIVE if self._administrative is not None else OwnerKind.IDLE))
             return {'shutdown': self._shutdown, 'kind': kind.value, 'owner_id': None if self._root is None else self._root.owner_id,
-                    'administrative_incomplete': self._administrative_incomplete, 'project_edits': len(self._project_edits), 'job_updates': len(self._job_updates), 'active': kind != OwnerKind.IDLE, 'administrative_active': self._administrative is not None, 'recovery_pending': self._recovery,
+                    'administrative_incomplete': self._administrative_incomplete, 'connection_active': self._connecting is not None, 'project_edits': len(self._project_edits), 'job_updates': len(self._job_updates), 'active': kind != OwnerKind.IDLE, 'administrative_active': self._administrative is not None, 'recovery_pending': self._recovery,
                     'cancel_requested': self._cancelled, 'reason': self._reason,
                     'session': self._session, 'revision': self._revision, 'producer_active': self._producer_active, 'dispatching': len(self._dispatching), 'children': max(0, len(self._permits) - 1)}
