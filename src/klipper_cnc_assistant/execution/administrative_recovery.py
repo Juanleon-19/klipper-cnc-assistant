@@ -377,9 +377,18 @@ def recover(service, transaction_id, *, partial_reset_attestation=None):
         remote = service._observe_administrative_remote()
         guard = SimpleNamespace(remote=remote, check=check)
         if not (_fully_archived_preparation_reset(service, journal, current, after)
-                or outcome == 'CURRENT_RUN_RETIRED_WITH_VERIFIED_ARCHIVE'):
-            # For earlier/partial phases, preserve the original remote-identity
-            # checks for every current run. No historical completion is inferred.
+                or outcome in {'CURRENT_RUN_RETIRED_WITH_VERIFIED_ARCHIVE',
+                               'MANUAL_PARTIAL_PROJECT_RESET_ATTESTED'}):
+            # For earlier/partial phases with potentially affected current
+            # runs, retain strict remote-identity checks. They must never be
+            # invoked against unrelated, byte-identical executions for an
+            # explicitly attested reset with runs=[] and no target current_run:
+            # Moonraker standby/filename='' is not evidence about the other
+            # project's historical print. The attested branch already checks
+            # the complete inventory (except the one acknowledged project.json),
+            # enforces no target runs, and still requires fresh remote idle,
+            # velocity, exclusive administrative ownership and worker quiescence.
+            # No foreign run is archived, changed or declared completed.
             for file in service.repository.projects_dir.glob('*/reports/jobs/*/*/current_run.json'):
                 run = service.run_store.load(file)
                 if run:

@@ -149,7 +149,7 @@ class AdministrativeRecoveryTest(unittest.TestCase):
             recover(self.service, journal['id'])
         self.assertTrue(self.path.exists())
 
-    def _uncheckpointed_zero_run_project_reset(self):
+    def _uncheckpointed_zero_run_project_reset(self, *, with_unrelated_run=False):
         from dataclasses import replace
         from klipper_cnc_assistant.domain.models import OperationPreparation
         from klipper_cnc_assistant.execution.administrative_guard import AdministrativeGuard
@@ -157,6 +157,16 @@ class AdministrativeRecoveryTest(unittest.TestCase):
         # The real reported case: an earlier successful recovery already
         # retired the run; this new reset has zero runs and changed only
         # project.json before reconnecting / losing its dependency checkpoint.
+        if with_unrelated_run:
+            other = (self.path.parent / 'projects' / 'unrelated-project'
+                     / 'reports' / 'jobs' / 'other-setup' / 'superior' / 'current_run.json')
+            other.parent.mkdir(parents=True, exist_ok=True)
+            payload = json.loads(self.fixture.path.read_text())
+            payload['project_id'] = 'unrelated-project'
+            payload['setup_id'] = 'other-setup'
+            payload['state'] = 'RECOVERY_REQUIRED'
+            payload['operations'][0]['remote_file'] = 'other/previous-job.gcode'
+            other.write_text(json.dumps(payload), encoding='utf-8')
         self.fixture.path.unlink()
         repo = self.service.repository
         def reset_project(guard):
@@ -222,6 +232,43 @@ class AdministrativeRecoveryTest(unittest.TestCase):
         self.assertEqual(receipt['audit']['operations_sha256'], attestation['operations_sha256'])
         self.assertTrue(self.runtime.physical_ownership.snapshot()['recovery_pending'])
         self.assertFalse(self.runtime.physical_ownership.snapshot()['administrative_incomplete'])
+
+    def test_attested_zero_run_reset_preserves_unrelated_run_with_empty_remote_filename(self):
+        """Reported failure: other run has an expected filename; Moonraker standby has none."""
+        journal = self._uncheckpointed_zero_run_project_reset(with_unrelated_run=True)
+        attestation = self._partial_reset_attestation()
+        other = (self.path.parent / 'projects' / 'unrelated-project'
+                 / 'reports' / 'jobs' / 'other-setup' / 'superior' / 'current_run.json')
+        foreign_before = other.read_bytes()
+        data_before = inventory(self.path.parent)
+        remote = self.service._observe_administrative_remote()
+        remote.update(filename='', state='standby', is_active_observed=False,
+                      live_velocity=[0.0, 0.0, 0.0])
+        from types import SimpleNamespace
+        with self.assertRaisesRegex(ApplicationError, 'Moonraker no tiene un archivo seleccionado'):
+            self.service._assert_administrative_print_identity(
+                json.loads(other.read_text()), SimpleNamespace(remote=remote, check=lambda: None))
+        with patch.object(self.service, '_observe_administrative_remote', return_value=remote) as observe:
+            result = recover(self.service, journal['id'], partial_reset_attestation=attestation)
+            observe.assert_called_once()
+        self.assertEqual(result['status'], 'reconciled')
+        self.assertEqual(result['outcome'], 'MANUAL_PARTIAL_PROJECT_RESET_ATTESTED')
+        self.assertEqual(other.read_bytes(), foreign_before)
+        self.assertEqual(inventory(self.path.parent), data_before)
+        self.assertFalse(self.path.exists())
+        self.assertTrue(self.runtime.physical_ownership.snapshot()['recovery_pending'])
+        self.assertFalse(self.runtime.physical_ownership.snapshot()['administrative_incomplete'])
+
+    def test_attested_zero_run_reset_rejects_unrelated_printing(self):
+        journal = self._uncheckpointed_zero_run_project_reset(with_unrelated_run=True)
+        attestation = self._partial_reset_attestation()
+        self.fixture.fixture.adapter.state = 'printing'
+        before = inventory(self.path.parent)
+        with self.assertRaisesRegex(ApplicationError, 'Moonraker'):
+            recover(self.service, journal['id'], partial_reset_attestation=attestation)
+        self.assertEqual(inventory(self.path.parent), before)
+        self.assertTrue(self.path.exists())
+        self.assertTrue(self.runtime.physical_ownership.snapshot()['administrative_incomplete'])
 
     def test_unattested_partial_project_reset_is_not_automatically_accepted(self):
         journal = self._uncheckpointed_zero_run_project_reset()
