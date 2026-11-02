@@ -776,10 +776,11 @@ class MachineRuntime:
 
     def connect(self) -> dict[str, Any]:
         with self._lifecycle_lock:
-            # Reserve the whole transport startup against an administrative
-            # reset. A concurrent reset must fail *before* persisting a journal;
-            # a late Connect button cannot recreate transports while a reset
-            # is checkpointing after its authorized disconnect.
+            # A redundant Connect on an existing session is read-only and must
+            # not advance the physical ownership revision of a running job.
+            # New transport startup, however, must be exclusively reserved.
+            if self.config.mode is MachineMode.SIMULATED or self._client is not None:
+                return self._connect_locked()
             try:
                 connection = self.physical_ownership.begin_runtime_connection()
             except OwnershipError as error:
