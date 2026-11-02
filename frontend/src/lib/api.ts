@@ -30,6 +30,15 @@ import type {
   Setup,
 } from "../types";
 
+export type OperationOrderPatch = {
+  project_id: string;
+  setup_id: string;
+  orders: Array<{ id: string; orden: number }>;
+  actualizado_en: string;
+  storage_revision: number;
+  moved: boolean;
+};
+
 export type OperationInput = {
   nombre: string;
   tipo: string;
@@ -274,6 +283,11 @@ export const api = {
   duplicateOperation: (projectId: string, operationId: string) =>
     request<Operation>(`/api/projects/${projectId}/operations/${operationId}/duplicate`, {
       method: "POST",
+    }),
+  moveOperationOrder: (projectId: string, operationId: string, direccion: "up" | "down") =>
+    request<OperationOrderPatch>(`/api/projects/${projectId}/operations/${operationId}/move-order`, {
+      method: "POST",
+      body: JSON.stringify({ direccion }),
     }),
   moveOperation: (projectId: string, operationId: string, direccion: "up" | "down") =>
     request<Operation>(`/api/projects/${projectId}/operations/${operationId}/move`, {
