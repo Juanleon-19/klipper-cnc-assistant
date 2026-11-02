@@ -317,7 +317,7 @@ class ProjectServiceTest(unittest.TestCase):
     def test_metadata_reorder_keeps_analysis_and_gcode_bytes_untouched(self) -> None:
         """Only 'orden' and top-level revision/timestamps may change."""
         from unittest.mock import patch
-        from klipper_cnc_assistant.storage.safe_persistence import PersistenceConflict
+        from klipper_cnc_assistant.domain import ProjectValidationError
         project = self.service.create_project(
             nombre="Orden rápido", ancho_mm=50.0, alto_mm=40.0,
         )
@@ -357,7 +357,7 @@ class ProjectServiceTest(unittest.TestCase):
         )
         self.assertFalse(unchanged['moved'])
         self.assertEqual(json.loads(path.read_text()), after)
-        with self.assertRaisesRegex((PersistenceConflict, Exception), 'orden'):
+        with self.assertRaisesRegex(ProjectValidationError, 'direccion'):
             self.service.move_operation_order_metadata(
                 project_id=project.id, operation_id=b.id, direction='sideways',
             )
