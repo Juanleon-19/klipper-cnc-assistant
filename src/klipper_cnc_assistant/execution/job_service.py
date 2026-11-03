@@ -356,6 +356,40 @@ class JobService:
                     or attempt.get('status') in {'dispatching', 'sending', 'uncertain'}):
                 raise ApplicationError('La ejecución actual conserva dependencias de este proyecto.')
 
+    def assert_project_reversible_status_safe(self, project_id):
+        """Permit only reversible trash/restore of historical terminal runs.
+
+        This does not retire, archive, cancel, resume, or edit any JobRun. The
+        coordinator's project-edit lease still prevents touching an actively
+        owned project, concurrent job update, or administrative transaction.
+        A cancelled job may contain sent start evidence requiring later
+        reconciliation; *preserve* it when merely hiding the project from the
+        main list. Permanent deletion keeps assert_project_edit_safe unchanged.
+        """
+        self.repository.load_project(project_id)
+        with self._lock:
+            if any(key[0] == project_id and thread.is_alive()
+                   for key, thread in self._threads.items()):
+                raise ApplicationError(
+                    'El proyecto tiene un supervisor de ejecución activo; no se puede mover a Papelera.'
+                )
+        for path in self.repository.project_dir(project_id).glob(
+                'reports/jobs/*/*/current_run.json'):
+            run = self.run_store.load(path)
+            if not isinstance(run, dict):
+                raise ApplicationError('Ejecución del proyecto no verificable.')
+            if run.get('state') not in {'JOB_CANCELLED', 'JOB_COMPLETE'}:
+                raise ApplicationError(
+                    'El proyecto tiene una ejecución sin finalizar; no se puede mover a Papelera.'
+                )
+            attempt = run.get('start_attempt')
+            if attempt is not None and not isinstance(attempt, dict):
+                raise ApplicationError('Intento de ejecución no verificable.')
+            if (attempt or {}).get('status') in {'dispatching', 'sending', 'uncertain'}:
+                raise ApplicationError(
+                    'El proyecto conserva un envío incierto; se requiere conciliación antes de moverlo a Papelera.'
+                )
+
     def administrative_mutation(self, action, *, allow_started_runs=False):
         return administrative_mutation(self, action, allow_started_runs=allow_started_runs)
 
