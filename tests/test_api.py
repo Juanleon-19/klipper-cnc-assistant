@@ -61,6 +61,94 @@ class ApiTest(unittest.TestCase):
         payload["montajes"][0]["preparacion"] = preparation
         project_file.write_text(json.dumps(payload, ensure_ascii=True, indent=2), encoding="utf-8")
 
+    def _write_legacy_cancelled_run(self, project_id: str, *, state="JOB_CANCELLED",
+                                    attempt_status="sent") -> Path:
+        """A historical job which emitted real commands; never simulate sending."""
+        path = (self.data_dir / "projects" / project_id / "reports" / "jobs"
+                / "setup-main" / "superior" / "current_run.json")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({
+            "run_id": "historical-cancelled-run",
+            "project_id": project_id,
+            "setup_id": "setup-main",
+            "face": "superior",
+            "state": state,
+            "started_at": "2026-11-02T13:23:10+00:00",
+            "start_attempt": {"status": attempt_status, "may_have_been_sent": True,
+                              "remote_file": "historical-board.nc"},
+            "cancel_remote_status": "cancel_sent_requires_reconciliation",
+            "operations": [{"remote_file": "historical-board.nc"}],
+        }), encoding="utf-8")
+        return path
+
+    def test_soft_trash_cancelled_sent_run_preserves_evidence_and_restores(self) -> None:
+        project_id = self._create_project()
+        run_file = self._write_legacy_cancelled_run(project_id)
+        before_run = run_file.read_bytes()
+        project = self.client.get(f"/api/projects/{project_id}").json()
+        # Reversible only: a cancelled sent run still forbids normal edits
+        # and permanent deletion, even after being moved to the Trash.
+        blocked = self.client.post(f"/api/projects/{project_id}/archive")
+        self.assertEqual(blocked.status_code, 400, blocked.text)
+        trashed = self.client.post(f"/api/projects/{project_id}/trash")
+        self.assertEqual(trashed.status_code, 200, trashed.text)
+        self.assertEqual(trashed.json()["status"], "trashed")
+        self.assertEqual(run_file.read_bytes(), before_run)
+        permanently = self.client.request(
+            "DELETE", f"/api/projects/{project_id}/permanent",
+            json={"confirm_name": project["nombre"]})
+        self.assertEqual(permanently.status_code, 400, permanently.text)
+        self.assertEqual(run_file.read_bytes(), before_run)
+        restored = self.client.post(f"/api/projects/{project_id}/restore")
+        self.assertEqual(restored.status_code, 200, restored.text)
+        self.assertEqual(restored.json()["status"], "active")
+        self.assertEqual(run_file.read_bytes(), before_run)
+
+    def test_soft_trash_other_project_while_different_project_has_ownership(self) -> None:
+        from klipper_cnc_assistant.machine.physical_ownership import OwnerKind
+        target = self._create_project()
+        other = self._create_project()
+        run = self._write_legacy_cancelled_run(target)
+        prior = run.read_bytes()
+        coord = self.app.state.machine_runtime.physical_ownership
+        permit = coord.acquire(OwnerKind.JOB_EXECUTION, f"{other}/setup-main/superior")
+        try:
+            response = self.client.post(f"/api/projects/{target}/trash")
+            self.assertEqual(response.status_code, 200, response.text)
+            self.assertEqual(response.json()["status"], "trashed")
+            self.assertEqual(run.read_bytes(), prior)
+            self.assertTrue(coord.snapshot()["producer_active"])
+            # The project actually owning the machine cannot be hidden,
+            # regardless of whether it has current_run evidence.
+            self._write_legacy_cancelled_run(other)
+            rejected = self.client.post(f"/api/projects/{other}/trash")
+            self.assertEqual(rejected.status_code, 400, rejected.text)
+            self.assertEqual(self.client.get(f"/api/projects/{other}").json()["status"], "active")
+        finally:
+            coord.release(permit, quiescent=True)
+
+    def test_soft_trash_never_hides_nonterminal_or_uncertain_start(self) -> None:
+        project_id = self._create_project()
+        run = self._write_legacy_cancelled_run(project_id, state="WAITING_FOR_KLIPPER")
+        before = run.read_bytes()
+        rejected = self.client.post(f"/api/projects/{project_id}/trash")
+        self.assertEqual(rejected.status_code, 400, rejected.text)
+        self.assertEqual(run.read_bytes(), before)
+        self.assertEqual(self.client.get(f"/api/projects/{project_id}").json()["status"], "active")
+        self._write_legacy_cancelled_run(project_id, state="JOB_CANCELLED", attempt_status="uncertain")
+        rejected = self.client.post(f"/api/projects/{project_id}/trash")
+        self.assertEqual(rejected.status_code, 400, rejected.text)
+        self.assertEqual(self.client.get(f"/api/projects/{project_id}").json()["status"], "active")
+
+    def test_soft_trash_cannot_bypass_pending_admin_journal(self) -> None:
+        project_id = self._create_project()
+        self._write_legacy_cancelled_run(project_id)
+        pending = self.data_dir / "administrative-reset.pending.json"
+        pending.write_text('{"status":"PENDING"}', encoding="utf-8")
+        rejected = self.client.post(f"/api/projects/{project_id}/trash")
+        self.assertEqual(rejected.status_code, 400, rejected.text)
+        self.assertEqual(self.client.get(f"/api/projects/{project_id}").json()["status"], "active")
+
     def test_reconnect_arduino_endpoint_returns_runtime_snapshot(self) -> None:
         runtime = self.app.state.machine_runtime
         runtime.reconnect_arduino = lambda: runtime.snapshot()

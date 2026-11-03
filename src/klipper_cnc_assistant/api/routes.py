@@ -136,12 +136,13 @@ def _reject_active_motion(request: Request) -> None:
     service._assert_no_started_runs()
 
 
-def _administrative_route(function=None, *, persistent=False, independent=False, metadata_only=False):
+def _administrative_route(function=None, *, persistent=False, independent=False, metadata_only=False, reversible_status=False):
     def decorate(handler):
         def scope(kwargs):
             service = kwargs['request'].app.state.job_service
             if independent:
-                return project_mutation(service, kwargs['project_id'], metadata_only=metadata_only)
+                return project_mutation(service, kwargs['project_id'],
+                                        metadata_only=metadata_only, reversible_status=reversible_status)
             return service.administrative_mutation(handler.__name__)
 
         def mark(guard, kwargs):
@@ -252,12 +253,12 @@ def build_router() -> APIRouter:
         return project_to_response(request.app.state.project_service.archive_project(project_id))
 
     @router.post("/projects/{project_id}/trash", response_model=ProjectResponse)
-    @_administrative_route(independent=True)
+    @_administrative_route(independent=True, reversible_status=True)
     def trash_project(project_id: str, request: Request) -> ProjectResponse:
         return project_to_response(request.app.state.project_service.trash_project(project_id))
 
     @router.post("/projects/{project_id}/restore", response_model=ProjectResponse)
-    @_administrative_route(independent=True)
+    @_administrative_route(independent=True, reversible_status=True)
     def restore_project(project_id: str, request: Request) -> ProjectResponse:
         return project_to_response(request.app.state.project_service.restore_project(project_id))
 
